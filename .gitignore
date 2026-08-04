@@ -8,3 +8,4 @@
 
 # editor
 .DS_Store
+.opencode/agents/

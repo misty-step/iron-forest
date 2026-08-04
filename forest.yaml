@@ -1,31 +1,27 @@
 # iron-forest backlog polling and PR factory
 #
-# This file composes the parts of the first working slice. Keep it small.
-# Add a field only when the binary needs it.
-
-# Backlog source: we poll GitHub issues on this repository itself (dogfood).
-# An item is a unit of work when all of these hold:
-#   - the issue is open
-#   - the issue is not parked by forest (label forest:wip) or failed (label forest:failed)
-#   - no open pull request already references the issue
+# This file declares the workflow: which agents run which phase, the poll
+# cadence, and which paths are off limits to every agent. Agent definitions
+# (model, permissions, MCPs, prompts, output contract) live in agents/<name>/.
 
 repo: misty-step/iron-forest
 
-# Poll: seconds to sleep between passes over the backlog.
-# The loop takes one item at a time and serializes the work.
+# Poll: seconds between passes over the backlog. One item at a time.
 poll_interval_seconds: 30
 
-# Agent: opencode as a subprocess in an ephemeral git worktree at the exact
-# base SHA of the default branch. The model is deepseek-v4-flash-0731 over
-# OpenRouter, reached through the Mint proxy with the __mint.openrouter.default__
-# marker as the key. No raw credential bytes live in this repo.
-agent:
-  harness: opencode
-  # provider-qualified id opencode resolves via .opencode/opencode.json
-  model: openrouter-mint/deepseek-v4-flash-0731
-  system_prompt: agents/chew.md
-  # The agent must not touch these paths. The gate fails the run
-  # when a protected path changes.
-  protected:
-    - .forest/
-    - forest.yaml
+# Factory-wide gate: no agent may change these paths. The per-agent tool
+# permissions live in each agents/<name>/agent.yaml.
+protected:
+  - .forest/
+  - forest.yaml
+  - agents/
+  - .opencode/opencode.json
+
+# The workflow. Each named agent is a directory under agents/. The build agent
+# implements the change; the review agent ("" disables review) checks it; when
+# review asks for changes, the build agent gets max_fix_iterations corrective
+# passes before the verdict is final.
+workflow:
+  build: chew
+  review: review
+  max_fix_iterations: 1

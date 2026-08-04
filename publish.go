@@ -12,8 +12,9 @@ func commitAndPush(repo, wtDir, branch string, it issue) error {
 	if err := git(wtDir, "add", "-A"); err != nil {
 		return err
 	}
-	// keep report.json out of the tree: it is the run's record, not the repo's
-	_ = git(wtDir, "reset", "-q", "--", "report.json")
+	// keep report.json and review.json out of the tree: they are the run's
+	// records, not the repo's change
+	_ = git(wtDir, "reset", "-q", "--", "report.json", "review.json")
 	if err := gitCommit(wtDir, fmt.Sprintf("forest: %s (#%d)", it.Title, it.Number)); err != nil {
 		return err
 	}

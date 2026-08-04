@@ -9,16 +9,22 @@ import (
 // runRecord is the durable ledger line for one chewed item. appends go to
 // .forest/runs.jsonl; append-only by construction.
 type runRecord struct {
-	Time     string  `json:"time"`
-	RunID    string  `json:"run_id"`
-	Issue    int     `json:"issue"`
-	Branch   string  `json:"branch"`
-	PRURL    string  `json:"pr_url"`
-	Status   string  `json:"status"`
-	CostUSD  float64 `json:"cost_usd"`
-	TokensIn int64   `json:"tokens_in"`
-	TokOut   int64   `json:"tokens_out"`
-	Error    string  `json:"error,omitempty"`
+	Time          string  `json:"time"`
+	RunID         string  `json:"run_id"`
+	Issue         int     `json:"issue"`
+	Branch        string  `json:"branch"`
+	PRURL         string  `json:"pr_url"`
+	Status        string  `json:"status"`
+	CostUSD       float64 `json:"cost_usd"`
+	TokensIn      int64   `json:"tokens_in"`
+	TokOut        int64   `json:"tokens_out"`
+	// Repro fields: what actually produced this run.
+	Agent         string  `json:"agent"`
+	Model         string  `json:"model"`
+	BaseSHA       string  `json:"base_sha"`
+	DefSHA        string  `json:"def_sha"`
+	ReviewVerdict string  `json:"review,omitempty"`
+	Error         string  `json:"error,omitempty"`
 }
 
 func appendRun(workspace string, r runRecord) error {

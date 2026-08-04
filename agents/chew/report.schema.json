@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chew report",
+  "description": "Output contract for the chew agent's report.json. The factory gate rejects a run whose report.json does not satisfy it.",
+  "type": "object",
+  "required": ["summary", "changed_files"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "one paragraph on what you changed and why"
+    },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "the files this change added or modified"
+    },
+    "notes": {
+      "type": "string",
+      "description": "anything a reviewer should know; use \"none\" if nothing"
+    }
+  }
+}

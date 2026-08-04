@@ -7,46 +7,45 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the composition file forest.yaml. It declares the backlog
-// source, the poll cadence, and the agent it dispatches per item.
-type Config struct {
-	Repo            string   `yaml:"repo"`
-	PollIntervalSec int      `yaml:"poll_interval_seconds"`
-	Agent           AgentCfg `yaml:"agent"`
-	PriceInUSDPerm  float64  `yaml:"price_usd_per_m_input"`
-	PriceOutUSDPerm float64  `yaml:"price_usd_per_m_output"`
-}
-
-// AgentCfg is the agent definition: which harness runs it, which model it
-// uses, which prompt file is its system prompt, and which paths are off
-// limits to it. This is the primitive-composition surface of the factory.
-type AgentCfg struct {
-	Harness      string   `yaml:"harness"`
-	Model        string   `yaml:"model"`
-	SystemPrompt string   `yaml:"system_prompt"`
-	Protected    []string `yaml:"protected"`
-}
-
 const (
-	modelDefault     = "openrouter-mint/deepseek-v4-flash-0731"
-	promptDefault    = "agents/chew.md"
+	// DefaultAgentsDir is where agent declarations live, one directory each.
+	DefaultAgentsDir = "agents"
+	// WorkspaceDir holds the ledger, traces, and per-run worktrees.
+	WorkspaceDir = ".forest"
+
 	claimLabel       = "forest:wip"
 	failedLabel      = "forest:failed"
 	commitAuthorName = "forest"
 	commitAuthorMail = "forest@mistystep.io"
+	modelDefault     = "openrouter-mint/deepseek-v4-flash-0731"
 )
+
+// Config is the composition file forest.yaml. It declares the backlog source,
+// the poll cadence, factory-wide protected paths, and the workflow: which
+// named agents implement the build and review phases and how many corrective
+// build passes are allowed before the review verdict is final.
+type Config struct {
+	Repo            string   `yaml:"repo"`
+	PollIntervalSec int      `yaml:"poll_interval_seconds"`
+	Protected       []string `yaml:"protected"`
+	Workflow        Workflow `yaml:"workflow"`
+}
+
+// Workflow names the agents that drive the phases of one item. An empty
+// Review disables the review phase entirely (build -> publish).
+type Workflow struct {
+	Build            string `yaml:"build"`
+	Review           string `yaml:"review"`
+	MaxFixIterations int    `yaml:"max_fix_iterations"`
+}
 
 func defaultConfig() Config {
 	return Config{
 		PollIntervalSec: 30,
-		Agent: AgentCfg{
-			Harness:      "opencode",
-			Model:        modelDefault,
-			SystemPrompt: promptDefault,
-			Protected:    []string{".forest/", "forest.yaml"},
+		Protected: []string{
+			".forest/", "forest.yaml", "agents/", ".opencode/opencode.json",
 		},
-		PriceInUSDPerm:  0.09, // deepseek-v4-flash-0731, from the OpenRouter catalog
-		PriceOutUSDPerm: 0.18,
+		Workflow: Workflow{Build: "chew", Review: "review", MaxFixIterations: 1},
 	}
 }
 
@@ -65,11 +64,11 @@ func loadConfig(path string) (Config, error) {
 	if cfg.PollIntervalSec <= 0 {
 		cfg.PollIntervalSec = 30
 	}
-	if cfg.Agent.Model == "" {
-		cfg.Agent.Model = modelDefault
+	if cfg.Workflow.Build == "" {
+		cfg.Workflow.Build = "chew"
 	}
-	if cfg.Agent.SystemPrompt == "" {
-		cfg.Agent.SystemPrompt = promptDefault
+	if cfg.Workflow.MaxFixIterations < 0 {
+		cfg.Workflow.MaxFixIterations = 0
 	}
 	return cfg, nil
 }

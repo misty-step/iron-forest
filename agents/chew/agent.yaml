@@ -1,0 +1,46 @@
+# chew: one issue -> a clean change + report.json in the worktree.
+#
+# This is the declaration: model, powers, MCPs, and budget. A directory is the
+# agent, not a prompt file:
+#   instructions.md    system prompt (identity + standing rules)
+#   prompt.md          user-prompt template (the item is injected per run)
+#   report.schema.json output contract the gate enforces
+#   skills/*.md        additional context appended to the system prompt
+#
+# Model and cost table: deepseek-v4-flash-0731 over OpenRouter through the
+# Mint proxy. No raw credential bytes live here.
+description: "Implements one issue in the worktree and writes report.json."
+harness: opencode
+mode: primary
+model: openrouter-mint/deepseek-v4-flash-0731
+temperature: 0.2
+steps: 50
+budget_seconds: 1200
+price_usd_per_m_input: 0.09
+price_usd_per_m_output: 0.18
+# Powers. deny entries are enforced by opencode even with --auto. The mcp__*
+# entries keep the offline rule hard even though the global opencode config
+# also declares the exa MCP server.
+permission:
+  read: allow
+  edit: allow
+  glob: allow
+  grep: allow
+  list: allow
+  bash: allow
+  lsp: allow
+  todowrite: allow
+  webfetch: deny
+  websearch: deny
+  task: deny
+  skill: deny
+  external_directory: deny
+  question: ask
+# MCP servers the agent may reach. Exa is declared (its wiring lives in the
+# opencode config) but disabled for this offline agent.
+mcp:
+  - name: exa
+    type: remote
+    url: http://mint.tail5f5eb4.ts.net:4949/proxy/https/mcp.exa.ai/mcp
+    header: __mint.exa.default__
+    enabled: false

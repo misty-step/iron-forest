@@ -1,0 +1,35 @@
+# review: checks one worktree change against its issue and returns a verdict.
+#
+# This is a read-mostly agent: it inspects the diff in its task message and may
+# write only review.json. Every network surface is denied, so review cannot
+# push, fetch, or research anything.
+description: "Reviews a worktree change against its issue and writes review.json."
+harness: opencode
+mode: primary
+model: openrouter-mint/deepseek-v4-flash-0731
+temperature: 0.2
+steps: 30
+budget_seconds: 600
+price_usd_per_m_input: 0.09
+price_usd_per_m_output: 0.18
+permission:
+  read: allow
+  edit: allow
+  glob: allow
+  grep: allow
+  list: allow
+  bash: allow
+  lsp: allow
+  webfetch: deny
+  websearch: deny
+  task: deny
+  skill: deny
+  todowrite: deny
+  external_directory: deny
+  question: deny
+mcp:
+  - name: exa
+    type: remote
+    url: http://mint.tail5f5eb4.ts.net:4949/proxy/https/mcp.exa.ai/mcp
+    header: __mint.exa.default__
+    enabled: false
