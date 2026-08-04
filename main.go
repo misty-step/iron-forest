@@ -20,7 +20,7 @@ func usage() {
   forest agents            list declared agents and their composition digest
   forest stats [--json]    aggregate the run ledger
   forest once <issue>      chew a single issue end to end
-  forest chew              poll the backlog forever, one item at a time
+  forest chew              poll: chew backlog AND watch open factory PRs
 `)
 }
 
@@ -116,6 +116,9 @@ func cmdAgents(repoDir string) int {
 	return 0
 }
 
+// chewLoop is the single piranha loop: it chews the backlog and, in the same
+// pass, watches every open factory PR (reaction loop) until it merges or
+// stalls. One loop, one serializer.
 func chewLoop(cfg Config, repoDir string) int {
 	fmt.Printf("forest: chewing %s every %ds\n", cfg.Repo, cfg.PollIntervalSec)
 	for {
@@ -134,14 +137,21 @@ func chewLoop(cfg Config, repoDir string) int {
 				fmt.Printf("forest: backlog empty, sleeping %ds\n", cfg.PollIntervalSec)
 			}
 		}
+		if prs, err := listOpenForestPRs(cfg.Repo); err != nil {
+			fmt.Fprintf(os.Stderr, "forest: pr list: %v\n", err)
+		} else {
+			for _, n := range prs {
+				watchPR(cfg, repoDir, n)
+				time.Sleep(2 * time.Second)
+			}
+		}
 		time.Sleep(time.Duration(cfg.PollIntervalSec) * time.Second)
 	}
 }
 
-// chewOne runs the whole workflow for one issue: claim, worktree, build,
-// gate, review, corrective passes, publish, record. Everything that mutates
-// external state is deterministic code; the agents only produce work in the
-// worktree.
+// chewOne runs the whole workflow for one new issue: claim, worktree, build,
+// gate, review, publish, record. It opens the PR and parks the item; the
+// reaction loop in chewLoop drives the PR from there.
 func chewOne(cfg Config, repoDir string, it issue) int {
 	runID := fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405Z"), it.Number)
 	workspace := filepath.Join(repoDir, WorkspaceDir)
@@ -152,25 +162,14 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 		fmt.Fprintf(os.Stderr, "forest: build agent: %v\n", err)
 		return 1
 	}
-	buildSchema := filepath.Join(repoDir, DefaultAgentsDir, cfg.Workflow.Build, "report.schema.json")
-
 	record := runRecord{
-		Time:  time.Now().UTC().Format(time.RFC3339),
-		RunID: runID, Issue: it.Number,
+		Time: nowRFC(), RunID: runID, Issue: it.Number,
 		Agent: buildAgent.Name, Model: buildAgent.Model, DefSHA: buildAgent.DefSHA,
 	}
-
-	// The review agent is optional; "" in forest.yaml disables review.
-	var reviewAgent *Agent
-	var reviewSchema string
 	if cfg.Workflow.Review != "" {
-		reviewAgent, err = loadAgent(repoDir, cfg.Workflow.Review)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "forest: review agent: %v\n", err)
-			return 1
+		if ra, err := loadAgent(repoDir, cfg.Workflow.Review); err == nil {
+			record.Agent += "," + ra.Name
 		}
-		record.Agent += "," + reviewAgent.Name
-		reviewSchema = filepath.Join(repoDir, DefaultAgentsDir, cfg.Workflow.Review, "report.schema.json")
 	}
 
 	if err := claimIssue(cfg.Repo, it.Number); err != nil {
@@ -194,135 +193,185 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 	record.Branch = branch
 	record.BaseSHA = baseSHA
 
-	trace := func(phase string) string {
-		return filepath.Join(workspace, "runs", runID+"."+phase+".jsonl")
-	}
-	addStats := func(st runStats, a *Agent) {
-		record.TokensIn += st.tokensIn
-		record.TokOut += st.tokensOut
-		record.CostUSD += price(st, a)
-	}
-	fail := func(status, label, msg string) int {
-		record.Status = status
-		record.Error = msg
-		_ = appendRun(workspace, record)
-		_ = failIssue(cfg.Repo, it.Number, label+": "+msg)
-		fmt.Fprintf(os.Stderr, "forest: %s #%d: %s\n", label, it.Number, msg)
-		return 1
-	}
-
-	// Phase 1: build.
-	prompt, err := renderUserPrompt(buildAgent, issueData(it, ""))
+	r, err := runPick(cfg, repoDir, wtDir, baseSHA, runID, it, "")
+	record.CostUSD += r.Cost
+	record.TokensIn += r.TokIn
+	record.TokOut += r.TokOut
+	record.ReviewVerdict = r.Verdict
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forest: prompt #%d: %v\n", it.Number, err)
+		record.Status = failStatus(err)
+		record.Error = err.Error()
+		_ = appendRun(workspace, record)
+		_ = failIssue(cfg.Repo, it.Number, err.Error())
+		fmt.Fprintf(os.Stderr, "forest: #%d: %s\n", it.Number, err.Error())
 		return 1
 	}
-	stats, runErr := runPhase(wtDir, buildAgent, prompt, trace("chew"),
-		time.Duration(buildAgent.BudgetSec)*time.Second)
-	addStats(stats, buildAgent)
-	if runErr != nil {
-		return fail("agent_failed", "agent", runErr.Error())
-	}
-	changed, rep, gerr := gate(wtDir, baseSHA, cfg.Protected, buildSchema)
-	if gerr != nil {
-		return fail("gate_failed", "gate", gerr.Error())
-	}
-
-	// Phase 2: review, with up to max_fix_iterations corrective build passes.
-	verdict := "approve"
-	reviewNotes := ""
-	if reviewAgent != nil {
-		verdict = ""
-	}
-	for fix := 0; fix <= cfg.Workflow.MaxFixIterations; fix++ {
-		if reviewAgent == nil {
-			break
-		}
-		// stage the working tree so the diff, including new files, is visible
-		// to the reviewer as exactly what would be committed.
-		_ = git(wtDir, "add", "-A")
-		_ = git(wtDir, "reset", "-q", "--", "report.json", "review.json")
-		diff, derr := gitOut(wtDir, "diff", "--cached", "--", ".",
-			":(exclude)report.json", ":(exclude)review.json")
-		if derr != nil {
-			return fail("review_failed", "review", derr.Error())
-		}
-		rvPrompt, rerr := renderUserPrompt(reviewAgent, reviewData(it, rep, diff))
-		if rerr != nil {
-			fmt.Fprintf(os.Stderr, "forest: review prompt #%d: %v\n", it.Number, rerr)
-			return 1
-		}
-		rvStats, rerr := runPhase(wtDir, reviewAgent, rvPrompt, trace("review"),
-			time.Duration(reviewAgent.BudgetSec)*time.Second)
-		addStats(rvStats, reviewAgent)
-		if rerr != nil {
-			return fail("review_failed", "review", rerr.Error())
-		}
-		rv, gerr := gateReview(wtDir, reviewSchema)
-		if gerr != nil {
-			return fail("review_failed", "review", gerr.Error())
-		}
-		record.ReviewVerdict = rv.Verdict
-		verdict = rv.Verdict
-		reviewNotes = rv.Notes
-		if verdict == "approve" {
-			break
-		}
-		if fix >= cfg.Workflow.MaxFixIterations {
-			break
-		}
-		// One corrective pass: re-run the build agent with the feedback.
-		fixPrompt, ferr := renderUserPrompt(buildAgent, issueData(it, reviewNotes))
-		if ferr != nil {
-			fmt.Fprintf(os.Stderr, "forest: fix prompt #%d: %v\n", it.Number, ferr)
-			return 1
-		}
-		fstats, ferr := runPhase(wtDir, buildAgent, fixPrompt, trace(fmt.Sprintf("fix%d", fix)),
-			time.Duration(buildAgent.BudgetSec)*time.Second)
-		addStats(fstats, buildAgent)
-		if ferr != nil {
-			return fail("agent_failed", "fix", ferr.Error())
-		}
-		changed, rep, gerr = gate(wtDir, baseSHA, cfg.Protected, buildSchema)
-		if gerr != nil {
-			return fail("gate_failed", "gate", gerr.Error())
-		}
-	}
-
-	if verdict != "approve" {
-		// The review never approved. Park the item for a human: comment the
-		// feedback and mark it failed so the loop does not retry forever.
-		msg := "review requested changes: " + reviewNotes
+	if r.Verdict != "approve" {
+		// The owl never approved. Park the item for a human: comment the
+		// feedback and mark it failed so the loop does not retry it forever.
+		msg := "review requested changes: " + r.Notes
 		record.Status = "changes_requested"
 		record.Error = msg
 		_ = appendRun(workspace, record)
 		_ = failIssue(cfg.Repo, it.Number, msg)
-		fmt.Printf("forest: #%d changes requested: %s\n", it.Number, reviewNotes)
+		fmt.Printf("forest: #%d changes requested: %s\n", it.Number, r.Notes)
 		return 0
 	}
 
 	if err := commitAndPush(repoDir, wtDir, branch, it); err != nil {
-		return fail("publish_failed", "publish", err.Error())
+		record.Status = "publish_failed"
+		record.Error = err.Error()
+		_ = appendRun(workspace, record)
+		_ = failIssue(cfg.Repo, it.Number, "publish: "+err.Error())
+		fmt.Fprintf(os.Stderr, "forest: publish #%d: %v\n", it.Number, err)
+		return 1
 	}
 
-	// the pull request body lists exactly what is in the pushed commit, so the
-	// run artifacts never appear as changed files.
 	committed, err := gitStrings(wtDir, "diff", "--name-only", baseSHA, "HEAD")
 	if err != nil {
-		committed = changed
+		committed = r.Changed
 	}
-	prURL, err := openPR(cfg.Repo, branch, "forest: "+it.Title, prBody(it, rep, committed))
+	prURL, err := openPR(cfg.Repo, branch, "forest: "+it.Title, prBody(it, r.Rep, committed))
 	if err != nil {
-		return fail("pr_failed", "pr", err.Error())
+		record.Status = "pr_failed"
+		record.Error = err.Error()
+		_ = appendRun(workspace, record)
+		_ = failIssue(cfg.Repo, it.Number, "pr: "+err.Error())
+		fmt.Fprintf(os.Stderr, "forest: pr #%d: %v\n", it.Number, err)
+		return 1
 	}
+	headSHA, _ := gitOut(wtDir, "rev-parse", "HEAD")
+	prNum := prNumberFromURL(prURL)
+	_ = appendPR(workspace, prState{
+		Time: nowRFC(), PRURL: prURL, PR: prNum, Branch: branch, Issue: it.Number,
+		State: "opened", Owl: r.Verdict, SHA: headSHA,
+	})
 	record.PRURL = prURL
 	record.Status = "done"
 	_ = appendRun(workspace, record)
 	if err := closeIssue(cfg.Repo, it.Number); err != nil {
 		fmt.Fprintf(os.Stderr, "forest: close #%d: %v (PR is open)\n", it.Number, err)
 	}
-	fmt.Printf("forest: #%d done: %s (review=%s)\n", it.Number, prURL, verdict)
+	fmt.Printf("forest: #%d done: %s (review=%s)\n", it.Number, prURL, r.Verdict)
 	return 0
+}
+
+// pickResult is one full build+gate+review pass over an item in a worktree.
+type pickResult struct {
+	Changed []string
+	Rep     report
+	Verdict string // owl verdict: approve | changes
+	Notes   string
+	TokIn   int64
+	TokOut  int64
+	Cost    float64
+}
+
+// runPick builds an item with the build agent, gates it, and runs the owl
+// review loop (up to MaxFixIterations corrective passes). It is shared by
+// chewOne (new items) and fixPR (reaction re-entries). Errors carry a stage
+// prefix so callers can classify the run's status.
+func runPick(cfg Config, repoDir, wtDir, baseSHA, runID string, it issue, feedback string) (pickResult, error) {
+	var pr pickResult
+	workspace := filepath.Join(repoDir, WorkspaceDir)
+	buildAgent, err := loadAgent(repoDir, cfg.Workflow.Build)
+	if err != nil {
+		return pr, err
+	}
+	buildSchema := filepath.Join(repoDir, DefaultAgentsDir, cfg.Workflow.Build, "report.schema.json")
+	trace := func(phase string) string {
+		return filepath.Join(workspace, "runs", runID+"."+phase+".jsonl")
+	}
+
+	prompt, err := renderUserPrompt(buildAgent, issueData(it, feedback))
+	if err != nil {
+		return pr, fmt.Errorf("prompt: %w", err)
+	}
+	stats, err := runPhase(wtDir, buildAgent, prompt, trace("chew"),
+		time.Duration(buildAgent.BudgetSec)*time.Second)
+	if err != nil {
+		return pr, fmt.Errorf("agent: %w", err)
+	}
+	pr.TokIn, pr.TokOut, pr.Cost = stats.tokensIn, stats.tokensOut, price(stats, buildAgent)
+	pr.Changed, pr.Rep, err = gate(wtDir, baseSHA, cfg.Protected, buildSchema)
+	if err != nil {
+		return pr, fmt.Errorf("gate: %w", err)
+	}
+	if cfg.Workflow.Review == "" {
+		pr.Verdict = "approve"
+		return pr, nil
+	}
+	reviewAgent, err := loadAgent(repoDir, cfg.Workflow.Review)
+	if err != nil {
+		return pr, err
+	}
+	reviewSchema := filepath.Join(repoDir, DefaultAgentsDir, cfg.Workflow.Review, "report.schema.json")
+	for fix := 0; fix <= cfg.Workflow.MaxFixIterations; fix++ {
+		_ = git(wtDir, "add", "-A")
+		_ = git(wtDir, "reset", "-q", "--", "report.json", "review.json")
+		diff, derr := gitOut(wtDir, "diff", "--cached", "--", ".",
+			":(exclude)report.json", ":(exclude)review.json")
+		if derr != nil {
+			return pr, fmt.Errorf("review: %w", derr)
+		}
+		rvPrompt, rerr := renderUserPrompt(reviewAgent, reviewData(it, pr.Rep, diff))
+		if rerr != nil {
+			return pr, fmt.Errorf("review: %w", rerr)
+		}
+		rvStats, rerr := runPhase(wtDir, reviewAgent, rvPrompt, trace(fmt.Sprintf("review%d", fix)),
+			time.Duration(reviewAgent.BudgetSec)*time.Second)
+		if rerr != nil {
+			return pr, fmt.Errorf("review: %w", rerr)
+		}
+		pr.TokIn += rvStats.tokensIn
+		pr.TokOut += rvStats.tokensOut
+		pr.Cost += price(rvStats, reviewAgent)
+		rv, gerr := gateReview(wtDir, reviewSchema)
+		if gerr != nil {
+			return pr, fmt.Errorf("review: %w", gerr)
+		}
+		pr.Verdict = rv.Verdict
+		pr.Notes = rv.Notes
+		if pr.Verdict == "approve" {
+			break
+		}
+		if fix >= cfg.Workflow.MaxFixIterations {
+			break
+		}
+		fixPrompt, ferr := renderUserPrompt(buildAgent, issueData(it, rv.Notes))
+		if ferr != nil {
+			return pr, fmt.Errorf("prompt: %w", ferr)
+		}
+		fstats, ferr := runPhase(wtDir, buildAgent, fixPrompt, trace(fmt.Sprintf("fix%d", fix)),
+			time.Duration(buildAgent.BudgetSec)*time.Second)
+		if ferr != nil {
+			return pr, fmt.Errorf("agent: %w", ferr)
+		}
+		pr.TokIn += fstats.tokensIn
+		pr.TokOut += fstats.tokensOut
+		pr.Cost += price(fstats, buildAgent)
+		pr.Changed, pr.Rep, gerr = gate(wtDir, baseSHA, cfg.Protected, buildSchema)
+		if gerr != nil {
+			return pr, fmt.Errorf("gate: %w", gerr)
+		}
+	}
+	return pr, nil
+}
+
+// failStatus maps a stage-prefixed error to a ledger status name.
+func failStatus(err error) string {
+	switch s := err.Error(); {
+	case strings.HasPrefix(s, "agent:"):
+		return "agent_failed"
+	case strings.HasPrefix(s, "gate:"):
+		return "gate_failed"
+	case strings.HasPrefix(s, "review:"):
+		return "review_failed"
+	case strings.HasPrefix(s, "prompt:"):
+		return "prompt_failed"
+	default:
+		return "pick_failed"
+	}
 }
 
 // prBody builds the pull request description from the agent's report.

@@ -32,11 +32,15 @@ type Config struct {
 }
 
 // Workflow names the agents that drive the phases of one item. An empty
-// Review disables the review phase entirely (build -> publish).
+// Review disables the review phase entirely (build -> publish). AutoMerge
+// gates the reaction loop's deterministic merge; it defaults off until the
+// operator has proven one manual merge.
 type Workflow struct {
 	Build            string `yaml:"build"`
 	Review           string `yaml:"review"`
 	MaxFixIterations int    `yaml:"max_fix_iterations"`
+	AutoMerge        bool   `yaml:"auto_merge"`
+	MaxReactionFixes int    `yaml:"max_reaction_fixes"`
 }
 
 func defaultConfig() Config {
@@ -45,7 +49,10 @@ func defaultConfig() Config {
 		Protected: []string{
 			".forest/", "forest.yaml", "agents/", ".opencode/opencode.json",
 		},
-		Workflow: Workflow{Build: "beaver", Review: "owl", MaxFixIterations: 1},
+		Workflow: Workflow{
+			Build: "beaver", Review: "owl", MaxFixIterations: 1,
+			AutoMerge: false, MaxReactionFixes: 2,
+		},
 	}
 }
 
@@ -69,6 +76,9 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Workflow.MaxFixIterations < 0 {
 		cfg.Workflow.MaxFixIterations = 0
+	}
+	if cfg.Workflow.MaxReactionFixes <= 0 {
+		cfg.Workflow.MaxReactionFixes = 2
 	}
 	return cfg, nil
 }

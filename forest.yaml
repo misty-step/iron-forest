@@ -21,7 +21,15 @@ protected:
 # implements the change; the review agent ("" disables review) checks it; when
 # review asks for changes, the build agent gets max_fix_iterations corrective
 # passes before the verdict is final.
+#
+# auto_merge: the reaction loop merges a PR only when the owl approved it, CI
+# is green, and no human CHANGES_REQUESTED review is open. It defaults to
+# false — prove one manual merge, then flip it.
+# max_reaction_fixes: how many re-entry build passes the loop makes on one PR
+# (human feedback or failing CI) before it parks the PR for a human.
 workflow:
   build: beaver
   review: owl
   max_fix_iterations: 1
+  auto_merge: false
+  max_reaction_fixes: 2

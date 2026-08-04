@@ -58,6 +58,21 @@ func getIssue(repo string, n int) (issue, error) {
 	return issue{}, fmt.Errorf("issue %d is not open", n)
 }
 
+// getIssueAny fetches an issue in any state (the reaction loop re-enters
+// issues that are already closed because their PR is open).
+func getIssueAny(repo string, n int) (issue, error) {
+	out, err := ghJSON("issue", "view", fmt.Sprintf("%d", n), "-R", repo,
+		"--json", "number,title,body,labels")
+	if err != nil {
+		return issue{}, err
+	}
+	var it issue
+	if err := json.Unmarshal(out, &it); err != nil {
+		return issue{}, err
+	}
+	return it, nil
+}
+
 var prRefRe = regexp.MustCompile(`(?i)\b(?:fixes|closes|resolves)\s+#\d+`)
 
 // openPRsReferencing finds whether an open PR mentions the issue.

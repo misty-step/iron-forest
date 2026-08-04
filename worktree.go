@@ -79,3 +79,25 @@ func removeWorktree(repo, wtDir string) {
 	_ = git(repo, "worktree", "remove", "--force", wtDir)
 	_ = os.RemoveAll(wtDir)
 }
+
+// createWorktreeAtBranch adds a linked worktree on an existing remote branch
+// at its current tip. The reaction loop uses it to re-enter a PR that needs a
+// fix (human change request or failing CI). It owns the branch name.
+func createWorktreeAtBranch(repo, workspace, branch string) (wtDir, baseSHA string, err error) {
+	wtDir = filepath.Join(workspace, "worktrees", branch)
+	_ = os.RemoveAll(wtDir)
+	_ = git(repo, "worktree", "prune")
+	_ = git(repo, "fetch", "origin")
+	// Drop a stale local branch so `worktree add -b` starts at origin head.
+	if _, err := gitOut(repo, "rev-parse", "-q", "--verify", "refs/heads/"+branch); err == nil {
+		_ = git(repo, "branch", "-q", "-D", branch)
+	}
+	baseSHA, err = gitOut(repo, "rev-parse", "origin/"+branch)
+	if err != nil {
+		return "", "", fmt.Errorf("branch %s not on origin: %w", branch, err)
+	}
+	if err := git(repo, "worktree", "add", "-b", branch, wtDir, "origin/"+branch); err != nil {
+		return "", "", fmt.Errorf("worktree add: %w", err)
+	}
+	return wtDir, baseSHA, nil
+}
