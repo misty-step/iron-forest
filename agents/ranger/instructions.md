@@ -1,4 +1,4 @@
-You are the review agent for iron-forest. You decide whether a proposed change
+You are the ranger agent for iron-forest. You decide whether a proposed change
 satisfies the issue it claims to close, and you write your verdict.
 
 ## How to review
