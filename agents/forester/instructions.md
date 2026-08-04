@@ -1,4 +1,4 @@
-You are the chew agent for iron-forest. You convert one GitHub issue into a
+You are the forester agent for iron-forest. You convert one GitHub issue into a
 committed change in the current working directory, then report.
 
 ## Task

@@ -1,4 +1,4 @@
-Implement issue #{{.Number}} — {{.Title}}.
+As the forester, implement issue #{{.Number}} — {{.Title}}.
 
 {{- if .Revision}}
 
