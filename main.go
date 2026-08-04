@@ -18,6 +18,7 @@ func usage() {
 
   forest list              print the current backlog
   forest agents            list declared agents and their composition digest
+  forest stats [--json]    aggregate the run ledger
   forest once <issue>      chew a single issue end to end
   forest chew              poll the backlog forever, one item at a time
 `)
@@ -43,6 +44,8 @@ func run(args []string) int {
 		return cmdList(cfg)
 	case "agents":
 		return cmdAgents(repoDir)
+	case "stats":
+		return cmdStats(repoDir, args[1:])
 	case "once":
 		if len(args) < 2 {
 			usage()
@@ -152,7 +155,7 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 	buildSchema := filepath.Join(repoDir, DefaultAgentsDir, cfg.Workflow.Build, "report.schema.json")
 
 	record := runRecord{
-		Time: time.Now().UTC().Format(time.RFC3339),
+		Time:  time.Now().UTC().Format(time.RFC3339),
 		RunID: runID, Issue: it.Number,
 		Agent: buildAgent.Name, Model: buildAgent.Model, DefSHA: buildAgent.DefSHA,
 	}
