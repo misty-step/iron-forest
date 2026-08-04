@@ -185,21 +185,22 @@ func checkRollup(repo, sha string) (string, error) {
 	return "pass", nil
 }
 
-// latestRequestedChange returns the newest CHANGES_REQUESTED review body.
-func latestRequestedChange(repo string, n int) (string, error) {
-	out, err := ghJSON("pr", "view", fmt.Sprintf("%d", n), "-R", repo,
-		"--json", "reviews", "-q",
-		`[.reviews[] | select(.state == "CHANGES_REQUESTED")][-1] | {body}`)
+// latestRequestedChange returns the newest CHANGES_REQUESTED review and the
+// commit it was submitted against, via the REST reviews endpoint.
+func latestRequestedChange(repo string, n int) (body, commitID string, err error) {
+	out, err := ghJSON("api", fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, n), "-q",
+		`[.[] | select(.state == "CHANGES_REQUESTED")][-1] | {body, commit_id}`)
 	if err != nil || len(bytes.TrimSpace(out)) == 0 || bytes.TrimSpace(out)[0] == 'n' {
-		return "", err
+		return "", "", err
 	}
-	var b struct {
-		Body string `json:"body"`
+	var r struct {
+		Body     string `json:"body"`
+		CommitID string `json:"commit_id"`
 	}
-	if err := json.Unmarshal(out, &b); err != nil {
-		return "", err
+	if err := json.Unmarshal(out, &r); err != nil {
+		return "", "", err
 	}
-	return b.Body, nil
+	return r.Body, r.CommitID, nil
 }
 
 // failingChecks lists names+conclusions of failed checks on a commit.
@@ -249,7 +250,15 @@ func watchPR(cfg Config, repoDir string, n int) int {
 	base.Fixes = last.Fixes
 	base.Owl = last.Owl
 
-	blocked := op.ReviewDecision == "CHANGES_REQUESTED"
+	// A CHANGES_REQUESTED is actionable only when it targets the current head:
+	// a review on code we already fixed is stale and must not re-enter.
+	blocked := false
+	if op.ReviewDecision == "CHANGES_REQUESTED" {
+		_, commitID, rerr := latestRequestedChange(cfg.Repo, n)
+		if rerr == nil {
+			blocked = commitID == op.HeadSHA
+		}
+	}
 	checks := ""
 	if c, cerr := checkRollup(cfg.Repo, op.HeadSHA); cerr == nil {
 		checks = c
@@ -257,7 +266,7 @@ func watchPR(cfg Config, repoDir string, n int) int {
 	base.Checks = checks
 
 	if blocked {
-		feedback, _ := latestRequestedChange(cfg.Repo, n)
+		feedback, _, _ := latestRequestedChange(cfg.Repo, n)
 		return fixPR(cfg, repoDir, op, base, feedback)
 	}
 	if checks == "fail" {
