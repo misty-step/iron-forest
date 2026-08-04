@@ -26,6 +26,17 @@ func gitOut(repo string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+func gitStrings(repo string, args ...string) ([]string, error) {
+	raw, err := gitOut(repo, args...)
+	if err != nil {
+		return nil, err
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	return strings.Split(raw, "\n"), nil
+}
+
 func gitCommit(wtDir, msg string) error {
 	cmd := exec.Command("git",
 		"-c", "user.name="+commitAuthorName,

@@ -39,7 +39,7 @@ func runAgent(wtDir, prompt, model, tracePath string, timeout time.Duration) (ru
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "opencode", "run",
-		"--format", "json", "--model", model, "--auto")
+		"--format", "json", "--model", model, "--auto", prompt)
 	cmd.Dir = wtDir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

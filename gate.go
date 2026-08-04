@@ -37,15 +37,20 @@ func gate(wtDir, baseSHA string, protected []string) ([]string, report, error) {
 		return nil, rep, err
 	}
 	changed := parseChanged(out)
-	if len(changed) == 0 {
-		return nil, rep, fmt.Errorf("agent produced no changes")
-	}
+	real := make([]string, 0, len(changed))
 	for _, path := range changed {
+		if path == "report.json" || strings.HasPrefix(path, ".forest/") {
+			continue // the run's record, not the repo's change
+		}
 		for _, prot := range protected {
 			if prot != "" && (path == prot || strings.HasPrefix(path, prot)) {
 				return nil, rep, fmt.Errorf("agent touched protected path %q", path)
 			}
 		}
+		real = append(real, path)
+	}
+	if len(real) == 0 {
+		return nil, rep, fmt.Errorf("agent produced no real changes")
 	}
 	raw, err := os.ReadFile(filepath.Join(wtDir, "report.json"))
 	if err != nil {
@@ -57,7 +62,7 @@ func gate(wtDir, baseSHA string, protected []string) ([]string, report, error) {
 	if strings.TrimSpace(rep.Summary) == "" {
 		return nil, rep, fmt.Errorf("report.json has an empty summary")
 	}
-	return changed, rep, nil
+	return real, rep, nil
 }
 
 // parseChanged turns `git status --porcelain` into a changed file list,

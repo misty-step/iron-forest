@@ -137,10 +137,12 @@ func failIssue(repo string, n int, msg string) error {
 	return nil
 }
 
-// closeIssue completes the chewed item once its pull request is open.
+// closeIssue completes the chewed item once its pull request is open. gh has
+// no way to close through `issue edit`, so this uses the dedicated command.
 func closeIssue(repo string, n int) error {
-	_, err := ghJSON("issue", "edit", "-R", repo, fmt.Sprintf("%d", n),
-		"--state", "closed", "--remove-label", claimLabel)
+	_, _ = ghJSON("issue", "edit", "-R", repo, fmt.Sprintf("%d", n),
+		"--remove-label", claimLabel, "--remove-label", failedLabel)
+	_, err := ghJSON("issue", "close", "-R", repo, fmt.Sprintf("%d", n))
 	return err
 }
 

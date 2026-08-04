@@ -162,7 +162,7 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 		return 1
 	}
 
-	if err := commitAndPush(cfg.Repo, wtDir, branch, it); err != nil {
+	if err := commitAndPush(repoDir, wtDir, branch, it); err != nil {
 		record.Status = "publish_failed"
 		record.Error = err.Error()
 		_ = appendRun(workspace, record)
@@ -171,7 +171,14 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 		return 1
 	}
 
-	prURL, err := openPR(cfg.Repo, branch, "forest: "+it.Title, prBody(it, rep, changed))
+	// the pull request body lists exactly what is in the pushed commit, so
+	// report.json (kept out of the tree) never appears as a changed file.
+	committed, err := gitStrings(wtDir, "diff", "--name-only", baseSHA, "HEAD")
+	if err != nil {
+		committed = changed
+	}
+
+	prURL, err := openPR(cfg.Repo, branch, "forest: "+it.Title, prBody(it, rep, committed))
 	if err != nil {
 		record.Status = "pr_failed"
 		record.Error = err.Error()
@@ -183,7 +190,9 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 	record.PRURL = prURL
 	record.Status = "done"
 	_ = appendRun(workspace, record)
-	_ = closeIssue(cfg.Repo, it.Number)
+	if err := closeIssue(cfg.Repo, it.Number); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: close #%d: %v (PR is open)\n", it.Number, err)
+	}
 	fmt.Printf("forest: #%d done: %s\n", it.Number, prURL)
 	return 0
 }
