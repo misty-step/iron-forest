@@ -1,0 +1,10 @@
+# Go build output
+/forest
+/dist/
+*.test
+
+# forest workspace (per-run worktrees, ledger, traces)
+/.forest/
+
+# editor
+.DS_Store

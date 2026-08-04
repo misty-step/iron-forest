@@ -1,0 +1,39 @@
+# iron-forest backlog polling and PR factory
+
+The loop of iron-forest. This file composes the parts of the first
+working slice. Keep it small. Add a field only when the binary needs it.
+
+## Backlog source
+
+We poll GitHub issues on the iron-forest repository itself (dogfood).
+An item is a unit of work when all of these hold:
+
+- the issue is open
+- the issue is not assigned to `forest`
+- no pull request already references the issue (search `Fixes #<n>`)
+
+repo: misty-step/iron-forest
+
+## Poll
+
+poll_interval_seconds: 30
+# seconds to sleep between passes over the backlog.
+# The loop takes one item at a time and serializes the work.
+
+## Agent
+
+The agent is opencode, driven as a subprocess in an ephemeral git
+worktree at the exact base SHA of the default branch.
+The model is deepseek/deepseek-v4-flash-0731 over OpenRouter,
+reached through the Mint proxy with the __mint.openrouter.default__
+marker as the key. No raw credential bytes live in this repo.
+
+agent:
+  harness: opencode
+  model: deepseek/deepseek-v4-flash-0731
+  system_prompt: agents/chew.md
+  # The agent must not touch these paths. The gate fails the run
+  # when a protected path changes.
+  protected:
+    - .forest/
+    - forest.yaml

@@ -1,0 +1,1131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iron Forest — Software Factory, From First Principles</title>
+<style>
+  :root{
+    --bg:#0b0e13; --bg2:#11151d; --bg3:#161b25; --line:#242c3a; --line2:#2f394b;
+    --fg:#dfe5ee; --dim:#8e9bb0; --dim2:#6b7789;
+    --iron:#8fa3bf; --ember:#e0913a; --ember2:#f5b45f;
+    --grn:#5fb87a; --red:#e0645f; --vio:#a98cd8; --cy:#4fb0c0;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 28px 120px}
+
+  header.hero{border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#12161f 0%,var(--bg) 100%);padding:52px 0 40px;margin-bottom:44px}
+  .hero h1{margin:0 0 6px;font-size:40px;letter-spacing:-.02em;font-weight:680}
+  .hero h1 span{color:var(--ember)}
+  .hero .sub{color:var(--dim);font-size:18px;margin:0 0 20px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;font-family:var(--mono);font-size:12px}
+  .meta span{background:var(--bg3);border:1px solid var(--line);border-radius:5px;padding:4px 10px;color:var(--dim)}
+
+  h2{font-size:27px;margin:60px 0 8px;letter-spacing:-.01em;padding-top:14px;border-top:1px solid var(--line)}
+  h2 .n{font-family:var(--mono);font-size:14px;color:var(--ember);margin-right:12px;font-weight:400}
+  h3{font-size:20px;margin:34px 0 8px;letter-spacing:-.01em}
+  h4{font-size:16px;margin:22px 0 6px;color:var(--iron);text-transform:uppercase;letter-spacing:.07em;font-weight:640}
+  p{margin:10px 0}
+  a{color:var(--ember2);text-decoration:none;border-bottom:1px solid rgba(224,145,58,.3)}
+  a:hover{border-bottom-color:var(--ember2)}
+  code{font-family:var(--mono);font-size:.875em;background:var(--bg3);border:1px solid var(--line);
+    border-radius:4px;padding:1px 5px;color:var(--ember2)}
+  pre{font-family:var(--mono);font-size:12.5px;line-height:1.55;background:var(--bg2);
+    border:1px solid var(--line);border-radius:9px;padding:16px 18px;overflow-x:auto;margin:14px 0}
+  pre code{background:none;border:none;padding:0;color:var(--fg);font-size:inherit}
+  pre.diagram{color:var(--iron);background:#0d1118;line-height:1.35;font-size:12px}
+
+  .lede{font-size:18px;color:#c3ccda;border-left:3px solid var(--ember);
+    padding:2px 0 2px 20px;margin:18px 0 26px}
+
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.2px}
+  th,td{text-align:left;padding:9px 12px;border:1px solid var(--line);vertical-align:top}
+  th{background:var(--bg3);font-weight:640;color:var(--iron);font-size:12.5px;
+    text-transform:uppercase;letter-spacing:.05em}
+  tr:nth-child(even) td{background:rgba(255,255,255,.012)}
+  td.ok{color:var(--grn)} td.no{color:var(--red)} td.mid{color:var(--ember2)}
+
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:11px;padding:20px 22px;margin:16px 0}
+  .card.acc{border-left:3px solid var(--ember)}
+  .card h3,.card h4{margin-top:0}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;
+    border-radius:20px;border:1px solid;margin-right:6px;vertical-align:2px}
+  .p-take{color:var(--grn);border-color:rgba(95,184,122,.4);background:rgba(95,184,122,.09)}
+  .p-drop{color:var(--red);border-color:rgba(224,100,95,.4);background:rgba(224,100,95,.09)}
+  .p-rec{color:var(--ember);border-color:rgba(224,145,58,.45);background:rgba(224,145,58,.1)}
+  .p-info{color:var(--cy);border-color:rgba(79,176,192,.4);background:rgba(79,176,192,.09)}
+  .p-vio{color:var(--vio);border-color:rgba(169,140,216,.4);background:rgba(169,140,216,.09)}
+
+  ul,ol{margin:10px 0;padding-left:22px}
+  li{margin:5px 0}
+  ul.tight li{margin:2px 0}
+  .thm{background:var(--bg2);border:1px solid var(--line);border-left:3px solid var(--cy);
+    border-radius:9px;padding:16px 20px;margin:14px 0}
+  .thm .t{font-weight:680;color:#e9eef6;font-size:16px}
+  .thm .why{color:var(--dim);font-size:14.5px;margin-top:6px}
+
+  .prop{border:1px solid var(--line2);border-radius:12px;margin:22px 0;overflow:hidden}
+  .prop>.head{background:var(--bg3);padding:16px 22px;border-bottom:1px solid var(--line)}
+  .prop>.head h3{margin:0;font-size:22px}
+  .prop>.head .tag{font-family:var(--mono);font-size:12px;color:var(--dim);display:block;margin-top:3px}
+  .prop>.body{padding:20px 22px}
+
+  .kv{display:grid;grid-template-columns:150px 1fr;gap:6px 16px;font-size:14.5px;margin:12px 0}
+  .kv dt{color:var(--dim);font-family:var(--mono);font-size:12.5px;padding-top:2px}
+  .kv dd{margin:0}
+
+  .callout{border-radius:9px;padding:15px 18px;margin:18px 0;border:1px solid}
+  .c-warn{background:rgba(224,145,58,.07);border-color:rgba(224,145,58,.35)}
+  .c-stop{background:rgba(224,100,95,.07);border-color:rgba(224,100,95,.35)}
+  .c-good{background:rgba(95,184,122,.06);border-color:rgba(95,184,122,.32)}
+  .callout .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.09em;
+    text-transform:uppercase;display:block;margin-bottom:5px;font-weight:700}
+  .c-warn .lbl{color:var(--ember)} .c-stop .lbl{color:var(--red)} .c-good .lbl{color:var(--grn)}
+  .callout p:first-of-type{margin-top:0} .callout p:last-child{margin-bottom:0}
+
+  nav.toc{background:var(--bg2);border:1px solid var(--line);border-radius:11px;padding:18px 24px;margin:30px 0}
+  nav.toc ol{columns:2;column-gap:40px;margin:0;padding-left:20px;font-size:14.5px}
+  @media(max-width:760px){nav.toc ol{columns:1}}
+  nav.toc a{border:none;color:var(--fg)} nav.toc a:hover{color:var(--ember2)}
+
+  footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--line);
+    color:var(--dim2);font-size:13px}
+  .fn{font-size:13.5px;color:var(--dim)}
+  strong{color:#f0f4fa;font-weight:640}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>Iron <span>Forest</span></h1>
+    <p class="sub">Software factory — architecture from first principles</p>
+    <div class="meta">
+      <span>Misty Step</span><span>2026-08-04</span><span>Design review draft</span>
+      <span>6 reference systems studied</span><span>3 proposals</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<p class="lede">
+A software factory converts human intent into released software without a human watching every step.
+Its one hard constraint: the producer is nondeterministic and occasionally wrong, yet the effects must be
+exactly once and the spend bounded. Everything in this document derives from that tension.
+</p>
+
+<div class="callout c-good">
+  <span class="lbl">Method</span>
+  <p>This design is derived from the problem, not from prior decisions. No existing roadmap, doctrine, or
+  predecessor system is treated as binding. Where another system is named, it is evidence of what happens in
+  practice — a corroboration or a caution — never an authority. Where an in-house service could play a role, it
+  appears only as an integration option chosen on the merits.</p>
+</div>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#rec">Recommendation</a></li>
+    <li><a href="#ground">Two ground truths</a></li>
+    <li><a href="#reqs">Requirements, derived</a></li>
+    <li><a href="#landscape">The landscape</a></li>
+    <li><a href="#theorems">Seven theorems</a></li>
+    <li><a href="#model">The object model</a></li>
+    <li><a href="#proposals">Three proposals</a></li>
+    <li><a href="#harness">Harness decision</a></li>
+    <li><a href="#substrate">Substrate decision</a></li>
+    <li><a href="#cost">Cost model</a></li>
+    <li><a href="#decisions">Decisions you must still make</a></li>
+    <li><a href="#questions">Open questions</a></li>
+    <li><a href="#evidence">Evidence and sources</a></li>
+  </ol>
+</nav>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="rec"><span class="n">01</span>Recommendation</h2>
+
+<p>Build <strong>Proposal A (Chain)</strong>: one Go binary, a SQLite-WAL ledger, a linear pipeline of phases.
+Design the scheduler and the transport as explicit seams so <strong>Proposal B (Graph)</strong> is a scheduler swap
+and <strong>Proposal C (Fleet)</strong> is a deployment change. Do not build any of them until the requirements in
+§03 are accepted, because each requirement has a price and an alternative.</p>
+
+<div class="card acc">
+<dl class="kv">
+  <dt>Scope</dt><dd>One deep service: durable run execution, trace, and cost attribution. Nothing else.</dd>
+  <dt>Language</dt><dd>Go for the orchestrator. The agent stays a subprocess in its own language.</dd>
+  <dt>Ledger</dt><dd>SQLite in WAL mode. One file. Readers poll a monotonic cursor.</dd>
+  <dt>Harness</dt><dd><code>opencode</code> by default, behind a nine-line <code>Harness</code> interface. Other agents swappable.</dd>
+  <dt>Model</dt><dd><code>deepseek/deepseek-v4-flash-0731</code> through OpenRouter, with a cascade fallback.</dd>
+  <dt>Secrets</dt><dd>Injected at the egress by a broker the factory trusts. The agent never holds a provider key.</dd>
+  <dt>Work intake</dt><dd>Claim work from the operator's existing work system. The factory stores no backlog.</dd>
+  <dt>Substrate</dt><dd>One server. The same binary runs on a desktop with no code change.</dd>
+  <dt>First proof</dt><dd>One one-phase run and one five-phase run on the same request, with cost, time, and acceptance compared.</dd>
+</dl>
+</div>
+
+<h4>Why this shape</h4>
+<ul>
+  <li><strong>A linear pipeline is the honest starting topology.</strong> Every working system in the landscape ships a
+  linear phase list. Branching and parallelism are later, optional, and costly. There is no published evidence that a
+  multi-lane pipeline beats a linear one for real work, so start where the evidence is and measure before diverging.</li>
+  <li><strong>Go is the right orchestrator language, and the choice is unrelated to the agent.</strong> Every system in
+  the landscape separates the orchestrator from the agent runtime. Go gives one static binary, real concurrency, and no
+  runtime to install. It has no mature coding-agent library, and it does not need one; the agent runs as a subprocess.</li>
+  <li><strong>SQLite removes an entire class of failure.</strong> A durable ledger with two constraints — effects happen
+  exactly once, and the log is the truth — needs either a battle-tested store or a long list of invariants you defend
+  yourself. SQLite is the first. An external workflow engine is the second, plus an operational dependency. This design
+  does not need an event-sourcing engine to run a pipeline.</li>
+  <li><strong>Cost attribution is not a feature; it is a precondition.</strong> You cannot decide whether a phase earns
+  its place unless the run records what it spent. So spend is attached to every run from the first line of code.</li>
+</ul>
+
+<div class="callout c-warn">
+  <span class="lbl">Sharpest risk</span>
+  <p>The factory will add stages because stages are easy to define, and nobody has measured whether they help.
+  A five-phase pipeline can be worse than one competent agent with a good prompt: more tokens, more chances to
+  misread a handoff, more gates to trip.</p>
+  <p>So the workflow file must be able to declare a one-phase control arm of itself, and a run must be able to
+  execute that arm on the same request. Then "does this pipeline deserve to exist" is a query against the ledger,
+  not a debate.</p>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="ground"><span class="n">02</span>Two ground truths</h2>
+
+<p>Two facts are not assumptions; they are the fixed points every decision below orbits.</p>
+
+<div class="grid2">
+  <div class="card acc">
+    <h4>G1 · The producer is nondeterministic and occasionally wrong</h4>
+    <p>An LLM returns a plausible next token, not a guarantee. It will misread an instruction, edit the wrong file,
+    claim a test passed that did not, and invent an API that does not exist. Probing is cheap and honesty is cheap,
+    but neither is guaranteed. No amount of prompt care removes this. The design must therefore assume the agent is
+    both wrong sometimes and creative in ways its author did not predict.</p>
+    <p><strong>Consequence:</strong> everything the factory relies on — sequencing, retries, acceptance, mutation —
+    must be deterministic code that the agent cannot reach. The agent proposes; code disposes.</p>
+  </div>
+  <div class="card">
+    <h4>G2 · Effects must happen exactly once</h4>
+    <p>A run touches real state: commits, PRs, reviews, maybe a merge. If the factory retries a phase after a crash
+    and the phase had already performed its effect, the state is now wrong <em>twice</em>. Duplicate PRs, duplicate
+    commits, and double-charged model calls are all the same failure: an effect that was not idempotent was repeated.</p>
+    <p><strong>Consequence:</strong> each effect must be idempotent or gated by a record in the ledger, and a resume
+    must start at the last committed phase boundary, never earlier.</p>
+  </div>
+</div>
+
+<p>Every requirement in §03 and every theorem in §05 is a direct consequence of G1 or G2.</p>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="reqs"><span class="n">03</span>Requirements, derived</h2>
+
+<p>From G1 and G2, plus the stated wish to run unattended, see and manage costs, read full traces, talk to GitHub,
+and run on a server or a desktop, the requirements are:</p>
+
+<table>
+  <tr><th>#</th><th>Requirement</th><th>Derived from</th><th>If ignored</th></tr>
+  <tr><td><strong>R1</strong></td><td>Survive interruption. A run resumes at the last committed phase after a process or host stop, with no duplicate effect.</td><td>G2 + "run unsupervised"</td><td>A crash silently corrupts or duplicates real state.</td></tr>
+  <tr><td><strong>R2</strong></td><td>Deterministic control. Sequencing, retries, and acceptance live in code, not in prompt text.</td><td>G1</td><td>Behavior becomes untestable, unreviewable, and prompt-dependent.</td></tr>
+  <tr><td><strong>R3</strong></td><td>Bounded spend. A hard budget is enforced mid-run and cancels the run that exceeds it.</td><td>"see and manage costs"</td><td>An unattended run loops and burns unbounded spend.</td></tr>
+  <tr><td><strong>R4</strong></td><td>Visible. A full event stream exists live and is stored for later inspection.</td><td>"view full agent traces and logs"</td><td>You cannot tell what a run actually did or why it failed.</td></tr>
+  <tr><td><strong>R5</strong></td><td>Composable. Phases are reusable units with typed handoffs; a workflow is an ordering of them.</td><td>"easy to define workflows"</td><td>Every workflow is bespoke code, and each is a maintenance trap.</td></tr>
+  <tr><td><strong>R6</strong></td><td>Agents without code. A role is defined in config: name, purpose, model, tools, write bounds.</td><td>"easy to define agents"</td><td>Adding a role means editing controller code.</td></tr>
+  <tr><td><strong>R7</strong></td><td>Controlled external reach. GitHub and other effects happen only through deliberate, reversible, deterministic actions.</td><td>G1 + "interact with GitHub"</td><td>A wrong agent makes an irreversible external change.</td></tr>
+  <tr><td><strong>R8</strong></td><td>One artifact anywhere. The same binary runs on a server and on a desktop.</td><td>"run on cloud" + "maybe someone's desktop"</td><td>Desktop and cloud are two products that drift.</td></tr>
+  <tr><td><strong>R9</strong></td><td>Verifiable. Gates prove the change's claims after the fact, before publish.</td><td>G1</td><td>You ship what the agent claims instead of what it did.</td></tr>
+</table>
+
+<p>These nine are the acceptance list. A proposal earns its code by how well it satisfies R1–R9 at the smallest
+cost in moving parts.</p>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="landscape"><span class="n">04</span>The landscape</h2>
+
+<p>Six existing systems were read to find out what works and what breaks in practice. They are evidence samples,
+not design authority. Two are internal predecessors of this org's work; four are public.</p>
+
+<table>
+  <tr>
+    <th>System</th><th>Stack</th><th>Topology</th><th>Store</th><th>Agent runtime</th><th>Isolation</th><th>Cost</th><th>Notes</th>
+  </tr>
+  <tr>
+    <td><strong>warren</strong><br><span class="fn">jayminwest</span></td>
+    <td>Bun / TS</td><td>Single run, serial plan-runs</td><td>SQLite → Postgres</td>
+    <td>pi, claude-code, sapling</td><td>bwrap or K8s pod</td><td class="ok">Yes, per run + cap</td><td class="ok">Stable 0.14 on GKE</td>
+  </tr>
+  <tr>
+    <td><strong>fabro</strong><br><span class="fn">fabro-sh</span></td>
+    <td>Rust</td><td>DOT graph, branch/loop/parallel</td><td>Server DB</td>
+    <td>Built-in sessions</td><td>Daytona cloud VM</td><td class="mid">Model routing, not spend</td><td class="ok">Active, MIT</td>
+  </tr>
+  <tr>
+    <td><strong>super-simple-software-factory</strong><br><span class="fn">disler</span></td>
+    <td>Python + uv</td><td>Linear phases, 12 workflows</td><td>SQLite WAL</td>
+    <td>pi only</td><td class="no">None. Current branch.</td><td class="mid">Tokens in trace</td><td class="ok">Active, a skill</td>
+  </tr>
+  <tr>
+    <td><strong>buzz</strong><br><span class="fn">block</span></td>
+    <td>Rust</td><td>Event log, YAML workflows</td><td>Postgres + Redis</td>
+    <td>ACP: goose, codex, claude</td><td>Process</td><td class="no">No</td><td class="mid">Approval gates unwired</td>
+  </tr>
+  <tr>
+    <td><strong>olympus</strong><br><span class="fn">internal predecessor, in production</span></td>
+    <td>TS / Hono</td><td>3 hard-coded workflows</td><td>SQLite, append-only</td>
+    <td>opencode</td><td>Remote VM + host flock</td><td class="ok">Yes, budget gate + egress proxy</td><td class="ok">Production</td>
+  </tr>
+  <tr>
+    <td><strong>bitterblossom</strong><br><span class="fn">internal predecessor, retired</span></td>
+    <td>TS + Bun</td><td>Durable DAG, 5 stages</td><td>Workflow-engine Postgres</td>
+    <td>recipe-based runner</td><td>Ephemeral git worktree</td><td class="no">None</td><td class="no">Retired</td>
+  </tr>
+</table>
+
+<h3>What the landscape teaches, stated as observations not law</h3>
+
+<div class="grid2">
+  <div class="card">
+    <h4>warren</h4>
+    <ul class="tight">
+      <li><span class="pill p-take">WORKS</span> Four sides of an agent: mind (persona), memory (expertise), worklist (tasks), body (loop + tools). Clean decomposition that survives contact with real repos.</li>
+      <li><span class="pill p-take">WORKS</span> The resolved agent is frozen onto the run row. A mid-run config edit does not affect an in-flight run.</li>
+      <li><span class="pill p-take">WORKS</span> One event stream, three thin clients. UI, CLI, and HTTP read the same stream.</li>
+      <li><span class="pill p-take">WORKS</span> A distinct empty-push event. A push that landed nothing is observably different from real work.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> Two isolation backends (bwrap and K8s) double the surface; a feature stops working under one of them and goes unnoticed.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> A single bearer token with no rotation, expiry, or scopes.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>fabro</h4>
+    <ul class="tight">
+      <li><span class="pill p-take">WORKS</span> The workflow is a diffable, reviewable, version-controlled file. Graphviz DOT renders it for free.</li>
+      <li><span class="pill p-take">WORKS</span> CSS-like model stylesheets: <code>* { model: cheap }</code> then <code>.coding { model: frontier }</code>. Route cost with one line.</li>
+      <li><span class="pill p-take">WORKS</span> Human approval is a node shape, not an out-of-band interrupt.</li>
+      <li><span class="pill p-take">WORKS</span> A git checkpoint per stage. Resume, revert, or trace any change.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> DOT has no schema and no types; validating a workflow requires your own parser.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> A hard dependency on one sandbox vendor.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>super-simple-software-factory</h4>
+    <ul class="tight">
+      <li><span class="pill p-take">WORKS</span> "Agent proposes, code disposes." The best sentence in the corpus and the same shape as G1.</li>
+      <li><span class="pill p-take">WORKS</span> Phases default to <code>fail</code>. Success has to be earned by a clean exit, a parsed envelope, and green gates.</li>
+      <li><span class="pill p-take">WORKS</span> A correction re-prompts the live session; a cold restart discards everything the agent learned.</li>
+      <li><span class="pill p-take">WORKS</span> The whole transport is one cursor query: select new events after a row id. No websocket, no ingest endpoint, no replay path.</li>
+      <li><span class="pill p-take">WORKS</span> Gates verify claims after the fact, never predictions.</li>
+      <li><span class="pill p-take">WORKS</span> A read-only agent is enforced by diffing and rolling back the repo, not by asking nicely.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> No sandbox, no branch per run, no merge step. Its own README lists these as missing.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> Placeholder quality commands that exit 0. A green phase that ran nothing is worse than no phase.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>buzz</h4>
+    <ul class="tight">
+      <li><span class="pill p-take">WORKS</span> Humans and agents are the same kind of actor with different keys. Scope by identity, not by permission flags.</li>
+      <li><span class="pill p-take">WORKS</span> The hash-chained audit log with a single-writer advisory lock.</li>
+      <li><span class="pill p-take">WORKS</span> Loop prevention. Workflow-emitted events must not trigger workflows.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> The whole substrate. Nostr, relays, Postgres, Redis, and S3 to run a coding agent is more moving parts than the problem needs.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> Ships approval gates whose engine marks the run failed instead of parking it. Its docs call this out.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>olympus <span class="fn">— strongest safety shape in the landscape</span></h4>
+    <ul class="tight">
+      <li><span class="pill p-take">WORKS</span> A wake cause is not authority. A webhook is a hint; the controller re-reads the source before admission and before every mutation. This removes a whole class of stale-intent bug.</li>
+      <li><span class="pill p-take">WORKS</span> An in-process egress LLM proxy: server-side key injection, per-run bearer tokens with a TTL, hashed at rest, scoped to a workflow and target, with a request cap and usage rows.</li>
+      <li><span class="pill p-take">WORKS</span> Per-agent permission maps. The reviewer gets <code>bash: deny</code> and <code>edit</code> on one path only.</li>
+      <li><span class="pill p-take">WORKS</span> Exact-SHA worktrees plus a host <code>flock</code>. Physical serialization beats a distributed lock at this scale.</li>
+      <li><span class="pill p-take">WORKS</span> Publish once, then poll for the exact published SHA. Never republish.</li>
+      <li><span class="pill p-take">WORKS</span> Append-only ledger enforced in SQL with <code>RAISE(ABORT)</code> triggers.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> Three hard-coded workflows with bespoke controllers; adding a workflow means controller surgery.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> Monitors added reactively after each incident instead of designed-in telemetry.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>bitterblossom <span class="fn">— the post-mortem</span></h4>
+    <ul class="tight">
+      <li><span class="pill p-take">WORKS</span> Schema as the trust boundary. Cross-field invariants mean an evidence packet cannot claim a merge it did not perform.</li>
+      <li><span class="pill p-take">WORKS</span> One terminal tool call as the only completion channel; exactly one call or the phase fails.</li>
+      <li><span class="pill p-take">WORKS</span> A head-SHA contract enforced inside the child, so an engine retry re-validates reality.</li>
+      <li><span class="pill p-take">WORKS</span> Idempotent findings via a content marker.</li>
+      <li><span class="pill p-take">WORKS</span> A positive environment allowlist to the agent subprocess. Orchestrator tokens never cross.</li>
+      <li><span class="pill p-take">WORKS</span> Model family varies across review lanes. Same-family lanes are correlated noise.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> A pinned immature workflow engine, then four separate workarounds for engine defects.</li>
+      <li><span class="pill p-drop">STRUGGLES</span> Zero dollar attribution on unattended multi-hour runs.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout c-good">
+  <span class="lbl">What the landscape says together</span>
+  <p>Six independent systems, no shared lineage, and the ones that survived converged on the same moves: control in
+  deterministic code, typed handoffs, post-hoc gates, correction over restart, and a durable event log. The ones that
+  struggled did so in predictable places: immature infrastructure, unbounded spend, and bespoke controls. The next
+  section turns that agreement into theorems with reasons.</p>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="theorems"><span class="n">05</span>Seven theorems</h2>
+
+<p>Each theorem states a rule, the failure it prevents, and the reason the rule is necessary. The reason is the
+argument; the landscape is only a note that the failure has been seen.</p>
+
+<div class="thm">
+  <div class="t">T1 · Control is deterministic; the agent is a subprocess behind a seam</div>
+  <div class="why">
+    Sequencing, retries, budgets, and acceptance live in code. An agent phase starts, runs bounded, and returns a
+    typed value.<br>
+    <strong>Failure prevented:</strong> behavior encoded in prompt prose. That behavior cannot be tested, reviewed,
+    or reasoned about, and it changes when the model changes.
+  </div>
+</div>
+
+<div class="thm">
+  <div class="t">T2 · The agent proposes; code disposes. Values cross seams as typed envelopes</div>
+  <div class="why">
+    A phase returns a value parsed against a schema. Free text never crosses a boundary; anything unparseable
+    fails the phase.<br>
+    <strong>Failure prevented:</strong> the phantom claim. An agent asserts "merged" or "tests pass" in prose, and
+    downstream code trusts the prose. Every handoff then silently depends on the model's honesty.
+  </div>
+</div>
+
+<div class="thm">
+  <div class="t">T3 · No agent-authorized external mutation</div>
+  <div class="why">
+    The agent never holds the authority to change external state. It produces a typed value; deterministic publisher
+    code performs the mutation, idempotently, gated by the ledger.<br>
+    <strong>Failure prevented:</strong> a model that is wrong in a confident way makes an irreversible external change.
+    This is the most expensive failure this system can have.
+  </div>
+</div>
+
+<div class="thm">
+  <div class="t">T4 · Gates verify after the fact</div>
+  <div class="why">
+    A gate runs after a phase finishes and checks the envelope's claims against reality: did the artifact appear,
+    does the diff match the claim, do the seeds fail without the change.<br>
+    <strong>Failure prevented:</strong> pre-flight checks and "trust me" exhaust. You cannot know what an agent touched
+    until it actually touches it, so only after-the-fact inspection is honest. Post-hoc gates are also how G1's
+    occasionally-wrong producer gets contained.
+  </div>
+</div>
+
+<div class="thm">
+  <div class="t">T5 · A correction beats a restart</div>
+  <div class="why">
+    When a gate fails, re-prompt the <em>same</em> agent session with the exact violation and the gate report, and
+    resume the phase. A cap on rounds stops the loop.<br>
+    <strong>Failure prevented:</strong> the cold-restart tax. Starting a new session throws away the context window —
+    the one resource the agent already paid for — and it repeats the same mistake with new confidence.
+  </div>
+</div>
+
+<div class="thm">
+  <div class="t">T6 · The durable event log is the single source of truth</div>
+  <div class="why">
+    Every event is appended while the work happens. Live view and historical replay are the same query at two
+    cadences: "give me events after cursor." No ingest endpoint, no duplicate path.<br>
+    <strong>Failure prevented:</strong> live and history disagreeing, which always ends in a wrong operator decision
+    about a real run.
+  </div>
+</div>
+
+<div class="thm">
+  <div class="t">T7 · An event is a hint; the source is the authority</div>
+  <div class="why">
+    A timer, webhook, or card is a request to check reality. Before admission and before each mutation, read the real
+    source: is the branch still there, is the PR still open, is this still unclaimed?<br>
+    <strong>Failure prevented:</strong> executing stale intent. The classic case is a webhook from an event the factory
+    itself produced, or acting on a card another actor already claimed.
+  </div>
+</div>
+
+<div class="callout c-stop">
+  <span class="lbl">Design test</span>
+  <p>A proposal that violates one of these seven is wrong, in this order of severity: T3 first, then T4, then T7, then
+  T1, then T2, then T5, then T6. If a shortcut name sounds tempting — "just let the agent push to main" — it is
+  violating T3, and the penalty is an irreversible external effect.</p>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="model"><span class="n">06</span>The object model</h2>
+
+<p>Six nouns. Everything else is derived.</p>
+
+<pre class="diagram">  AGENT      a named role. purpose + system prompt + model cascade + tool policy + write boundary.
+             never a model id at the call site.
+
+  PHASE      one bounded step. kind = agent | code | gate | human.
+             defaults to fail. success is earned.
+
+  WORKFLOW   an ordered list of phases (A), or a DAG of them (B).
+             a versioned file in the target repository.
+
+  ENVELOPE   the typed value a phase returns. parsed against a schema.
+             the only channel that crosses a seam.
+
+  GATE       gate(envelope, run) -> report. verifies claims. runs after.
+
+  RUN        one execution. owns a workspace, a branch, a budget, a ledger stream,
+             and one claimed piece of work.</pre>
+
+<h3>Agent definition</h3>
+<p>One YAML file per roster. Config says who an agent <em>is</em>. The workflow says how it is <em>used</em>.</p>
+
+<pre><code>defaults:
+  harness: opencode
+  model:   [deepseek/deepseek-v4-flash-0731]   # cascade; index 1+ are fallbacks
+  variant: medium                              # reasoning effort
+  protected:                                   # no agent may edit the machinery that grades it
+    - .forest/
+    - workflows/
+
+agents:
+  - name: planner
+    purpose: Turn a request into a plan the builder implements without asking questions.
+    model:   [deepseek/deepseek-v4-flash-0731, z-ai/glm-5.2]
+    variant: high
+    writes:  [specs/]            # enforced by post-call diff, then rollback
+    tools:   {deny: [bash]}
+    output:  PlanOutput
+
+  - name: reviewer
+    purpose: Judge whether the change is what was asked for.
+    model:   [x-ai/grok-4.5]     # different family on purpose: same-family lanes correlate
+    writes:  []                  # read-only, enforced in code
+    tools:   {deny: [bash, edit, write]}
+    output:  ReviewOutput</code></pre>
+
+<h3>Workflow definition</h3>
+<p>Lives in the target repository, so it is reviewed like source.</p>
+
+<pre><code>name:     plan-build-verify
+budget:   {usd: 2.00, on_exceed: cancel}
+control:  direct              # the one-phase baseline this pipeline is measured against
+
+phases:
+  - {name: plan,    kind: agent, agent: planner}
+  - {name: build,   kind: agent, agent: builder, mutates_head: true}
+  - {name: gate,    kind: gate,  checks: [artifacts_exist, diff_matches_claims]}
+  - {name: test,    kind: code,  run: quality.test}
+  - {name: fix,     kind: agent, agent: builder, on_fail: test, max_rounds: 2, resume: true}
+  - {name: review,  kind: agent, agent: reviewer}
+  - {name: commit,  kind: code,  run: git.commit}
+  - {name: publish, kind: code,  run: github.open_pr}
+
+# the control arm. same request, same budget, one phase.
+controls:
+  direct:
+    phases:
+      - {name: do, kind: agent, agent: builder, mutates_head: true}
+      - {name: commit,  kind: code, run: git.commit}
+      - {name: publish, kind: code, run: github.open_pr}</code></pre>
+
+<div class="callout c-warn">
+  <span class="lbl">Note the control block</span>
+  <p>This is the answer to "does my pipeline earn its phases?" expressed as data. Any workflow can run as its own
+  control arm on the same request. Cost, wall time, and acceptance are already in the ledger, so the comparison is a
+  query, not a project. If the five-phase arm is not measurably better, delete the phases.</p>
+</div>
+
+<h3>Go interfaces</h3>
+<p>Three seams. Everything swappable sits behind one of them.</p>
+
+<pre><code>// Harness runs one bounded agent phase and streams events. The only seam between
+// the deterministic orchestrator and an opaque coding agent.
+type Harness interface {
+    Name() string
+    Run(ctx context.Context, req PhaseRequest, sink EventSink) (PhaseResult, error)
+}
+
+type PhaseRequest struct {
+    Workspace  string        // absolute path; the agent's cwd
+    System     string        // rendered system prompt
+    Prompt     string        // rendered user prompt
+    Model      string        // resolved from the cascade at dispatch, then frozen
+    Variant    string        // reasoning effort
+    SessionID  string        // "" = new. non-empty = resume, for corrections.
+    Tools      ToolPolicy    // allow / deny / no-builtins
+    Output     *jsonschema.Schema
+    Deadline   time.Time
+}
+
+type PhaseResult struct {
+    SessionID string          // carried forward so a correction reuses the window
+    Envelope  json.RawMessage
+    Usage     Usage           // in, out, cacheRead, cacheWrite
+    CostUSD   float64
+    ExitCode  int
+}
+
+// Gate verifies an envelope's claims against reality. Always after the call.
+type Gate func(ctx context.Context, env Envelope, run *Run) GateReport
+
+// Ledger is the single durable store. Append-only for events.
+type Ledger interface {
+    StartRun(context.Context, RunSpec) (*Run, error)
+    Append(context.Context, Event) error
+    Since(ctx context.Context, runID string, cursor int64, limit int) ([]Event, error)
+    FinishPhase(context.Context, PhaseID, PhaseResult, []GateReport) error
+}</code></pre>
+
+<h3>Ledger schema</h3>
+<p>SQLite, WAL. Events are append-only and enforced in SQL.</p>
+
+<pre><code>CREATE TABLE runs (
+  id          TEXT PRIMARY KEY,
+  workflow    TEXT NOT NULL,
+  arm         TEXT NOT NULL DEFAULT 'main',   -- 'main' | control-arm name
+  work_id     TEXT,                            -- claimed work item, if any
+  repo        TEXT NOT NULL,
+  base_sha    TEXT NOT NULL,
+  branch      TEXT NOT NULL,
+  state       TEXT NOT NULL,                   -- queued|running|blocked|done|failed|cancelled
+  accepted    INTEGER,                         -- distinct from state: phases pass and the run still fails
+  budget_usd  REAL,
+  cost_usd    REAL NOT NULL DEFAULT 0,
+  tokens_in   INTEGER NOT NULL DEFAULT 0,
+  tokens_out  INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL,
+  ended_at    INTEGER
+);
+
+CREATE TABLE phases (
+  id          TEXT PRIMARY KEY,
+  run_id      TEXT NOT NULL REFERENCES runs(id),
+  seq         INTEGER NOT NULL,
+  round       INTEGER NOT NULL DEFAULT 0,
+  name        TEXT NOT NULL,
+  kind        TEXT NOT NULL,                   -- agent|code|gate|human
+  agent       TEXT,                            -- roster name
+  model       TEXT,                            -- resolved, frozen
+  session_id  TEXT,                            -- harness session; enables correction
+  status      TEXT NOT NULL DEFAULT 'fail',    -- success is earned
+  sha_before  TEXT, sha_after TEXT,
+  cost_usd    REAL, tokens_in INTEGER, tokens_out INTEGER,
+  started_at  INTEGER, ended_at INTEGER
+);
+
+CREATE TABLE events (
+  seq       INTEGER PRIMARY KEY AUTOINCREMENT,  -- the cursor. the whole transport.
+  run_id    TEXT NOT NULL,
+  phase_id  TEXT,
+  parent    INTEGER,                            -- nests tool calls under a phase
+  ts        INTEGER NOT NULL,
+  kind      TEXT NOT NULL,
+  name      TEXT,
+  payload   TEXT NOT NULL
+);
+CREATE TRIGGER events_immutable BEFORE UPDATE ON events
+  BEGIN SELECT RAISE(ABORT,'events are append-only'); END;
+
+CREATE TABLE envelopes    (phase_id TEXT PRIMARY KEY, schema TEXT, body TEXT, valid INTEGER);
+CREATE TABLE gate_results (id INTEGER PRIMARY KEY, phase_id TEXT, gate TEXT, ok INTEGER, checks TEXT);</code></pre>
+
+<p>The entire live-view transport is one statement:</p>
+<pre><code>SELECT * FROM events WHERE run_id = ? AND seq &gt; ? ORDER BY seq LIMIT 500;</code></pre>
+<p>Live view and full history are the same query at two cadences. There is no ingest endpoint, no websocket, no
+backfill, and no separate replay path. Every reader opens WAL, so reads never block a running writer.</p>
+
+<h3>Run lifecycle</h3>
+<pre class="diagram">  intake      claimed work, cron tick, or GitHub webhook.
+     │        the cause is a HINT (T7).
+     ▼
+  admit       re-read the real source. is it still real? still unclaimed? (T7)
+     │        claim the work. check budget. take the per-repo lock.
+     ▼
+  provision   git worktree at an exact base SHA. branch forest/&lt;run&gt;.
+     │        seed .forest/context/ with prior envelopes.
+     ▼
+  phases      for each phase:
+     │          agent → Harness.Run(), parse envelope, run gates
+     │                  on violation → re-prompt SAME session with the report (T5)
+     │          code  → deterministic step, its own trace row
+     │          gate  → verify the previous envelope's claims (T4)
+     │          human → park the run, wait, resume on decision
+     │        every event → ledger, while it happens (T6)
+     ▼
+  publish     deterministic only. commit, push, open PR, post findings (T2, T3).
+     │        idempotent content marker. publish once, poll for the exact SHA.
+     ▼
+  settle      accepted? write terminal evidence. release the worktree.
+              never release the claim implicitly; report it.</pre>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="proposals"><span class="n">07</span>Three proposals</h2>
+
+<p>Same object model, same ledger, same harness seam. They differ only in the scheduler and the deployment unit.</p>
+
+<!-- A -->
+<div class="prop">
+  <div class="head">
+    <h3>A · Chain <span class="pill p-rec">RECOMMENDED</span></h3>
+    <span class="tag">one Go binary · linear phases · one box · ~3,500 LOC</span>
+  </div>
+  <div class="body">
+    <pre class="diagram">┌──────────────────────── forest (one static Go binary) ────────────────────────┐
+│                                                                               │
+│  HTTP :8080 ── API + server-rendered UI (polls events by cursor)              │
+│                                                                               │
+│  intake ──► admitter ──► runner (N worker goroutines, 1 per repo lock)        │
+│               │             │                                                 │
+│               │             ├─ phase: agent ─► Harness ─► opencode subprocess │
+│               │             │                              (own worktree,     │
+│               │             │                               env allowlist)    │
+│               │             ├─ phase: code  ─► git / test / lint (in-process) │
+│               │             ├─ phase: gate  ─► verify envelope claims         │
+│               │             └─ phase: human ─► park, wait for decision        │
+│               │                                                               │
+│  egress proxy ── OpenRouter ── per-run token, TTL, cost row per call          │
+│  publisher ──── GitHub via gh/API ── commit, push, PR, findings               │
+│                                                                               │
+│  /var/lib/forest/                                                             │
+│    forest.db        ledger (SQLite WAL) — runs, phases, events, envelopes     │
+│    worktrees/&lt;run&gt;  ephemeral, exact base SHA, reaped on settle              │
+└───────────────────────────────────────────────────────────────────────────────┘
+        │                                    │
+     work ledger                        secret broker                       </pre>
+
+    <dl class="kv">
+      <dt>Scheduler</dt><dd>Walk the phase list. One run per repo at a time, enforced by a file lock. N runs across repos.</dd>
+      <dt>Durability</dt><dd>Every phase boundary commits to SQLite. On boot, resume from the last committed phase; mark orphans <code>interrupted</code> and never replay a mutation.</dd>
+      <dt>Concurrency</dt><dd>Worker goroutines. One SQLite writer through a single connection. Agents are subprocesses, so a hung agent cannot wedge the orchestrator.</dd>
+      <dt>Deploy</dt><dd><code>scp</code> the binary. Systemd unit. One server. Identical on a desktop.</dd>
+    </dl>
+
+    <div class="grid2">
+      <div><h4>Strengths</h4><ul class="tight">
+        <li>Smallest correct thing. One binary, one file, one process.</li>
+        <li>Covers every requirement R1–R9: agents, workflows, cost, traces, GitHub, server, desktop.</li>
+        <li>Deterministic phases are a node kind, not a special case.</li>
+        <li>No external engine, so no engine defects to work around; the ledger is yours and simple.</li>
+        <li>The control-arm comparison is a query, because both arms write the same ledger.</li>
+      </ul></div>
+      <div><h4>Limits</h4><ul class="tight">
+        <li>No parallel fan-out inside one run. Three reviewers run in sequence.</li>
+        <li>No conditional branching beyond a bounded fix loop.</li>
+        <li>One host caps concurrency at what one box can sandbox.</li>
+      </ul></div>
+    </div>
+    <p><strong>Pick when</strong> the workflow is a pipeline, which describes every workflow this factory needs today.</p>
+  </div>
+</div>
+
+<!-- B -->
+<div class="prop">
+  <div class="head">
+    <h3>B · Graph</h3>
+    <span class="tag">same binary · DAG scheduler · parallel fan-out · human gates · ~+1,800 LOC</span>
+  </div>
+  <div class="body">
+    <pre class="diagram">                        ┌──────────► review-A (grok)   ─┐
+                        │                                │
+  plan ──► build ──► gate ──────────► review-B (glm)   ──┼──► merge-reviews ──► human? ──► publish
+   │                    │                                │         │
+   │                    └──────────► security (codex)  ──┘         │ [reject]
+   │                                                               ▼
+   └───────────────────◄──────── fix (resume session) ◄────────  revise
+                                  max_rounds: 2
+
+  scheduler:  topological sort → ready set → run ready nodes concurrently
+              → barrier → next ready set
+  edges:      pass | fail | approve | reject  (guards, not code)
+  human node: parks the run in the ledger; a decision POST resumes it</pre>
+
+    <dl class="kv">
+      <dt>Adds</dt><dd>Parallel sibling phases, conditional edges, explicit human-gate nodes, and the fan-in/merge node.</dd>
+      <dt>Cost effect</dt><dd>Three independent reviewers from three model families. Different-family lanes are the only review lanes with independent signal.</dd>
+      <dt>Authoring</dt><dd>Same YAML with a <code>needs:</code> field. Render to DOT for a picture, but keep YAML as the typed source.</dd>
+      <dt>Migration from A</dt><dd>Replace the list-walker with a topological scheduler. The ledger, harness, gates, and publisher do not change.</dd>
+    </dl>
+
+    <div class="grid2">
+      <div><h4>Strengths</h4><ul class="tight">
+        <li>Independent review lanes run at once, so wall time falls.</li>
+        <li>Human approval becomes a first-class, resumable state.</li>
+        <li>Matches the strongest proven graph shape in the landscape without its untyped authoring or its sandbox vendor.</li>
+      </ul></div>
+      <div><h4>Limits</h4><ul class="tight">
+        <li>Concurrent phases in one worktree collide. Each parallel node needs its own worktree and a merge step.</li>
+        <li>Failure semantics harden: partial fan-out, sibling cancellation, and barrier timeouts.</li>
+        <li>A parked human gate can hold a lock and a budget reservation for days.</li>
+      </ul></div>
+    </div>
+    <p><strong>Pick when</strong> you have measured that multi-lane review beats single-lane review. Not before.</p>
+  </div>
+</div>
+
+<!-- C -->
+<div class="prop">
+  <div class="head">
+    <h3>C · Fleet</h3>
+    <span class="tag">control plane + remote workers · horizontal scale · ~+2,500 LOC and real ops</span>
+  </div>
+  <div class="body">
+    <pre class="diagram">   ┌─────────── control plane (1 server) ───────────┐
+   │  API · UI · scheduler · ledger · egress proxy │
+   │  Postgres (or SQLite + streaming replication)  │
+   └───────┬───────────────────────────────────────┘
+           │ claim / heartbeat / event push  (gRPC or NATS)
+     ┌─────┴──────┬───────────────┬──────────────┐
+     ▼            ▼               ▼              ▼
+  worker-1     worker-2       worker-3      your desktop
+  server       server         cloud VM      (same binary,
+  │            │              │              --worker)
+  └ sandbox    └ sandbox      └ sandbox
+    + harness    + harness      + harness
+
+  the worker holds NO secret. every model call goes back through
+  the control plane's egress proxy on a per-run token with a TTL.</pre>
+
+    <dl class="kv">
+      <dt>Adds</dt><dd>A worker protocol, lease and heartbeat, work stealing, and worker-side event push.</dd>
+      <dt>Store</dt><dd>Postgres once more than one process writes. Or keep SQLite with exactly one writer and stream reads.</dd>
+      <dt>Nice property</dt><dd>Your desktop joins as a worker with one flag. That is the clean answer to "maybe run on someone's desktop."</dd>
+    </dl>
+
+    <div class="grid2">
+      <div><h4>Strengths</h4><ul class="tight">
+        <li>Concurrency is no longer capped by one box.</li>
+        <li>A runaway agent kills its worker, not the control plane.</li>
+        <li>Heterogeneous workers: a cheap server for small phases, a big one for builds.</li>
+      </ul></div>
+      <div><h4>Limits</h4><ul class="tight">
+        <li>You now own a distributed system: leases, split brain, partial failure, and worker auth.</li>
+        <li>This is where the landscape's strongest system needed a cluster. That is the cost of this tier.</li>
+        <li>Unjustified until one box is provably saturated.</li>
+      </ul></div>
+    </div>
+    <p><strong>Pick when</strong> a measured queue depth on one server is the actual bottleneck. Not on a forecast.</p>
+  </div>
+</div>
+
+<h3>Side by side</h3>
+<table>
+  <tr><th>Dimension</th><th>A · Chain</th><th>B · Graph</th><th>C · Fleet</th></tr>
+  <tr><td>New code</td><td class="ok">~3,500 LOC</td><td class="mid">~5,300 LOC</td><td class="no">~7,800 LOC + ops</td></tr>
+  <tr><td>Moving parts in prod</td><td class="ok">1 process, 1 file</td><td class="ok">1 process, 1 file</td><td class="no">N processes, DB, bus</td></tr>
+  <tr><td>Parallel phases</td><td class="no">No</td><td class="ok">Yes</td><td class="ok">Yes</td></tr>
+  <tr><td>Human gates</td><td class="mid">Park and resume, serial</td><td class="ok">First-class node</td><td class="ok">First-class node</td></tr>
+  <tr><td>Horizontal scale</td><td class="no">One box</td><td class="no">One box</td><td class="ok">Yes</td></tr>
+  <tr><td>Failure modes to design</td><td class="ok">Few</td><td class="mid">Moderate</td><td class="no">Many</td></tr>
+  <tr><td>Satisfies R1–R9</td><td class="ok">Yes, all</td><td class="ok">Yes, all</td><td class="ok">Yes, all</td></tr>
+  <tr><td>Time to first real run</td><td class="ok">Days</td><td class="mid">1–2 weeks</td><td class="no">3–4 weeks</td></tr>
+</table>
+
+<div class="callout c-good">
+  <span class="lbl">Upgrade path</span>
+  <p>A → B is a scheduler swap behind one interface. B → C is a transport swap behind the same interface.
+  Build A now with those two seams explicit, and neither later step is a rewrite.</p>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="harness"><span class="n">08</span>Harness decision</h2>
+
+<p>Four candidates are installed on this machine. Versions and flags below were read from the local binaries,
+not from documentation.</p>
+
+<table>
+  <tr>
+    <th>Capability</th><th>opencode 1.18.11</th><th>pi 0.83.0</th><th>goose 1.45.0</th><th>omp 17.2.8</th>
+  </tr>
+  <tr><td>Machine-readable event stream</td>
+    <td class="ok"><code>--format json</code></td><td class="ok">JSONL / RPC mode</td>
+    <td class="mid">Session JSONL</td><td class="ok">Recipe runner events</td></tr>
+  <tr><td>Session resume for corrections</td>
+    <td class="ok"><code>--session</code>, <code>--continue</code>, <code>--fork</code></td>
+    <td class="ok"><code>--session</code></td><td class="ok"><code>--session-id</code></td><td class="mid">Task-scoped</td></tr>
+  <tr><td>Per-call model override</td>
+    <td class="ok"><code>-m provider/model</code></td><td class="ok">CLI flag</td><td class="mid">Config or recipe</td><td class="ok"><code>models[]</code> cascade</td></tr>
+  <tr><td>Per-call reasoning effort</td>
+    <td class="ok"><code>--variant high|max</code></td><td class="ok">thinking level</td><td class="mid">Recipe</td><td class="ok">Per-model</td></tr>
+  <tr><td>Named agent definitions</td>
+    <td class="ok"><code>--agent</code>, <code>opencode agent</code></td><td class="mid">Prompt files</td>
+    <td class="ok"><code>--recipe</code> + <code>--params</code></td><td class="ok">Recipe bundle</td></tr>
+  <tr><td>Unattended permission model</td>
+    <td class="ok"><code>--auto</code> + per-agent permissions</td><td class="ok">Tool allow/deny</td>
+    <td class="mid">Config</td><td class="ok">Skill and tool policy</td></tr>
+  <tr><td>MCP</td>
+    <td class="ok"><code>opencode mcp</code></td><td class="no">None by design</td>
+    <td class="ok">Native</td><td class="ok"><code>mcpServers[]</code></td></tr>
+  <tr><td>Cost and token reporting</td>
+    <td class="ok"><code>opencode stats</code></td><td class="ok"><code>get_session_stats</code></td>
+    <td class="mid">Session data</td><td class="mid">Via proxy</td></tr>
+  <tr><td>Headless server to attach to</td>
+    <td class="ok"><code>serve</code> + <code>--attach</code></td><td class="ok">RPC mode</td>
+    <td class="no">No</td><td class="mid">Recipe task RPC</td></tr>
+  <tr><td>Session export for the ledger</td>
+    <td class="ok"><code>export</code> / <code>import</code></td><td class="mid">JSONL</td>
+    <td class="mid">JSONL</td><td class="ok">Raw output</td></tr>
+  <tr><td>Runtime dependency</td>
+    <td class="mid">Bundled binary</td><td class="mid">Node 22</td>
+    <td class="ok">Static Rust</td><td class="mid">Bun + Python</td></tr>
+</table>
+
+<h4>Verdict</h4>
+<div class="card acc">
+  <p><strong>Default to <code>opencode</code>.</strong> It is the only candidate with all six properties an unattended
+  orchestrator needs: JSON events, session resume, per-call model and effort, named agents, an unattended permission
+  model, and first-party cost reporting. It also has MCP and a headless server.</p>
+  <p><strong>Keep <code>goose</code> as the MCP-heavy alternate.</strong> Its recipe-plus-sub-recipe model with typed
+  <code>--params</code> is the best agent-definition surface of the four, and it is a static Rust binary with no runtime.</p>
+  <p><strong>Keep <code>pi</code> as a reference bounded node.</strong> Two public systems chose it. Its deliberate
+  absence of MCP is a smaller tool surface to audit, which suits a read-only reviewer.</p>
+  <p><strong>Treat <code>omp</code> as a possible in-house path only if you want the factory coupled to the OMP runtime.</strong>
+  Its recipes already express models, skills, and MCP servers in one bundle.</p>
+</div>
+
+<p>The interface is nine lines. Write all four adapters; pick per agent, per phase.</p>
+<pre><code>agents:
+  - {name: builder,  harness: opencode, model: [deepseek/deepseek-v4-flash-0731]}
+  - {name: reviewer, harness: pi,       model: [x-ai/grok-4.5], tools: {deny: [bash, edit]}}
+  - {name: triager,  harness: goose,    model: [deepseek/deepseek-v4-flash-0731]}   # needs GitHub MCP</code></pre>
+
+<div class="callout c-warn">
+  <span class="lbl">Language reality check</span>
+  <p>Go has no mature coding-agent harness, and it does not need one. Every system in the landscape separates the
+  orchestrator language from the agent runtime: Python drives pi; TypeScript drives pi and opencode; Rust drives goose.
+  Go is a good orchestrator language for exactly this: one static binary, real concurrency, and clean subprocess control.
+  <strong>Note that Go is not currently installed on this machine.</strong> Step zero is installing it.</p>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="substrate"><span class="n">09</span>Substrate decision</h2>
+
+<table>
+  <tr><th>Option</th><th>Fit</th><th>Deciding fact</th><th>Verdict</th></tr>
+  <tr>
+    <td><strong>Plain Linux server</strong> (any provider)</td>
+    <td>Long-lived process, local disk, full control of sandboxing, predictable cost</td>
+    <td>An agent phase is a multi-minute subprocess with a git worktree and local disk. That is what a server is for.</td>
+    <td class="ok"><strong>Recommended.</strong> The provider is a billing detail, not a design decision.</td>
+  </tr>
+  <tr>
+    <td><strong>Cloud VM per run</strong> (remote sandboxes)</td>
+    <td>Isolation per run, fast boot, volume for SQLite</td>
+    <td>Matches the strongest system's proven shape; strong candidate for Proposal C workers.</td>
+    <td class="mid">Viable later. Not needed when the work is your own code on your own repos.</td>
+  </tr>
+  <tr>
+    <td><strong>Serverless functions</strong> (Workers-style)</td>
+    <td class="no">Poor</td>
+    <td>No long-lived process, no local filesystem, no subprocess, no git worktree.</td>
+    <td class="no"><strong>Reject</strong> for run execution. Usable only as a webhook edge.</td>
+  </tr>
+  <tr>
+    <td><strong>Kubernetes</strong></td>
+    <td>Pod-per-run isolation</td>
+    <td>The strongest public system needed it only after one box saturated.</td>
+    <td class="no">Reject now. This is the Proposal C endgame, not a starting point.</td>
+  </tr>
+  <tr>
+    <td><strong>Local desktop</strong></td>
+    <td>Development and burst capacity</td>
+    <td>One static Go binary, so the same artifact runs anywhere.</td>
+    <td class="ok"><strong>Free.</strong> Real if you decide to run workers on desktops; nice otherwise.</td>
+  </tr>
+</table>
+
+<h4>Isolation posture, by tier</h4>
+<table>
+  <tr><th>Tier</th><th>Mechanism</th><th>Protects against</th><th>Cost to build</th></tr>
+  <tr><td>0 · now</td><td>Ephemeral git worktree at an exact SHA, positive env allowlist, post-call diff and rollback, per-agent tool deny</td>
+    <td>Accidental edits, secret leakage into the agent, unauthorized writes</td><td class="ok">Low. This is Proposal A, and it covers T3 for your own code.</td></tr>
+  <tr><td>1 · next</td><td>Unshared user namespace plus a read-only bind of everything outside the worktree</td>
+    <td>A confused agent reaching the host filesystem</td><td class="mid">Medium</td></tr>
+  <tr><td>2 · later</td><td>Container per run with CPU, memory, and egress allowlist</td>
+    <td>A runaway agent starving the box; unexpected network egress</td><td class="mid">Medium</td></tr>
+  <tr><td>3 · only if untrusted</td><td>VM per run</td><td>Hostile code execution</td><td class="no">High</td></tr>
+</table>
+<p class="fn">You are running your own code on your own repositories, so tier 0 is honest today and tier 2 is the
+natural target. Do not pay for tier 3 by default.</p>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="cost"><span class="n">10</span>Cost model</h2>
+
+<p>Live OpenRouter prices, read through the local credential broker on 2026-08-04. The agent process never holds a
+provider key; the egress proxy authenticates and records usage per call.</p>
+
+<table>
+  <tr><th>Model</th><th>Context</th><th>Input / M</th><th>Output / M</th><th>Use</th></tr>
+  <tr><td><code>deepseek/deepseek-v4-flash-0731</code></td><td>1,048,576</td><td>$0.09</td><td>$0.18</td>
+    <td class="ok">Default for every phase</td></tr>
+  <tr><td><code>deepseek/deepseek-v4-pro</code></td><td>1,048,576</td><td>$0.435</td><td>$0.87</td><td>Escalation for a hard plan</td></tr>
+  <tr><td><code>x-ai/grok-4.5</code></td><td>—</td><td colspan="2">see catalog</td><td>Review lane, different family</td></tr>
+</table>
+
+<h4>Estimated run cost, flash-0731</h4>
+<table>
+  <tr><th>Shape</th><th>Tokens in</th><th>Tokens out</th><th>Per phase</th><th>Five-phase run</th></tr>
+  <tr><td>Small phase</td><td>30 k</td><td>3 k</td><td>$0.0032</td><td>$0.016</td></tr>
+  <tr><td>Medium phase</td><td>120 k</td><td>12 k</td><td>$0.0130</td><td>$0.065</td></tr>
+  <tr><td>Large phase</td><td>400 k</td><td>30 k</td><td>$0.0414</td><td>$0.207</td></tr>
+</table>
+<p>At 100 medium five-phase runs per day, model spend is about <strong>$6.50/day, roughly $195/month</strong>.
+The same workload on <code>v4-pro</code> is about <strong>$940/month</strong>. Compute is about $24/month on one
+plain server.</p>
+
+<div class="callout c-warn">
+  <span class="lbl">Design consequences of a 1 M context at $0.09/M</span>
+  <ol style="margin:6px 0 0">
+    <li><strong>Context compression is not worth engineering yet.</strong> A full 1 M-token context costs 9 cents.
+    Spend the effort on gates instead.</li>
+    <li><strong>The budget cap is a safety rail, not a cost control.</strong> It exists to stop a loop, not to save money.
+    Set it near $2 per run and alert on approach.</li>
+    <li><strong>The expensive resources are wall time and merge risk, not tokens.</strong> Optimize for phases that catch
+    defects.</li>
+    <li><strong>Attribute anyway.</strong> Without per-run cost you cannot answer "was this change worth its tokens,"
+    which is the entire point of a factory you run unattended.</li>
+  </ol>
+</div>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="decisions"><span class="n">11</span>Decisions you must still make</h2>
+
+<p>These are the choices that change the architecture. Each is a real fork with a price, not a detail.</p>
+
+<div class="grid2">
+  <div class="card">
+    <h4>1 · Prove a phase before you keep it</h4>
+    <p>The factory will add stages because stages are easy to define and no public system has published an A/B proving
+    a staged pipeline beats one good agent. The burden of proof is on the stages.</p>
+    <p><strong>Decision:</strong> the control arm is a first-class field in the workflow file, and the comparison is a
+    ledger query. Otherwise you carry unmeasured phases for a year.</p>
+  </div>
+  <div class="card">
+    <h4>2 · Who owns the merge line</h4>
+    <p>Either the factory auto-merges when gates pass, or it always leaves a PR for a human. This sets the terminal
+    state machine and the blast radius of a bad run.</p>
+    <p><strong>Decision:</strong> define it now. Auto-merge means "no human required" is real; PR-only halves the value.</p>
+  </div>
+  <div class="card">
+    <h4>3 · Where the agent gets external-system authority</h4>
+    <p>A sandboxed agent has no working GitHub auth path, so the usual pattern is: the agent commits, the host pushes.
+    There is no clean way to give a sandboxed agent write credentials.</p>
+    <p><strong>Decision:</strong> the agent reads external systems through MCP with a scoped short-lived lease, or it
+    gets nothing and the factory performs all I/O. The second is safer and simpler; the first enables triage agents.</p>
+  </div>
+  <div class="card">
+    <h4>4 · Secret custody at the egress</h4>
+    <p>The agent must reach a model provider, and the provider key must not reach the agent. Two shapes exist: a broker
+    the factory calls, which injects the key server-side and records usage; or a key placed in the sandbox.</p>
+    <p><strong>Decision:</strong> the broker. It gives exact per-call cost attribution for free and lets you revoke
+    mid-run. It costs about 300 lines.</p>
+  </div>
+  <div class="card">
+    <h4>5 · Reproducibility of a composition</h4>
+    <p>"Reproduce this run" requires the agent definition, prompts, model, reasoning effort, tool policy, and harness
+    version to hash to a digest stored on the run.</p>
+    <p><strong>Decision:</strong> hash and freeze at dispatch. Cheap now, impossible to retrofit.</p>
+  </div>
+  <div class="card">
+    <h4>6 · What a failed run leaves behind</h4>
+    <p>A failed run is not "no run." It must leave a terminal state, the evidence it gathered, and a distinct operator
+    action for each cause.</p>
+    <p><strong>Decision:</strong> define the terminal states now. Suggested:
+    <code>merged</code>, <code>awaiting_operator</code>, <code>review_blocked</code>, <code>verification_failed</code>,
+    <code>budget_exceeded</code>, <code>interrupted</code>.</p>
+  </div>
+  <div class="card">
+    <h4>7 · Independence of judges</h4>
+    <p>No self-approval: a reviewer must not be the same model family as the builder, and it must be read-only,
+    enforced in code. Same-family review lanes are correlated noise and prove nothing.</p>
+    <p><strong>Decision:</strong> plan a seeded-defect corpus early. It is the only way to learn whether review pays.</p>
+  </div>
+  <div class="card">
+    <h4>8 · Concurrency and the one-writer rule</h4>
+    <p>SQLite in WAL allows many readers and one writer. The safest pattern is physical serialization with a file lock.</p>
+    <p><strong>Decision:</strong> one writer goroutine owns the ledger; one lock per repository, not one global lock.
+    Two runs on different repositories should proceed at once.</p>
+  </div>
+  <div class="card">
+    <h4>9 · Retention and backup</h4>
+    <p>An event row per tool call grows quickly, and history is the one thing you cannot rebuild.</p>
+    <p><strong>Decision:</strong> keep envelopes and phase rows forever; roll raw events to compressed files after
+    30 days. Back up the SQLite file on a schedule from day one.</p>
+  </div>
+  <div class="card">
+    <h4>10 · Single-tenant or multi-tenant from day zero</h4>
+    <p>A factory your team runs is single-tenant. A factory other people's desktops join as workers is multi-tenant
+    across trust boundaries.</p>
+    <p><strong>Decision:</strong> design the ledger and the egress proxy single-tenant now. Multi-tenant is Proposal C
+    plus an authorization layer, and only that.</p>
+  </div>
+</div>
+
+<h4>Smaller decisions, still real</h4>
+<ul class="tight">
+  <li><strong>Prompt versioning.</strong> Prompts live in the target repository and are reviewed like code.</li>
+  <li><strong>Loop prevention.</strong> A PR opened by the factory must not trigger the factory. Exclude the factory's
+  own identity from its triggers.</li>
+  <li><strong>Multi-repository.</strong> The lock is per repository and the worktree root is per repository. Design it
+  in now; it costs nothing.</li>
+  <li><strong>The quality-command trap.</strong> A placeholder command that exits 0 produces a green phase that ran
+  nothing. Fail closed when the command is unset.</li>
+  <li><strong>Cancellation.</strong> Must kill the subprocess tree, not just the parent, and must mark the phase in the
+  ledger. A silent agent hang with an empty trace is a debugging dead end.</li>
+  <li><strong>Deadlines.</strong> Every phase needs a wall-clock deadline, and the timeout must be a distinct exit code
+  so the trace shows it.</li>
+</ul>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="questions"><span class="n">12</span>Open questions</h2>
+
+<ol>
+  <li><strong>Is durability a hard requirement or a best-effort property?</strong> If hard, R1's test is "stop the
+  host, the run resumes at the correct phase with no duplicate effect," and that single sentence drives the whole
+  design. If best-effort, you may cut the resumed-run machinery and lose little today.</li>
+  <li><strong>Auto-merge on green, or always hand you a PR?</strong> This sets the terminal state machine.</li>
+  <li><strong>Egress broker, or a key inside the sandbox?</strong> The broker costs about 300 lines and buys exact
+  per-call cost attribution plus revocation.</li>
+  <li><strong>Do agents need external-system tools at all in v1?</strong> If no, drop MCP from the critical path and
+  pi becomes as viable as opencode.</li>
+  <li><strong>Server-rendered UI, or an embedded SPA?</strong> Go templates plus one polling endpoint is roughly
+  400 lines. A React build is a second toolchain. The ledger is one cursor query, so start server-rendered.</li>
+  <li><strong>Is "run on someone's desktop" a real requirement, or a nice property?</strong> If real, it argues for
+  Proposal C's worker flag earlier. If nice, one static binary already gives it for development.</li>
+</ol>
+
+<!-- ══════════════════════════════════════════════ -->
+<h2 id="evidence"><span class="n">13</span>Evidence and sources</h2>
+
+<table>
+  <tr><th>Claim</th><th>Source</th><th>Method</th></tr>
+  <tr><td>Landscape facts: topology, stack, store, isolation</td>
+    <td>warren, fabro, super-simple-software-factory, buzz READMEs and design docs</td><td>Fetched 2026-08-04</td></tr>
+  <tr><td>Landscape facts: two internal predecessor systems</td>
+    <td>local repository checkouts</td><td>Read source on disk</td></tr>
+  <tr><td>Harness versions and flags</td>
+    <td>Local binaries: opencode 1.18.11, pi 0.83.0, goose 1.45.0, omp 17.2.8</td>
+    <td><code>--version</code> and <code>--help</code> on this machine</td></tr>
+  <tr><td>Model prices and context windows</td>
+    <td>OpenRouter model catalog through the local credential broker</td><td>Queried 2026-08-04</td></tr>
+</table>
+
+<h4>Not verified</h4>
+<ul class="tight">
+  <li>Public systems' claims come from their own documentation, not from reading their source.</li>
+  <li>Cost figures are computed from listed prices. Real spend depends on cache hit rate and retry volume.</li>
+  <li>Line-of-code estimates for the three proposals are engineering judgment, not measurements.</li>
+</ul>
+
+<footer>
+  Iron Forest design draft · 2026-08-04 · from first principles<br>
+  Six reference systems studied. Three proposals. One recommendation: build the chain, keep the two seams.
+</footer>
+
+</div>
+</body>
+</html>
