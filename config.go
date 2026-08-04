@@ -45,7 +45,7 @@ func defaultConfig() Config {
 		Protected: []string{
 			".forest/", "forest.yaml", "agents/", ".opencode/opencode.json",
 		},
-		Workflow: Workflow{Build: "forester", Review: "ranger", MaxFixIterations: 1},
+		Workflow: Workflow{Build: "beaver", Review: "owl", MaxFixIterations: 1},
 	}
 }
 
@@ -65,7 +65,7 @@ func loadConfig(path string) (Config, error) {
 		cfg.PollIntervalSec = 30
 	}
 	if cfg.Workflow.Build == "" {
-		cfg.Workflow.Build = "forester"
+		cfg.Workflow.Build = "beaver"
 	}
 	if cfg.Workflow.MaxFixIterations < 0 {
 		cfg.Workflow.MaxFixIterations = 0

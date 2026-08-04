@@ -1,4 +1,4 @@
-# forester: one issue -> a clean change + report.json in the worktree.
+# beaver: one issue -> a clean change + report.json in the worktree.
 #
 # This is the declaration: model, powers, MCPs, and budget. A directory is the
 # agent, not a prompt file:
@@ -9,7 +9,7 @@
 #
 # Model and cost table: deepseek-v4-flash-0731 over OpenRouter through the
 # Mint proxy. No raw credential bytes live here.
-description: "The forester agent implements one issue in the worktree and writes report.json."
+description: "The beaver agent implements one issue in the worktree and writes report.json."
 harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
