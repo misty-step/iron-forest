@@ -22,6 +22,6 @@ protected:
 # review asks for changes, the build agent gets max_fix_iterations corrective
 # passes before the verdict is final.
 workflow:
-  build: forester
-  review: ranger
+  build: beaver
+  review: owl
   max_fix_iterations: 1

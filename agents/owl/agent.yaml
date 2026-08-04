@@ -1,9 +1,9 @@
-# ranger: checks one worktree change against its issue and returns a verdict.
+# owl: checks one worktree change against its issue and returns a verdict.
 #
 # This is a read-mostly agent: it inspects the diff in its task message and may
 # write only review.json. Every network surface is denied, so review cannot
 # push, fetch, or research anything.
-description: "The ranger agent reviews a worktree change against its issue and writes review.json."
+description: "The owl agent reviews a worktree change against its issue and writes review.json."
 harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731

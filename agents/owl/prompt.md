@@ -1,4 +1,4 @@
-As the ranger, review the proposed change for issue #{{.Number}} — {{.Title}}.
+As the owl, review the proposed change for issue #{{.Number}} — {{.Title}}.
 
 ## Issue body
 {{.Body}}

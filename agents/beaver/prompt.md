@@ -1,4 +1,4 @@
-As the forester, implement issue #{{.Number}} — {{.Title}}.
+As the beaver, implement issue #{{.Number}} — {{.Title}}.
 
 {{- if .Revision}}
 
