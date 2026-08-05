@@ -3,9 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -64,6 +67,11 @@ func run(args []string) int {
 		return chewOne(cfg, repoDir, it)
 	case "chew":
 		return chewLoop(cfg, repoDir)
+	case "version":
+		fmt.Printf("forest %s\n", version)
+		return 0
+	case "selfcheck":
+		return cmdSelfcheck(repoDir)
 	default:
 		usage()
 		return 2
@@ -120,8 +128,37 @@ func cmdAgents(repoDir string) int {
 // pass, watches every open factory PR (reaction loop) until it merges or
 // stalls. One loop, one serializer.
 func chewLoop(cfg Config, repoDir string) int {
-	fmt.Printf("forest: chewing %s every %ds\n", cfg.Repo, cfg.PollIntervalSec)
+	fmt.Printf("forest v%s: chewing %s every %ds\n", version, cfg.Repo, cfg.PollIntervalSec)
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	var drain int32
+	go func() {
+		<-sig // first signal: drain in-flight agents, then stop at a pass boundary
+		atomic.StoreInt32(&drain, 1)
+		select {
+		case <-sig: // second signal: force exit now
+			fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
+			os.Exit(1)
+		case <-time.After(5 * time.Minute):
+			fmt.Fprintln(os.Stderr, "forest: drain timed out, exiting")
+			os.Exit(0)
+		}
+	}()
+	lock, err := acquireSingletonLock(repoDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "forest:", err)
+		return 1
+	}
+	defer lock.Close()
 	for {
+		if atomic.LoadInt32(&drain) == 1 {
+			fmt.Fprintln(os.Stderr, "forest: draining, no new pass")
+			return 0
+		}
+		runUpdateCheck(repoDir)
+		if nc, err := loadConfig(filepath.Join(repoDir, "forest.yaml")); err == nil {
+			cfg = nc
+		}
 		items, err := backlog(cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forest: backlog: %v\n", err)

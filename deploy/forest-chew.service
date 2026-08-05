@@ -1,0 +1,27 @@
+# iron-forest piranha tank — systemd --user unit.
+# The factory runs on this machine, pulls green master itself, and swaps to a
+# fresh build at a pass boundary (self-exec; same PID, so no restart ever
+# interrupts an in-flight agent). See deploy/install-service.sh.
+#
+# %h expands to the user's home directory; user units resolve it at load time.
+
+[Unit]
+Description=iron-forest piranha tank (self-updating factory daemon)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Development/misty-step/iron-forest
+ExecStart=%h/Development/misty-step/iron-forest/forest chew
+Restart=always
+RestartSec=10
+# Give a draining pass room to finish the in-flight agent (bounded by the
+# daemon's 5-minute drain watchdog; a second SIGTERM force-exits). On
+# timeout systemd SIGKILLs and Restart=always brings it back.
+TimeoutStopSec=300
+# mise shims so the daemon can rebuild itself with the pinned toolchain.
+Environment=PATH=%h/.local/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

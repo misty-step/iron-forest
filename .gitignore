@@ -1,5 +1,7 @@
 # Go build output
 /forest
+/forest.next
+/forest.prev
 /dist/
 *.test
 
