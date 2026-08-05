@@ -24,6 +24,8 @@ func usage() {
   forest stats [--json]    aggregate the run ledger
   forest once <issue>      chew a single issue end to end
   forest chew              poll: chew backlog AND watch open factory PRs
+  forest version           print the git sha this binary was built from
+  forest selfcheck         offline smoke gate (config + agents load)
 `)
 }
 
