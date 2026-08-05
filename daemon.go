@@ -56,8 +56,20 @@ func runUpdateCheck(repoDir string) {
 		return // already running the latest merged build
 	}
 	dirty, err := gitOut(repoDir, "status", "--porcelain")
-	if err != nil || dirty != "" {
-		fmt.Fprintln(os.Stderr, "forest: update: working tree not clean, deferring")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forest: update: status: %v\n", err)
+		return
+	}
+	if dirty != "" {
+		// Deferral must never be silent: say exactly what blocks the pull so
+		// a stuck daemon is diagnosable from its log alone.
+		head := strings.SplitN(dirty, "\n", 5)
+		ellipsis := ""
+		if len(head) == 5 {
+			ellipsis = "…"
+		}
+		fmt.Fprintf(os.Stderr, "forest: update: working tree not clean, deferring:\n%s%s\n",
+			strings.Join(head, "\n"), ellipsis)
 		return
 	}
 	if err := git(repoDir, "pull", "--ff-only", "origin", "master"); err != nil {
