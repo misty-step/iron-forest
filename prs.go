@@ -238,6 +238,13 @@ func watchPR(cfg Config, repoDir string, n int) int {
 	}
 	last, known := lastPRState(workspace, n)
 	base := prState{Time: nowRFC(), PR: op.PR, PRURL: op.URL, Branch: op.Branch}
+	sig := func(s prState) string {
+		return fmt.Sprintf("%s|%s|%s|%d|%s|%s", s.State, s.Checks, s.SHA, s.Fixes, s.Owl, s.Error)
+	}
+	// Skip the append burst: a PR that did not change is recorded once.
+	unchanged := func() bool {
+		return known && sig(base) == sig(last)
+	}
 
 	if op.State != "OPEN" {
 		base.State = "closed"
@@ -296,12 +303,16 @@ func watchPR(cfg Config, repoDir string, n int) int {
 			return 0
 		}
 		base.State = "ready"
-		_ = appendPR(workspace, base)
+		if !unchanged() {
+			_ = appendPR(workspace, base)
+		}
 		fmt.Printf("forest: pr #%d ready to merge (auto_merge off): %s\n", n, op.URL)
 		return 0
 	}
 	base.State = "opened"
-	_ = appendPR(workspace, base)
+	if !unchanged() {
+		_ = appendPR(workspace, base)
+	}
 	return 0
 }
 
