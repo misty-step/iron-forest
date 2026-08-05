@@ -19,8 +19,8 @@ type prState struct {
 	PR     int    `json:"pr"`
 	Branch string `json:"branch"`
 	Issue  int    `json:"issue"`
-	State  string `json:"state"` // opened | fixing | ready | merged | closed | stalled
-	Owl    string `json:"owl"`   // approve | changes | ""
+	State  string `json:"state"`  // opened | fixing | ready | merged | closed | stalled
+	Owl    string `json:"owl"`    // approve | changes | ""
 	Checks string `json:"checks"` // pending | pass | fail | "" (no CI yet)
 	SHA    string `json:"sha"`
 	Fixes  int    `json:"fixes"`
@@ -38,10 +38,6 @@ type pulledPR struct {
 	HeadSHA        string `json:"oid"`
 	CommittedDate  string `json:"committedDate"`
 }
-
-// maxReactionFixes caps how many re-entry build passes the loop makes on one
-// PR before it gives up and parks it for a human.
-const maxReactionFixes = 2
 
 func nowRFC() string { return time.Now().UTC().Format(time.RFC3339) }
 
@@ -119,7 +115,7 @@ func listOpenForestPRs(repo string) ([]int, error) {
 		return nil, err
 	}
 	var prs []struct {
-		Number     int    `json:"number"`
+		Number      int    `json:"number"`
 		HeadRefName string `json:"headRefName"`
 	}
 	if err := json.Unmarshal(out, &prs); err != nil {
@@ -316,11 +312,39 @@ func watchPR(cfg Config, repoDir string, n int) int {
 	return 0
 }
 
+// fixLimitReached reports whether a PR's recorded fix count already consumed
+// the reaction-fix budget configured on cfg. The loop asks this before each
+// re-entry; once true it stops attempting fixes and parks the PR instead.
+func fixLimitReached(cfg Config, prior prState) bool {
+	return prior.Fixes >= cfg.Workflow.MaxReactionFixes
+}
+
+// recordFixFailure persists one failed fix attempt on a PR: it increments the
+// recorded fix count, writes a PR state row, and marks the PR stalled once the
+// configured reaction-fix budget is spent. It returns the appended row and
+// whether the PR was parked. A failed fix must count against the budget or a
+// stuck PR is retried forever.
+func recordFixFailure(cfg Config, workspace string, prior prState, errMsg string) (prState, bool) {
+	prior.Fixes++
+	prior.Error = errMsg
+	prior.Time = nowRFC()
+	stalled := fixLimitReached(cfg, prior)
+	if stalled {
+		prior.State = "stalled"
+	} else {
+		prior.State = "fixing"
+	}
+	_ = appendPR(workspace, prior)
+	return prior, stalled
+}
+
 // fixPR re-enters a PR's item at the build phase on its existing branch: the
-// owl re-verifies and forest pushes a new commit. Bounded by maxReactionFixes.
+// owl re-verifies and forest pushes a new commit. It never re-enters past the
+// reaction-fix budget configured on cfg and parks the PR once that budget is
+// spent.
 func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback string) int {
 	workspace := filepath.Join(repoDir, WorkspaceDir)
-	if prior.Fixes >= maxReactionFixes {
+	if fixLimitReached(cfg, prior) {
 		prior.State = "stalled"
 		prior.Error = "too many fix cycles"
 		prior.Time = nowRFC()
@@ -348,7 +372,12 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 			PRURL: op.URL, Status: failStatus(err), Error: err.Error(),
 		}
 		_ = appendRun(workspace, rec)
-		fmt.Fprintf(os.Stderr, "forest: pr #%d fix: %v\n", op.PR, err)
+		prior, stalled := recordFixFailure(cfg, workspace, prior, err.Error())
+		if stalled {
+			fmt.Fprintf(os.Stderr, "forest: pr #%d stalled after %d fixes: %v\n", op.PR, prior.Fixes, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "forest: pr #%d fix %d: %v\n", op.PR, prior.Fixes, err)
+		}
 		return 1
 	}
 	buildAgent, bErr := loadAgent(repoDir, cfg.Workflow.Build)
