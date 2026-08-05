@@ -365,11 +365,13 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 	}
 	defer removeWorktree(repoDir, wtDir)
 
+	id := identify(repoDir, cfg)
 	r, err := runPick(cfg, repoDir, wtDir, baseSHA, runID, it, feedback)
 	if err != nil {
 		rec := runRecord{
 			Time: nowRFC(), RunID: runID, Issue: it.Number, Branch: op.Branch,
 			PRURL: op.URL, Status: failStatus(err), Error: err.Error(),
+			Agent: id.Agents, Model: id.Models, DefSHA: id.DefSHA,
 		}
 		_ = appendRun(workspace, rec)
 		prior, stalled := recordFixFailure(cfg, workspace, prior, err.Error())
@@ -380,11 +382,6 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 		}
 		return 1
 	}
-	buildAgent, bErr := loadAgent(repoDir, cfg.Workflow.Build)
-	if bErr != nil {
-		fmt.Fprintf(os.Stderr, "forest: pr #%d build agent: %v\n", op.PR, bErr)
-		return 1
-	}
 	status := "fixed"
 	verdict := r.Verdict
 	if verdict != "approve" {
@@ -393,13 +390,13 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 	rec := runRecord{
 		Time: nowRFC(), RunID: runID, Issue: it.Number, Branch: op.Branch, PRURL: op.URL,
 		Status: status, CostUSD: r.Cost, TokensIn: r.TokIn, TokOut: r.TokOut,
-		Agent: buildAgent.Name + ",owl", Model: buildAgent.Model,
-		BaseSHA: baseSHA, DefSHA: buildAgent.DefSHA, ReviewVerdict: verdict,
+		Agent: id.Agents, Model: id.Models,
+		BaseSHA: baseSHA, DefSHA: id.DefSHA, ReviewVerdict: verdict,
 	}
 	_ = appendRun(workspace, rec)
 	if verdict != "approve" {
 		prior.State = "stalled"
-		prior.Error = "owl did not approve the fix"
+		prior.Error = cfg.Workflow.Review + " did not approve the fix"
 		prior.Fixes++
 		prior.Owl = r.Verdict
 		prior.Time = nowRFC()

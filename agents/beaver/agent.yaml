@@ -15,7 +15,8 @@ mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
 temperature: 0.2
 steps: 50
-budget_seconds: 1200
+# No deadline: a long build that is still working is not a failure.
+budget_seconds: 0
 price_usd_per_m_input: 0.09
 price_usd_per_m_output: 0.18
 # Powers. deny entries are enforced by opencode even with --auto. The mcp__*

@@ -3,15 +3,37 @@
 # This is a read-mostly agent: it inspects the diff in its task message and may
 # write only review.json. Every network surface is denied, so review cannot
 # push, fetch, or research anything.
+#
+# The reviewer must not share the builder's model family. A gate judged by the
+# same weights that wrote the change is a smoke test, not an independent
+# verdict, and owl is the only agent whose approval can merge a change. beaver
+# builds on DeepSeek; owl judges on OpenAI at maximum reasoning effort.
+#
+# Provider note: this names the built-in `openrouter` provider, not the
+# openai-compatible `openrouter-mint` provider that beaver uses. Only the
+# built-in provider carries model metadata, so only it turns `variant` into a
+# real `reasoning: {effort}` field on the wire. Under `openrouter-mint` the
+# variant is accepted and then silently dropped, which buys a slower, dearer
+# model with none of the reasoning asked for. Verified by capturing the
+# request body, not by reading documentation.
 description: "The owl agent reviews a worktree change against its issue and writes review.json."
 harness: opencode
 mode: primary
-model: openrouter-mint/deepseek-v4-flash-0731
-temperature: 0.2
+model: openrouter/openai/gpt-5.6-luna
+variant: max
 steps: 30
-budget_seconds: 600
-price_usd_per_m_input: 0.09
-price_usd_per_m_output: 0.18
+# No deadline. Max effort spends reasoning tokens before it answers, and a
+# review cut off by a clock wastes every token it already spent. The operator
+# stops a run with a signal, not a timer.
+budget_seconds: 0
+# Luna declares no temperature parameter, so this agent sends none.
+#
+# Reasoning tokens bill as output, and output here costs 3.3x what the builder
+# pays, so a review now costs more than the change it judges. That is the
+# price of an independent gate. Rates are the standard tier; above 200k input
+# tokens OpenRouter charges 0.20/0.90, which no review diff should approach.
+price_usd_per_m_input: 0.10
+price_usd_per_m_output: 0.60
 permission:
   read: allow
   edit: allow

@@ -31,14 +31,18 @@ type McpSpec struct {
 // system prompt, prompt.md is the user-prompt template, skills/*.md add
 // context, and report.schema.json is the output contract the gate enforces.
 type Agent struct {
-	Dir             string
-	Name            string
-	Description     string            `yaml:"description"`
-	Harness         string            `yaml:"harness"`
-	Model           string            `yaml:"model"`
-	Mode            string            `yaml:"mode"`
-	Temperature     float64           `yaml:"temperature"`
-	Steps           int               `yaml:"steps"`
+	Dir         string
+	Name        string
+	Description string   `yaml:"description"`
+	Harness     string   `yaml:"harness"`
+	Model       string   `yaml:"model"`
+	Variant     string   `yaml:"variant"`
+	Mode        string   `yaml:"mode"`
+	Temperature *float64 `yaml:"temperature"`
+	Steps       int      `yaml:"steps"`
+	// BudgetSec bounds one agent run. Zero or absent means no deadline: a
+	// reasoning model at maximum effort can think for many minutes and still be
+	// doing useful work, and a killed run wastes every token it already spent.
 	BudgetSec       int               `yaml:"budget_seconds"`
 	PriceInUSDPerM  float64           `yaml:"price_usd_per_m_input"`
 	PriceOutUSDPerM float64           `yaml:"price_usd_per_m_output"`
@@ -70,14 +74,8 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if a.Mode == "" {
 		a.Mode = "primary"
 	}
-	if a.Temperature == 0 {
-		a.Temperature = 0.2
-	}
 	if a.Steps == 0 {
 		a.Steps = 50
-	}
-	if a.BudgetSec == 0 {
-		a.BudgetSec = 1200
 	}
 	if a.PriceInUSDPerM == 0 {
 		a.PriceInUSDPerM = 0.09
@@ -98,6 +96,52 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	}
 	a.DefSHA = composeDigest(repoDir, name)
 	return a, nil
+}
+
+// runIdentity names every agent that produced a run, with the model and the
+// definition digest each ran under. Both phases are recorded because the
+// reviewer is deliberately a different model family from the builder: with one
+// model field the ledger could not say who judged a change, and cost would be
+// attributed to whichever family happened to build it.
+type runIdentity struct {
+	Agents string // "beaver,owl"
+	Models string // one model per agent, same order
+	DefSHA string // one composition digest per agent, same order
+}
+
+// identify loads the workflow's agents and joins their identities in phase
+// order. A missing or unreadable agent is skipped: attribution must never
+// block a run that otherwise succeeded.
+func identify(repoDir string, cfg Config) runIdentity {
+	var id runIdentity
+	for _, name := range []string{cfg.Workflow.Build, cfg.Workflow.Review} {
+		if name == "" {
+			continue
+		}
+		a, err := loadAgent(repoDir, name)
+		if err != nil {
+			continue
+		}
+		if id.Agents != "" {
+			id.Agents += ","
+			id.Models += ","
+			id.DefSHA += ","
+		}
+		id.Agents += a.Name
+		id.Models += a.Model
+		id.DefSHA += a.DefSHA
+	}
+	return id
+}
+
+// variantSuffix renders the reasoning variant beside the model for operator
+// output, so a listing states the effort a model actually runs at instead of
+// leaving it to be inferred from the model name.
+func variantSuffix(a *Agent) string {
+	if a.Variant == "" {
+		return ""
+	}
+	return "@" + a.Variant
 }
 
 // discoverAgents lists the declared agents under agents/.
@@ -169,13 +213,14 @@ func renderMarkdown(wtDir string, a *Agent) error {
 	type frontmatter struct {
 		Description string            `yaml:"description"`
 		Model       string            `yaml:"model"`
+		Variant     string            `yaml:"variant,omitempty"`
 		Mode        string            `yaml:"mode"`
-		Temperature float64           `yaml:"temperature"`
+		Temperature *float64          `yaml:"temperature,omitempty"`
 		Steps       int               `yaml:"steps"`
 		Permission  map[string]string `yaml:"permission"`
 	}
 	fm, err := yaml.Marshal(frontmatter{
-		Description: a.Description, Model: a.Model, Mode: a.Mode,
+		Description: a.Description, Model: a.Model, Variant: a.Variant, Mode: a.Mode,
 		Temperature: a.Temperature, Steps: a.Steps, Permission: perm,
 	})
 	if err != nil {
@@ -246,4 +291,3 @@ func reviewData(it issue, rep report, diff string) map[string]any {
 		"Diff":   diff,
 	}
 }
-

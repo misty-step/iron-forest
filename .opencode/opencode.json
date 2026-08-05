@@ -1,6 +1,12 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
+    "openrouter": {
+      "options": {
+        "baseURL": "http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1",
+        "apiKey": "__mint.openrouter.default__"
+      }
+    },
     "openrouter-mint": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "OpenRouter via Mint",

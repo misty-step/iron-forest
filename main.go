@@ -112,8 +112,13 @@ func cmdAgents(repoDir string) int {
 			fmt.Fprintf(os.Stderr, "forest: %v\n", err)
 			continue
 		}
-		fmt.Printf("%s\tmodel=%s mode=%s steps=%d budget=%ds price=%.2f/%.2f def_sha=%s\n",
-			n, a.Model, a.Mode, a.Steps, a.BudgetSec, a.PriceInUSDPerM, a.PriceOutUSDPerM, a.DefSHA)
+		budget := "none"
+		if a.BudgetSec > 0 {
+			budget = fmt.Sprintf("%ds", a.BudgetSec)
+		}
+		fmt.Printf("%s\tmodel=%s%s mode=%s steps=%d budget=%s price=%.2f/%.2f def_sha=%s\n",
+			n, a.Model, variantSuffix(a), a.Mode, a.Steps, budget,
+			a.PriceInUSDPerM, a.PriceOutUSDPerM, a.DefSHA)
 		fmt.Printf("  %s\n", a.Description)
 		var mcps []string
 		for _, m := range a.MCP {
@@ -139,16 +144,12 @@ func chewLoop(cfg Config, repoDir string) int {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	var drain int32
 	go func() {
-		<-sig // first signal: drain in-flight agents, then stop at a pass boundary
+		<-sig // first signal: drain the in-flight agent, then stop at a pass boundary
 		atomic.StoreInt32(&drain, 1)
-		select {
-		case <-sig: // second signal: force exit now
-			fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
-			os.Exit(1)
-		case <-time.After(5 * time.Minute):
-			fmt.Fprintln(os.Stderr, "forest: drain timed out, exiting")
-			os.Exit(0)
-		}
+		fmt.Fprintln(os.Stderr, "forest: draining, waiting for the in-flight agent")
+		<-sig // second signal: the operator's only clock, since agents are unbounded
+		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
+		os.Exit(1)
 	}()
 	lock, err := acquireSingletonLock(repoDir)
 	if err != nil {
@@ -200,19 +201,14 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 	workspace := filepath.Join(repoDir, WorkspaceDir)
 	_ = ensureLabels(cfg.Repo)
 
-	buildAgent, err := loadAgent(repoDir, cfg.Workflow.Build)
-	if err != nil {
+	if _, err := loadAgent(repoDir, cfg.Workflow.Build); err != nil {
 		fmt.Fprintf(os.Stderr, "forest: build agent: %v\n", err)
 		return 1
 	}
+	id := identify(repoDir, cfg)
 	record := runRecord{
 		Time: nowRFC(), RunID: runID, Issue: it.Number,
-		Agent: buildAgent.Name, Model: buildAgent.Model, DefSHA: buildAgent.DefSHA,
-	}
-	if cfg.Workflow.Review != "" {
-		if ra, err := loadAgent(repoDir, cfg.Workflow.Review); err == nil {
-			record.Agent += "," + ra.Name
-		}
+		Agent: id.Agents, Model: id.Models, DefSHA: id.DefSHA,
 	}
 
 	if err := claimIssue(cfg.Repo, it.Number); err != nil {

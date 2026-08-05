@@ -21,9 +21,10 @@ type runStats struct {
 	costUSD    float64
 }
 
-// runPhase executes one bounded, named agent with opencode in a worktree and
-// streams its JSON event stream into the trace file. The exit code is not the
-// verdict: a non-zero exit with work produced is judged by the gate.
+// runPhase executes one named agent with opencode in a worktree and streams its
+// JSON event stream into the trace file. The run is bounded only when the agent
+// declares a budget. The exit code is not the verdict: a non-zero exit with work
+// produced is judged by the gate.
 func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.Duration) (runStats, error) {
 	var stats runStats
 	if err := renderMarkdown(wtDir, a); err != nil {
@@ -38,7 +39,7 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.
 	}
 	defer trace.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	ctx, cancel := phaseContext(budget)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "opencode", "run",
@@ -84,6 +85,17 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.
 	return stats, nil
 }
 
+// phaseContext bounds one agent run. A budget of zero or less means no deadline:
+// an agent reasoning at maximum effort can work for a long time and still be
+// productive, so the harness waits rather than killing the run and discarding
+// every token it already spent. The operator's escape is a signal, not a clock.
+func phaseContext(budget time.Duration) (context.Context, context.CancelFunc) {
+	if budget <= 0 {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithTimeout(context.Background(), budget)
+}
+
 type stepTokens struct {
 	tokensIn   int64
 	tokensOut  int64
@@ -97,9 +109,9 @@ func parseStepFinish(line []byte) (stepTokens, bool) {
 		Type string `json:"type"`
 		Part struct {
 			Tokens struct {
-				Input   int64 `json:"input"`
-				Output  int64 `json:"output"`
-				Cache   struct {
+				Input  int64 `json:"input"`
+				Output int64 `json:"output"`
+				Cache  struct {
 					Read  int64 `json:"read"`
 					Write int64 `json:"write"`
 				} `json:"cache"`
