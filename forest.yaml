@@ -31,5 +31,8 @@ workflow:
   build: beaver
   review: owl
   max_fix_iterations: 1
-  auto_merge: false
+  # Enabled after the operator proved one manual merge on PR #22 (2026-08-05).
+  # The loop now merges autonomously when the owl approved, CI is green, and
+  # no human CHANGES_REQUESTED review is outstanding on the current head.
+  auto_merge: true
   max_reaction_fixes: 2

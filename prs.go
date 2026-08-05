@@ -340,13 +340,24 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 		fmt.Fprintf(os.Stderr, "forest: pr #%d fix: %v\n", op.PR, err)
 		return 1
 	}
+	buildAgent, bErr := loadAgent(repoDir, cfg.Workflow.Build)
+	if bErr != nil {
+		fmt.Fprintf(os.Stderr, "forest: pr #%d build agent: %v\n", op.PR, bErr)
+		return 1
+	}
+	status := "fixed"
+	verdict := r.Verdict
+	if verdict != "approve" {
+		status = "review_failed"
+	}
 	rec := runRecord{
 		Time: nowRFC(), RunID: runID, Issue: it.Number, Branch: op.Branch, PRURL: op.URL,
-		Status: "fixed", CostUSD: r.Cost, TokensIn: r.TokIn, TokOut: r.TokOut,
-		Agent: "beaver,owl", Model: modelDefault, ReviewVerdict: r.Verdict,
+		Status: status, CostUSD: r.Cost, TokensIn: r.TokIn, TokOut: r.TokOut,
+		Agent: buildAgent.Name + ",owl", Model: buildAgent.Model,
+		BaseSHA: baseSHA, DefSHA: buildAgent.DefSHA, ReviewVerdict: verdict,
 	}
 	_ = appendRun(workspace, rec)
-	if r.Verdict != "approve" {
+	if verdict != "approve" {
 		prior.State = "stalled"
 		prior.Error = "owl did not approve the fix"
 		prior.Fixes++
