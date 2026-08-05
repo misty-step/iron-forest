@@ -112,7 +112,7 @@ func backlog(cfg Config) ([]issue, error) {
 	}
 	var ready []issue
 	for _, it := range items {
-		if it.hasLabel(claimLabel) || it.hasLabel(failedLabel) {
+		if it.hasLabel(claimLabel) || it.hasLabel(failedLabel) || it.hasLabel("parked") {
 			continue
 		}
 		hits, err := openPRsReferencing(cfg.Repo, it.Number)
