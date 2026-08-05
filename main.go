@@ -26,6 +26,8 @@ func usage() {
   forest chew              poll: chew backlog AND watch open factory PRs
   forest version           print the git sha this binary was built from
   forest selfcheck         offline smoke gate (config + agents load)
+  forest watch [--interval 2s] [--live-gh]
+                          live operator board over .forest/ + daemon
 `)
 }
 
@@ -74,6 +76,8 @@ func run(args []string) int {
 		return 0
 	case "selfcheck":
 		return cmdSelfcheck(repoDir)
+	case "watch":
+		return cmdWatch(cfg, repoDir, args[1:])
 	default:
 		usage()
 		return 2
