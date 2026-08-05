@@ -163,12 +163,13 @@ func checkRollup(repo, sha string) (string, error) {
 		if strings.Contains(l, "ci") || strings.Contains(l, "test") {
 			haveCI = true
 		}
-		if r.Status != "COMPLETED" {
+		// The REST API returns lowercase status/conclusion values.
+		if strings.ToLower(r.Status) != "completed" {
 			anyPending = true
 			continue
 		}
-		switch r.Conclusion {
-		case "SUCCESS", "NEUTRAL", "SKIPPED", "":
+		switch strings.ToLower(r.Conclusion) {
+		case "success", "neutral", "skipped", "":
 		default:
 			allPass = false
 		}
@@ -206,7 +207,7 @@ func latestRequestedChange(repo string, n int) (body, commitID string, err error
 // failingChecks lists names+conclusions of failed checks on a commit.
 func failingChecks(repo, sha string) (string, error) {
 	out, err := ghJSON("api", fmt.Sprintf("repos/%s/commits/%s/check-runs", repo, sha),
-		"-q", `[.check_runs[] | select(.status == "COMPLETED" and .conclusion != "SUCCESS" and .conclusion != "NEUTRAL" and .conclusion != "SKIPPED") | .name + ": " + .conclusion]`)
+		"-q", `[.check_runs[] | select(.status == "completed" and .conclusion != "success" and .conclusion != "neutral" and .conclusion != "skipped") | .name + ": " + (.conclusion // "unknown")]`)
 	if err != nil {
 		return "", err
 	}
