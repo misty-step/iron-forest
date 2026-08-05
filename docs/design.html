@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Iron Forest — Software Factory, From First Principles</title>
+<title>Iron Forest — Software Factory, From First Principles (superseded)</title>
 <style>
   :root{
     --bg:#0b0e13; --bg2:#11151d; --bg3:#161b25; --line:#242c3a; --line2:#2f394b;
@@ -107,12 +107,33 @@
 </head>
 <body>
 
+<div class="wrap" style="padding-top:26px">
+<div class="callout c-stop">
+  <span class="lbl">Superseded &mdash; historical draft, not current design</span>
+  <p>This 69&nbsp;KB draft is archived for reference and does <strong>not</strong> describe
+  the shipped system. It was retired on 2026-08-05 because it contradicts what the
+  repository actually builds. <strong>VISION.md</strong> is the only forward-looking
+  artifact and is authoritative. Two named contradictions:</p>
+  <ul>
+    <li><strong>Ledger.</strong> Sections 01, 06, and 11 mandate a SQLite-WAL ledger.
+      The shipped system writes an append-only JSONL ledger
+      (<code>.forest/runs.jsonl</code>, appended by construction in
+      <code>records.go</code>).</li>
+    <li><strong>Independent reviewer family.</strong> Sections 07 and 11 require a
+      reviewer that does not share the builder&rsquo;s model family. The shipped agents
+      have not upheld that mandate &mdash; the rule this draft states and the system
+      that shipped were out of agreement, which is why VISION.md restores the
+      rule as a direction change.</li>
+  </ul>
+</div>
+</div>
+
 <header class="hero">
   <div class="wrap">
     <h1>Iron <span>Forest</span></h1>
     <p class="sub">Software factory — architecture from first principles</p>
     <div class="meta">
-      <span>Misty Step</span><span>2026-08-04</span><span>Design review draft</span>
+      <span>Misty Step</span><span>2026-08-04</span><span>Superseded draft</span>
       <span>6 reference systems studied</span><span>3 proposals</span>
     </div>
   </div>
