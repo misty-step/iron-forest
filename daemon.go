@@ -23,11 +23,13 @@ type updateRecord struct {
 	Status string `json:"status"`
 }
 
-// runUpdateCheck pulls green master and, when a new build exists, swaps the
-// running process to the fresh binary by exec. It runs only at a pass
-// boundary, never while an agent is in flight. Systemd never restarts us: the
-// exec keeps the same PID, so the singleton lock and the service state stay
-// continuous across the swap.
+// runUpdateCheck keeps the running binary on the checked-out HEAD: it
+// fast-forwards from origin/master when behind, then rebuilds and execs a
+// fresh binary whenever the running build's version no longer matches HEAD
+// (which covers remote merges and commits pushed from this same working
+// tree). It runs only at a pass boundary, never while an agent is in flight.
+// Systemd never restarts us: the exec keeps the same PID, so the singleton
+// lock and the service state stay continuous across the swap.
 func runUpdateCheck(repoDir string) {
 	cfgPath := filepath.Join(repoDir, "forest.yaml")
 	if _, err := os.Stat(cfgPath); err != nil {
@@ -52,33 +54,28 @@ func runUpdateCheck(repoDir string) {
 		fmt.Fprintf(os.Stderr, "forest: update: rev-parse origin/master: %v\n", err)
 		return
 	}
-	if head == remote {
-		return // already running the latest merged build
-	}
-	dirty, err := gitOut(repoDir, "status", "--porcelain")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forest: update: status: %v\n", err)
-		return
-	}
-	if dirty != "" {
-		// Deferral must never be silent: say exactly what blocks the pull so
-		// a stuck daemon is diagnosable from its log alone.
-		head := strings.SplitN(dirty, "\n", 5)
-		ellipsis := ""
-		if len(head) == 5 {
-			ellipsis = "…"
+	if head != remote {
+		if deferDirty(repoDir) {
+			return
 		}
-		fmt.Fprintf(os.Stderr, "forest: update: working tree not clean, deferring:\n%s%s\n",
-			strings.Join(head, "\n"), ellipsis)
-		return
-	}
-	if err := git(repoDir, "pull", "--ff-only", "origin", "master"); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: update: pull: %v\n", err)
-		return
+		if err := git(repoDir, "pull", "--ff-only", "origin", "master"); err != nil {
+			fmt.Fprintf(os.Stderr, "forest: update: pull: %v\n", err)
+			return
+		}
 	}
 	short, err := gitOut(repoDir, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forest: update: rev-parse --short HEAD: %v\n", err)
+		return
+	}
+	if version == short {
+		// The running binary already matches the checked-out code. Comparing
+		// against HEAD (not origin) also catches commits pushed directly from
+		// this same working tree, where HEAD reached the new commit before
+		// the rebuild ever ran.
+		return
+	}
+	if deferDirty(repoDir) {
 		return
 	}
 	if err := buildSelf(repoDir, short); err != nil {
@@ -92,8 +89,32 @@ func runUpdateCheck(repoDir string) {
 		fmt.Fprintf(os.Stderr, "forest: update: selfcheck failed, keeping current build:\n%s", out)
 		return
 	}
-	_ = appendUpdate(repoDir, updateRecord{Time: nowRFC(), From: head, To: remote, Status: "swapped"})
+	newHead, _ := gitOut(repoDir, "rev-parse", "HEAD")
+	_ = appendUpdate(repoDir, updateRecord{Time: nowRFC(), From: head, To: newHead, Status: "swapped"})
 	swapSelf(repoDir, short)
+}
+
+// deferDirty reports whether the working tree has uncommitted changes and, if
+// so, logs the offending paths and returns true (defer the update). A defer is
+// never silent: the porcelain head is printed so a stuck daemon is diagnosable
+// from its log alone.
+func deferDirty(repoDir string) bool {
+	dirty, err := gitOut(repoDir, "status", "--porcelain")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forest: update: status: %v\n", err)
+		return true
+	}
+	if dirty == "" {
+		return false
+	}
+	lines := strings.SplitN(dirty, "\n", 5)
+	suffix := ""
+	if len(lines) == 5 {
+		suffix = "…"
+	}
+	fmt.Fprintf(os.Stderr, "forest: update: working tree not clean, deferring:\n%s%s\n",
+		strings.Join(lines, "\n"), suffix)
+	return true
 }
 
 // buildSelf compiles the current checkout into forest.next. It prefers the
