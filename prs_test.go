@@ -84,6 +84,43 @@ func TestRecordFixFailureCountsAndPersists(t *testing.T) {
 	}
 }
 
+// TestRollupChecksPinsConclusions guards the merge gate's conclusion mapping:
+// a run that is still pending, or completed with an empty conclusion, must roll
+// up to pending — never pass — so an automatic merge cannot be unlocked by a
+// check that never decided.
+func TestRollupChecksPinsConclusions(t *testing.T) {
+	tests := []struct {
+		name string
+		runs []checkRun
+		want string
+	}{
+		{"no checks", nil, ""},
+		{"passing ci", []checkRun{{Status: "completed", Conclusion: "success", Name: "ci"}}, "pass"},
+		{"neutral and skipped count as pass", []checkRun{
+			{Status: "completed", Conclusion: "neutral", Name: "ci"},
+			{Status: "completed", Conclusion: "skipped", Name: "test"},
+		}, "pass"},
+		{"failed ci", []checkRun{{Status: "completed", Conclusion: "failure", Name: "ci"}}, "fail"},
+		{"pending ci", []checkRun{
+			{Status: "queued", Name: "ci"},
+			{Status: "completed", Conclusion: "success", Name: "ci"},
+		}, "pending"},
+		{"completed with empty conclusion", []checkRun{{Status: "completed", Conclusion: "", Name: "ci"}}, "pending"},
+		{"empty conclusion cannot pass next to a green check", []checkRun{
+			{Status: "completed", Conclusion: "success", Name: "ci"},
+			{Status: "completed", Conclusion: "", Name: "test"},
+		}, "pending"},
+		{"non-ci bot only", []checkRun{{Status: "completed", Conclusion: "success", Name: "CodeRabbit"}}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rollupChecks(tt.runs); got != tt.want {
+				t.Fatalf("rollupChecks(%+v) = %q, want %q", tt.runs, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestRecordFixFailureStallsAtLimit pins the other end of the failed-fix path:
 // when the increment exhausts the budget the PR is parked in the ledger.
 func TestRecordFixFailureStallsAtLimit(t *testing.T) {
