@@ -11,12 +11,21 @@ import (
 
 // issue is the unit of work. One open GitHub issue becomes one pull request.
 type issue struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	Labels []struct {
+	Number   int       `json:"number"`
+	Title    string    `json:"title"`
+	Body     string    `json:"body"`
+	Comments []comment `json:"comments"`
+	Labels   []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
+}
+
+// comment is one issue comment as returned by gh. Comments carry the feedback
+// a prior run left behind, which the next chew reads back so an objection is
+// not paid for twice.
+type comment struct {
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
 }
 
 func (it issue) hasLabel(name string) bool {
@@ -35,7 +44,7 @@ func ghJSON(args ...string) ([]byte, error) {
 
 func listOpenIssues(repo string) ([]issue, error) {
 	out, err := ghJSON("issue", "list", "-R", repo, "--state", "open",
-		"--json", "number,title,body,labels", "--limit", "200")
+		"--json", "number,title,body,comments,labels", "--limit", "200")
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +72,7 @@ func getIssue(repo string, n int) (issue, error) {
 // issues that are already closed because their PR is open).
 func getIssueAny(repo string, n int) (issue, error) {
 	out, err := ghJSON("issue", "view", fmt.Sprintf("%d", n), "-R", repo,
-		"--json", "number,title,body,labels")
+		"--json", "number,title,body,comments,labels")
 	if err != nil {
 		return issue{}, err
 	}

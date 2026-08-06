@@ -271,14 +271,71 @@ func renderUserPrompt(a *Agent, data map[string]any) (string, error) {
 	return strings.TrimSpace(sb.String()), nil
 }
 
-// issueData feeds a chew run: the item plus an optional revision request.
+// issueData feeds a chew run: the item plus an optional revision request. The
+// item's comments are folded onto the body so feedback a prior run left behind
+// (a pre-publish rejection, an operator note) reaches the same prompt as the
+// task text; comments are carried through the prompt data rather than by
+// rewriting the stored issue body on GitHub.
 func issueData(it issue, revision string) map[string]any {
+	body := it.Body
+	if comments := renderComments(it.Comments); comments != "" {
+		body += "\n\n## Item comments\n" + comments
+	}
 	return map[string]any{
 		"Number":   it.Number,
 		"Title":    it.Title,
-		"Body":     it.Body,
+		"Body":     body,
+		"Comments": it.Comments,
 		"Revision": revision,
 	}
+}
+
+// maxCommentBytes caps how much of an item's comment thread a prompt carries,
+// so a single noisy thread cannot crowd out the task text.
+const maxCommentBytes = 2000
+
+// renderComments joins an item's comments into one deterministic block, oldest
+// first, capped in volume. Ordering is pinned to creation time so a retry sees
+// earlier objections before later ones and the resulting prompt is stable.
+// Every rendered comment costs its body plus a "- " prefix and a trailing
+// newline, and the cap applies to the whole block, not just the bodies, so a
+// thread of many short comments cannot render several times maxCommentBytes.
+// Comments are selected newest first so the cap can never drop the newest
+// rejection behind older comments: a retry keeps reading the objection.
+func renderComments(cs []comment) string {
+	sorted := append([]comment(nil), cs...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].CreatedAt < sorted[j].CreatedAt
+	})
+
+	const overhead = 3 // "- " prefix plus trailing "\n" per rendered comment
+	// keep records how many body bytes each selected comment renders. Walk the
+	// newest comment first so an over-full thread holds onto the rejection the
+	// next run must read rather than the oldest filler.
+	remain := maxCommentBytes
+	keep := make(map[int]string, len(sorted))
+	for i := len(sorted) - 1; i >= 0; i-- {
+		b := strings.TrimSpace(sorted[i].Body)
+		if b == "" || remain <= overhead {
+			continue
+		}
+		if head := len(b); head+overhead > remain {
+			head = remain - overhead
+			b = b[:head]
+		}
+		keep[i] = b
+		remain -= len(b) + overhead
+	}
+
+	var sb strings.Builder
+	for i := range sorted {
+		if b, ok := keep[i]; ok {
+			sb.WriteString("- ")
+			sb.WriteString(b)
+			sb.WriteString("\n")
+		}
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 // reviewData feeds a review run: the item plus the author report and diff.

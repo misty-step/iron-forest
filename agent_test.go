@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,76 @@ func TestRenderMarkdownTemperatureIsOptional(t *testing.T) {
 	}
 	if md := rendered(t, declared, "owl"); !strings.Contains(md, "temperature: 0.2") {
 		t.Fatalf("declared temperature was dropped:\n%s", md)
+	}
+}
+
+// TestIssueDataFeedsComments verifies a chew run carries its item's comments
+// into the build prompt, not just the task text. A prior run's rejection is
+// posted as a comment, so the next chew must read that objection back or it
+// repeats the rejected design (observed on #58).
+func TestIssueDataFeedsComments(t *testing.T) {
+	it := issue{
+		Number: 92,
+		Title:  "feed a rejection back",
+		Body:   "implement the change",
+		Comments: []comment{
+			{CreatedAt: "2026-08-05T10:00:00Z", Body: "owl rejected: keep ordering deterministic"},
+			{CreatedAt: "2026-08-05T09:00:00Z", Body: "operator note: cap the volume"},
+		},
+	}
+	data := issueData(it, "")
+	body, _ := data["Body"].(string)
+	// Oldest comment first, both present.
+	if !strings.Contains(body, "operator note") || !strings.Contains(body, "owl rejected") {
+		t.Fatalf("build prompt body dropped a comment:\n%s", body)
+	}
+	if strings.Index(body, "operator note") > strings.Index(body, "owl rejected") {
+		t.Fatalf("comments not ordered oldest first:\n%s", body)
+	}
+	if _, ok := data["Comments"]; !ok {
+		t.Fatalf("prompt data did not expose Comments")
+	}
+}
+
+// TestRenderCommentsCapsVolume verifies a noisy thread cannot crowd out the
+// task: the comment block is limited to maxCommentBytes total.
+func TestRenderCommentsCapsVolume(t *testing.T) {
+	long := strings.Repeat("x", maxCommentBytes+100)
+	out := renderComments([]comment{{CreatedAt: "t", Body: long}, {CreatedAt: "u", Body: long}})
+	if len(out) > maxCommentBytes+10 {
+		t.Fatalf("comment block grew past the cap: %d bytes", len(out))
+	}
+}
+
+// TestRenderCommentsCapsShortComments enforces the cap on the complete rendered
+// block, not just the comment bodies. Each comment also adds a "- " prefix and
+// a newline, so a thread of many one-byte comments would render roughly four
+// times maxCommentBytes in body bytes if that overhead were not counted.
+func TestRenderCommentsCapsShortComments(t *testing.T) {
+	var cs []comment
+	for i := 0; i < maxCommentBytes; i++ {
+		cs = append(cs, comment{CreatedAt: fmt.Sprintf("t%04d", i), Body: "x"})
+	}
+	out := renderComments(cs)
+	if len(out) > maxCommentBytes {
+		t.Fatalf("short-comment block exceeded the cap: %d bytes for %d comments", len(out), maxCommentBytes)
+	}
+}
+
+// TestRenderCommentsKeepsNewest pins that an over-full thread cannot drop the
+// newest rejection behind older comments, or a retry would still start blind.
+func TestRenderCommentsKeepsNewest(t *testing.T) {
+	var cs []comment
+	for i := 0; i < 4000; i++ {
+		cs = append(cs, comment{CreatedAt: fmt.Sprintf("t%04d", i), Body: "o"})
+	}
+	cs = append(cs, comment{CreatedAt: "zzzzz", Body: "owl rejected: do it differently"})
+	out := renderComments(cs)
+	if !strings.Contains(out, "owl rejected") {
+		t.Fatalf("newest rejection was dropped from the capped block:\n%s", out)
+	}
+	if !strings.HasPrefix(out, "- o") {
+		t.Fatalf("block is not ordered oldest first:\n%s", out)
 	}
 }
 
