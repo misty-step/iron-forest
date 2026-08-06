@@ -35,9 +35,10 @@ func (it issue) hasLabel(name string) bool {
 	return false
 }
 
-func ghJSON(args ...string) ([]byte, error) {
-	cmd := exec.Command("gh", args...)
-	return cmd.Output()
+// ghJSON runs the host CLI once. Tests replace it to stub the tracker without
+// invoking the host binary.
+var ghJSON = func(args ...string) ([]byte, error) {
+	return exec.Command("gh", args...).Output()
 }
 
 func listOpenIssues(repo string) ([]issue, error) {

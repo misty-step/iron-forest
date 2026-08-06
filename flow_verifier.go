@@ -96,6 +96,27 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}()
 	out := Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
 
+	// Rebase the branch onto current master before checking or reviewing it: a
+	// Verdict and its checks must key to the exact tree that will land, not to a
+	// tree built from an ancient master. Every later step uses the returned head.
+	if newHead, err := rebaseOntoMaster(wtDir, s.Branch); err != nil {
+		// A branch that cannot move onto current master can never land through
+		// this factory. Spend one attempt, as the merge-failure path does, so the
+		// verifier stops offering it, and say the reason on the item for a human.
+		out.Status = "merge_failed"
+		if _, berr := bumpAttempts(repoDir, s.Key); berr != nil {
+			return out, fmt.Errorf("rebase: %w (attempt record failed: %v)", err, berr)
+		}
+		_ = labelItem(cfg.Repo, it.Number, []string{failedLabel}, nil)
+		_ = commentItem(cfg.Repo, it.Number, "Merge blocked: "+err.Error())
+		return out, fmt.Errorf("rebase: %w", err)
+	} else {
+		baseSHA = newHead
+		// The ledger must record the head the checks, the Verdict, and the merge
+		// all key to; the init value above was the pre-rebase head.
+		out.BaseSHA = newHead
+	}
+
 	checks, checkErr := runChecks(cfg, wtDir, runID)
 	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
 		out.Status = "notes_failed"
@@ -186,6 +207,43 @@ func verifierReview(cfg Config, repoDir, wtDir string, it issue, head, runID str
 		return verdictNote{}, stats, fmt.Errorf("notes: %w", err)
 	}
 	return out, stats, nil
+}
+
+// rebaseOntoMaster moves the branch checked out in wtDir onto origin/master when
+// the branch is behind it, then pushes the rebased branch with --force-with-lease,
+// so every later step keys to the tree that will land. A branch that is already
+// current is left untouched and its head returned unchanged. A rebase that
+// conflicts returns an error naming the conflicting paths, never a bare exit
+// status.
+func rebaseOntoMaster(wtDir, branch string) (string, error) {
+	if err := git(wtDir, "fetch", "origin", "master"); err != nil {
+		return "", fmt.Errorf("rebase: fetch origin/master: %w", err)
+	}
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("rebase: head: %w", err)
+	}
+	behind, err := gitOut(wtDir, "rev-list", "--count", "origin/master", "^HEAD")
+	if err != nil {
+		return "", fmt.Errorf("rebase: compare: %w", err)
+	}
+	if behind == "0" {
+		return head, nil
+	}
+	if err := git(wtDir, "rebase", "origin/master"); err != nil {
+		if paths, perr := gitOut(wtDir, "diff", "--name-only", "--diff-filter=U"); perr == nil && strings.TrimSpace(paths) != "" {
+			return "", fmt.Errorf("rebase onto origin/master conflicts in %s", strings.Join(strings.Fields(paths), ", "))
+		}
+		return "", fmt.Errorf("rebase onto origin/master: %w", err)
+	}
+	head, err = gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("rebase: head: %w", err)
+	}
+	if err := git(wtDir, "push", "--force-with-lease", "origin", "HEAD:"+branch); err != nil {
+		return "", fmt.Errorf("rebase: push %s: %w", branch, err)
+	}
+	return head, nil
 }
 
 // mergeVerified lands an approved branch. The host path and the git path are
