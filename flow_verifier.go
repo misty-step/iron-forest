@@ -112,6 +112,9 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		return out, fmt.Errorf("rebase: %w", err)
 	} else {
 		baseSHA = newHead
+		// The ledger must record the head the checks, the Verdict, and the merge
+		// all key to; the init value above was the pre-rebase head.
+		out.BaseSHA = newHead
 	}
 
 	checks, checkErr := runChecks(cfg, wtDir, runID)

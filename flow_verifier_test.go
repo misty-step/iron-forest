@@ -38,9 +38,9 @@ func rebaseTestWriteFile(t *testing.T, path, body string) {
 }
 
 // TestRebaseOntoMasterRebasesBehindBranch proves a branch behind master by a
-// non-conflicting commit is rebased onto origin/master, its new head is pushed
-// with force, and a checks note written at that head keys to the post-rebase
-// head and not the pre-rebase one.
+// non-conflicting commit is rebased onto origin/master and its new head pushed
+// with force, and that Act writes the checks note at the post-rebase head and
+// records that same head in its outcome.
 func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
@@ -57,12 +57,16 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	rebaseTestGit(t, repo, "commit", "-q", "-m", "master work")
 	rebaseTestGit(t, repo, "push", "-q", "origin", "master")
 
+	// A verifier agent directory is required for Act to build a run.
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	// Learn the post-rebase head in a worktree so a verdict can be seeded there
+	// and Act stops after review; Act then rebases again, a no-op because the
+	// branch is already current.
 	wtDir, oldHead, err := createWorktreeAtBranch(repo, workspace, "forest/9-change")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer removeWorktree(repo, wtDir)
-
 	newHead, err := rebaseOntoMaster(wtDir, "forest/9-change")
 	if err != nil {
 		t.Fatal(err)
@@ -73,17 +77,50 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(wtDir, "master.txt")); err != nil {
 		t.Fatalf("rebased worktree lacks the master commit: %v", err)
 	}
+	removeWorktree(repo, wtDir)
 	if remoteHead := remoteBranchHead(t, repo, "forest/9-change"); remoteHead != newHead {
 		t.Fatalf("origin branch = %q, want pushed post-rebase head %q", remoteHead, newHead)
 	}
 
-	// The checks note written by Act must key to the post-rebase head.
-	note := checksNote{Status: "pass", RunID: "run-1", Results: []checkResult{{Name: "go test", Code: 0, Seconds: 1, Output: "ok"}}}
-	if err := writeChecks(repo, newHead, note); err != nil {
-		t.Fatalf("write checks on post-rebase head: %v", err)
+	// A verdict already recorded at the post-rebase head lets Act pass the
+	// review phase without a model call; the checks note Act writes is the
+	// signal under test.
+	if err := writeVerdict(repo, newHead, verdictNote{
+		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
+		DefSHA: "def", RunID: "seed",
+	}); err != nil {
+		t.Fatalf("seed verdict: %v", err)
+	}
+	if _, ok, err := readChecks(repo, newHead); err != nil || ok {
+		t.Fatalf("checks already present on post-rebase head before Act: (found=%v, err=%v)", ok, err)
+	}
+
+	// Stub the tracker so Act's item read does not touch the host CLI.
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = false
+	cfg.Projection = Projection{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-forest/9-change", Kind: "branch", Revision: oldHead,
+		Label: "forest/9-change", Issue: 9, Branch: "forest/9-change", Head: oldHead,
+	}, "run-1")
+	if err != nil {
+		t.Fatalf("Act: %v", err)
+	}
+	if out.BaseSHA != newHead {
+		t.Fatalf("out.BaseSHA = %q, want post-rebase head %q", out.BaseSHA, newHead)
 	}
 	if got, ok, err := readChecks(repo, newHead); err != nil || !ok || got.Status != "pass" {
-		t.Fatalf("checks on post-rebase head = (found=%v, err=%v), want found pass note", ok, err)
+		t.Fatalf("checks on post-rebase head = (found=%v, status=%q, err=%v), want pass", ok, got.Status, err)
 	}
 	if _, ok, err := readChecks(repo, oldHead); err != nil || ok {
 		t.Fatalf("checks on pre-rebase head = (found=%v, err=%v), want not found", ok, err)
