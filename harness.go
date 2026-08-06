@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -23,8 +24,9 @@ type runStats struct {
 
 // runPhase executes one named agent with opencode in a worktree and streams its
 // JSON event stream into the trace file. The run is bounded only when the agent
-// declares a budget. The exit code is not the verdict: a non-zero exit with work
-// produced is judged by the gate.
+// declares a budget. A harness exit outside the documented out-of-steps case
+// marks the run failed: the error carries the exit status and stderr so a crash
+// or truncation is never mistaken for work the gate can publish.
 func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.Duration) (runStats, error) {
 	var stats runStats
 	if err := renderMarkdown(wtDir, a); err != nil {
@@ -59,12 +61,14 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.
 
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	sawStepFinish := false
 	for sc.Scan() {
 		line := sc.Bytes()
 		if _, err := trace.Write(append(line, '\n')); err != nil {
 			return stats, err
 		}
 		if st, ok := parseStepFinish(line); ok {
+			sawStepFinish = true
 			stats.tokensIn += st.tokensIn
 			stats.tokensOut += st.tokensOut
 			stats.cacheRead += st.cacheRead
@@ -75,14 +79,36 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.
 	if ctx.Err() == context.DeadlineExceeded {
 		return stats, fmt.Errorf("agent timed out after %s", budget)
 	}
-	_ = stderr
 	if sc.Err() != nil {
 		return stats, sc.Err()
 	}
-	// opencode exits non-zero when it runs out of steps but still produced
-	// work; the gate decides, so a non-nil waitErr is not a failure here.
-	_ = waitErr
+	if waitErr != nil && !isOutOfSteps(waitErr, sawStepFinish, stderr.String()) {
+		// The harness exited outside the documented out-of-steps case: the run
+		// is failed. Record the status and stderr so the failure is auditable.
+		return stats, fmt.Errorf("agent exited %q: %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
 	return stats, nil
+}
+
+// isOutOfSteps reports whether a non-zero opencode exit is the documented
+// step-limit case. The harness announces that it hit the agent's step budget on
+// stderr with the "out of steps" message; only when that explicit announcement
+// is present after at least one completed step_finish does the gate decide the
+// run, so a provider or API crash that exits non-zero after earlier work is
+// never mistaken for an out-of-steps stop. Every other non-zero exit is a crash
+// or a truncation. Step completion is tracked as a boolean rather than the
+// token totals so a zero-token step_finish still counts as work.
+func isOutOfSteps(waitErr error, sawStepFinish bool, stderr string) bool {
+	ee, ok := waitErr.(*exec.ExitError)
+	if !ok {
+		return false
+	}
+	// A negative exit code means the process was killed by a signal rather than
+	// exiting through os.Exit: that is a crash, not a stop at the step budget.
+	if ee.ExitCode() < 0 {
+		return false
+	}
+	return sawStepFinish && strings.Contains(stderr, "out of steps")
 }
 
 // phaseContext bounds one agent run. A budget of zero or less means no deadline:
