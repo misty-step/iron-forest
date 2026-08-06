@@ -79,6 +79,26 @@ func lastPRState(workspace string, n int) (prState, bool) {
 	return last, found
 }
 
+// prCurrent records a PR's current state in prs.jsonl, writing nothing when the
+// row is unchanged from the PR's most recent recorded state. It is the ledger's
+// reconcile oracle: each open PR keeps exactly one current row instead of
+// accumulating a stream of duplicates every pass that re-enters the same state.
+func prCurrent(workspace string, s prState) error {
+	if last, ok := lastPRState(workspace, s.PR); ok && samePRState(last, s) {
+		return nil
+	}
+	return appendPR(workspace, s)
+}
+
+// samePRState reports whether two rows describe identical PR state. Time is
+// deliberately ignored so a pass that changes nothing does not append a row.
+func samePRState(a, b prState) bool {
+	return a.PRURL == b.PRURL && a.PR == b.PR && a.Branch == b.Branch &&
+		a.Issue == b.Issue && a.State == b.State && a.Owl == b.Owl &&
+		a.Checks == b.Checks && a.SHA == b.SHA && a.Fixes == b.Fixes &&
+		a.Error == b.Error
+}
+
 // fetchOpenPR loads the pull request fields the loop decides on.
 func fetchOpenPR(repo string, n int) (pulledPR, error) {
 	out, err := ghJSON("pr", "view", fmt.Sprintf("%d", n), "-R", repo,
@@ -255,13 +275,13 @@ func watchPR(cfg Config, repoDir string, n int) int {
 
 	if op.State != "OPEN" {
 		base.State = "closed"
-		_ = appendPR(workspace, base)
+		_ = prCurrent(workspace, base)
 		return 0
 	}
 	if !known {
 		// Not opened by this factory session: record idly, never act on it.
 		base.State = "opened"
-		_ = appendPR(workspace, base)
+		_ = prCurrent(workspace, base)
 		return 0
 	}
 	if last.State == "merged" {
@@ -300,25 +320,25 @@ func watchPR(cfg Config, repoDir string, n int) int {
 			if err := mergePR(cfg.Repo, n); err != nil {
 				base.State = "stalled"
 				base.Error = err.Error()
-				_ = appendPR(workspace, base)
+				_ = prCurrent(workspace, base)
 				fmt.Fprintf(os.Stderr, "forest: merge #%d: %v\n", n, err)
 				return 1
 			}
 			base.State = "merged"
-			_ = appendPR(workspace, base)
+			_ = prCurrent(workspace, base)
 			fmt.Printf("forest: pr #%d merged\n", n)
 			return 0
 		}
 		base.State = "ready"
 		if !unchanged() {
-			_ = appendPR(workspace, base)
+			_ = prCurrent(workspace, base)
 		}
 		fmt.Printf("forest: pr #%d ready to merge (auto_merge off): %s\n", n, op.URL)
 		return 0
 	}
 	base.State = "opened"
 	if !unchanged() {
-		_ = appendPR(workspace, base)
+		_ = prCurrent(workspace, base)
 	}
 	return 0
 }
@@ -345,7 +365,7 @@ func recordFixFailure(cfg Config, workspace string, prior prState, errMsg string
 	} else {
 		prior.State = "fixing"
 	}
-	_ = appendPR(workspace, prior)
+	_ = prCurrent(workspace, prior)
 	return prior, stalled
 }
 
@@ -359,7 +379,7 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 		prior.State = "stalled"
 		prior.Error = "too many fix cycles"
 		prior.Time = nowRFC()
-		_ = appendPR(workspace, prior)
+		_ = prCurrent(workspace, prior)
 		fmt.Fprintf(os.Stderr, "forest: pr #%d stalled after %d fixes\n", op.PR, prior.Fixes)
 		return 1
 	}
@@ -411,7 +431,7 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 		prior.Fixes++
 		prior.Owl = r.Verdict
 		prior.Time = nowRFC()
-		_ = appendPR(workspace, prior)
+		_ = prCurrent(workspace, prior)
 		fmt.Fprintf(os.Stderr, "forest: pr #%d fix not approved by owl\n", op.PR)
 		return 1
 	}
@@ -419,7 +439,7 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 		prior.State = "stalled"
 		prior.Error = err.Error()
 		prior.Time = nowRFC()
-		_ = appendPR(workspace, prior)
+		_ = prCurrent(workspace, prior)
 		fmt.Fprintf(os.Stderr, "forest: pr #%d push: %v\n", op.PR, err)
 		return 1
 	}
@@ -431,7 +451,7 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 	prior.Checks = "pending"
 	prior.Error = ""
 	prior.Time = nowRFC()
-	_ = appendPR(workspace, prior)
+	_ = prCurrent(workspace, prior)
 	fmt.Printf("forest: pr #%d fix pushed %s\n", op.PR, short(newSHA))
 	return 0
 }

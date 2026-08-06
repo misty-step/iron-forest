@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +35,45 @@ func TestFixPRStallsAtLimit(t *testing.T) {
 	if last.Error != "too many fix cycles" {
 		t.Fatalf("error = %q, want %q", last.Error, "too many fix cycles")
 	}
+}
+
+// TestFixPRStalledDoesNotDuplicateRow pins the reconcile oracle on the stalled
+// fixPR paths: when a re-entrant watchPR pass reconstructs the same prior state
+// (same SHA, checks, fixes, owl, and error) and calls fixPR again, the stalled
+// row must be routed through prCurrent so the ledger records one current row
+// per PR instead of appending an identical row on every pass.
+func TestFixPRStalledDoesNotDuplicateRow(t *testing.T) {
+	repoDir := t.TempDir()
+	cfg := defaultConfig()
+	cfg.Workflow.MaxReactionFixes = 2
+	op := pulledPR{PR: 41, URL: "https://example.test/pr/41", Branch: "forest/41-fix"}
+	prior := prState{PR: 41, Issue: 7, Branch: op.Branch, PRURL: op.URL, State: "fixing", Fixes: 2}
+
+	for i := 0; i < 3; i++ {
+		if code := fixPR(cfg, repoDir, op, prior, "feedback"); code == 0 {
+			t.Fatalf("call %d: fixPR reported success for an exhausted fix budget", i+1)
+		}
+	}
+	if n := countPRStateRows(t, filepath.Join(repoDir, WorkspaceDir), 41); n != 1 {
+		t.Fatalf("ledger holds %d current rows for PR 41 after repeated stalled re-entry, want 1", n)
+	}
+}
+
+// countPRStateRows returns how many prs.jsonl rows reference the given PR.
+func countPRStateRows(t *testing.T, workspace string, n int) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(workspace, "prs.jsonl"))
+	if err != nil {
+		t.Fatalf("read prs.jsonl: %v", err)
+	}
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var s prState
+		if json.Unmarshal([]byte(line), &s) == nil && s.PR == n {
+			count++
+		}
+	}
+	return count
 }
 
 // TestFixLimitReachedHonorsConfig pins the bound to cfg.Workflow.MaxReactionFixes
