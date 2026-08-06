@@ -8,26 +8,38 @@ import (
 	"testing"
 )
 
-// setupTestRepo builds a throwaway git repo on a master branch with one commit
-// so worktree helpers have something real to operate on.
+// setupTestRepo builds a throwaway repository with a real origin, because
+// createWorktree resolves its base from the remote tip and a fixture without a
+// remote would prove nothing about the path the flows actually take.
 func setupTestRepo(t *testing.T) string {
 	t.Helper()
-	repo := t.TempDir()
-	must := func(name string, args ...string) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	repo := filepath.Join(root, "work")
+	run := func(dir, name string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %s: %v: %s", name, err, strings.TrimSpace(string(out)))
 		}
 	}
-	must("init", "init", "-b", "master")
-	must("config", "config", "user.email", "test@example.com")
-	must("config", "config", "user.name", "test")
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "init-bare", "init", "--bare", "-b", "master")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(repo, "init", "init", "-b", "master")
+	run(repo, "config", "config", "user.email", "test@example.com")
+	run(repo, "config", "config", "user.name", "test")
 	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	must("add", "add", "file.txt")
-	must("commit", "commit", "-m", "init")
+	run(repo, "add", "add", "file.txt")
+	run(repo, "commit", "commit", "-m", "init")
+	run(repo, "remote", "remote", "add", "origin", origin)
+	run(repo, "push", "push", "-q", "-u", "origin", "master")
 	return repo
 }
 
@@ -74,24 +86,52 @@ func TestReapOrphanWorktreesRemovesStaleRun(t *testing.T) {
 	}
 }
 
-// TestCurrentWorktreeTracksInFlight pins the handler-facing contract: the
-// run's worktree is recorded so an abrupt os.Exit can still remove it, and it
-// is cleared once the run no longer owns it.
-func TestCurrentWorktreeTracksInFlight(t *testing.T) {
+// TestCreateWorktreeStartsAtTheRemoteTip pins the isolation invariant: a run
+// begins at the exact sha the record reports, so the run is reproducible even
+// when the remote branch moves during the pass.
+func TestCreateWorktreeStartsAtTheRemoteTip(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
-	wtDir, _, _, err := createWorktree(repo, workspace, issue{Number: 7, Title: "track"})
+	wtDir, branch, baseSHA, err := createWorktree(repo, workspace, issue{Number: 5, Title: "tip"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer removeWorktree(repo, wtDir)
-	// createWorktree registers the worktree in the tracker before git adds it,
-	// so there is no window in which the second-signal handler would leak it.
-	if got := currentWorktreeDir(); got != wtDir {
-		t.Fatalf("currentWorktreeDir() right after createWorktree = %q, want %q", got, wtDir)
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
 	}
-	setCurrentWorktree("")
-	if got := currentWorktreeDir(); got != "" {
-		t.Fatalf("currentWorktreeDir() = %q after clear, want empty", got)
+	if head != baseSHA {
+		t.Fatalf("worktree head = %q, want the reported base %q", head, baseSHA)
+	}
+	if want := "forest/5-tip"; branch != want {
+		t.Fatalf("branch = %q, want %q", branch, want)
+	}
+}
+
+// TestTrackedWorktreesIsolateLanes pins the contract the drain handler depends
+// on: every live worktree is listed, and clearing one lane's worktree never
+// hides another lane's, which would leak it on an abrupt exit.
+func TestTrackedWorktreesIsolateLanes(t *testing.T) {
+	repo := setupTestRepo(t)
+	workspace := filepath.Join(repo, WorkspaceDir)
+	first, _, _, err := createWorktree(repo, workspace, issue{Number: 7, Title: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeWorktree(repo, first)
+	second, _, _, err := createWorktree(repo, workspace, issue{Number: 8, Title: "two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeWorktree(repo, second)
+
+	if got := trackedWorktrees(); len(got) != 2 {
+		t.Fatalf("trackedWorktrees() = %v, want both lanes", got)
+	}
+	untrackWorktree(first)
+	got := trackedWorktrees()
+	if len(got) != 1 || got[0] != second {
+		t.Fatalf("trackedWorktrees() = %v after clearing one lane, want only %q", got, second)
 	}
 }

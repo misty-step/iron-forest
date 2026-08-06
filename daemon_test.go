@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// TestSingletonLockExcludesConcurrentChewer pins the oracle for #42: a manual
+// TestSingletonLockExcludesASecondDaemon pins the oracle for #42: a manual
 // `forest once` must not run while the daemon holds the singleton lock. The
 // acquisition is non-blocking and fails with a named lock error, so the
 // holder is undisturbed and the runner exits non-zero.
-func TestSingletonLockExcludesConcurrentChewer(t *testing.T) {
+func TestSingletonLockExcludesASecondDaemon(t *testing.T) {
 	repoDir := t.TempDir()
 
 	holder, err := acquireSingletonLock(repoDir)

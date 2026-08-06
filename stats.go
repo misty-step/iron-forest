@@ -6,39 +6,38 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 )
 
-// statsCmd aggregates the run ledger (.forest/runs.jsonl) into numbers an
-// operator can read. It is the CLI face of what the reaction loop (R3) needs
-// to prove it works. Reading is append-only and never mutates the ledger.
+// statsCmd aggregates valid ledger rows without changing the append-only file.
 type statsCmd struct {
-	first   time.Time   // timestamp of the first run in the ledger
-	last    time.Time   // timestamp of the last run in the ledger
-	runs    []runRecord // parsed, valid ledger lines
-	invalid int         // ledger lines that could not be parsed
+	first   time.Time
+	last    time.Time
+	runs    []runRecord
+	invalid int
 }
 
-// keyed is a rate-based accumulator used for the by-agent, by-model and
-// by-def_sha breakdowns: total cost and run count per key, in encounter order.
+type groupTotals struct {
+	count int
+	in    int64
+	out   int64
+}
+
+// keyed groups rows in first-seen order for stable operator output.
 type keyed struct {
-	cost  map[string]float64
-	count map[string]int
-	order []string
-	seen  map[string]bool
+	totals map[string]groupTotals
+	order  []string
+	seen   map[string]bool
 }
 
 func newKeyed() *keyed {
 	return &keyed{
-		cost:  make(map[string]float64),
-		count: make(map[string]int),
-		seen:  make(map[string]bool),
+		totals: make(map[string]groupTotals),
+		seen:   make(map[string]bool),
 	}
 }
 
-// add records one run against a key, preserving the first-seen order.
-func (k *keyed) add(key string, cost float64) {
+func (k *keyed) add(key string, r runRecord) {
 	if key == "" {
 		key = "(none)"
 	}
@@ -46,12 +45,13 @@ func (k *keyed) add(key string, cost float64) {
 		k.seen[key] = true
 		k.order = append(k.order, key)
 	}
-	k.cost[key] += cost
-	k.count[key]++
+	t := k.totals[key]
+	t.count++
+	t.in += r.TokensIn
+	t.out += r.TokOut
+	k.totals[key] = t
 }
 
-// cmdStats runs `forest stats` against the ledger under repoDir and prints the
-// aggregate. Passing --json emits one JSON object per aggregate group.
 func cmdStats(repoDir string, args []string) int {
 	asJSON := false
 	for _, a := range args {
@@ -74,9 +74,6 @@ func cmdStats(repoDir string, args []string) int {
 	return s.emitText(os.Stdout)
 }
 
-// load reads and validates every ledger line through the shared loader.
-// Unparseable lines are counted and skipped so one bad artifact never breaks
-// the whole report.
 func (s *statsCmd) load(path string) error {
 	runs, invalid, err := loadLedger(path)
 	if err != nil {
@@ -88,167 +85,126 @@ func (s *statsCmd) load(path string) error {
 	return nil
 }
 
-// buckets collapses the ledger statuses into the single operator-facing
-// vocabulary (done/fixed/failed/other) shared with `forest watch`. All four
-// keys are present even when zero, so callers never omit a zero-valued
-// category.
-func (s *statsCmd) buckets() map[string]int {
-	m := map[string]int{"done": 0, "fixed": 0, "failed": 0, "other": 0}
+func (s *statsCmd) categories() map[string]int {
+	m := map[string]int{"progress": 0, "failed": 0, "other": 0}
 	for _, r := range s.runs {
 		m[runCategory(r.Status)]++
 	}
 	return m
 }
 
-// computeRange fills first/last from the RFC3339 time fields of the runs.
 func (s *statsCmd) computeRange() {
-	var first, last time.Time
 	for _, r := range s.runs {
 		t, err := time.Parse(time.RFC3339, r.Time)
 		if err != nil {
 			continue
 		}
-		if first.IsZero() || t.Before(first) {
-			first = t
+		if s.first.IsZero() || t.Before(s.first) {
+			s.first = t
 		}
-		if last.IsZero() || t.After(last) {
-			last = t
+		if s.last.IsZero() || t.After(s.last) {
+			s.last = t
 		}
 	}
-	s.first, s.last = first, last
 }
 
-// mean returns average of sum over count, or 0 when count is zero.
-func mean(sum float64, count int) float64 {
-	if count == 0 {
-		return 0
+func (s *statsCmd) totals() (int64, int64) {
+	var in, out int64
+	for _, r := range s.runs {
+		in += r.TokensIn
+		out += r.TokOut
 	}
-	return sum / float64(count)
+	return in, out
 }
 
-// emitText prints the human-readable aggregate report.
 func (s *statsCmd) emitText(w io.Writer) int {
-	if len(s.runs) == 0 {
-		fmt.Fprintf(w, "runs:      0 (empty ledger or no valid lines)\n")
-		if s.invalid > 0 {
-			fmt.Fprintf(w, "invalid:   %d\n", s.invalid)
-		}
-		buckets := s.buckets()
-		fmt.Fprintf(w, "\nstatus:\n  done=%d fixed=%d failed=%d other=%d\n",
-			buckets["done"], buckets["fixed"], buckets["failed"], buckets["other"])
-		return 0
-	}
 	fmt.Fprintf(w, "runs:      %d\n", len(s.runs))
 	if !s.first.IsZero() && !s.last.IsZero() {
 		fmt.Fprintf(w, "range:     %s..%s\n", s.first.Format(time.RFC3339), s.last.Format(time.RFC3339))
 	}
 
-	fmt.Fprintf(w, "\nstatus:\n")
-	byStatus := map[string]int{}
-	var statusKeys []string
-	for _, r := range s.runs {
-		if byStatus[r.Status] == 0 {
-			statusKeys = append(statusKeys, r.Status)
-		}
-		byStatus[r.Status]++
-	}
-	sort.Strings(statusKeys)
-	for _, k := range statusKeys {
-		fmt.Fprintf(w, "  %-20s %d\n", k, byStatus[k])
-	}
+	fmt.Fprintln(w, "\nstatus:")
+	s.emitTextGroup(w, func(r runRecord) string { return r.Status })
+	categories := s.categories()
+	fmt.Fprintf(w, "\ncategory:  progress=%d failed=%d other=%d\n", categories["progress"], categories["failed"], categories["other"])
+	in, out := s.totals()
+	fmt.Fprintf(w, "tokens:    input=%d output=%d\n", in, out)
 
-	buckets := s.buckets()
-	fmt.Fprintf(w, "  done=%d fixed=%d failed=%d other=%d\n",
-		buckets["done"], buckets["fixed"], buckets["failed"], buckets["other"])
-
-	var totalCost, totalIn, totalOut float64
-	for _, r := range s.runs {
-		totalCost += r.CostUSD
-		totalIn += float64(r.TokensIn)
-		totalOut += float64(r.TokOut)
-	}
-	n := len(s.runs)
-	fmt.Fprintf(w, "\ncost_usd   total=%8.4f mean=%8.4f\n", totalCost, mean(totalCost, n))
-	fmt.Fprintf(w, "tokens_in  total=%10d mean=%10.1f\n", int64(totalIn), mean(totalIn, n))
-	fmt.Fprintf(w, "tokens_out total=%10d mean=%10.1f\n", int64(totalOut), mean(totalOut, n))
-
-	s.emitBreakdown(w, "by agent:", func(r runRecord) string { return r.Agent })
-	s.emitBreakdown(w, "by model:", func(r runRecord) string { return r.Model })
-	s.emitBreakdown(w, "by def_sha:", func(r runRecord) string { return r.DefSHA })
-
+	s.emitTextBreakdown(w, "by flow:", func(r runRecord) string { return r.Flow })
+	s.emitTextBreakdown(w, "by agent:", func(r runRecord) string { return r.Agent })
+	s.emitTextBreakdown(w, "by model:", func(r runRecord) string { return r.Model })
 	if s.invalid > 0 {
 		fmt.Fprintf(w, "\ninvalid:   %d unparseable line(s) skipped\n", s.invalid)
 	}
 	return 0
 }
 
-// emitBreakdown prints one grouped table (agent/model/def_sha) for text mode.
-func (s *statsCmd) emitBreakdown(w io.Writer, title string, key func(runRecord) string) {
-	k := newKeyed()
-	for _, r := range s.runs {
-		k.add(key(r), r.CostUSD)
-	}
-	fmt.Fprintf(w, "\n%s\n", title)
-	for _, name := range k.order {
-		fmt.Fprintf(w, "  %-24s cost=%8.4f count=%d\n", name, k.cost[name], k.count[name])
+func (s *statsCmd) emitTextGroup(w io.Writer, key func(runRecord) string) {
+	items := s.breakdown(key)
+	for _, item := range items {
+		fmt.Fprintf(w, "  %-20s count=%d tokens_in=%d tokens_out=%d\n",
+			item["key"], item["count"], item["tokens_in"], item["tokens_out"])
 	}
 }
 
-// emitJSON prints one JSON object per aggregate group, one object per line so
-// the stream is trivially parseable and grep-able.
+func (s *statsCmd) emitTextBreakdown(w io.Writer, title string, key func(runRecord) string) {
+	fmt.Fprintf(w, "\n%s\n", title)
+	s.emitTextGroup(w, key)
+}
+
 func (s *statsCmd) emitJSON(w io.Writer) int {
 	enc := json.NewEncoder(w)
-
-	enc.Encode(map[string]any{
+	if err := enc.Encode(map[string]any{
 		"group":   "overview",
 		"runs":    len(s.runs),
 		"first":   fmtTime(s.first),
 		"last":    fmtTime(s.last),
 		"invalid": s.invalid,
-		"status":  s.buckets(),
-	})
-
-	byStatus := map[string]int{}
-	for _, r := range s.runs {
-		byStatus[r.Status]++
+		"status":  s.categories(),
+	}); err != nil {
+		return 1
 	}
-	enc.Encode(map[string]any{"group": "status", "counts": byStatus})
-
-	var totalCost, totalIn, totalOut float64
-	for _, r := range s.runs {
-		totalCost += r.CostUSD
-		totalIn += float64(r.TokensIn)
-		totalOut += float64(r.TokOut)
+	for _, group := range []struct {
+		name string
+		key  func(runRecord) string
+	}{
+		{"status", func(r runRecord) string { return r.Status }},
+		{"by_flow", func(r runRecord) string { return r.Flow }},
+		{"by_agent", func(r runRecord) string { return r.Agent }},
+		{"by_model", func(r runRecord) string { return r.Model }},
+	} {
+		if err := enc.Encode(map[string]any{"group": group.name, "items": s.breakdown(group.key)}); err != nil {
+			return 1
+		}
 	}
-	n := len(s.runs)
-	enc.Encode(map[string]any{"group": "cost_usd", "total": totalCost, "mean": mean(totalCost, n)})
-	enc.Encode(map[string]any{"group": "tokens_in", "total": totalIn, "mean": mean(totalIn, n)})
-	enc.Encode(map[string]any{"group": "tokens_out", "total": totalOut, "mean": mean(totalOut, n)})
-
-	enc.Encode(map[string]any{"group": "by_agent", "items": s.breakdown(func(r runRecord) string { return r.Agent })})
-	enc.Encode(map[string]any{"group": "by_model", "items": s.breakdown(func(r runRecord) string { return r.Model })})
-	enc.Encode(map[string]any{"group": "by_def_sha", "items": s.breakdown(func(r runRecord) string { return r.DefSHA })})
+	in, out := s.totals()
+	if err := enc.Encode(map[string]any{"group": "tokens_in", "total": in}); err != nil {
+		return 1
+	}
+	if err := enc.Encode(map[string]any{"group": "tokens_out", "total": out}); err != nil {
+		return 1
+	}
 	return 0
 }
 
-// breakdown returns the per-key cost/count rows for JSON mode.
 func (s *statsCmd) breakdown(key func(runRecord) string) []map[string]any {
 	k := newKeyed()
 	for _, r := range s.runs {
-		k.add(key(r), r.CostUSD)
+		k.add(key(r), r)
 	}
 	var out []map[string]any
 	for _, name := range k.order {
+		t := k.totals[name]
 		out = append(out, map[string]any{
-			"key":   name,
-			"cost":  k.cost[name],
-			"count": k.count[name],
+			"key":        name,
+			"count":      t.count,
+			"tokens_in":  t.in,
+			"tokens_out": t.out,
 		})
 	}
 	return out
 }
 
-// fmtTime renders a timestamp for JSON, or "" when zero.
 func fmtTime(t time.Time) string {
 	if t.IsZero() {
 		return ""

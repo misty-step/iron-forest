@@ -13,13 +13,12 @@ import (
 	"time"
 )
 
-// runStats is the session-level token and cost accounting for one agent run.
+// runStats is the session-level token accounting for one agent run.
 type runStats struct {
 	tokensIn   int64
 	tokensOut  int64
 	cacheRead  int64
 	cacheWrite int64
-	costUSD    float64
 }
 
 // runPhase executes one named agent with opencode in a worktree and streams its
@@ -149,12 +148,4 @@ func parseStepFinish(line []byte) (stepTokens, bool) {
 	}
 	return stepTokens{tokensIn: ev.Part.Tokens.Input, tokensOut: ev.Part.Tokens.Output,
 		cacheRead: ev.Part.Tokens.Cache.Read, cacheWrite: ev.Part.Tokens.Cache.Write}, true
-}
-
-// price computes US dollar cost from token counts using the agent's own price
-// table; opencode reports zero cost for model ids outside its catalog.
-func price(st runStats, a *Agent) float64 {
-	inUSD := float64(st.tokensIn) / 1e6 * a.PriceInUSDPerM
-	outUSD := float64(st.tokensOut) / 1e6 * a.PriceOutUSDPerM
-	return inUSD + outUSD
 }

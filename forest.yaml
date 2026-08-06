@@ -1,38 +1,49 @@
-# iron-forest backlog polling and PR factory
-#
-# This file declares the workflow: which agents run which phase, the poll
-# cadence, and which paths are off limits to every agent. Agent definitions
-# (model, permissions, MCPs, prompts, output contract) live in agents/<name>/.
-
+# iron-forest — the factory's own composition file.
+# Flows are independent lanes. They coordinate only through leases and notes in
+# this repository, so concurrency needs no scheduler.
 repo: misty-step/iron-forest
 
-# Poll: seconds between passes over the backlog. One item at a time.
-poll_interval_seconds: 30
-
-# Factory-wide gate: no agent may change these paths. The per-agent tool
-# permissions live in each agents/<name>/agent.yaml.
+# Paths no agent may write. The gate rejects a run that touches one.
 protected:
   - .forest/
   - forest.yaml
   - agents/
   - .opencode/opencode.json
 
-# The workflow. Each named agent is a directory under agents/. The build agent
-# implements the change; the review agent ("" disables review) checks it; when
-# review asks for changes, the build agent gets max_fix_iterations corrective
-# passes before the verdict is final.
-#
-# auto_merge: the reaction loop merges a PR only when the owl approved it, CI
-# is green, and no human CHANGES_REQUESTED review is open. It defaults to
-# false — prove one manual merge, then flip it.
-# max_reaction_fixes: how many re-entry build passes the loop makes on one PR
-# (human feedback or failing CI) before it parks the PR for a human.
-workflow:
-  build: beaver
-  review: owl
-  max_fix_iterations: 1
-  # Enabled after the operator proved one manual merge on PR #22 (2026-08-05).
-  # The loop now merges autonomously when the owl approved, CI is green, and
-  # no human CHANGES_REQUESTED review is outstanding on the current head.
-  auto_merge: true
-  max_reaction_fixes: 2
+# A lease older than this may be broken, so a dead host cannot own a subject
+# forever.
+lease:
+  ttl_seconds: 7200
+
+# The checks Iron Forest runs itself. The result is a note on the commit, not a
+# status read back from a host.
+checks:
+  - name: build
+    run: mise exec -- go build ./...
+  - name: vet
+    run: mise exec -- go vet ./...
+  - name: test
+    run: mise exec -- go test ./...
+
+flows:
+  builder:
+    enabled: true
+    agent: builder
+    interval_seconds: 30
+    exclude_labels: [parked, "forest:failed"]
+  verifier:
+    enabled: true
+    agent: verifier
+    interval_seconds: 20
+    merge: squash
+    auto_merge: true
+  fixer:
+    enabled: true
+    agent: builder
+    interval_seconds: 40
+    attempts: 2
+
+# The human-facing surface. One way out: Iron Forest never reads it back.
+projection:
+  enabled: true
+  merge_via_host: false

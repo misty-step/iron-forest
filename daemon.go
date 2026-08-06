@@ -7,15 +7,34 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=<sha>".
-// It identifies which merge this binary was built from; see `forest version`.
+
+func recordPendingUpdate() {
+	from, to := os.Getenv("FOREST_UPDATE_FROM"), os.Getenv("FOREST_UPDATE_TO")
+	if from == "" || to == "" {
+		return
+	}
+	_ = os.Unsetenv("FOREST_UPDATE_FROM")
+	_ = os.Unsetenv("FOREST_UPDATE_TO")
+	repoDir, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	if err := appendUpdate(repoDir, updateRecord{Time: nowRFC(), From: from, To: to, Status: "swapped"}); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: update: record: %v\n", err)
+	}
+}
+
 var version = "dev"
 
-// updateRecord is one self-update row in .forest/updates.jsonl: when the
-// factory swapped itself to a newer build of itself.
+var updateGate sync.RWMutex
+
 type updateRecord struct {
 	Time   string `json:"time"`
 	From   string `json:"from_sha"`
@@ -23,17 +42,31 @@ type updateRecord struct {
 	Status string `json:"status"`
 }
 
-// runUpdateCheck keeps the running binary on the checked-out HEAD: it
-// fast-forwards from origin/master when behind, then rebuilds and execs a
-// fresh binary whenever the running build's version no longer matches HEAD
-// (which covers remote merges and commits pushed from this same working
-// tree). It runs only at a pass boundary, never while an agent is in flight.
-// Systemd never restarts us: the exec keeps the same PID, so the singleton
-// lock and the service state stay continuous across the swap.
+// selfUpdateLoop checks for a new binary only when all lanes are idle.
+func selfUpdateLoop(cfg Config, repoDir string, drain *int32) {
+	_ = cfg
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if atomic.LoadInt32(drain) != 0 {
+			return
+		}
+		if !processLeases.idle() {
+			continue
+		}
+		updateGate.Lock()
+		if processLeases.idle() {
+			runUpdateCheck(repoDir)
+		}
+		updateGate.Unlock()
+	}
+}
+
+// runUpdateCheck keeps the running binary on checked-out master.
 func runUpdateCheck(repoDir string) {
 	cfgPath := filepath.Join(repoDir, "forest.yaml")
 	if _, err := os.Stat(cfgPath); err != nil {
-		return // not a forest clone; do not try to update
+		return
 	}
 	ref, err := gitOut(repoDir, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil || ref != "master" {
@@ -69,10 +102,6 @@ func runUpdateCheck(repoDir string) {
 		return
 	}
 	if version == short {
-		// The running binary already matches the checked-out code. Comparing
-		// against HEAD (not origin) also catches commits pushed directly from
-		// this same working tree, where HEAD reached the new commit before
-		// the rebuild ever ran.
 		return
 	}
 	if deferDirty(repoDir) {
@@ -90,14 +119,9 @@ func runUpdateCheck(repoDir string) {
 		return
 	}
 	newHead, _ := gitOut(repoDir, "rev-parse", "HEAD")
-	_ = appendUpdate(repoDir, updateRecord{Time: nowRFC(), From: head, To: newHead, Status: "swapped"})
-	swapSelf(repoDir, short)
+	swapSelf(repoDir, short, head, newHead)
 }
 
-// deferDirty reports whether the working tree has uncommitted changes and, if
-// so, logs the offending paths and returns true (defer the update). A defer is
-// never silent: the porcelain head is printed so a stuck daemon is diagnosable
-// from its log alone.
 func deferDirty(repoDir string) bool {
 	dirty, err := gitOut(repoDir, "status", "--porcelain")
 	if err != nil {
@@ -117,9 +141,6 @@ func deferDirty(repoDir string) bool {
 	return true
 }
 
-// buildSelf compiles the current checkout into forest.next. It prefers the
-// project toolchain (mise) when plain `go` is not on PATH, so the same build
-// works inside the daemon and in a dev shell.
 func buildSelf(repoDir, shortSHA string) error {
 	tmp := filepath.Join(repoDir, "forest.next.tmp")
 	target := filepath.Join(repoDir, "forest.next")
@@ -129,8 +150,7 @@ func buildSelf(repoDir, shortSHA string) error {
 		c.Dir = repoDir
 		out, err := c.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("%s %s: %v: %s",
-				name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+			return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}
@@ -149,10 +169,7 @@ func buildSelf(repoDir, shortSHA string) error {
 	return os.Rename(tmp, target)
 }
 
-// swapSelf installs forest.next as forest and execs it, replacing the current
-// process image. On any failure it restores the previous binary and keeps
-// running with the old image.
-func swapSelf(repoDir, shortSHA string) {
+func swapSelf(repoDir, shortSHA, fromSHA, toSHA string) {
 	cur := filepath.Join(repoDir, "forest")
 	prev := filepath.Join(repoDir, "forest.prev")
 	next := filepath.Join(repoDir, "forest.next")
@@ -165,20 +182,31 @@ func swapSelf(repoDir, shortSHA string) {
 		fmt.Fprintf(os.Stderr, "forest: update: install new binary: %v\n", err)
 		return
 	}
+	if err := os.Setenv("FOREST_UPDATE_FROM", fromSHA); err != nil {
+		_ = os.Rename(cur, next)
+		_ = os.Rename(prev, cur)
+		fmt.Fprintf(os.Stderr, "forest: update: pending record: %v\n", err)
+		return
+	}
+	if err := os.Setenv("FOREST_UPDATE_TO", toSHA); err != nil {
+		_ = os.Unsetenv("FOREST_UPDATE_FROM")
+		_ = os.Rename(cur, next)
+		_ = os.Rename(prev, cur)
+		fmt.Fprintf(os.Stderr, "forest: update: pending record: %v\n", err)
+		return
+	}
 	fmt.Fprintf(os.Stderr, "forest: self-updated to %s, handoff at next pass\n", shortSHA)
 	argv := append([]string{cur}, os.Args[1:]...)
 	if err := syscall.Exec(cur, argv, os.Environ()); err != nil {
+		_ = os.Unsetenv("FOREST_UPDATE_FROM")
+		_ = os.Unsetenv("FOREST_UPDATE_TO")
 		_ = os.Rename(cur, next)
 		_ = os.Rename(prev, cur)
 		fmt.Fprintf(os.Stderr, "forest: update: exec: %v\n", err)
 	}
 }
 
-// acquireSingletonLock takes an exclusive, non-blocking flock on
-// .forest/daemon.lock so only one chewer runs at a time: the `forest chew`
-// daemon or a manual `forest once`. The lock fd is CLOEXEC, so self-exec drops
-// it and the fresh process image re-acquires it at the next chewLoop start — a
-// microsecond gap owned by the same pid.
+// acquireSingletonLock takes one non-blocking lock for a running service.
 func acquireSingletonLock(repoDir string) (*os.File, error) {
 	dir := filepath.Join(repoDir, WorkspaceDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -190,12 +218,11 @@ func acquireSingletonLock(repoDir string) (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("%s/daemon.lock is held by another forest daemon", WorkspaceDir)
+		return nil, fmt.Errorf("%s/daemon.lock is held by another forest service", WorkspaceDir)
 	}
 	return f, nil
 }
 
-// appendUpdate records one self-swap in the deploy ledger.
 func appendUpdate(repoDir string, r updateRecord) error {
 	dir := filepath.Join(repoDir, WorkspaceDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -209,9 +236,7 @@ func appendUpdate(repoDir string, r updateRecord) error {
 	return json.NewEncoder(f).Encode(r)
 }
 
-// cmdSelfcheck is the smoke gate the updater runs on a freshly built binary
-// before swapping to it. It must be cheap and offline: config parses, agents
-// load, and the workflow names resolve to real agents.
+// cmdSelfcheck verifies config and every configured lane agent offline.
 func cmdSelfcheck(repoDir string) int {
 	cfgPath := filepath.Join(repoDir, "forest.yaml")
 	if _, err := os.Stat(cfgPath); err != nil {
@@ -223,7 +248,7 @@ func cmdSelfcheck(repoDir string) int {
 		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
 		return 1
 	}
-	for _, name := range []string{cfg.Workflow.Build, cfg.Workflow.Review} {
+	for _, name := range []string{cfg.Flows.Builder.Agent, cfg.Flows.Verifier.Agent, cfg.Flows.Fixer.Agent} {
 		if name == "" {
 			continue
 		}

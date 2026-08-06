@@ -1,35 +1,30 @@
 package main
 
 import (
-	"errors"
+	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync/atomic"
-	"syscall"
-	"time"
 )
 
 func main() {
+	recordPendingUpdate()
 	os.Exit(run(os.Args[1:]))
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `forest — the iron-forest piranha tank
+	fmt.Fprintln(os.Stderr, `forest
 
-  forest list              print the current backlog
-  forest agents            list declared agents and their composition digest
-  forest stats [--json]    aggregate the run ledger
-  forest once <issue>      chew a single issue end to end
-  forest chew              poll: chew backlog AND watch open factory PRs
-  forest version           print the git sha this binary was built from
-  forest selfcheck         offline smoke gate (config + agents load)
-  forest watch [--interval 2s] [--live-gh]
-                          live operator board over .forest/ + daemon
-`)
+  forest list                         print eligible tracker items
+  forest agents                       list declared agents and digests
+  forest stats [--json]              aggregate the run ledger
+  forest serve [--flow <name>]...    run enabled flows
+  forest run <flow> <subject>        run one selected subject
+  forest show <sha>                  print verdict and checks notes
+  forest version                     print the binary revision
+  forest selfcheck                   verify config and agents offline
+  forest watch [--interval 2s]       show the operator board`)
 }
 
 func run(args []string) int {
@@ -54,33 +49,29 @@ func run(args []string) int {
 		return cmdAgents(repoDir)
 	case "stats":
 		return cmdStats(repoDir, args[1:])
-	case "once":
-		if len(args) < 2 {
+	case "serve":
+		var names []string
+		for i := 1; i < len(args); i++ {
+			if args[i] != "--flow" || i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "forest: serve: expected --flow <name>, got %q\n", args[i])
+				return 2
+			}
+			names = append(names, args[i+1])
+			i++
+		}
+		return serve(cfg, repoDir, names)
+	case "run":
+		if len(args) != 3 {
 			usage()
 			return 2
 		}
-		n, err := strconv.Atoi(args[1])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "forest: issue number required")
+		return runOnce(cfg, repoDir, args[1], args[2])
+	case "show":
+		if len(args) != 2 {
+			usage()
 			return 2
 		}
-		lock, err := acquireSingletonLock(repoDir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "forest:", err)
-			return 1
-		}
-		defer lock.Close()
-		// Reap worktrees a previous run leaked on abnormal exit before this run
-		// creates its own, mirroring the daemon at the top of chewLoop.
-		reapOrphanWorktrees(repoDir)
-		it, err := getIssue(cfg.Repo, n)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "forest:", err)
-			return 1
-		}
-		return chewOne(cfg, repoDir, it)
-	case "chew":
-		return chewLoop(cfg, repoDir)
+		return cmdShow(repoDir, args[1])
 	case "version":
 		fmt.Printf("forest %s\n", version)
 		return 0
@@ -95,7 +86,12 @@ func run(args []string) int {
 }
 
 func cmdList(cfg Config) int {
-	items, err := backlog(cfg)
+	repoDir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "forest:", err)
+		return 1
+	}
+	items, err := eligibleItems(cfg, repoDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
@@ -116,8 +112,8 @@ func cmdAgents(repoDir string) int {
 		fmt.Println("forest: no agents declared under agents/")
 		return 0
 	}
-	for _, n := range names {
-		a, err := loadAgent(repoDir, n)
+	for _, name := range names {
+		a, err := loadAgent(repoDir, name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forest: %v\n", err)
 			continue
@@ -126,9 +122,8 @@ func cmdAgents(repoDir string) int {
 		if a.BudgetSec > 0 {
 			budget = fmt.Sprintf("%ds", a.BudgetSec)
 		}
-		fmt.Printf("%s\tmodel=%s%s mode=%s steps=%d budget=%s price=%.2f/%.2f def_sha=%s\n",
-			n, a.Model, variantSuffix(a), a.Mode, a.Steps, budget,
-			a.PriceInUSDPerM, a.PriceOutUSDPerM, a.DefSHA)
+		fmt.Printf("%s\tmodel=%s%s mode=%s steps=%d budget=%s def_sha=%s\n",
+			name, a.Model, variantSuffix(a), a.Mode, a.Steps, budget, a.DefSHA)
 		fmt.Printf("  %s\n", a.Description)
 		var mcps []string
 		for _, m := range a.MCP {
@@ -145,339 +140,38 @@ func cmdAgents(repoDir string) int {
 	return 0
 }
 
-// chewLoop is the single piranha loop: it chews the backlog and, in the same
-// pass, watches every open factory PR (reaction loop) until it merges or
-// stalls. One loop, one serializer.
-func chewLoop(cfg Config, repoDir string) int {
-	fmt.Printf("forest v%s: chewing %s every %ds\n", version, cfg.Repo, cfg.PollIntervalSec)
-	sig := make(chan os.Signal, 2)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	var drain int32
-	go func() {
-		<-sig // first signal: drain the in-flight agent, then stop at a pass boundary
-		atomic.StoreInt32(&drain, 1)
-		fmt.Fprintln(os.Stderr, "forest: draining, waiting for the in-flight agent")
-		<-sig // second signal: the operator's only clock, since agents are unbounded
-		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
-		// os.Exit below skips deferred cleanup, so remove the in-flight
-		// worktree here or the run leaks it until the next startup reaps it.
-		if dir := currentWorktreeDir(); dir != "" {
-			removeWorktree(repoDir, dir)
-			fmt.Fprintf(os.Stderr, "forest: removed in-flight worktree %s\n", dir)
-		}
-		os.Exit(1)
-	}()
-	lock, err := acquireSingletonLock(repoDir)
+func cmdShow(repoDir, sha string) int {
+	if err := fetchNotes(repoDir); err != nil {
+		fmt.Fprintln(os.Stderr, "forest: notes:", err)
+		return 1
+	}
+	verdict, haveVerdict, err := readVerdict(repoDir, sha)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
+		fmt.Fprintln(os.Stderr, "forest: verdict:", err)
 		return 1
 	}
-	defer lock.Close()
-	// Reap worktrees a previous daemon leaked on abnormal exit before we start
-	// a new pass, so no stale run dir survives across a restart.
-	reapOrphanWorktrees(repoDir)
-	for {
-		if atomic.LoadInt32(&drain) == 1 {
-			fmt.Fprintln(os.Stderr, "forest: draining, no new pass")
-			return 0
-		}
-		runUpdateCheck(repoDir)
-		if nc, err := loadConfig(filepath.Join(repoDir, "forest.yaml")); err == nil {
-			cfg = nc
-		}
-		if err := reconcileClaims(cfg.Repo); err != nil {
-			fmt.Fprintf(os.Stderr, "forest: reconcile: %v\n", err)
-		}
-		items, err := backlog(cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "forest: backlog: %v\n", err)
-		} else {
-			if len(items) == 0 {
-				fmt.Printf("forest: backlog empty, sleeping %ds\n", cfg.PollIntervalSec)
-			} else {
-				// One item per pass. Chewing the whole backlog before watching a
-				// single PR starves the merge gate for as long as the queue is,
-				// and every later build then branches from a master missing the
-				// work already approved and waiting in an unmerged PR.
-				for _, it := range items {
-					fmt.Printf("forest: chewing #%d %s\n", it.Number, it.Title)
-					code := chewOne(cfg, repoDir, it)
-					if code == codeUnclaimable {
-						// Another worker owns it. Try the next candidate rather
-						// than spending the pass on an item we cannot touch.
-						continue
-					}
-					if code != 0 {
-						fmt.Fprintf(os.Stderr, "forest: #%d failed\n", it.Number)
-					}
-					break
-				}
-			}
-		}
-		if prs, err := listOpenForestPRs(cfg.Repo); err != nil {
-			fmt.Fprintf(os.Stderr, "forest: pr list: %v\n", err)
-		} else {
-			for _, n := range prs {
-				watchPR(cfg, repoDir, n)
-				time.Sleep(2 * time.Second)
-			}
-		}
-		time.Sleep(time.Duration(cfg.PollIntervalSec) * time.Second)
-	}
-}
-
-// codeUnclaimable is chewOne's answer when another worker already owns the item.
-// It is not a failure: nothing was built, spent, or decided, so the pass moves
-// to the next candidate instead of burning itself on an item it cannot touch.
-const codeUnclaimable = 2
-
-// chewOne runs the whole workflow for one new issue: claim, worktree, build,
-// gate, review, publish, record. It opens the PR and parks the item; the
-// reaction loop in chewLoop drives the PR from there.
-func chewOne(cfg Config, repoDir string, it issue) int {
-	runID := fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405Z"), it.Number)
-	workspace := filepath.Join(repoDir, WorkspaceDir)
-	_ = ensureLabels(cfg.Repo)
-
-	if _, err := loadAgent(repoDir, cfg.Workflow.Build); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: build agent: %v\n", err)
-		return 1
-	}
-	id := identify(repoDir, cfg)
-	record := runRecord{
-		Time: nowRFC(), RunID: runID, Issue: it.Number,
-		Agent: id.Agents, Model: id.Models, DefSHA: id.DefSHA,
-	}
-
-	if err := claimIssue(cfg.Repo, it.Number); err != nil {
-		if errors.Is(err, errAlreadyClaimed) {
-			// Not a run: nothing was built, spent, or decided. Recording it as a
-			// failure buried the ledger under identical zero-cost rows and, while
-			// this item stayed first in the backlog, starved every card behind it.
-			fmt.Fprintf(os.Stderr, "forest: #%d claimed by another worker, skipping\n", it.Number)
-			return codeUnclaimable
-		}
-		record.Status = "claim_failed"
-		record.Error = err.Error()
-		_ = appendRun(workspace, record)
-		fmt.Fprintf(os.Stderr, "forest: claim #%d: %v\n", it.Number, err)
-		return 1
-	}
-
-	wtDir, branch, baseSHA, err := createWorktree(repoDir, workspace, it)
+	checks, haveChecks, err := readChecks(repoDir, sha)
 	if err != nil {
-		record.Status = "worktree_failed"
-		record.Error = err.Error()
-		_ = appendRun(workspace, record)
-		_ = failIssue(cfg.Repo, it.Number, "worktree: "+err.Error())
-		fmt.Fprintf(os.Stderr, "forest: worktree #%d: %v\n", it.Number, err)
+		fmt.Fprintln(os.Stderr, "forest: checks:", err)
 		return 1
 	}
-	// createWorktree already registered wtDir in the tracker; this defer clears
-	// it (and removes the worktree) once the run no longer owns it.
-	defer func() {
-		removeWorktree(repoDir, wtDir)
-		setCurrentWorktree("")
-	}()
-	record.Branch = branch
-	record.BaseSHA = baseSHA
-
-	r, err := runPick(cfg, repoDir, wtDir, baseSHA, runID, it, "")
-	record.CostUSD += r.Cost
-	record.TokensIn += r.TokIn
-	record.TokOut += r.TokOut
-	record.ReviewVerdict = r.Verdict
+	value := struct {
+		Verdict *verdictNote `json:"verdict,omitempty"`
+		Checks  *checksNote  `json:"checks,omitempty"`
+	}{
+		Checks: &checks,
+	}
+	if haveVerdict {
+		value.Verdict = &verdict
+	}
+	if !haveChecks {
+		value.Checks = nil
+	}
+	b, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		record.Status = failStatus(err)
-		record.Error = err.Error()
-		_ = appendRun(workspace, record)
-		_ = failIssue(cfg.Repo, it.Number, err.Error())
-		fmt.Fprintf(os.Stderr, "forest: #%d: %s\n", it.Number, err.Error())
+		fmt.Fprintln(os.Stderr, "forest: show:", err)
 		return 1
 	}
-	if r.Verdict != "approve" {
-		// The owl never approved. Park the item for a human: comment the
-		// feedback and mark it failed so the loop does not retry it forever.
-		msg := "review requested changes: " + r.Notes
-		record.Status = "changes_requested"
-		record.Error = msg
-		_ = appendRun(workspace, record)
-		_ = failIssue(cfg.Repo, it.Number, msg)
-		fmt.Printf("forest: #%d changes requested: %s\n", it.Number, r.Notes)
-		return 0
-	}
-
-	if err := commitAndPush(repoDir, wtDir, branch, it); err != nil {
-		record.Status = "publish_failed"
-		record.Error = err.Error()
-		_ = appendRun(workspace, record)
-		_ = failIssue(cfg.Repo, it.Number, "publish: "+err.Error())
-		fmt.Fprintf(os.Stderr, "forest: publish #%d: %v\n", it.Number, err)
-		return 1
-	}
-
-	var committed []string
-	raw, err := gitOut(wtDir, "diff", "--name-only", baseSHA, "HEAD")
-	if err != nil {
-		committed = r.Changed
-	} else if raw != "" {
-		committed = strings.Split(raw, "\n")
-	}
-	prURL, err := openPR(cfg.Repo, branch, "forest: "+it.Title, prBody(it, r.Rep, committed))
-	if err != nil {
-		record.Status = "pr_failed"
-		record.Error = err.Error()
-		_ = appendRun(workspace, record)
-		_ = failIssue(cfg.Repo, it.Number, "pr: "+err.Error())
-		fmt.Fprintf(os.Stderr, "forest: pr #%d: %v\n", it.Number, err)
-		return 1
-	}
-	headSHA, _ := gitOut(wtDir, "rev-parse", "HEAD")
-	prNum := prNumberFromURL(prURL)
-	_ = appendPR(workspace, prState{
-		Time: nowRFC(), PRURL: prURL, PR: prNum, Branch: branch, Issue: it.Number,
-		State: "opened", Owl: r.Verdict, SHA: headSHA,
-	})
-	record.PRURL = prURL
-	record.Status = "done"
-	_ = appendRun(workspace, record)
-	if err := closeIssue(cfg.Repo, it.Number); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: close #%d: %v (PR is open)\n", it.Number, err)
-	}
-	fmt.Printf("forest: #%d done: %s (review=%s)\n", it.Number, prURL, r.Verdict)
+	fmt.Println(string(b))
 	return 0
-}
-
-// pickResult is one full build+gate+review pass over an item in a worktree.
-type pickResult struct {
-	Changed []string
-	Rep     report
-	Verdict string // owl verdict: approve | changes
-	Notes   string
-	TokIn   int64
-	TokOut  int64
-	Cost    float64
-}
-
-// runPick builds an item with the build agent, gates it, and runs the owl
-// review loop (up to MaxFixIterations corrective passes). It is shared by
-// chewOne (new items) and fixPR (reaction re-entries). Errors carry a stage
-// prefix so callers can classify the run's status.
-func runPick(cfg Config, repoDir, wtDir, baseSHA, runID string, it issue, feedback string) (pickResult, error) {
-	var pr pickResult
-	workspace := filepath.Join(repoDir, WorkspaceDir)
-	buildAgent, err := loadAgent(repoDir, cfg.Workflow.Build)
-	if err != nil {
-		return pr, err
-	}
-	buildSchema := filepath.Join(repoDir, DefaultAgentsDir, cfg.Workflow.Build, "report.schema.json")
-	trace := func(phase string) string {
-		return filepath.Join(workspace, "runs", runID+"."+phase+".jsonl")
-	}
-
-	prompt, err := renderUserPrompt(buildAgent, issueData(it, feedback))
-	if err != nil {
-		return pr, fmt.Errorf("prompt: %w", err)
-	}
-	stats, err := runPhase(wtDir, buildAgent, prompt, trace("chew"),
-		time.Duration(buildAgent.BudgetSec)*time.Second)
-	if err != nil {
-		return pr, fmt.Errorf("agent: %w", err)
-	}
-	pr.TokIn, pr.TokOut, pr.Cost = stats.tokensIn, stats.tokensOut, price(stats, buildAgent)
-	pr.Changed, pr.Rep, err = gate(wtDir, baseSHA, cfg.Protected, buildSchema)
-	if err != nil {
-		return pr, fmt.Errorf("gate: %w", err)
-	}
-	if cfg.Workflow.Review == "" {
-		pr.Verdict = "approve"
-		return pr, nil
-	}
-	reviewAgent, err := loadAgent(repoDir, cfg.Workflow.Review)
-	if err != nil {
-		return pr, err
-	}
-	reviewSchema := filepath.Join(repoDir, DefaultAgentsDir, cfg.Workflow.Review, "report.schema.json")
-	for fix := 0; fix <= cfg.Workflow.MaxFixIterations; fix++ {
-		_ = git(wtDir, "add", "-A")
-		_ = git(wtDir, "reset", "-q", "--", "report.json", "review.json")
-		diff, derr := gitOut(wtDir, "diff", "--cached", "--", ".",
-			":(exclude)report.json", ":(exclude)review.json")
-		if derr != nil {
-			return pr, fmt.Errorf("review: %w", derr)
-		}
-		rvPrompt, rerr := renderUserPrompt(reviewAgent, reviewData(it, pr.Rep, diff))
-		if rerr != nil {
-			return pr, fmt.Errorf("review: %w", rerr)
-		}
-		rvStats, rerr := runPhase(wtDir, reviewAgent, rvPrompt, trace(fmt.Sprintf("review%d", fix)),
-			time.Duration(reviewAgent.BudgetSec)*time.Second)
-		if rerr != nil {
-			return pr, fmt.Errorf("review: %w", rerr)
-		}
-		pr.TokIn += rvStats.tokensIn
-		pr.TokOut += rvStats.tokensOut
-		pr.Cost += price(rvStats, reviewAgent)
-		rv, gerr := gateReview(wtDir, reviewSchema)
-		if gerr != nil {
-			return pr, fmt.Errorf("review: %w", gerr)
-		}
-		pr.Verdict = rv.Verdict
-		pr.Notes = rv.Notes
-		if pr.Verdict == "approve" {
-			break
-		}
-		if fix >= cfg.Workflow.MaxFixIterations {
-			break
-		}
-		fixPrompt, ferr := renderUserPrompt(buildAgent, issueData(it, rv.Notes))
-		if ferr != nil {
-			return pr, fmt.Errorf("prompt: %w", ferr)
-		}
-		fstats, ferr := runPhase(wtDir, buildAgent, fixPrompt, trace(fmt.Sprintf("fix%d", fix)),
-			time.Duration(buildAgent.BudgetSec)*time.Second)
-		if ferr != nil {
-			return pr, fmt.Errorf("agent: %w", ferr)
-		}
-		pr.TokIn += fstats.tokensIn
-		pr.TokOut += fstats.tokensOut
-		pr.Cost += price(fstats, buildAgent)
-		pr.Changed, pr.Rep, gerr = gate(wtDir, baseSHA, cfg.Protected, buildSchema)
-		if gerr != nil {
-			return pr, fmt.Errorf("gate: %w", gerr)
-		}
-	}
-	return pr, nil
-}
-
-// failStatus maps a stage-prefixed error to a ledger status name.
-func failStatus(err error) string {
-	switch s := err.Error(); {
-	case strings.HasPrefix(s, "agent:"):
-		return "agent_failed"
-	case strings.HasPrefix(s, "gate:"):
-		return "gate_failed"
-	case strings.HasPrefix(s, "review:"):
-		return "review_failed"
-	case strings.HasPrefix(s, "prompt:"):
-		return "prompt_failed"
-	default:
-		return "pick_failed"
-	}
-}
-
-// prBody builds the pull request description from the agent's report.
-func prBody(it issue, rep report, changed []string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Autogenerated by iron-forest `forest` from issue #%d — %s.\n\n", it.Number, it.Title)
-	sb.WriteString(rep.Summary)
-	sb.WriteString("\n\nChanged files:\n")
-	for _, f := range changed {
-		fmt.Fprintf(&sb, "- %s\n", f)
-	}
-	if strings.TrimSpace(rep.Notes) != "" && !strings.EqualFold(strings.TrimSpace(rep.Notes), "none") {
-		fmt.Fprintf(&sb, "\nNotes: %s\n", rep.Notes)
-	}
-	fmt.Fprintf(&sb, "\nFixes #%d\n", it.Number)
-	return sb.String()
 }

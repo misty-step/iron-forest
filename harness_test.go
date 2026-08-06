@@ -50,7 +50,7 @@ func fakeOpencode(t *testing.T, script string) (string, string) {
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	trace := filepath.Join(t.TempDir(), "run", "chew.jsonl")
+	trace := filepath.Join(t.TempDir(), "run", "agent.jsonl")
 	return wt, trace
 }
 

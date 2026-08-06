@@ -1,10 +1,6 @@
 package main
 
-import (
-	"encoding/json"
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // commitAndPush makes the deterministic commit for one run and pushes the
 // branch. The agent never touches GitHub; this is the only writer.
@@ -22,29 +18,4 @@ func commitAndPush(repo, wtDir, branch string, it issue) error {
 		return err
 	}
 	return nil
-}
-
-// openPR creates the pull request deterministically and idempotently: if a PR
-// for the head branch already exists it returns it instead of a second one.
-func openPR(repo, head, title, body string) (string, error) {
-	out, err := ghJSON("pr", "list", "-R", repo, "--state", "open",
-		"--head", head, "--json", "url")
-	if err != nil {
-		return "", err
-	}
-	var existing []struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal(out, &existing); err != nil {
-		return "", err
-	}
-	if len(existing) > 0 {
-		return existing[0].URL, nil
-	}
-	created, err := ghJSON("pr", "create", "-R", repo,
-		"--base", "master", "--head", head, "--title", title, "--body", body)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(created)), nil
 }

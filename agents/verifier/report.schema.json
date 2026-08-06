@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "review verdict",
-  "description": "Output contract for the review agent's review.json. The review gate rejects a run whose review.json does not satisfy it.",
+  "title": "verifier verdict",
+  "description": "Output contract for review.json from the Verifier lane.",
   "type": "object",
   "required": ["verdict", "summary"],
   "properties": {
@@ -15,7 +15,7 @@
     },
     "notes": {
       "type": "string",
-      "description": "specific feedback for the author, or \"none\""
+      "description": "specific feedback for the Builder, or \"none\""
     }
   }
 }

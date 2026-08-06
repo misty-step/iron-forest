@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -12,53 +14,134 @@ const (
 	DefaultAgentsDir = "agents"
 	// WorkspaceDir holds the ledger, traces, and per-run worktrees.
 	WorkspaceDir = ".forest"
+	// BranchPrefix names every branch a flow creates.
+	BranchPrefix = "forest/"
 
-	claimLabel       = "forest:wip"
-	failedLabel      = "forest:failed"
+	// failedLabel is the human hint a lane leaves when a subject needs a person.
+	// It is a tracker convenience, never state the factory reads back.
+	failedLabel = "forest:failed"
+
 	commitAuthorName = "forest"
 	commitAuthorMail = "forest@mistystep.io"
 	modelDefault     = "openrouter-mint/deepseek-v4-flash-0731"
 )
 
-// defaultMaxReactionFixes is the single source of truth for how many re-entry
-// build passes the reaction loop makes on one PR before parking it. It is
-// applied both when composing the default config and when a config omits the
-// value or sets it to zero.
-const defaultMaxReactionFixes = 2
+// configPath is the composition file for a checkout.
+func configPath(repoDir string) string { return filepath.Join(repoDir, "forest.yaml") }
 
-// Config is the composition file forest.yaml. It declares the backlog source,
-// the poll cadence, factory-wide protected paths, and the workflow: which
-// named agents implement the build and review phases and how many corrective
-// build passes are allowed before the review verdict is final.
+// workspaceDir is where a checkout keeps its ledger, traces, and worktrees.
+func workspaceDir(repoDir string) string { return filepath.Join(repoDir, WorkspaceDir) }
+
+// Config is forest.yaml: the work source, the paths no agent may touch, the
+// lease policy, the checks the factory runs itself, the flows that are on, and
+// the optional human-facing projection.
 type Config struct {
-	Repo            string   `yaml:"repo"`
-	PollIntervalSec int      `yaml:"poll_interval_seconds"`
-	Protected       []string `yaml:"protected"`
-	Workflow        Workflow `yaml:"workflow"`
+	Repo       string      `yaml:"repo"`
+	Protected  []string    `yaml:"protected"`
+	Lease      LeasePolicy `yaml:"lease"`
+	Checks     []Check     `yaml:"checks"`
+	Flows      Flows       `yaml:"flows"`
+	Projection Projection  `yaml:"projection"`
 }
 
-// Workflow names the agents that drive the phases of one item. An empty
-// Review disables the review phase entirely (build -> publish). AutoMerge
-// gates the reaction loop's deterministic merge; it defaults off until the
-// operator has proven one manual merge.
-type Workflow struct {
-	Build            string `yaml:"build"`
-	Review           string `yaml:"review"`
-	MaxFixIterations int    `yaml:"max_fix_iterations"`
-	AutoMerge        bool   `yaml:"auto_merge"`
-	MaxReactionFixes int    `yaml:"max_reaction_fixes"`
+// LeasePolicy bounds how long one worker may own a subject. A lease older than
+// TTLSeconds may be broken by another worker, so a host that dies mid-run
+// cannot make its subject unworkable forever. Zero disables breaking.
+type LeasePolicy struct {
+	TTLSeconds int `yaml:"ttl_seconds"`
+}
+
+// TTL is the lease policy as a duration.
+func (l LeasePolicy) TTL() time.Duration { return time.Duration(l.TTLSeconds) * time.Second }
+
+// Check is one command the factory runs itself against a worktree. The result
+// is a fact the factory writes to a note, not a status it reads from a host.
+type Check struct {
+	Name string `yaml:"name"`
+	Run  string `yaml:"run"`
+}
+
+// Flows declares the lanes. Each lane runs independently, on its own clock,
+// coordinating only through leases and notes in the repository.
+type Flows struct {
+	Builder  BuilderFlowCfg  `yaml:"builder"`
+	Verifier VerifierFlowCfg `yaml:"verifier"`
+	Fixer    FixerFlowCfg    `yaml:"fixer"`
+}
+
+// FlowCfg is what every lane declares: whether it is on, which agent it runs,
+// and how long it sleeps between passes.
+type FlowCfg struct {
+	Enabled     bool   `yaml:"enabled"`
+	Agent       string `yaml:"agent"`
+	IntervalSec int    `yaml:"interval_seconds"`
+}
+
+// BuilderFlowCfg turns tracker items into branches. ExcludeLabels are the
+// tracker-side signals that make an item ineligible; they are a convenience of
+// the current tracker, not part of the factory's state.
+type BuilderFlowCfg struct {
+	FlowCfg       `yaml:",inline"`
+	ExcludeLabels []string `yaml:"exclude_labels"`
+}
+
+// VerifierFlowCfg reviews branches and owns the merge. Merge names the history
+// shape: squash keeps one commit per subject on the target branch; ff keeps the
+// branch's own commits and refuses when the branch is behind. AutoMerge gates
+// the merge effect itself, so a factory can review without merging.
+type VerifierFlowCfg struct {
+	FlowCfg   `yaml:",inline"`
+	Merge     string `yaml:"merge"`
+	AutoMerge bool   `yaml:"auto_merge"`
+}
+
+// FixerFlowCfg repairs branches that were rejected or failed their checks.
+// Attempts bounds how many repairs one branch may receive before it waits for
+// a human.
+type FixerFlowCfg struct {
+	FlowCfg  `yaml:",inline"`
+	Attempts int `yaml:"attempts"`
+}
+
+// Projection is the optional, one-way human surface: publish a branch as a pull
+// request and mirror decisions as comments. The factory never reads it back.
+// MergeViaHost is for a protected target branch, where only the host may merge.
+type Projection struct {
+	Enabled      bool `yaml:"enabled"`
+	MergeViaHost bool `yaml:"merge_via_host"`
+}
+
+// defaultChecks is what the factory runs when a config declares no checks.
+func defaultChecks() []Check {
+	return []Check{
+		{Name: "build", Run: "mise exec -- go build ./..."},
+		{Name: "vet", Run: "mise exec -- go vet ./..."},
+		{Name: "test", Run: "mise exec -- go test ./..."},
+	}
 }
 
 func defaultConfig() Config {
 	return Config{
-		PollIntervalSec: 30,
 		Protected: []string{
 			".forest/", "forest.yaml", "agents/", ".opencode/opencode.json",
 		},
-		Workflow: Workflow{
-			Build: "beaver", Review: "owl", MaxFixIterations: 1,
-			AutoMerge: false, MaxReactionFixes: defaultMaxReactionFixes,
+		Lease:  LeasePolicy{TTLSeconds: 7200},
+		Checks: defaultChecks(),
+		Flows: Flows{
+			Builder: BuilderFlowCfg{
+				FlowCfg:       FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 30},
+				ExcludeLabels: []string{"parked", failedLabel},
+			},
+			Verifier: VerifierFlowCfg{
+				FlowCfg: FlowCfg{Enabled: true, Agent: "verifier", IntervalSec: 20},
+				Merge:   "squash", AutoMerge: false,
+			},
+			Fixer: FixerFlowCfg{
+				FlowCfg:  FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 40},
+				Attempts: 2,
+			},
 		},
+		Projection: Projection{Enabled: true, MergeViaHost: false},
 	}
 }
 
@@ -74,17 +157,45 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Repo == "" {
 		return cfg, fmt.Errorf("%s: repo is required", path)
 	}
-	if cfg.PollIntervalSec <= 0 {
-		cfg.PollIntervalSec = 30
+	d := defaultConfig()
+	if len(cfg.Checks) == 0 {
+		cfg.Checks = d.Checks
 	}
-	if cfg.Workflow.Build == "" {
-		cfg.Workflow.Build = "beaver"
+	if cfg.Lease.TTLSeconds < 0 {
+		cfg.Lease.TTLSeconds = 0
 	}
-	if cfg.Workflow.MaxFixIterations < 0 {
-		cfg.Workflow.MaxFixIterations = 0
+	if cfg.Flows.Builder.Agent == "" {
+		cfg.Flows.Builder.Agent = d.Flows.Builder.Agent
 	}
-	if cfg.Workflow.MaxReactionFixes <= 0 {
-		cfg.Workflow.MaxReactionFixes = defaultMaxReactionFixes
+	if cfg.Flows.Verifier.Agent == "" {
+		cfg.Flows.Verifier.Agent = d.Flows.Verifier.Agent
+	}
+	if cfg.Flows.Fixer.Agent == "" {
+		cfg.Flows.Fixer.Agent = d.Flows.Fixer.Agent
+	}
+	if cfg.Flows.Builder.IntervalSec <= 0 {
+		cfg.Flows.Builder.IntervalSec = d.Flows.Builder.IntervalSec
+	}
+	if cfg.Flows.Verifier.IntervalSec <= 0 {
+		cfg.Flows.Verifier.IntervalSec = d.Flows.Verifier.IntervalSec
+	}
+	if cfg.Flows.Fixer.IntervalSec <= 0 {
+		cfg.Flows.Fixer.IntervalSec = d.Flows.Fixer.IntervalSec
+	}
+	switch cfg.Flows.Verifier.Merge {
+	case "":
+		cfg.Flows.Verifier.Merge = d.Flows.Verifier.Merge
+	case "squash", "ff":
+	default:
+		return cfg, fmt.Errorf("%s: merge must be squash or ff, got %q", path, cfg.Flows.Verifier.Merge)
+	}
+	if cfg.Flows.Fixer.Attempts <= 0 {
+		cfg.Flows.Fixer.Attempts = d.Flows.Fixer.Attempts
+	}
+	for i, c := range cfg.Checks {
+		if c.Name == "" || c.Run == "" {
+			return cfg, fmt.Errorf("%s: checks[%d] needs a name and a run", path, i)
+		}
 	}
 	return cfg, nil
 }

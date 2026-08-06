@@ -1,6 +1,10 @@
 # Contributing
 
-iron-forest is a self-hosting software factory: issues are chewed by the
-beaver agent into a git worktree, gated by the factory, reviewed by the owl
-agent, and published as pull requests that the reaction loop watches until
-merge.
+Work from `master` and keep each change focused.
+
+1. Run `mise exec -- go build ./...`.
+2. Run `mise exec -- go vet ./...`.
+3. Run `mise exec -- go test ./...`.
+4. Run `./forest selfcheck` after configuration or agent changes.
+5. Use the vocabulary in [AGENTS.md](AGENTS.md).
+6. Update the tests and docs that describe your change.

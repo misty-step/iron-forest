@@ -1,53 +1,63 @@
 # AGENTS
 
-Iron Forest defines its agents as data so they are diffable, inspectable, and
-reproducible. Each agent is a directory under `agents/<name>/`. The factory
-never edits these directories: they are protected paths, reviewed like source.
+This file is the contributor contract for Iron Forest.
 
-## Agent anatomy
+## Vocabulary
 
-An agent directory contains:
+Use these names for system concepts: Flow, Run, Phase, Subject, Revision, Lease,
+Selector, Effect, Verdict, Gate, Ledger, Tracker, Host, Runner, Projection,
+Builder, Verifier, and Fixer.
 
-- `agent.yaml` — the declaration: harness, model, permissions, MCP wiring,
-  budget, and provider price table.
-- `instructions.md` — the system prompt: identity and standing rules.
-- `prompt.md` — the user-prompt template; the work item is injected per run.
-- `report.schema.json` — the output contract the gate enforces.
-- `skills/*.md` — optional extra context appended to the system prompt.
+Forbidden vocabulary includes the retired animal labels, the former action and state words, and the obsolete configuration noun.
+Do not add accounting for monetary amounts.
+Use the system names above in source, tests, issues, commits, and documentation.
 
-The gate requires that a run's report validate against the agent's schema
-before the change can move forward.
+## Agent declarations
 
-## The beaver (build)
+Iron Forest has two declarations:
 
-`agents/beaver/` implements one issue in the worktree and writes `report.json`.
+- `agents/builder/` contains the Builder declaration.
+- `agents/verifier/` contains the Verifier declaration.
 
-- Model: `openrouter-mint/deepseek-v4-flash-0731` (DeepSeek through OpenRouter
-  via the Mint proxy), temperature 0.2.
-- Mode: `primary`, up to 50 steps, no deadline (`budget_seconds: 0`).
-- Powers: read/edit/glob/grep/list/bash/lsp/todowrite allowed; the web, `task`,
-  `skill`, and external-directory surfaces are denied — the builder runs
-  offline against its own snapshot.
-- The Exa MCP server is declared but disabled.
+Each declaration uses these files:
 
-## The owl (review)
+- `agent.yaml` declares the harness, model, permissions, MCP wiring, and run limits.
+- `instructions.md` contains the system prompt and standing rules.
+- `prompt.md` contains the user-prompt template for one Subject.
+- `report.schema.json` defines the output contract enforced by the Gate.
+- `skills/*.md` contains optional context added to the system prompt.
 
-`agents/owl/` checks a worktree change against its issue and writes
-`review.json`. Its approval is the only thing that can clear a change for
-merge, so it must not share the builder's bias.
+The Builder writes `report.json` after it implements a Subject.
+The Verifier writes `review.json` after it produces a Verdict.
+The Builder declaration currently includes `skills/go-style.md`.
+The Verifier declaration has no skills directory.
 
-- Model: `openrouter/openai/gpt-5.6-luna` at `variant: max` — OpenAI, a
-  different family than the builder, at maximum reasoning effort.
-- Mode: `primary`, up to 30 steps, no deadline.
-- Read-mostly: it inspects the diff and may write only `review.json`. Every
-  network surface and every tool except read/edit/glob/grep/list/bash/lsp is
-  denied.
+## Gate and protected paths
 
-## Adding an agent
+The Gate rejects changes to these protected paths:
 
-1. Create `agents/<name>/` with the five files above, copying the shape from an
-   existing agent.
-2. Declare `workflow.build` or `workflow.review: <name>` in `forest.yaml`.
-3. Wire the model and price table in `agent.yaml`.
-4. Run `forest selfcheck` from the repository root to confirm the config loads
-   and the agent resolves.
+- `.forest/`
+- `forest.yaml`
+- `agents/`
+- `.opencode/opencode.json`
+
+Keep these paths unchanged in an agent worktree. The Gate also validates the
+agent output against its `report.schema.json`.
+
+Iron Forest runs its own commands from `checks:` and writes their results as git
+notes. It never reads a Host's review or check state.
+
+The Ledger records tokens only.
+
+## Toolchain and branch
+
+Use the pinned Go toolchain through mise:
+
+```sh
+mise exec -- go build ./...
+mise exec -- go vet ./...
+mise exec -- go test ./...
+```
+
+Use `master` as the target branch. Keep agent changes small, update the relevant
+tests and docs, and run `./forest selfcheck` after configuration changes.

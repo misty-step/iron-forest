@@ -40,19 +40,15 @@ type Agent struct {
 	Mode        string   `yaml:"mode"`
 	Temperature *float64 `yaml:"temperature"`
 	Steps       int      `yaml:"steps"`
-	// BudgetSec bounds one agent run. Zero or absent means no deadline: a
-	// reasoning model at maximum effort can think for many minutes and still be
-	// doing useful work, and a killed run wastes every token it already spent.
-	BudgetSec       int               `yaml:"budget_seconds"`
-	PriceInUSDPerM  float64           `yaml:"price_usd_per_m_input"`
-	PriceOutUSDPerM float64           `yaml:"price_usd_per_m_output"`
-	Permission      map[string]string `yaml:"permission"`
-	MCP             []McpSpec         `yaml:"mcp"`
+	// BudgetSec bounds one agent run. Zero or absent means no deadline.
+	BudgetSec  int               `yaml:"budget_seconds"`
+	Permission map[string]string `yaml:"permission"`
+	MCP        []McpSpec         `yaml:"mcp"`
 
-	Instructions string // instructions.md body (the system prompt)
-	PromptTmpl   string // prompt.md body (the user-prompt template)
-	ReportSchema string // report.schema.json document
-	DefSHA       string // composition digest of the whole definition
+	Instructions string
+	PromptTmpl   string
+	ReportSchema string
+	DefSHA       string
 }
 
 func loadAgent(repoDir, name string) (*Agent, error) {
@@ -77,12 +73,6 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if a.Steps == 0 {
 		a.Steps = 50
 	}
-	if a.PriceInUSDPerM == 0 {
-		a.PriceInUSDPerM = 0.09
-	}
-	if a.PriceOutUSDPerM == 0 {
-		a.PriceOutUSDPerM = 0.18
-	}
 	ins, err := os.ReadFile(filepath.Join(dir, "instructions.md"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %s instructions.md: %w", name, err)
@@ -96,42 +86,6 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	}
 	a.DefSHA = composeDigest(repoDir, name)
 	return a, nil
-}
-
-// runIdentity names every agent that produced a run, with the model and the
-// definition digest each ran under. Both phases are recorded because the
-// reviewer is deliberately a different model family from the builder: with one
-// model field the ledger could not say who judged a change, and cost would be
-// attributed to whichever family happened to build it.
-type runIdentity struct {
-	Agents string // "beaver,owl"
-	Models string // one model per agent, same order
-	DefSHA string // one composition digest per agent, same order
-}
-
-// identify loads the workflow's agents and joins their identities in phase
-// order. A missing or unreadable agent is skipped: attribution must never
-// block a run that otherwise succeeded.
-func identify(repoDir string, cfg Config) runIdentity {
-	var id runIdentity
-	for _, name := range []string{cfg.Workflow.Build, cfg.Workflow.Review} {
-		if name == "" {
-			continue
-		}
-		a, err := loadAgent(repoDir, name)
-		if err != nil {
-			continue
-		}
-		if id.Agents != "" {
-			id.Agents += ","
-			id.Models += ","
-			id.DefSHA += ","
-		}
-		id.Agents += a.Name
-		id.Models += a.Model
-		id.DefSHA += a.DefSHA
-	}
-	return id
 }
 
 // variantSuffix renders the reasoning variant beside the model for operator
@@ -271,11 +225,9 @@ func renderUserPrompt(a *Agent, data map[string]any) (string, error) {
 	return strings.TrimSpace(sb.String()), nil
 }
 
-// issueData feeds a chew run: the item plus an optional revision request. The
-// item's comments are folded onto the body so feedback a prior run left behind
-// (a pre-publish rejection, an operator note) reaches the same prompt as the
-// task text; comments are carried through the prompt data rather than by
-// rewriting the stored issue body on GitHub.
+// issueData feeds a builder or fixer run: the item plus an optional revision
+// request. Comments carry earlier feedback into the same prompt as the task.
+// The stored item body stays unchanged.
 func issueData(it issue, revision string) map[string]any {
 	body := it.Body
 	if comments := renderComments(it.Comments); comments != "" {
@@ -295,13 +247,9 @@ func issueData(it issue, revision string) map[string]any {
 const maxCommentBytes = 2000
 
 // renderComments joins an item's comments into one deterministic block, oldest
-// first, capped in volume. Ordering is pinned to creation time so a retry sees
-// earlier objections before later ones and the resulting prompt is stable.
-// Every rendered comment costs its body plus a "- " prefix and a trailing
-// newline, and the cap applies to the whole block, not just the bodies, so a
-// thread of many short comments cannot render several times maxCommentBytes.
-// Comments are selected newest first so the cap can never drop the newest
-// rejection behind older comments: a retry keeps reading the objection.
+// first, capped in volume. Creation time keeps retries stable across runs.
+// The full rendered block stays within maxCommentBytes.
+// Newest comments are selected first so the latest objection remains visible.
 func renderComments(cs []comment) string {
 	sorted := append([]comment(nil), cs...)
 	sort.SliceStable(sorted, func(i, j int) bool {

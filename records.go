@@ -7,21 +7,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
-// runRecord is the durable ledger line for one chewed item. appends go to
-// .forest/runs.jsonl; append-only by construction.
+// runRecord is one append-only ledger row for one flow decision.
 type runRecord struct {
-	Time     string  `json:"time"`
-	RunID    string  `json:"run_id"`
-	Issue    int     `json:"issue"`
-	Branch   string  `json:"branch"`
-	PRURL    string  `json:"pr_url"`
-	Status   string  `json:"status"`
-	CostUSD  float64 `json:"cost_usd"`
-	TokensIn int64   `json:"tokens_in"`
-	TokOut   int64   `json:"tokens_out"`
-	// Repro fields: what actually produced this run.
+	Time          string `json:"time"`
+	RunID         string `json:"run_id"`
+	Flow          string `json:"flow"`
+	Subject       string `json:"subject"`
+	Revision      string `json:"revision"`
+	Issue         int    `json:"issue"`
+	Branch        string `json:"branch"`
+	PRURL         string `json:"pr_url"`
+	Status        string `json:"status"`
+	TokensIn      int64  `json:"tokens_in"`
+	TokOut        int64  `json:"tokens_out"`
 	Agent         string `json:"agent"`
 	Model         string `json:"model"`
 	BaseSHA       string `json:"base_sha"`
@@ -29,6 +31,9 @@ type runRecord struct {
 	ReviewVerdict string `json:"review,omitempty"`
 	Error         string `json:"error,omitempty"`
 }
+
+// nowRFC returns the UTC timestamp used by ledger records.
+func nowRFC() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // loadLedger reads every run from the append-only ledger at path. Unparseable
 // lines are skipped and counted so one bad artifact never breaks the whole
@@ -65,19 +70,17 @@ func loadLedger(path string) ([]runRecord, int, error) {
 	return out, invalid, nil
 }
 
-// runCategory buckets a ledger status into the operator-facing totals that
-// `forest stats` and `forest watch` both report: done, fixed, failed, or other.
-// This is the single failure vocabulary; readers must not map statuses again.
+// runCategory groups ledger statuses for operator summaries.
 func runCategory(status string) string {
 	switch status {
-	case "done":
-		return "done"
-	case "fixed":
-		return "fixed"
-	case "agent_failed", "gate_failed", "review_failed", "publish_failed",
-		"pr_failed", "claim_failed", "worktree_failed", "prompt_failed", "pick_failed":
-		return "failed"
+	case "built", "reviewed", "merged", "fixed":
+		return "progress"
+	case "skipped":
+		return "other"
 	default:
+		if strings.HasSuffix(status, "_failed") {
+			return "failed"
+		}
 		return "other"
 	}
 }
