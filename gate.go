@@ -47,18 +47,24 @@ func gate(wtDir, baseSHA string, protected []string, schemaPath string) ([]strin
 	if err != nil {
 		return nil, rep, err
 	}
-	changed := parseChanged(out)
+	changed, renamed := parseChanged(out)
 	real := make([]string, 0, len(changed))
 	for _, path := range changed {
 		if strings.HasPrefix(path, ".forest/") || isRunArtifact(path) {
 			continue // a run record, not the repo's change
 		}
-		for _, prot := range protected {
-			if prot != "" && (path == prot || strings.HasPrefix(path, prot)) {
-				return nil, rep, fmt.Errorf("agent touched protected path %q", path)
-			}
+		if isProtected(path, protected) {
+			return nil, rep, fmt.Errorf("agent touched protected path %q", path)
 		}
 		real = append(real, path)
+	}
+	// parseChanged keeps only the destination of a rename, so the protected
+	// list would never see a protected path being moved away; reject any
+	// rename whose original path is protected.
+	for _, path := range renamed {
+		if isProtected(path, protected) {
+			return nil, rep, fmt.Errorf("agent renamed protected path %q", path)
+		}
 	}
 	if len(real) == 0 {
 		return nil, rep, fmt.Errorf("agent produced no real changes")
@@ -105,7 +111,7 @@ func checkSchema(file, schemaPath string) error {
 		return nil // no declared schema; rely on the typed struct
 	}
 	var s struct {
-		Required   []string             `json:"required"`
+		Required   []string `json:"required"`
 		Properties map[string]struct {
 			Type string `json:"type"`
 		} `json:"properties"`
@@ -157,10 +163,22 @@ func isRunArtifact(path string) bool {
 	return false
 }
 
+// isProtected reports whether path is covered by one of the protected paths.
+func isProtected(path string, protected []string) bool {
+	for _, prot := range protected {
+		if prot != "" && (path == prot || strings.HasPrefix(path, prot)) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseChanged turns `git status --porcelain` into a changed file list,
-// stripping rename arrows (`R  old -> new` keeps `new`).
-func parseChanged(porcelain string) []string {
-	var out []string
+// stripping rename arrows (`R  old -> new` keeps `new`). The original path of
+// each rename is returned separately so the gate can reject renames that move
+// a protected path out from under it.
+func parseChanged(porcelain string) ([]string, []string) {
+	var out, renamed []string
 	for _, line := range strings.Split(porcelain, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if len(line) < 4 {
@@ -168,11 +186,12 @@ func parseChanged(porcelain string) []string {
 		}
 		path := line[3:]
 		if i := strings.Index(path, " -> "); i >= 0 {
+			renamed = append(renamed, path[:i])
 			path = path[i+4:]
 		}
 		out = append(out, path)
 	}
-	return out
+	return out, renamed
 }
 
 func short(sha string) string {
