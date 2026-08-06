@@ -139,11 +139,7 @@ func checkRollup(repo, sha string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var runs []struct {
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-		Name       string `json:"name"`
-	}
+	var runs []checkRun
 	if err := json.Unmarshal(out, &runs); err != nil {
 		if len(bytes.TrimSpace(out)) == 0 {
 			return "", nil
@@ -153,33 +149,48 @@ func checkRollup(repo, sha string) (string, error) {
 	if len(runs) == 0 {
 		return "", nil
 	}
+	return rollupChecks(runs), nil
+}
+
+// checkRun is one check-run as returned by the commits/check-runs endpoint.
+type checkRun struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	Name       string `json:"name"`
+}
+
+// rollupChecks maps check-runs to pending | pass | fail | "". A run that never
+// concluded — still running, or completed with an empty conclusion — counts as
+// pending: it must never unlock a merge as a pass.
+func rollupChecks(runs []checkRun) string {
 	haveCI, anyPending, allPass := false, false, true
 	for _, r := range runs {
 		l := strings.ToLower(r.Name)
 		if strings.Contains(l, "ci") || strings.Contains(l, "test") {
 			haveCI = true
 		}
+		conclusion := strings.ToLower(r.Conclusion)
 		// The REST API returns lowercase status/conclusion values.
-		if strings.ToLower(r.Status) != "completed" {
+		if strings.ToLower(r.Status) != "completed" || conclusion == "" {
 			anyPending = true
 			continue
 		}
-		switch strings.ToLower(r.Conclusion) {
-		case "success", "neutral", "skipped", "":
+		switch conclusion {
+		case "success", "neutral", "skipped":
 		default:
 			allPass = false
 		}
 	}
 	if !allPass {
-		return "fail", nil
+		return "fail"
 	}
 	if anyPending {
-		return "pending", nil
+		return "pending"
 	}
 	if !haveCI {
-		return "", nil
+		return ""
 	}
-	return "pass", nil
+	return "pass"
 }
 
 // latestRequestedChange returns the newest CHANGES_REQUESTED review and the
