@@ -27,7 +27,10 @@ func (it issue) hasLabel(name string) bool {
 	return false
 }
 
-func ghJSON(args ...string) ([]byte, error) {
+// ghJSON runs the gh CLI and returns its stdout. It is a package-level
+// variable rather than a function so the offline tests can stub the CLI
+// without a gh binary or a network.
+var ghJSON = func(args ...string) ([]byte, error) {
 	cmd := exec.Command("gh", args...)
 	return cmd.Output()
 }
