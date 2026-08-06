@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,31 +22,29 @@ import (
 // never hammers GitHub. Pass --live-gh to also poll the backlog via gh.
 // Ctrl-C restores the cursor and exits.
 func cmdWatch(cfg Config, repoDir string, args []string) int {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "forest watch [--interval 2s] [--live-gh]  live board over .forest/ + daemon")
+	}
 	interval := 2 * time.Second
 	liveGH := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--interval", "-n":
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "forest: watch: --interval needs a duration (e.g. 2s)")
-				return 2
-			}
-			i++
-			d, err := time.ParseDuration(args[i])
-			if err != nil || d < 200*time.Millisecond {
-				fmt.Fprintf(os.Stderr, "forest: watch: bad interval %q\n", args[i])
-				return 2
-			}
-			interval = d
-		case "--live-gh":
-			liveGH = true
-		case "-h", "--help":
-			fmt.Fprintln(os.Stderr, "forest watch [--interval 2s] [--live-gh]  live board over .forest/ + daemon")
+	fs.DurationVar(&interval, "interval", interval, "refresh interval (min 200ms)")
+	fs.DurationVar(&interval, "n", interval, "refresh interval (min 200ms)")
+	fs.BoolVar(&liveGH, "live-gh", false, "poll the GitHub backlog")
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
 			return 0
-		default:
-			fmt.Fprintf(os.Stderr, "forest: watch: unknown flag %q\n", args[i])
-			return 2
 		}
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "forest: watch: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	if interval < 200*time.Millisecond {
+		fmt.Fprintf(os.Stderr, "forest: watch: bad interval %q\n", interval)
+		return 2
 	}
 
 	fmt.Fprint(os.Stdout, "\033[?25l")
