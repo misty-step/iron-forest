@@ -38,6 +38,9 @@ type Outcome struct {
 	Agent   string
 	Model   string
 	DefSHA  string
+	// BaseSHA is the commit the run actually acted on. It differs from the
+	// Subject's Revision when the run moved the branch first, as a rebase does:
+	// Revision says why the lane woke, BaseSHA says what it checked and merged.
 	BaseSHA string
 	TokIn   int64
 	TokOut  int64

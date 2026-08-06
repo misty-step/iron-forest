@@ -12,3 +12,6 @@
 .DS_Store
 .opencode/agents/
 /iron-forest
+
+# one-off published snapshots, not repository artifacts
+/docs/*.html
