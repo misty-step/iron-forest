@@ -303,6 +303,9 @@ func finishMerge(cfg Config, repoDir, branch string, it issue) error {
 	if err := closeItem(cfg.Repo, it.Number); err != nil {
 		return fmt.Errorf("merge: close item: %w", err)
 	}
+	if err := dropAttempts(repoDir, "branch-"+branch); err != nil {
+		return fmt.Errorf("merge: drop attempt record: %w", err)
+	}
 	return nil
 }
 

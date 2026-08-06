@@ -206,3 +206,18 @@ func bumpAttempts(repoDir, key string) (int, error) {
 	}
 	return 0, fmt.Errorf("bump attempts after five attempts: %w", casErr)
 }
+
+// dropAttempts removes a subject's attempt record. A retired subject must not
+// leave one behind: the old claim scheme made items permanently unworkable
+// exactly this way, by leaving a ref nobody would ever read again.
+func dropAttempts(repoDir, key string) error {
+	ref := "refs/forest/attempt/" + key
+	sha, _, err := getBlobRef(repoDir, ref)
+	if err != nil {
+		return err
+	}
+	if sha == "" {
+		return nil
+	}
+	return git(repoDir, "push", "--force-with-lease="+ref+":"+sha, "origin", ":"+ref)
+}

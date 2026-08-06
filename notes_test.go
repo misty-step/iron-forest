@@ -201,3 +201,34 @@ func notesTestGitOutput(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// TestDropAttemptsRetiresTheRecord pins the leak this factory has already paid
+// for once: a retired subject must not leave a ref behind. The previous claim
+// scheme left one on every failure and made those items unworkable forever.
+func TestDropAttemptsRetiresTheRecord(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+	const key = "branch-forest/9-example"
+
+	if err := dropAttempts(work, key); err != nil {
+		t.Fatalf("dropAttempts on an absent record = %v, want nil", err)
+	}
+	if _, err := bumpAttempts(work, key); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := readAttempts(work, key); err != nil || n != 1 {
+		t.Fatalf("readAttempts after bump = (%d, %v), want (1, nil)", n, err)
+	}
+	if err := dropAttempts(work, key); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := readAttempts(work, key); err != nil || n != 0 {
+		t.Fatalf("readAttempts after drop = (%d, %v), want (0, nil)", n, err)
+	}
+	out, err := gitOut(work, "ls-remote", "origin", "refs/forest/attempt/"+key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("remote still holds the retired record: %q", out)
+	}
+}
