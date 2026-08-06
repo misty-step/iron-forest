@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -76,37 +74,30 @@ func cmdStats(repoDir string, args []string) int {
 	return s.emitText(os.Stdout)
 }
 
-// load reads and validates every ledger line. Unparseable lines are counted
-// and skipped so one bad artifact never breaks the whole report.
+// load reads and validates every ledger line through the shared loader.
+// Unparseable lines are counted and skipped so one bad artifact never breaks
+// the whole report.
 func (s *statsCmd) load(path string) error {
-	f, err := os.Open(path)
+	runs, invalid, err := loadLedger(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// An empty ledger is a valid state: report zeroes rather than fail.
-			return nil
-		}
-		return fmt.Errorf("open ledger: %w", err)
+		return err
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var r runRecord
-		if err := json.Unmarshal(line, &r); err != nil {
-			s.invalid++
-			continue
-		}
-		s.runs = append(s.runs, r)
-	}
-	if err := sc.Err(); err != nil {
-		return fmt.Errorf("read ledger: %w", err)
-	}
+	s.runs = runs
+	s.invalid = invalid
 	s.computeRange()
 	return nil
+}
+
+// buckets collapses the ledger statuses into the single operator-facing
+// vocabulary (done/fixed/failed/other) shared with `forest watch`. All four
+// keys are present even when zero, so callers never omit a zero-valued
+// category.
+func (s *statsCmd) buckets() map[string]int {
+	m := map[string]int{"done": 0, "fixed": 0, "failed": 0, "other": 0}
+	for _, r := range s.runs {
+		m[runCategory(r.Status)]++
+	}
+	return m
 }
 
 // computeRange fills first/last from the RFC3339 time fields of the runs.
@@ -142,6 +133,9 @@ func (s *statsCmd) emitText(w io.Writer) int {
 		if s.invalid > 0 {
 			fmt.Fprintf(w, "invalid:   %d\n", s.invalid)
 		}
+		buckets := s.buckets()
+		fmt.Fprintf(w, "\nstatus:\n  done=%d fixed=%d failed=%d other=%d\n",
+			buckets["done"], buckets["fixed"], buckets["failed"], buckets["other"])
 		return 0
 	}
 	fmt.Fprintf(w, "runs:      %d\n", len(s.runs))
@@ -162,6 +156,10 @@ func (s *statsCmd) emitText(w io.Writer) int {
 	for _, k := range statusKeys {
 		fmt.Fprintf(w, "  %-20s %d\n", k, byStatus[k])
 	}
+
+	buckets := s.buckets()
+	fmt.Fprintf(w, "  done=%d fixed=%d failed=%d other=%d\n",
+		buckets["done"], buckets["fixed"], buckets["failed"], buckets["other"])
 
 	var totalCost, totalIn, totalOut float64
 	for _, r := range s.runs {
@@ -207,6 +205,7 @@ func (s *statsCmd) emitJSON(w io.Writer) int {
 		"first":   fmtTime(s.first),
 		"last":    fmtTime(s.last),
 		"invalid": s.invalid,
+		"status":  s.buckets(),
 	})
 
 	byStatus := map[string]int{}
