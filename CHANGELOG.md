@@ -1,5 +1,6 @@
 # Changelog
 
+- Added a reconcile pass that keeps `forest:wip` honest: it clears the claim label from any item that no longer holds a live claim (a closed issue or one that never started) every daemon pass, while never clearing a genuine in-flight claim. (2026-08-05)
 - Closed the list-then-claim race with a repository-visible lease: `claimIssue` now wins a compare-and-set git ref (`refs/heads/forest/claim/issue-<n>`, which GitHub refuses to create if it already exists) before writing the claim label, so exactly one host can own an item across both the re-read and the label write. Any failure after winning the ref — a flaked pre-label read or label write — undoes the ref and releases the in-process broker, so an item is never left unclaimed-but-unretryable for the daemon. Tests drive the real concurrent claim path with a compare-and-set fake and prove exactly-one-wins, disjoint concurrent passes, and release-on-failure. (2026-08-05)
 - Shipped the reaction loop (R3): the factory now watches its own pull requests, re-enters on feedback or failing CI, and auto-merges when the owl approves and CI is green. (2026-08-05)
 - Bounded the reaction loop: re-entry passes now honor `workflow.max_reaction_fixes`, every failed fix increments the PR's recorded fix count and writes a PR state row, and a PR at the limit is parked stalled for a human. (2026-08-05)

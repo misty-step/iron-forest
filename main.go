@@ -173,6 +173,9 @@ func chewLoop(cfg Config, repoDir string) int {
 		if nc, err := loadConfig(filepath.Join(repoDir, "forest.yaml")); err == nil {
 			cfg = nc
 		}
+		if err := reconcileClaims(cfg.Repo); err != nil {
+			fmt.Fprintf(os.Stderr, "forest: reconcile: %v\n", err)
+		}
 		items, err := backlog(cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forest: backlog: %v\n", err)
