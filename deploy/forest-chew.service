@@ -3,7 +3,9 @@
 # fresh build at a pass boundary (self-exec; same PID, so no restart ever
 # interrupts an in-flight agent). See deploy/install-service.sh.
 #
-# %h expands to the user's home directory; user units resolve it at load time.
+# @REPO_DIR@ is a placeholder: deploy/install-service.sh substitutes the
+# absolute path of the repository it installs from, so a clone moved elsewhere
+# still deploys correctly.
 
 [Unit]
 Description=iron-forest piranha tank (self-updating factory daemon)
@@ -12,8 +14,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Development/misty-step/iron-forest
-ExecStart=%h/Development/misty-step/iron-forest/forest chew
+WorkingDirectory=@REPO_DIR@
+ExecStart=@REPO_DIR@/forest chew
 Restart=always
 RestartSec=10
 # Agents run without a deadline, so a draining pass gets unlimited room to

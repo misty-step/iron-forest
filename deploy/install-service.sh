@@ -8,7 +8,7 @@ repo="$(cd "$here/.." && pwd)"
 unit="$HOME/.config/systemd/user/forest-chew.service"
 
 mkdir -p "$(dirname "$unit")"
-cp "$here/forest-chew.service" "$unit"
+sed "s|@REPO_DIR@|$repo|g" "$here/forest-chew.service" > "$unit"
 systemctl --user daemon-reload
 systemctl --user enable forest-chew.service >/dev/null
 echo "$(basename "$0"): installed $unit (repo: $repo)"
