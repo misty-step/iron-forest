@@ -295,6 +295,43 @@ func (s ghClaimStore) deleteClaimRef(n int) error {
 	return err
 }
 
+// wipIssues lists every issue carrying the claim label, in any state, so a
+// reconcile pass can decide which of them still represent live work.
+func (s ghClaimStore) wipIssues() ([]issue, error) {
+	out, err := ghJSON("issue", "list", "-R", s.repo, "--state", "all",
+		"--label", claimLabel, "--json", "number,title,body,labels", "--limit", "200")
+	if err != nil {
+		return nil, err
+	}
+	var items []issue
+	if err := json.Unmarshal(out, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// hasClaimRef reports whether the item still holds its claim ref, the durable
+// cross-host lease that marks a genuinely live claim. A missing ref (HTTP 404)
+// means the work is not in flight, so the label is stale and may be cleared.
+func (s ghClaimStore) hasClaimRef(n int) (bool, error) {
+	_, err := ghJSON("api", fmt.Sprintf("repos/%s/git/ref/heads/forest/claim/issue-%d", s.repo, n))
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok &&
+			strings.Contains(string(ee.Stderr), "404") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// removeClaimLabel clears the durable claim label from an item.
+func (s ghClaimStore) removeClaimLabel(n int) error {
+	_, err := ghJSON("issue", "edit", "-R", s.repo, fmt.Sprintf("%d", n),
+		"--remove-label", claimLabel)
+	return err
+}
+
 // claimRefused reports whether an issue can no longer be claimed: it is already
 // claimed, failed, or parked, or an open pull request already covers it.
 func claimRefused(it issue, hits []string) bool {
@@ -357,6 +394,46 @@ func claimIssue(repo string, n int) error {
 // failed run and then refused every later attempt.
 func releaseClaim(repo string, n int) {
 	_ = ghClaimStore{repo: repo}.deleteClaimRef(n)
+}
+
+// reconcileStore is the subset of repository access a reconcile pass needs:
+// list the items that carry the claim label, ask whether an item still holds
+// its claim ref, and remove the claim label.
+type reconcileStore interface {
+	wipIssues() ([]issue, error)
+	hasClaimRef(n int) (bool, error)
+	removeClaimLabel(n int) error
+}
+
+// reconcileClearsStaleClaims is the reconcile pass that keeps forest:wip
+// honest: a claim label must never outlive the work it claimed. It clears the
+// label from any item that no longer holds a live claim — one whose issue was
+// closed (its ref was released on close) or one that carries the label but
+// never started (its ref was never held) — while leaving a genuine in-flight
+// claim, which still holds its ref, untouched.
+func reconcileClearsStaleClaims(store reconcileStore) error {
+	items, err := store.wipIssues()
+	if err != nil {
+		return err
+	}
+	for _, it := range items {
+		live, err := store.hasClaimRef(it.Number)
+		if err != nil {
+			return err
+		}
+		if live {
+			continue // a live claim must never be cleared
+		}
+		if err := store.removeClaimLabel(it.Number); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcileClaims runs the stale-claim-label pass against the live repository.
+func reconcileClaims(repo string) error {
+	return reconcileClearsStaleClaims(ghClaimStore{repo: repo})
 }
 
 // failIssue records why a run failed, unparks the item, and marks it so the

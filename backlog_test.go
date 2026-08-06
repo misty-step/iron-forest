@@ -108,6 +108,43 @@ func (f *fakeClaimStore) deleteClaimRef(n int) error {
 	return nil
 }
 
+func (f *fakeClaimStore) hasClaimRef(n int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.claims[n], nil
+}
+
+func (f *fakeClaimStore) removeClaimLabel(n int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var keep []string
+	for _, l := range f.labels[n] {
+		if l != claimLabel {
+			keep = append(keep, l)
+		}
+	}
+	f.labels[n] = keep
+	return nil
+}
+
+func (f *fakeClaimStore) wipIssues() ([]issue, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var items []issue
+	for n := range f.labels {
+		it := issue{Number: n}
+		for _, l := range f.labels[n] {
+			it.Labels = append(it.Labels, struct {
+				Name string `json:"name"`
+			}{Name: l})
+		}
+		if it.hasLabel(claimLabel) {
+			items = append(items, it)
+		}
+	}
+	return items, nil
+}
+
 // TestClaimFromExactlyOneWins is the cross-host oracle for the concurrent
 // claim: two workers claiming the same item must resolve to exactly one winner
 // and the loser is refused with errAlreadyClaimed. This exercises the real
@@ -241,6 +278,44 @@ func TestClaimBrokerReleaseFreesItem(t *testing.T) {
 	b.release(7)
 	if !b.acquire(7) {
 		t.Fatal("after release the same item must be acquirable again")
+	}
+}
+
+// TestReconcileClearsStaleClaimsPinsTheOracle covers both branches of the
+// reconcile oracle: a forest:wip label must be cleared from an item whose work
+// is done — a closed issue or one that never started — while a live claim, one
+// that still holds its claim ref, is never cleared.
+func TestReconcileClearsStaleClaimsPinsTheOracle(t *testing.T) {
+	store := newFakeClaimStore()
+
+	// #11: closed work left behind a stale label. Its claim ref was released on
+	// close, so no live claim remains and the label is stale.
+	store.labels[11] = []string{claimLabel}
+	// #12: carries forest:wip but has never run; its claim ref was never held.
+	store.labels[12] = []string{claimLabel}
+	// #13: a genuine live claim — the label and its claim ref are both held.
+	store.labels[13] = []string{claimLabel}
+	store.claims[13] = true
+
+	if err := reconcileClearsStaleClaims(store); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	for _, n := range []int{11, 12} {
+		it, err := store.issue(n)
+		if err != nil {
+			t.Fatalf("#%d: issue: %v", n, err)
+		}
+		if it.hasLabel(claimLabel) {
+			t.Errorf("#%d: stale claim label was not cleared", n)
+		}
+	}
+	live, err := store.issue(13)
+	if err != nil {
+		t.Fatalf("#13: issue: %v", err)
+	}
+	if !live.hasLabel(claimLabel) {
+		t.Errorf("#13: a live claim's label was wrongly cleared")
 	}
 }
 
