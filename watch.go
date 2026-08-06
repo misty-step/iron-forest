@@ -149,9 +149,10 @@ func loadWatchSnapshot(cfg Config, repoDir string) watchSnapshot {
 	}
 	s.Daemon = probeDaemon(repoDir)
 	s.OpenPRs = latestOpenPRs(ws)
-	s.Recent = tailRuns(ws, 8)
+	all, _, _ := loadLedger(filepath.Join(ws, "runs.jsonl"))
+	s.Recent = tailRuns(all, 8)
 	s.Updates = tailUpdates(ws, 5)
-	s.Stats = summarizeRuns(ws)
+	s.Stats = summarizeRuns(all)
 	return s
 }
 
@@ -239,35 +240,11 @@ func prActiveRank(state string) int {
 	}
 }
 
-func tailRuns(workspace string, n int) []runRecord {
-	all := loadRunRecords(filepath.Join(workspace, "runs.jsonl"))
+func tailRuns(all []runRecord, n int) []runRecord {
 	if len(all) > n {
 		return all[len(all)-n:]
 	}
 	return all
-}
-
-func loadRunRecords(path string) []runRecord {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	var out []runRecord
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var r runRecord
-		if json.Unmarshal(line, &r) != nil {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
 }
 
 func tailUpdates(workspace string, n int) []updateRecord {
@@ -295,18 +272,17 @@ func tailUpdates(workspace string, n int) []updateRecord {
 	return all
 }
 
-func summarizeRuns(workspace string) watchStats {
+func summarizeRuns(all []runRecord) watchStats {
 	var st watchStats
-	for _, r := range loadRunRecords(filepath.Join(workspace, "runs.jsonl")) {
+	for _, r := range all {
 		st.Runs++
 		st.Cost += r.CostUSD
-		switch r.Status {
+		switch runCategory(r.Status) {
 		case "done":
 			st.Done++
 		case "fixed":
 			st.Fixed++
-		case "agent_failed", "gate_failed", "review_failed", "publish_failed",
-			"pr_failed", "claim_failed", "worktree_failed", "prompt_failed", "pick_failed":
+		case "failed":
 			st.Failed++
 		default:
 			st.Other++
