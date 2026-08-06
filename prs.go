@@ -394,7 +394,12 @@ func fixPR(cfg Config, repoDir string, op pulledPR, prior prState, feedback stri
 		fmt.Fprintf(os.Stderr, "forest: pr #%d worktree: %v\n", op.PR, err)
 		return 1
 	}
-	defer removeWorktree(repoDir, wtDir)
+	// createWorktreeAtBranch registered wtDir in the tracker so the re-enter's
+	// worktree is also covered by the second-signal handler; clear it here.
+	defer func() {
+		removeWorktree(repoDir, wtDir)
+		setCurrentWorktree("")
+	}()
 
 	id := identify(repoDir, cfg)
 	r, err := runPick(cfg, repoDir, wtDir, baseSHA, runID, it, feedback)
