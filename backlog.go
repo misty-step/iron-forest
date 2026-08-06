@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // issue is the unit of work. One open GitHub issue becomes one pull request.
@@ -135,11 +137,212 @@ func ensureLabels(repo string) error {
 	return nil
 }
 
-// claimIssue parks the item so the loop never picks it a second time.
-func claimIssue(repo string, n int) error {
-	_, err := ghJSON("issue", "edit", "-R", repo, fmt.Sprintf("%d", n),
+// claimBroker is the in-process referee for work-item ownership. It hands each
+// issue to exactly one acquiring worker, so two concurrent passes over the same
+// backlog claim disjoint items: the first acquirer wins and every later one is
+// refused, even before the durable claim on GitHub has propagated.
+type claimBroker struct {
+	mu      sync.Mutex
+	claimed map[int]bool
+}
+
+func newClaimBroker() *claimBroker {
+	return &claimBroker{claimed: make(map[int]bool)}
+}
+
+// acquire grants n to the caller if nobody else in this process holds it yet.
+// It returns false — the refusal — when another pass already claimed n.
+func (b *claimBroker) acquire(n int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.claimed[n] {
+		return false
+	}
+	b.claimed[n] = true
+	return true
+}
+
+// release returns n to the broker so a later pass can try again. It is called
+// whenever a claim fails after the broker granted it, so a mid-claim failure —
+// a failed pre-label read or label write — never leaves the item blocked for
+// the lifetime of the daemon.
+func (b *claimBroker) release(n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.claimed, n)
+}
+
+// processClaims is the claimBroker shared by every claim this binary makes, so
+// the running daemon never double-claims an item across its own passes.
+var processClaims = newClaimBroker()
+
+// claimRefPrefix is the git ref under which a claim is recorded. Creating the
+// ref is a compare-and-set on GitHub (it fails if the ref already exists), so
+// it is the repository-visible atomic lease that closes the cross-host race.
+const claimRefPrefix = "refs/heads/forest/claim/issue-"
+
+// errAlreadyClaimed is returned by a claimStore.claimRef when the claim ref
+// already exists: some other worker, on any host, already owns the item.
+var errAlreadyClaimed = errors.New("claim ref already exists")
+
+// claimStore is the set of repository mutations a claim needs. Production uses
+// ghClaimStore backed by the GitHub CLI; tests drive the real concurrent claim
+// path with an in-memory fake that performs the same compare-and-set.
+type claimStore interface {
+	// claimRef atomically creates the claim ref iff it does not exist. It
+	// returns errAlreadyClaimed when another worker already owns the ref.
+	claimRef(n int) error
+	// issue fetches the issue's current state (labels).
+	issue(n int) (issue, error)
+	// openPRs lists open pull requests that reference the issue.
+	openPRs(n int) ([]string, error)
+	// addClaimLabel applies the durable claim label.
+	addClaimLabel(n int) error
+	// deleteClaimRef undoes a claim won by this worker.
+	deleteClaimRef(n int) error
+}
+
+// ghClaimStore is the claimStore backed by the GitHub CLI.
+type ghClaimStore struct {
+	repo string
+}
+
+// defaultBranch returns the repository's default branch name.
+func defaultBranch(repo string) (string, error) {
+	out, err := ghJSON("api", fmt.Sprintf("repos/%s", repo))
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := json.Unmarshal(out, &r); err != nil {
+		return "", err
+	}
+	return r.DefaultBranch, nil
+}
+
+// defaultBranchSHA returns the tip commit sha of the default branch, the
+// object a new claim ref is pointed at.
+func defaultBranchSHA(repo string) (string, error) {
+	branch, err := defaultBranch(repo)
+	if err != nil {
+		return "", err
+	}
+	out, err := ghJSON("api", fmt.Sprintf("repos/%s/git/ref/heads/%s", repo, branch))
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(out, &r); err != nil {
+		return "", err
+	}
+	return r.Object.SHA, nil
+}
+
+// claimRef creates the claim ref for n, succeeding only if the ref does not
+// yet exist. A 422 from GitHub ("Reference already exists") means another host
+// already claimed the item, reported as errAlreadyClaimed.
+func (s ghClaimStore) claimRef(n int) error {
+	sha, err := defaultBranchSHA(s.repo)
+	if err != nil {
+		return err
+	}
+	_, err = ghJSON("api", "--method", "POST",
+		fmt.Sprintf("repos/%s/git/refs", s.repo),
+		"-f", fmt.Sprintf("ref=%s%d", claimRefPrefix, n),
+		"-f", "sha="+sha)
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok &&
+			strings.Contains(string(ee.Stderr), "already exists") {
+			return errAlreadyClaimed
+		}
+		return err
+	}
+	return nil
+}
+
+// issue fetches the issue's current labels for the refusal re-check.
+func (s ghClaimStore) issue(n int) (issue, error) {
+	return getIssueAny(s.repo, n)
+}
+
+// openPRs lists open pull requests referencing the issue.
+func (s ghClaimStore) openPRs(n int) ([]string, error) {
+	return openPRsReferencing(s.repo, n)
+}
+
+// addClaimLabel writes the durable claim label.
+func (s ghClaimStore) addClaimLabel(n int) error {
+	_, err := ghJSON("issue", "edit", "-R", s.repo, fmt.Sprintf("%d", n),
 		"--add-label", claimLabel)
 	return err
+}
+
+// deleteClaimRef removes the claim ref won by this worker.
+func (s ghClaimStore) deleteClaimRef(n int) error {
+	_, err := ghJSON("api", "--method", "DELETE",
+		fmt.Sprintf("repos/%s/git/refs/heads/forest/claim/issue-%d", s.repo, n))
+	return err
+}
+
+// claimRefused reports whether an issue can no longer be claimed: it is already
+// claimed, failed, or parked, or an open pull request already covers it.
+func claimRefused(it issue, hits []string) bool {
+	if it.hasLabel(claimLabel) || it.hasLabel(failedLabel) || it.hasLabel("parked") {
+		return true
+	}
+	return len(hits) > 0
+}
+
+// claimFrom is the core of claimIssue against an injected claimStore. It first
+// wins the repository-visible compare-and-set ref, so across every host exactly
+// one worker owns the item; it then re-reads the issue so the durable label
+// write is never based on a stale listing and refuses an item that is already
+// claimed, failed, parked, or covered by an open pull request. Any failure
+// after winning the ref undoes it, so the item stays claimable and retryable.
+func claimFrom(store claimStore, n int) (err error) {
+	if err := store.claimRef(n); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = store.deleteClaimRef(n)
+		}
+	}()
+
+	it, err := store.issue(n)
+	if err != nil {
+		return err
+	}
+	if claimRefused(it, nil) {
+		return fmt.Errorf("issue %d is already claimed", n)
+	}
+	hits, err := store.openPRs(n)
+	if err != nil {
+		return err
+	}
+	if len(hits) > 0 {
+		return fmt.Errorf("issue %d is already covered by an open pull request", n)
+	}
+	return store.addClaimLabel(n)
+}
+
+// claimIssue claims the item for this forest. The process broker guards one
+// in-flight claim per binary; the durable, repository-visible ownership is the
+// compare-and-set claim ref in claimFrom, which is atomic across hosts. The
+// broker mark is always released on the way out, so a failed claim never blocks
+// the item inside this daemon.
+func claimIssue(repo string, n int) error {
+	if !processClaims.acquire(n) {
+		return fmt.Errorf("issue %d is already claimed by another pass", n)
+	}
+	defer processClaims.release(n)
+	return claimFrom(ghClaimStore{repo: repo}, n)
 }
 
 // failIssue records why a run failed, unparks the item, and marks it so the
