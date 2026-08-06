@@ -1,0 +1,1 @@
+{"status":"pass","results":[{"name":"build","code":0,"seconds":0.252123636,"output":""},{"name":"vet","code":0,"seconds":0.074061342,"output":""},{"name":"test","code":0,"seconds":0.814791032,"output":"ok  \tgithub.com/misty-step/iron-forest\t0.512s\n"}],"run_id":"20260806T184444Z-branch-forest/7-add-a--gitattributes-enforcing-l","time":"2026-08-06T18:44:50Z"}
