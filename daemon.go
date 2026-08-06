@@ -175,9 +175,10 @@ func swapSelf(repoDir, shortSHA string) {
 }
 
 // acquireSingletonLock takes an exclusive, non-blocking flock on
-// .forest/daemon.lock so only one `forest chew` runs at a time. The lock fd
-// is CLOEXEC, so self-exec drops it and the fresh process image re-acquires
-// it at the next chewLoop start — a microsecond gap owned by the same pid.
+// .forest/daemon.lock so only one chewer runs at a time: the `forest chew`
+// daemon or a manual `forest once`. The lock fd is CLOEXEC, so self-exec drops
+// it and the fresh process image re-acquires it at the next chewLoop start — a
+// microsecond gap owned by the same pid.
 func acquireSingletonLock(repoDir string) (*os.File, error) {
 	dir := filepath.Join(repoDir, WorkspaceDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

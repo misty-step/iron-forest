@@ -63,6 +63,12 @@ func run(args []string) int {
 			fmt.Fprintln(os.Stderr, "forest: issue number required")
 			return 2
 		}
+		lock, err := acquireSingletonLock(repoDir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "forest:", err)
+			return 1
+		}
+		defer lock.Close()
 		it, err := getIssue(cfg.Repo, n)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "forest:", err)
