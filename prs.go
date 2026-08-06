@@ -79,6 +79,18 @@ func lastPRState(workspace string, n int) (prState, bool) {
 	return last, found
 }
 
+// closedPRRow is the ledger row written when a watched pull request is no
+// longer open (merged or closed). It must carry forward the originating issue
+// from the last known row: without it the latest row for this PR loses
+// attribution, latestPRStates keeps that Issue=0 row, and the reconcile pass
+// silently skips the orphan (it cannot match a row whose Issue is zero).
+// Preserving the issue keeps a closed-but-unmerged PR attributable.
+func closedPRRow(base, last prState) prState {
+	base.Issue = last.Issue
+	base.State = "closed"
+	return base
+}
+
 // fetchOpenPR loads the pull request fields the loop decides on.
 func fetchOpenPR(repo string, n int) (pulledPR, error) {
 	out, err := ghJSON("pr", "view", fmt.Sprintf("%d", n), "-R", repo,
@@ -254,8 +266,7 @@ func watchPR(cfg Config, repoDir string, n int) int {
 	}
 
 	if op.State != "OPEN" {
-		base.State = "closed"
-		_ = appendPR(workspace, base)
+		_ = appendPR(workspace, closedPRRow(base, last))
 		return 0
 	}
 	if !known {

@@ -184,24 +184,12 @@ func probeDaemon(repoDir string) daemonSnap {
 }
 
 func latestOpenPRs(workspace string) []prState {
-	b, err := os.ReadFile(filepath.Join(workspace, "prs.jsonl"))
+	prs, err := latestPRStates(workspace)
 	if err != nil {
 		return nil
 	}
-	last := map[int]prState{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var s prState
-		if json.Unmarshal([]byte(line), &s) != nil || s.PR == 0 {
-			continue
-		}
-		last[s.PR] = s
-	}
-	out := make([]prState, 0, len(last))
-	for _, s := range last {
+	out := make([]prState, 0, len(prs))
+	for _, s := range prs {
 		switch s.State {
 		case "merged", "closed":
 			if t, err := time.Parse(time.RFC3339, s.Time); err == nil && time.Since(t) > 48*time.Hour {

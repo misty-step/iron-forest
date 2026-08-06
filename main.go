@@ -25,6 +25,7 @@ func usage() {
   forest stats [--json]    aggregate the run ledger
   forest once <issue>      chew a single issue end to end
   forest chew              poll: chew backlog AND watch open factory PRs
+  forest reconcile         report orphaned PRs (closed issue, unmerged change)
   forest version           print the git sha this binary was built from
   forest selfcheck         offline smoke gate (config + agents load)
   forest watch [--interval 2s] [--live-gh]
@@ -78,6 +79,8 @@ func run(args []string) int {
 		return chewOne(cfg, repoDir, it)
 	case "chew":
 		return chewLoop(cfg, repoDir)
+	case "reconcile":
+		return cmdReconcile(cfg, repoDir)
 	case "version":
 		fmt.Printf("forest %s\n", version)
 		return 0

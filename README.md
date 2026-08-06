@@ -66,6 +66,7 @@ requires `gh` to be authenticated.
 | `forest stats [--json]` | Aggregate the run ledger from `.forest/`. Pass `--json` for machine-readable output. |
 | `forest once <issue>` | Chew a single issue end to end: claim, worktree, build, gate, review, publish, record. |
 | `forest chew` | Poll: chew the backlog AND watch open factory PRs until they merge or stall. |
+| `forest reconcile` | Report orphaned PRs — closed issue whose change never landed — with their issue ids and reasons. |
 | `forest version` | Print the git SHA this binary was built from. |
 | `forest selfcheck` | Offline smoke gate: config loads and agents resolve. |
 | `forest watch [--interval 2s] [--live-gh]` | Live operator board over `.forest/` and the daemon. |
