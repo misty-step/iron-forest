@@ -170,15 +170,18 @@ func chewLoop(cfg Config, repoDir string) int {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forest: backlog: %v\n", err)
 		} else {
-			for _, it := range items {
+			if len(items) == 0 {
+				fmt.Printf("forest: backlog empty, sleeping %ds\n", cfg.PollIntervalSec)
+			} else {
+				// One item per pass. Chewing the whole backlog before watching a
+				// single PR starves the merge gate for as long as the queue is,
+				// and every later build then branches from a master missing the
+				// work already approved and waiting in an unmerged PR.
+				it := items[0]
 				fmt.Printf("forest: chewing #%d %s\n", it.Number, it.Title)
 				if code := chewOne(cfg, repoDir, it); code != 0 {
 					fmt.Fprintf(os.Stderr, "forest: #%d failed\n", it.Number)
 				}
-				time.Sleep(2 * time.Second) // breathe between items
-			}
-			if len(items) == 0 {
-				fmt.Printf("forest: backlog empty, sleeping %ds\n", cfg.PollIntervalSec)
 			}
 		}
 		if prs, err := listOpenForestPRs(cfg.Repo); err != nil {
