@@ -70,6 +70,9 @@ func run(args []string) int {
 			return 1
 		}
 		defer lock.Close()
+		// Reap worktrees a previous run leaked on abnormal exit before this run
+		// creates its own, mirroring the daemon at the top of chewLoop.
+		reapOrphanWorktrees(repoDir)
 		it, err := getIssue(cfg.Repo, n)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "forest:", err)
@@ -156,6 +159,12 @@ func chewLoop(cfg Config, repoDir string) int {
 		fmt.Fprintln(os.Stderr, "forest: draining, waiting for the in-flight agent")
 		<-sig // second signal: the operator's only clock, since agents are unbounded
 		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
+		// os.Exit below skips deferred cleanup, so remove the in-flight
+		// worktree here or the run leaks it until the next startup reaps it.
+		if dir := currentWorktreeDir(); dir != "" {
+			removeWorktree(repoDir, dir)
+			fmt.Fprintf(os.Stderr, "forest: removed in-flight worktree %s\n", dir)
+		}
 		os.Exit(1)
 	}()
 	lock, err := acquireSingletonLock(repoDir)
@@ -164,6 +173,9 @@ func chewLoop(cfg Config, repoDir string) int {
 		return 1
 	}
 	defer lock.Close()
+	// Reap worktrees a previous daemon leaked on abnormal exit before we start
+	// a new pass, so no stale run dir survives across a restart.
+	reapOrphanWorktrees(repoDir)
 	for {
 		if atomic.LoadInt32(&drain) == 1 {
 			fmt.Fprintln(os.Stderr, "forest: draining, no new pass")
@@ -261,7 +273,12 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 		fmt.Fprintf(os.Stderr, "forest: worktree #%d: %v\n", it.Number, err)
 		return 1
 	}
-	defer removeWorktree(repoDir, wtDir)
+	// createWorktree already registered wtDir in the tracker; this defer clears
+	// it (and removes the worktree) once the run no longer owns it.
+	defer func() {
+		removeWorktree(repoDir, wtDir)
+		setCurrentWorktree("")
+	}()
 	record.Branch = branch
 	record.BaseSHA = baseSHA
 
