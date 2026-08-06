@@ -243,3 +243,22 @@ func TestClaimBrokerReleaseFreesItem(t *testing.T) {
 		t.Fatal("after release the same item must be acquirable again")
 	}
 }
+
+// TestClaimIssueReportsAlreadyClaimed pins the sentinel chewLoop switches on. A
+// refusal must be recognisable with errors.Is, because the alternative is what
+// happened on 2026-08-05: a leaked claim ref made issue #92 permanently
+// unclaimable, each pass recorded it as a failed run, and since it stayed first
+// in the backlog it starved the eight cards queued behind it for a quarter hour.
+func TestClaimIssueReportsAlreadyClaimed(t *testing.T) {
+	const item = 4242
+	if !processClaims.acquire(item) {
+		t.Fatal("a fresh item must be acquirable")
+	}
+	defer processClaims.release(item)
+
+	// The broker refuses before any repository call, so this stays offline.
+	err := claimIssue("owner/repo", item)
+	if !errors.Is(err, errAlreadyClaimed) {
+		t.Fatalf("claimIssue = %v, want an errAlreadyClaimed sentinel", err)
+	}
+}

@@ -335,10 +335,19 @@ func claimFrom(store claimStore, n int) (err error) {
 // the item inside this daemon.
 func claimIssue(repo string, n int) error {
 	if !processClaims.acquire(n) {
-		return fmt.Errorf("issue %d is already claimed by another pass", n)
+		return fmt.Errorf("issue %d: %w", n, errAlreadyClaimed)
 	}
 	defer processClaims.release(n)
 	return claimFrom(ghClaimStore{repo: repo}, n)
+}
+
+// releaseClaim drops the claim ref once an item reaches a terminal state. The
+// ref is the cross-host mutex for one attempt, not a permanent record: left
+// behind, it makes the item unclaimable forever, so a reopened or requeued item
+// can never be worked again. Observed on issue #92, whose leaked ref survived a
+// failed run and then refused every later attempt.
+func releaseClaim(repo string, n int) {
+	_ = ghClaimStore{repo: repo}.deleteClaimRef(n)
 }
 
 // failIssue records why a run failed, unparks the item, and marks it so the
@@ -348,6 +357,7 @@ func failIssue(repo string, n int, msg string) error {
 		"--body", "forest run failed: "+msg)
 	_, _ = ghJSON("issue", "edit", "-R", repo, fmt.Sprintf("%d", n),
 		"--add-label", failedLabel, "--remove-label", claimLabel)
+	releaseClaim(repo, n)
 	return nil
 }
 
@@ -357,6 +367,7 @@ func closeIssue(repo string, n int) error {
 	_, _ = ghJSON("issue", "edit", "-R", repo, fmt.Sprintf("%d", n),
 		"--remove-label", claimLabel, "--remove-label", failedLabel)
 	_, err := ghJSON("issue", "close", "-R", repo, fmt.Sprintf("%d", n))
+	releaseClaim(repo, n)
 	return err
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -183,10 +184,18 @@ func chewLoop(cfg Config, repoDir string) int {
 				// single PR starves the merge gate for as long as the queue is,
 				// and every later build then branches from a master missing the
 				// work already approved and waiting in an unmerged PR.
-				it := items[0]
-				fmt.Printf("forest: chewing #%d %s\n", it.Number, it.Title)
-				if code := chewOne(cfg, repoDir, it); code != 0 {
-					fmt.Fprintf(os.Stderr, "forest: #%d failed\n", it.Number)
+				for _, it := range items {
+					fmt.Printf("forest: chewing #%d %s\n", it.Number, it.Title)
+					code := chewOne(cfg, repoDir, it)
+					if code == codeUnclaimable {
+						// Another worker owns it. Try the next candidate rather
+						// than spending the pass on an item we cannot touch.
+						continue
+					}
+					if code != 0 {
+						fmt.Fprintf(os.Stderr, "forest: #%d failed\n", it.Number)
+					}
+					break
 				}
 			}
 		}
@@ -201,6 +210,11 @@ func chewLoop(cfg Config, repoDir string) int {
 		time.Sleep(time.Duration(cfg.PollIntervalSec) * time.Second)
 	}
 }
+
+// codeUnclaimable is chewOne's answer when another worker already owns the item.
+// It is not a failure: nothing was built, spent, or decided, so the pass moves
+// to the next candidate instead of burning itself on an item it cannot touch.
+const codeUnclaimable = 2
 
 // chewOne runs the whole workflow for one new issue: claim, worktree, build,
 // gate, review, publish, record. It opens the PR and parks the item; the
@@ -221,6 +235,13 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 	}
 
 	if err := claimIssue(cfg.Repo, it.Number); err != nil {
+		if errors.Is(err, errAlreadyClaimed) {
+			// Not a run: nothing was built, spent, or decided. Recording it as a
+			// failure buried the ledger under identical zero-cost rows and, while
+			// this item stayed first in the backlog, starved every card behind it.
+			fmt.Fprintf(os.Stderr, "forest: #%d claimed by another worker, skipping\n", it.Number)
+			return codeUnclaimable
+		}
 		record.Status = "claim_failed"
 		record.Error = err.Error()
 		_ = appendRun(workspace, record)
