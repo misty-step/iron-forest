@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 )
@@ -75,8 +74,6 @@ func getIssueAny(repo string, n int) (issue, error) {
 	return it, nil
 }
 
-var prRefRe = regexp.MustCompile(`(?i)\b(?:fixes|closes|resolves)\s+#\d+`)
-
 // openPRsReferencing finds whether an open PR mentions the issue.
 func openPRsReferencing(repo string, n int) ([]string, error) {
 	out, err := ghJSON("pr", "list", "-R", repo, "--state", "open",
@@ -101,7 +98,6 @@ func openPRsReferencing(repo string, n int) ([]string, error) {
 			hits = append(hits, fmt.Sprintf("#%d %s %s", p.Number, p.Title, p.URL))
 		}
 	}
-	_ = prRefRe
 	return hits, nil
 }
 

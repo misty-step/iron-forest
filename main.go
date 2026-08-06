@@ -275,9 +275,12 @@ func chewOne(cfg Config, repoDir string, it issue) int {
 		return 1
 	}
 
-	committed, err := gitStrings(wtDir, "diff", "--name-only", baseSHA, "HEAD")
+	var committed []string
+	raw, err := gitOut(wtDir, "diff", "--name-only", baseSHA, "HEAD")
 	if err != nil {
 		committed = r.Changed
+	} else if raw != "" {
+		committed = strings.Split(raw, "\n")
 	}
 	prURL, err := openPR(cfg.Repo, branch, "forest: "+it.Title, prBody(it, r.Rep, committed))
 	if err != nil {

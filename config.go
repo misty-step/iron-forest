@@ -20,6 +20,12 @@ const (
 	modelDefault     = "openrouter-mint/deepseek-v4-flash-0731"
 )
 
+// defaultMaxReactionFixes is the single source of truth for how many re-entry
+// build passes the reaction loop makes on one PR before parking it. It is
+// applied both when composing the default config and when a config omits the
+// value or sets it to zero.
+const defaultMaxReactionFixes = 2
+
 // Config is the composition file forest.yaml. It declares the backlog source,
 // the poll cadence, factory-wide protected paths, and the workflow: which
 // named agents implement the build and review phases and how many corrective
@@ -51,7 +57,7 @@ func defaultConfig() Config {
 		},
 		Workflow: Workflow{
 			Build: "beaver", Review: "owl", MaxFixIterations: 1,
-			AutoMerge: false, MaxReactionFixes: 2,
+			AutoMerge: false, MaxReactionFixes: defaultMaxReactionFixes,
 		},
 	}
 }
@@ -78,7 +84,7 @@ func loadConfig(path string) (Config, error) {
 		cfg.Workflow.MaxFixIterations = 0
 	}
 	if cfg.Workflow.MaxReactionFixes <= 0 {
-		cfg.Workflow.MaxReactionFixes = 2
+		cfg.Workflow.MaxReactionFixes = defaultMaxReactionFixes
 	}
 	return cfg, nil
 }

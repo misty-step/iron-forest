@@ -26,17 +26,6 @@ func gitOut(repo string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func gitStrings(repo string, args ...string) ([]string, error) {
-	raw, err := gitOut(repo, args...)
-	if err != nil {
-		return nil, err
-	}
-	if raw == "" {
-		return nil, nil
-	}
-	return strings.Split(raw, "\n"), nil
-}
-
 func gitCommit(wtDir, msg string) error {
 	cmd := exec.Command("git",
 		"-c", "user.name="+commitAuthorName,
@@ -67,10 +56,6 @@ func createWorktree(repo, workspace string, it issue) (wtDir, branch, baseSHA st
 	}
 	if err := git(repo, "worktree", "add", "-b", branch, wtDir, "master"); err != nil {
 		return "", "", "", fmt.Errorf("worktree add: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(wtDir, ".git"), 0o755); err != nil {
-		// linked worktrees have a .git file; ignore a absent dir error
-		_ = err
 	}
 	return wtDir, branch, baseSHA, nil
 }
