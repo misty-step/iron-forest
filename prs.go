@@ -253,6 +253,57 @@ func mergePR(repo string, n int) error {
 	return err
 }
 
+// rebaseOntoMaster brings a factory PR branch up to date with origin/master so
+// an approved change lands even though master advanced while the Verifier was
+// reasoning. It reports whether a rebase was needed and was pushed. The rebase
+// runs inside the merge worktree and the rewritten branch is pushed with
+// --force-with-lease, which refuses if someone else advanced the branch in the
+// window. A conflicting rebase names the conflicting paths instead of a bare
+// exit status, so the calling merge path spends an attempt and the item is
+// labelled for a human. Callers must not carry a Verdict across the rebase:
+// the new head was not the commit the review approved.
+func rebaseOntoMaster(repo, workspace, branch string) (bool, error) {
+	if err := git(repo, "fetch", "origin"); err != nil {
+		return false, err
+	}
+	// origin/master already reachable from the branch head means the branch is
+	// not behind master: nothing to rebase and merging may proceed as-is.
+	if err := git(repo, "merge-base", "--is-ancestor", "origin/master", "origin/"+branch); err == nil {
+		return false, nil
+	}
+	wtDir, _, err := createWorktreeAtBranch(repo, workspace, branch)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		removeWorktree(repo, wtDir)
+		setCurrentWorktree("")
+	}()
+	if err := git(wtDir, "rebase", "origin/master"); err != nil {
+		conflicts := unmergedPaths(wtDir)
+		_ = git(wtDir, "rebase", "--abort")
+		if len(conflicts) > 0 {
+			return false, fmt.Errorf("rebase of %s conflicts on %s",
+				branch, strings.Join(conflicts, ", "))
+		}
+		return false, err
+	}
+	if err := git(repo, "push", "--force-with-lease", "origin", branch); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// unmergedPaths lists the paths with an unresolved merge conflict in a
+// worktree, or nil when none are staged as unmerged.
+func unmergedPaths(wtDir string) []string {
+	out, err := gitOut(wtDir, "diff", "--name-only", "--diff-filter=U")
+	if err != nil || out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
 // watchPR drives one open factory PR: re-enter on a change request or CI
 // failure, merge when owl approved + CI green + auto_merge on. Every state
 // change is appended to prs.jsonl. Returns 0 on handled outcomes.
@@ -317,6 +368,26 @@ func watchPR(cfg Config, repoDir string, n int) int {
 	}
 	if last.Owl == "approve" && checks == "pass" {
 		if cfg.Workflow.AutoMerge {
+			// Bring the branch up to date before merging so an approved change
+			// is not lost because master moved during the review.
+			rebased, rerr := rebaseOntoMaster(cfg.Repo, workspace, op.Branch)
+			if rerr != nil {
+				base.State = "stalled"
+				base.Error = rerr.Error()
+				_ = prCurrent(workspace, base)
+				fmt.Fprintf(os.Stderr, "forest: rebase #%d: %v\n", n, rerr)
+				return 1
+			}
+			if rebased {
+				// The rebase produced a new head: the verdict keyed to the old
+				// commit no longer applies, so clear it and re-review next pass.
+				base.Owl = ""
+				base.Checks = "pending"
+				base.State = "opened"
+				_ = prCurrent(workspace, base)
+				fmt.Printf("forest: pr #%d rebased onto master; re-reviewing\n", n)
+				return 0
+			}
 			if err := mergePR(cfg.Repo, n); err != nil {
 				base.State = "stalled"
 				base.Error = err.Error()

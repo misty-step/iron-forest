@@ -3,10 +3,122 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// rebaseFixture builds a worktree-less git repo with origin/master on "base",
+// a factory branch "forest/1-topic" cut at that base, and an origin/master that
+// then advances by the given committing closure. It returns the repo and the
+// branch name. Real git drives the fixture so the fetch/rebase/push paths have
+// something live to operate on.
+func rebaseFixture(t *testing.T, masterAhead func(t *testing.T, dir string)) (repo, branch string) {
+	t.Helper()
+	origin := t.TempDir()
+	mustBare := exec.Command("git", "init", "--bare", "-b", "master", origin)
+	if out, err := mustBare.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	repo = t.TempDir()
+	must := func(name string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v: %s", name, err, strings.TrimSpace(string(out)))
+		}
+	}
+	must("init", "init", "-b", "master")
+	must("config", "config", "user.email", "test@example.com")
+	must("config", "config", "user.name", "test")
+	must("remote", "remote", "add", "origin", origin)
+	must("commit", "commit", "--allow-empty", "-m", "base")
+	must("push", "push", "-u", "origin", "master")
+	// Cut the topic branch off the same base, with its own change.
+	must("checkout", "checkout", "-b", "forest/1-topic")
+	if err := os.WriteFile(filepath.Join(repo, "topic.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	must("add", "add", "topic.txt")
+	must("commit", "commit", "-m", "topic")
+	must("push", "push", "-u", "origin", "forest/1-topic")
+	// Advance master past the branch base.
+	must("checkout", "checkout", "master")
+	masterAhead(t, repo)
+	must("add", "add", "-A")
+	must("commit", "commit", "-m", "master ahead")
+	must("push", "push", "origin", "master")
+	return repo, "forest/1-topic"
+}
+
+// TestRebaseOntoMasterRebasesAndMerges pins the whole point of the change: a
+// branch cut from an older master is rebased onto origin/master (and
+// force-pushed) so the approved change still reaches master, and the new head
+// carries master's newer commit instead of the stale base.
+func TestRebaseOntoMasterRebasesAndMerges(t *testing.T) {
+	repo, branch := rebaseFixture(t, func(t *testing.T, dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("master\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	workspace := filepath.Join(repo, WorkspaceDir)
+
+	rebased, err := rebaseOntoMaster(repo, workspace, branch)
+	if err != nil {
+		t.Fatalf("rebaseOntoMaster: %v", err)
+	}
+	if !rebased {
+		t.Fatal("branch behind origin/master was not reported as rebased")
+	}
+	// The branch head rewritten on top of master: it must contain the newer
+	// commit, so a merge onto master is now conflict-free.
+	if err := git(repo, "merge-base", "--is-ancestor", "origin/master", "origin/"+branch); err != nil {
+		t.Fatalf("origin/master not an ancestor of the rebased branch: %v", err)
+	}
+	if err := git(repo, "merge-base", "--is-ancestor", "origin/"+branch, "origin/master"); err == nil {
+		t.Fatal("rebase lost the branch's own change: branch is an ancestor of origin/master")
+	}
+	// A squash merge onto master now applies cleanly.
+	if err := git(repo, "merge", "--no-commit", "--squash", "origin/"+branch); err != nil {
+		t.Fatalf("merge after rebase: %v", err)
+	}
+}
+
+// TestRebaseOntoMasterConflictNamesPaths pins the merge-failure contract: a
+// rebase that conflicts returns an error naming the conflicting paths, never a
+// bare exit status, so the Verifier's merge-failure path can label the item.
+func TestRebaseOntoMasterConflictNamesPaths(t *testing.T) {
+	repo, branch := rebaseFixture(t, func(t *testing.T, dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "topic.txt"), []byte("master edit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	workspace := filepath.Join(repo, WorkspaceDir)
+
+	_, err := rebaseOntoMaster(repo, workspace, branch)
+	if err == nil {
+		t.Fatal("conflicting rebase reported success")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "topic.txt") {
+		t.Fatalf("conflict error %q does not name the conflicting path topic.txt", msg)
+	}
+	if strings.Contains(msg, "exit status") {
+		t.Fatalf("conflict error %q leaks a bare exit status", msg)
+	}
+	// The worktree is cleaned up and the remote branch is untouched.
+	out, werr := gitOut(repo, "worktree", "list", "--porcelain")
+	if werr != nil {
+		t.Fatal(werr)
+	}
+	if strings.Contains(out, filepath.Join(workspace, "worktrees")) {
+		t.Fatalf("merge worktree leaked after failed rebase")
+	}
+	if _, lerr := gitOut(repo, "rev-list", "--count", "origin/master..origin/"+branch); lerr != nil {
+		t.Fatalf("remote branch lost after failed rebase: %v", lerr)
+	}
+}
 
 // TestFixPRStallsAtLimit pins the reaction bound: fixPR must refuse to
 // re-enter a PR whose recorded fix count already consumed the configured
