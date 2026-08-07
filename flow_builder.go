@@ -83,8 +83,9 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	stats, err := runPhase(repoDir, wtDir, a, prompt, trace)
 	out := Outcome{
 		Branch: branch, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
-		BaseSHA: baseSHA, TokIn: stats.tokensIn, TokOut: stats.tokensOut,
+		BaseSHA: baseSHA,
 	}
+	out.addTokens(stats)
 	if err != nil {
 		out.Status = "agent_failed"
 		return out, fmt.Errorf("agent: %w", err)

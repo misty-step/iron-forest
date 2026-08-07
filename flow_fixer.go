@@ -111,7 +111,7 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	}
 	trace := filepath.Join(workspace, "runs", runID+".fixer.jsonl")
 	stats, err := runPhase(repoDir, wtDir, a, prompt, trace)
-	out.TokIn, out.TokOut = stats.tokensIn, stats.tokensOut
+	out.addTokens(stats)
 	if err != nil {
 		out.Status = "agent_failed"
 		return out, fmt.Errorf("agent: %w", err)

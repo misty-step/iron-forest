@@ -112,6 +112,9 @@ type RunRecord struct {
 	Status        string
 	TokensIn      int64
 	TokensOut     int64
+	CacheRead     int64
+	CacheWrite    int64
+	Reasoning     int64
 	Agent         string
 	Model         string
 	BaseSHA       string

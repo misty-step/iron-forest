@@ -12,12 +12,15 @@ import (
 	"strings"
 )
 
-// runStats is the session-level token accounting for one agent run.
+// runStats is the session-level token accounting for one agent run. Every field
+// is a measured token class that must reach the ledger row; a class with no
+// consumer is the under-statement the ledger exists to prevent.
 type runStats struct {
 	tokensIn   int64
 	tokensOut  int64
 	cacheRead  int64
 	cacheWrite int64
+	reasoning  int64
 }
 
 // runPhase executes one named agent with opencode in a worktree and streams its
@@ -103,6 +106,7 @@ func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (ru
 			stats.tokensOut += st.tokensOut
 			stats.cacheRead += st.cacheRead
 			stats.cacheWrite += st.cacheWrite
+			stats.reasoning += st.reasoning
 		}
 	}
 	waitErr := cmd.Wait()
@@ -323,6 +327,7 @@ type stepTokens struct {
 	tokensOut  int64
 	cacheRead  int64
 	cacheWrite int64
+	reasoning  int64
 }
 
 // parseStepFinish extracts per-step token deltas from a step_finish event.
@@ -331,9 +336,10 @@ func parseStepFinish(line []byte) (stepTokens, bool) {
 		Type string `json:"type"`
 		Part struct {
 			Tokens struct {
-				Input  int64 `json:"input"`
-				Output int64 `json:"output"`
-				Cache  struct {
+				Input     int64 `json:"input"`
+				Output    int64 `json:"output"`
+				Reasoning int64 `json:"reasoning"`
+				Cache     struct {
 					Read  int64 `json:"read"`
 					Write int64 `json:"write"`
 				} `json:"cache"`
@@ -343,6 +349,11 @@ func parseStepFinish(line []byte) (stepTokens, bool) {
 	if err := json.Unmarshal(line, &ev); err != nil || ev.Type != "step_finish" {
 		return stepTokens{}, false
 	}
-	return stepTokens{tokensIn: ev.Part.Tokens.Input, tokensOut: ev.Part.Tokens.Output,
-		cacheRead: ev.Part.Tokens.Cache.Read, cacheWrite: ev.Part.Tokens.Cache.Write}, true
+	return stepTokens{
+		tokensIn:   ev.Part.Tokens.Input,
+		tokensOut:  ev.Part.Tokens.Output,
+		cacheRead:  ev.Part.Tokens.Cache.Read,
+		cacheWrite: ev.Part.Tokens.Cache.Write,
+		reasoning:  ev.Part.Tokens.Reasoning,
+	}, true
 }

@@ -18,9 +18,12 @@ type statsCmd struct {
 }
 
 type groupTotals struct {
-	count int
-	in    int64
-	out   int64
+	count      int
+	in         int64
+	out        int64
+	cacheRead  int64
+	cacheWrite int64
+	reasoning  int64
 }
 
 // keyed groups rows in first-seen order for stable operator output.
@@ -49,6 +52,9 @@ func (k *keyed) add(key string, r runRecord) {
 	t.count++
 	t.in += r.TokensIn
 	t.out += r.TokOut
+	t.cacheRead += r.CacheRead
+	t.cacheWrite += r.CacheWrite
+	t.reasoning += r.Reasoning
 	k.totals[key] = t
 }
 
@@ -108,13 +114,26 @@ func (s *statsCmd) computeRange() {
 	}
 }
 
-func (s *statsCmd) totals() (int64, int64) {
-	var in, out int64
+// ledgerTotals holds the summed token classes across aggregate rows. Cached
+// input stays apart from fresh input because the two bill at different rates.
+type ledgerTotals struct {
+	in         int64
+	out        int64
+	cacheRead  int64
+	cacheWrite int64
+	reasoning  int64
+}
+
+func (s *statsCmd) totals() ledgerTotals {
+	var t ledgerTotals
 	for _, r := range s.runs {
-		in += r.TokensIn
-		out += r.TokOut
+		t.in += r.TokensIn
+		t.out += r.TokOut
+		t.cacheRead += r.CacheRead
+		t.cacheWrite += r.CacheWrite
+		t.reasoning += r.Reasoning
 	}
-	return in, out
+	return t
 }
 
 func (s *statsCmd) emitText(w io.Writer) int {
@@ -127,8 +146,9 @@ func (s *statsCmd) emitText(w io.Writer) int {
 	s.emitTextGroup(w, func(r runRecord) string { return r.Status })
 	categories := s.categories()
 	fmt.Fprintf(w, "\ncategory:  progress=%d failed=%d other=%d\n", categories["progress"], categories["failed"], categories["other"])
-	in, out := s.totals()
-	fmt.Fprintf(w, "tokens:    input=%d output=%d\n", in, out)
+	t := s.totals()
+	fmt.Fprintf(w, "tokens:    input=%d cache_read=%d cache_write=%d reasoning=%d output=%d\n",
+		t.in, t.cacheRead, t.cacheWrite, t.reasoning, t.out)
 
 	s.emitTextBreakdown(w, "by flow:", func(r runRecord) string { return r.Flow })
 	s.emitTextBreakdown(w, "by agent:", func(r runRecord) string { return r.Agent })
@@ -142,8 +162,9 @@ func (s *statsCmd) emitText(w io.Writer) int {
 func (s *statsCmd) emitTextGroup(w io.Writer, key func(runRecord) string) {
 	items := s.breakdown(key)
 	for _, item := range items {
-		fmt.Fprintf(w, "  %-20s count=%d tokens_in=%d tokens_out=%d\n",
-			item["key"], item["count"], item["tokens_in"], item["tokens_out"])
+		fmt.Fprintf(w, "  %-20s count=%d tokens_in=%d cache_read=%d cache_write=%d reasoning=%d tokens_out=%d\n",
+			item["key"], item["count"], item["tokens_in"], item["cache_read"],
+			item["cache_write"], item["reasoning"], item["tokens_out"])
 	}
 }
 
@@ -177,12 +198,20 @@ func (s *statsCmd) emitJSON(w io.Writer) int {
 			return 1
 		}
 	}
-	in, out := s.totals()
-	if err := enc.Encode(map[string]any{"group": "tokens_in", "total": in}); err != nil {
-		return 1
-	}
-	if err := enc.Encode(map[string]any{"group": "tokens_out", "total": out}); err != nil {
-		return 1
+	t := s.totals()
+	for _, c := range []struct {
+		group string
+		total int64
+	}{
+		{"tokens_in", t.in},
+		{"tokens_out", t.out},
+		{"cache_read", t.cacheRead},
+		{"cache_write", t.cacheWrite},
+		{"reasoning", t.reasoning},
+	} {
+		if err := enc.Encode(map[string]any{"group": c.group, "total": c.total}); err != nil {
+			return 1
+		}
 	}
 	return 0
 }
@@ -196,10 +225,13 @@ func (s *statsCmd) breakdown(key func(runRecord) string) []map[string]any {
 	for _, name := range k.order {
 		t := k.totals[name]
 		out = append(out, map[string]any{
-			"key":        name,
-			"count":      t.count,
-			"tokens_in":  t.in,
-			"tokens_out": t.out,
+			"key":         name,
+			"count":       t.count,
+			"tokens_in":   t.in,
+			"tokens_out":  t.out,
+			"cache_read":  t.cacheRead,
+			"cache_write": t.cacheWrite,
+			"reasoning":   t.reasoning,
 		})
 	}
 	return out

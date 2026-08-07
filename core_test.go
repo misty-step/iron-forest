@@ -115,7 +115,7 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(ws), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	rows := "{\"time\":\"2026-01-01T00:00:00Z\",\"run_id\":\"r1\",\"flow\":\"builder\",\"subject\":\"item-1\",\"revision\":\"a\",\"status\":\"built\",\"tokens_in\":10,\"tokens_out\":2}\n" +
+	rows := "{\"time\":\"2026-01-01T00:00:00Z\",\"run_id\":\"r1\",\"flow\":\"builder\",\"subject\":\"item-1\",\"revision\":\"a\",\"status\":\"built\",\"tokens_in\":10,\"tokens_out\":2,\"cache_read\":30,\"cache_write\":4,\"reasoning\":5}\n" +
 		"{\"time\":\"2026-01-01T00:00:01Z\",\"run_id\":\"r2\",\"flow\":\"verifier\",\"subject\":\"item-2\",\"revision\":\"b\",\"status\":\"merged\",\"tokens_in\":5,\"tokens_out\":1}\n"
 	if err := os.WriteFile(ws, []byte(rows), 0o644); err != nil {
 		t.Fatal(err)
@@ -127,8 +127,8 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if len(all) != 2 {
 		t.Fatalf("Ledger returned %d rows, want 2", len(all))
 	}
-	if all[0].Flow != "builder" || all[0].TokensIn != 10 {
-		t.Fatalf("row 0 = %+v, want builder with 10 tokens in", all[0])
+	if all[0].Flow != "builder" || all[0].TokensIn != 10 || all[0].CacheRead != 30 || all[0].CacheWrite != 4 || all[0].Reasoning != 5 {
+		t.Fatalf("row 0 = %+v, want builder with 10 fresh, 30 cached-read, 4 cached-write, 5 reasoning in", all[0])
 	}
 	builder, err := api.Ledger(core.LedgerQuery{Flow: "builder"})
 	if err != nil {
