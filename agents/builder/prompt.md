@@ -1,4 +1,4 @@
-As the Builder, implement item #{{.ID}} — {{.Title}}.
+As the Builder, implement item #{{.Number}} — {{.Title}}.
 
 {{- if .Revision}}
 
