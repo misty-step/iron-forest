@@ -39,7 +39,9 @@ Coordination is facts, not locks. A Verdict or Checks note is keyed to the exact
 reviewed commit and written once; git refuses the second writer. Attempts and the
 repeat-failure brake are compare-and-set refs. Branch publication carries the
 observed remote tip, so a lost race fails cleanly. Exclusion inside one process
-is an in-process subject set, and one lock file keeps one process per checkout.
+is an in-process subject set, and one lock file keeps one daemon per checkout.
+That lock covers `serve` only: `forest run` dispatches outside it, and nothing
+today excludes two checkouts of the same repository.
 
 Run history lives in `.forest/runs.jsonl` on the host and is not in git. It is
 telemetry. No selection decision depends on it.
@@ -69,23 +71,31 @@ The core is a headless program. It runs with no terminal, no operator present,
 and no network listener, and it is complete on its own. Everything it knows is
 in the repository, the refs, the notes, and the Ledger.
 
-Every operation the core performs is reachable through one internal API. Each
-surface is a client of that API with no privileged path around it:
+Every operation the core performs should be reachable through one internal API,
+with each surface a client of that API and no privileged path around it. That is
+the target, not today's state. `core/core.go` currently exposes durable reads
+only; `cmdList`, `cmdAgents`, `cmdShow`, `cmdStats`, and `watch` still reach past
+it. #176 migrates the read callers, #177 moves the implementations, and #162 adds
+the writes an operator needs.
 
-- **CLI** — the reference surface and the contract. Scriptable, pipeable, and
-  usable by an agent that is not part of Iron Forest.
+- **CLI** — the reference surface and the contract, and today the only one that
+  ships. Scriptable, pipeable, and usable by an agent that is not part of Iron
+  Forest.
 - **TUI** — the same operations with a live view, for an operator watching work.
+  Planned; see #62.
 - **UI** — the same operations again, for reading traces and configuration
-  comfortably.
+  comfortably. Planned; see #180.
 
-Surfaces have parity. Anything readable in Iron Forest is readable from any of
-them, and anything writable is writable from any of them. A capability that
-exists in only one surface is a defect, not a roadmap item.
+Surfaces will have parity: anything readable is readable from any of them, and
+anything writable is writable from any of them. Once two surfaces ship, a
+capability that exists in only one is a defect rather than a roadmap item.
 
 One exception shapes the design rather than breaking the rule. Which subject is
 in flight, and cancelling a live run, exist only inside the running process.
-Those operations are served by the daemon over a local transport. Everything
-else is durable state that any surface may read directly.
+Those operations need the daemon to serve them over a local transport, which is
+not built yet; #163 is that work, and until it lands `watch` infers liveness from
+git, systemd, and the Ledger. Everything else is durable state that any surface
+may read directly.
 
 ## Standards
 
@@ -105,9 +115,17 @@ else is durable state that any surface may read directly.
 
 ## Excellent outcome — 2027-02-06
 
-A new operator configures Iron Forest on repositories that are not this one and
-runs it unattended for 30 days. Every merge is explainable from git refs, notes,
-checks, and the Ledger. The Gate has demonstrably rejected a real regression.
+A fresh operator runs a recorded factory Revision on `misty-step/cantrip` and at
+least one further repository that is not Iron Forest, for 30 consecutive UTC
+days, with no manual Flow intervention. Record the start and end instants, the
+factory Revision, and each `forest.yaml` Revision.
+
+For every merge, the Ledger retains one row linking Subject, reviewed Revision,
+Checks note, Verdict note, and the resulting master Revision. Branch deletion at
+merge must not break that lineage.
+
+Seed one known regression into code or checks. Require a failing Checks note, no
+merge, and a retained evidence bundle naming the exact Revision that was refused.
 
 ## Direction
 
