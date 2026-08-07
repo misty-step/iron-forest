@@ -1,9 +1,9 @@
 package main
 
-// item is one tracker item and its discussion in a host-independent shape. The
+// Item is one tracker item and its discussion in a host-independent shape. The
 // id is a string so a second work source can carry its own identity. It sits
 // beside the legacy issue struct; migrating over is #149.
-type item struct {
+type Item struct {
 	ID        string
 	Title     string
 	Body      string
@@ -12,13 +12,13 @@ type item struct {
 	Comments  []comment
 }
 
-// tracker is the work source. A flow lists open items, reads one item, and
+// Tracker is the work source. A flow lists open items, reads one item, and
 // records comments, closure, and tag changes against it.
-type tracker interface {
+type Tracker interface {
 	// ListOpen returns every open item.
-	ListOpen() ([]item, error)
+	ListOpen() ([]Item, error)
 	// Get returns one item by its id.
-	Get(id string) (item, error)
+	Get(id string) (Item, error)
 	// Comment appends a comment to an item's discussion.
 	Comment(id, body string) error
 	// Close closes one item.
@@ -27,13 +27,13 @@ type tracker interface {
 	SetTags(id string, add, remove []string) error
 }
 
-// projection is the optional, one-way human surface. It mirrors a branch and
+// Projection is the optional, one-way human surface. It mirrors a branch and
 // each decision as a pull request and can merge one.
-type projection interface {
+type Projection interface {
 	// FindOpen returns the open projection for a branch, if any.
-	FindOpen(branch string) (item, error)
+	FindOpen(branch string) (Item, error)
 	// Open publishes a branch as one projection.
-	Open(branch, title, body string) (item, error)
+	Open(branch, title, body string) (Item, error)
 	// Comment appends a comment to an open projection.
 	Comment(id, body string) error
 	// Merge merges an open projection using the named strategy.

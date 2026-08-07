@@ -2,15 +2,15 @@ package main
 
 import "testing"
 
-// TestTrackerFake drives the in-memory tracker through the tracker interface.
+// TestTrackerFake drives the in-memory tracker through the Tracker interface.
 func TestTrackerFake(t *testing.T) {
 	store := newMemoryTracker()
 	if _, err := store.Get("7"); err == nil {
 		t.Fatal("Get of a missing item must fail")
 	}
-	store.seed(item{ID: "7", Title: "build the parser", Tags: []string{"forest:ready"}})
+	store.seed(Item{ID: "7", Title: "build the parser", Tags: []string{"forest:ready"}})
 
-	var src tracker = store
+	var src Tracker = store
 	if items, err := src.ListOpen(); err != nil || len(items) != 1 || items[0].ID != "7" {
 		t.Fatalf("ListOpen = %+v, %v; want one item id 7", items, err)
 	}
@@ -43,7 +43,7 @@ func TestTrackerFake(t *testing.T) {
 	}
 }
 
-// TestProjectionFake drives the in-memory projection through the projection
+// TestProjectionFake drives the in-memory projection through the Projection
 // interface.
 func TestProjectionFake(t *testing.T) {
 	proj := newMemoryProjection()
@@ -51,7 +51,7 @@ func TestProjectionFake(t *testing.T) {
 		t.Fatal("FindOpen of a missing branch must fail")
 	}
 
-	var dst projection = proj
+	var dst Projection = proj
 	opened, err := dst.Open("forest/7-change", "forest: build the parser", "body")
 	if err != nil {
 		t.Fatalf("Open: %v", err)

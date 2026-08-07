@@ -5,38 +5,38 @@ import "fmt"
 // memoryTracker is an in-memory tracker used by tests. Open items live in the
 // map; closing one removes it, exactly as a host would stop returning it.
 type memoryTracker struct {
-	items map[string]item
+	items map[string]Item
 }
 
 // newMemoryTracker returns an empty in-memory tracker.
 func newMemoryTracker() *memoryTracker {
-	return &memoryTracker{items: make(map[string]item)}
+	return &memoryTracker{items: make(map[string]Item)}
 }
 
 // seed inserts or replaces one item by id.
-func (m *memoryTracker) seed(it item) {
+func (m *memoryTracker) seed(it Item) {
 	m.items[it.ID] = it
 }
 
-// ListOpen implements tracker.
-func (m *memoryTracker) ListOpen() ([]item, error) {
-	items := make([]item, 0, len(m.items))
+// ListOpen implements Tracker.
+func (m *memoryTracker) ListOpen() ([]Item, error) {
+	items := make([]Item, 0, len(m.items))
 	for _, it := range m.items {
 		items = append(items, it)
 	}
 	return items, nil
 }
 
-// Get implements tracker.
-func (m *memoryTracker) Get(id string) (item, error) {
+// Get implements Tracker.
+func (m *memoryTracker) Get(id string) (Item, error) {
 	it, ok := m.items[id]
 	if !ok {
-		return item{}, fmt.Errorf("item %q not found", id)
+		return Item{}, fmt.Errorf("item %q not found", id)
 	}
 	return it, nil
 }
 
-// Comment implements tracker.
+// Comment implements Tracker.
 func (m *memoryTracker) Comment(id, body string) error {
 	it, err := m.Get(id)
 	if err != nil {
@@ -47,7 +47,7 @@ func (m *memoryTracker) Comment(id, body string) error {
 	return nil
 }
 
-// Close implements tracker.
+// Close implements Tracker.
 func (m *memoryTracker) Close(id string) error {
 	if _, ok := m.items[id]; !ok {
 		return fmt.Errorf("item %q not found", id)
@@ -56,7 +56,7 @@ func (m *memoryTracker) Close(id string) error {
 	return nil
 }
 
-// SetTags implements tracker.
+// SetTags implements Tracker.
 func (m *memoryTracker) SetTags(id string, add, remove []string) error {
 	it, err := m.Get(id)
 	if err != nil {
@@ -83,36 +83,36 @@ func (m *memoryTracker) SetTags(id string, add, remove []string) error {
 // memoryProjection is an in-memory projection used by tests. One open
 // projection is keyed by its branch; merging one removes it.
 type memoryProjection struct {
-	branches map[string]item
+	branches map[string]Item
 	next     int
 }
 
 // newMemoryProjection returns an empty in-memory projection.
 func newMemoryProjection() *memoryProjection {
-	return &memoryProjection{branches: make(map[string]item), next: 1}
+	return &memoryProjection{branches: make(map[string]Item), next: 1}
 }
 
-// FindOpen implements projection.
-func (m *memoryProjection) FindOpen(branch string) (item, error) {
+// FindOpen implements Projection.
+func (m *memoryProjection) FindOpen(branch string) (Item, error) {
 	pr, ok := m.branches[branch]
 	if !ok {
-		return item{}, fmt.Errorf("no open projection for branch %q", branch)
+		return Item{}, fmt.Errorf("no open projection for branch %q", branch)
 	}
 	return pr, nil
 }
 
-// Open implements projection.
-func (m *memoryProjection) Open(branch, title, body string) (item, error) {
+// Open implements Projection.
+func (m *memoryProjection) Open(branch, title, body string) (Item, error) {
 	if _, ok := m.branches[branch]; ok {
-		return item{}, fmt.Errorf("projection already open for branch %q", branch)
+		return Item{}, fmt.Errorf("projection already open for branch %q", branch)
 	}
-	pr := item{ID: fmt.Sprintf("%d", m.next), Title: title, Body: body}
+	pr := Item{ID: fmt.Sprintf("%d", m.next), Title: title, Body: body}
 	m.next++
 	m.branches[branch] = pr
 	return pr, nil
 }
 
-// Comment implements projection.
+// Comment implements Projection.
 func (m *memoryProjection) Comment(id, body string) error {
 	for branch, pr := range m.branches {
 		if pr.ID == id {
@@ -124,7 +124,7 @@ func (m *memoryProjection) Comment(id, body string) error {
 	return fmt.Errorf("projection %q not found", id)
 }
 
-// Merge implements projection.
+// Merge implements Projection.
 func (m *memoryProjection) Merge(id, strategy string) error {
 	for branch, pr := range m.branches {
 		if pr.ID == id {
