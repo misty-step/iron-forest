@@ -95,6 +95,17 @@ Each check runs in a child environment with a private `HOME` and a scrubbed
   platform path-list of directories to prepend to the child `PATH`. They sit
   before the mise shims, so a working host binary wins over a dead shim.
 
+A host binary is often only a proxy that must read toolchain metadata to find
+its real driver (rustup's `cargo` needs `RUSTUP_HOME`, and per its toolchain
+layout `CARGO_HOME`, to locate the default toolchain; with a private empty
+`HOME` and only the proxy on `PATH` it reports "no default is configured"). Name
+that metadata with `FOREST_CHECK_ENV` on the host running the Factory, a
+newline-separated list of `KEY=VALUE` pairs (for example one line `RUSTUP_HOME`
+and one `CARGO_HOME`) added to the child environment. Like `FOREST_CHECK_PATH`
+it is stack-agnostic and non-credential: it carries only the metadata a
+toolchain needs, never secrets, and it is appended after the private environment
+so it cannot override `HOME` or the scrubbed `PATH`.
+
 Building the wrong thing is worse than not building: Iron Forest does not guess a
 stack. If a `checks:` command's tool is missing, the check fails and the note
 names the command that could not start.

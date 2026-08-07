@@ -104,7 +104,9 @@ const childSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 // Non-Go tools the managed repo declares reach the child through one of two
 // ways: mise-managed tools with working shims (already on the child PATH), or
 // host toolchain directories the operator names in FOREST_CHECK_PATH (see
-// checkHostBins).
+// checkHostBins). Toolchain metadata such as RUSTUP_HOME or CARGO_HOME, which a
+// host proxy must read to resolve its real driver, arrives via FOREST_CHECK_ENV
+// (see checkHostEnv).
 func childEnvironment() ([]string, func(), error) {
 	mise, err := exec.LookPath("mise")
 	if err != nil {
@@ -137,6 +139,9 @@ func childEnvironment() ([]string, func(), error) {
 		// world: measured 22s cold against about 1s warm.
 		"GOCACHE=" + goBuildCache(),
 	}
+	// Operator-declared host toolchain metadata (see checkHostEnv) is appended
+	// last so it can never shadow the private HOME or the scrubbed PATH.
+	env = append(env, checkHostEnv()...)
 	return env, cleanup, nil
 }
 
@@ -154,6 +159,28 @@ func checkHostBins() []string {
 		dirs = append(dirs, filepath.Clean(entry))
 	}
 	return dirs
+}
+
+// checkHostEnv reads the operator-declared host toolchain metadata from
+// FOREST_CHECK_ENV, a newline-separated list of KEY=VALUE pairs, and returns
+// them as child environment entries. Like FOREST_CHECK_PATH, it is a
+// stack-agnostic, non-credential mechanism: it carries the metadata a host
+// toolchain proxy needs to resolve its real driver under a private HOME (for
+// example RUSTUP_HOME and CARGO_HOME for rustup). Blank lines and entries with
+// no "=" separators are ignored.
+func checkHostEnv() []string {
+	var entries []string
+	for _, line := range strings.Split(os.Getenv("FOREST_CHECK_ENV"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, _, ok := strings.Cut(line, "="); !ok {
+			continue
+		}
+		entries = append(entries, line)
+	}
+	return entries
 }
 
 // childPath assembles the PATH for a child environment. Order is load-bearing:

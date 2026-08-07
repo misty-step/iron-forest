@@ -103,3 +103,69 @@ func TestRunChecksFindsHostToolchainDriver(t *testing.T) {
 		t.Fatalf("check output = %q, want the fake driver to have run", note.Results[0].Output)
 	}
 }
+
+// TestCheckHostEnvParsesMetadata pins the generic metadata mechanism: a host
+// toolchain proxy reads metadata that lives outside the private child HOME, so
+// FOREST_CHECK_ENV carries newline-separated KEY=VALUE pairs into the child
+// environment, ignoring blank lines and entries with no "=" separator.
+func TestCheckHostEnvParsesMetadata(t *testing.T) {
+	rustup := filepath.Join("home", ".rustup")
+	cargo := filepath.Join("home", ".cargo")
+	t.Setenv("FOREST_CHECK_ENV", "RUSTUP_HOME="+rustup+"\n\nCARGO_HOME="+cargo+"\nNOT_A_PAIR")
+	entries := checkHostEnv()
+	want := []string{"RUSTUP_HOME=" + rustup, "CARGO_HOME=" + cargo}
+	if len(entries) != len(want) {
+		t.Fatalf("checkHostEnv() = %v, want %v", entries, want)
+	}
+	for i := range want {
+		if entries[i] != want[i] {
+			t.Fatalf("checkHostEnv()[%d] = %q, want %q", i, entries[i], want[i])
+		}
+	}
+}
+
+// TestRunChecksHostProxyResolvesWithMetadata pins the actual proxy behavior the
+// item calls out, not a self-contained fake. A host toolchain "cargo" is a
+// proxy that reads RUSTUP_HOME (falling back to $HOME/.rustup) to find its real
+// driver. With a private HOME and only ~/.cargo/bin on PATH, that lookup finds
+// nothing and the proxy reports "no default is configured"; pointing RUSTUP_HOME
+// at the host rustup home makes the proxy resolve and run the real driver.
+// FOREST_CHECK_PATH supplies the proxy, FOREST_CHECK_ENV supplies its metadata.
+func TestRunChecksHostProxyResolvesWithMetadata(t *testing.T) {
+	cargoBin := filepath.Join(t.TempDir(), "cargo", "bin")
+	rustupHome := filepath.Join(t.TempDir(), ".rustup")
+	realBin := filepath.Join(rustupHome, "toolchains", "stable-x86_64-unknown-linux-gnu", "bin")
+	for _, dir := range []string{cargoBin, realBin} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeDriver(t, cargoBin, "cargo",
+		"#!/bin/sh\n"+
+			": \"${RUSTUP_HOME:=$HOME/.rustup}\"\n"+
+			"for tc in \"$RUSTUP_HOME\"/toolchains/*/bin; do\n"+
+			"\t[ -d \"$tc\" ] || continue\n"+
+			"\tif [ -x \"$tc/cargo-real\" ]; then exec \"$tc/cargo-real\" \"$@\"; fi\n"+
+			"done\n"+
+			"echo 'error: no default toolchain configured' >&2\n"+
+			"exit 1\n")
+	writeDriver(t, realBin, "cargo-real", "#!/bin/sh\necho real-driver-ok\n")
+
+	t.Setenv("FOREST_CHECK_PATH", cargoBin)
+	t.Setenv("FOREST_CHECK_ENV", "RUSTUP_HOME="+rustupHome+"\nCARGO_HOME="+filepath.Join(t.TempDir(), ".cargo"))
+
+	cfg := Config{Checks: []Check{{Name: "cargo-version", Run: "cargo --version"}}}
+	note, err := runChecks(cfg, t.TempDir(), "run-proxy")
+	if err != nil {
+		t.Fatalf("runChecks returned error: %v", err)
+	}
+	if note.Status != "pass" {
+		t.Fatalf("status = %q, want pass; output = %q", note.Status, note.Results[0].Output)
+	}
+	if len(note.Results) != 1 || note.Results[0].Code != 0 {
+		t.Fatalf("results = %+v, want one passing check", note.Results)
+	}
+	if !strings.Contains(note.Results[0].Output, "real-driver-ok") {
+		t.Fatalf("check output = %q, want the real driver behind the proxy to have run", note.Results[0].Output)
+	}
+}
