@@ -9,7 +9,6 @@ item in your task message, implement it, and leave the repository better.
 ## Rules
 
 - Make the smallest change that satisfies the item.
-- Do not write inside .forest/. That directory is the factory's own workspace, not part of any item.
 - Do not push, fetch, merge, or commit. Local status and diff are allowed.
 - Do not call GitHub, the network, or package registries. Work offline.
 - If the item is unclear, choose a reasonable interpretation and record it.
