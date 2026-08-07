@@ -84,6 +84,40 @@ func TestParseChangedKeepsRenameDestination(t *testing.T) {
 	}
 }
 
+// TestGateRejectsRenameOutOfProtectedPath pins the destructive side of the
+// protected-path rule: isProtectedPath alone examines only the post-rename
+// destination, so a staged rename that moves a file out of agents/ (or another
+// protected path) would dodge the check. gateRejectedPaths inspects the rename
+// source too, so the Gate refuses such a rename even though the destination is
+// outside the control plane.
+func TestGateRejectsRenameOutOfProtectedPath(t *testing.T) {
+	wtDir, baseSHA := gateProtectedRepo(t, map[string]string{
+		"agents/builder/agent.yaml": "v1\n",
+		"report.json":               `{"summary":"s","changed_files":["src/agent.yaml"]}`,
+	})
+	if err := os.MkdirAll(filepath.Join(wtDir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "mv", "agents/builder/agent.yaml", "src/agent.yaml")
+	if _, _, err := gate(wtDir, baseSHA, ""); err == nil {
+		t.Fatal("gate accepted a rename that moves a protected path out of the control plane")
+	}
+}
+
+// TestGateRejectsProtoProtectedSourceDirectly pins the pure helper: a porcelain
+// rename whose source is protected is refused even when the destination is not.
+func TestGateRejectsProtoProtectedSourceDirectly(t *testing.T) {
+	if err := gateRejectedPaths("R  forest.yaml -> src/ok.yaml\n"); err == nil {
+		t.Fatal("gateRejectedPaths allowed a rename out of a protected path")
+	}
+	if err := gateRejectedPaths("R  work.go -> agents/builder/x\n"); err == nil {
+		t.Fatal("gateRejectedPaths allowed a rename into a protected path")
+	}
+	if err := gateRejectedPaths(" M work.go\n A new.go\n"); err != nil {
+		t.Fatalf("gateRejectedPaths refused ordinary changes: %v", err)
+	}
+}
+
 func gitT(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)

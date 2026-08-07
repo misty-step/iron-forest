@@ -590,3 +590,83 @@ func TestAdmitMergeReadsTheExactNotes(t *testing.T) {
 		t.Run(sc.name, func(t *testing.T) { run(t, sc) })
 	}
 }
+
+// TestAdmitCheckReadsTheExactNote is the flow-level illegal-transition coverage
+// for the check effect: the verifier's check admission reads the Checks note on
+// the exact head and asks the machine. A bare head is admitted; a head that
+// already carries a Checks note is refused, so the effectCheck transition is
+// actually called and enforced rather than skipped by the pass.
+func TestAdmitCheckReadsTheExactNote(t *testing.T) {
+	run := func(t *testing.T, seedChecks bool, wantErr bool) {
+		t.Helper()
+		_, work, _ := notesTestRepository(t)
+		branch := "forest/9-admitcheck"
+		notesTestGit(t, work, "checkout", "-q", "-b", branch)
+		if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("branch\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		notesTestGit(t, work, "add", "branch.txt")
+		notesTestGit(t, work, "commit", "-qm", "branch work")
+		notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
+		head := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+		if seedChecks {
+			if err := writeChecks(work, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := admitCheck(work, head)
+		if wantErr && err == nil {
+			t.Fatal("admitCheck checked a head that already carries a checks note")
+		}
+		if !wantErr && err != nil {
+			t.Fatalf("admitCheck refused a bare head: %v", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		seedChecks bool
+		wantErr    bool
+	}{
+		{name: "bare head is checked", seedChecks: false},
+		{name: "a head already carrying a checks note is refused", seedChecks: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) { run(t, tc.seedChecks, tc.wantErr) })
+	}
+}
+
+// TestMergeVerifiedRefusesMovedBranch pins the expected-head admission that
+// closes the window between admitMerge and the merge itself: if the branch head
+// moved after admission, its Checks and Verdict may no longer describe the head
+// about to land, so landing it would violate the exact-revision invariant.
+func TestMergeVerifiedRefusesMovedBranch(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+	branch := "forest/9-moved"
+	notesTestGit(t, work, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "add", "branch.txt")
+	notesTestGit(t, work, "commit", "-qm", "branch work")
+	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
+	admitted := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+
+	// The branch advances after it was admitted; the merge now lands a different
+	// head and must refuse on the expected-head check.
+	if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "commit", "-qam", "branch moved")
+	notesTestGit(t, work, "push", "-q", "origin", branch)
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{}
+	err := mergeVerified(cfg, work, branch, Item{ID: "9", Title: "moved"}, admitted)
+	if err == nil {
+		t.Fatal("mergeVerified landed a branch that moved after admission")
+	}
+	if !strings.Contains(err.Error(), "after admission") {
+		t.Errorf("error %q does not name the expected-head refusal", err)
+	}
+}

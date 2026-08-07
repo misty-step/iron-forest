@@ -94,10 +94,19 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	}
 	// The fix effect is only legal on a broken head: failed Checks, or a
 	// Verdict of changes. A green, approved head is the merge path, never fix
-	// work; the machine is the authority deciding which lane owns it.
+	// work; the machine is the authority deciding which lane owns it. The facts
+	// carry the spent attempts, the configured cap, and the failure label, so
+	// observe reports failed when the cap is reached and the effect is refused
+	// here -- the FSM enforces the cap at the boundary, not just Select.
+	attempts, err := readAttempts(repoDir, s.Key)
+	if err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("attempts: %w", err)
+	}
 	ffacts := subjectFacts{
 		revision: s.Head, hasBranch: true,
 		checksStatus: checks.Status, verdictStatus: v.Verdict,
+		attempts: attempts, attemptsCap: cfg.Flows.Fixer.Attempts,
+		failedLabel: it.hasTag(failedLabel),
 	}
 	if _, err := transit(observe(ffacts), effectFix, ffacts, "", "fixer"); err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "item_failed"}, fmt.Errorf("fix: %w", err)

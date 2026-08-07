@@ -134,14 +134,17 @@ func observe(f subjectFacts) deliveryState {
 	// A failing head is repair work, never a review outcome, and a Verdict is
 	// only ever *written* on a green head. The Checks fact therefore dominates
 	// the Verdict fact: a head whose Checks fail is observed as checks_recorded
-	// (the Fixer's work) even if a stray fact still names a Verdict.
+	// (the Fixer's work) even if a stray fact still names a Verdict. The green
+	// Checks fact must likewise be present before a Verdict is read as a state:
+	// a Verdict with no green Checks on the exact revision is a stranded signal,
+	// never an approved or rejected outcome that a lane may act on.
 	if f.checksStatus == "fail" {
 		return stateChecksRecorded
 	}
 	switch {
-	case f.verdictStatus == "approve":
+	case f.checksStatus == "pass" && f.verdictStatus == "approve":
 		return stateVerdictApproved
-	case f.verdictStatus == "changes":
+	case f.checksStatus == "pass" && f.verdictStatus == "changes":
 		return stateVerdictRejected
 	case f.checksStatus != "":
 		return stateChecksRecorded

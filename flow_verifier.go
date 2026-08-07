@@ -153,6 +153,9 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			Time:    nowRFC(),
 			Results: []checkResult{{Name: "rebase", Code: 1, Output: rebaseErr.Error()}},
 		}
+		if err := admitCheck(repoDir, baseSHA); err != nil {
+			return out, fmt.Errorf("rebase: %w (pre-check: %v)", rebaseErr, err)
+		}
 		if err := writeChecks(repoDir, baseSHA, note); err != nil {
 			if !errors.Is(err, errNoteExists) {
 				return out, fmt.Errorf("rebase: %w (notes: %v)", rebaseErr, err)
@@ -175,6 +178,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// The ledger must record the head the checks, the Verdict, and the merge all
 	// key to; the value above was the pre-rebase head.
 	out.BaseSHA = newHead
+
+	// The check effect is only legal on a bare pushed head: it may not write
+	// over a Checks note that already exists on the exact revision.
+	if err := admitCheck(repoDir, baseSHA); err != nil {
+		out.Status = "checks_failed"
+		return out, fmt.Errorf("checks: %w", err)
+	}
 
 	checks, checkErr := runChecks(cfg, wtDir, runID)
 	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
@@ -254,7 +264,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "merge_failed"
 		return out, fmt.Errorf("merge: %w", err)
 	}
-	if err := mergeVerified(cfg, repoDir, s.Branch, it); err != nil {
+	if err := mergeVerified(cfg, repoDir, s.Branch, it, baseSHA); err != nil {
 		// A branch that cannot land needs a human, not another attempt. Spend one
 		// attempt so the merge selector stops offering it, and say so on the item.
 		out.Status = "merge_failed"
@@ -296,6 +306,28 @@ func admitMerge(repoDir, head string) error {
 	return nil
 }
 
+// admitCheck is the verifier's check admission. A Checks note may only be
+// recorded on a bare pushed head -- one carrying no Checks on the exact
+// revision -- so the machine is asked whether that head may take the check
+// effect. The note is read to confirm the head is bare: a head that already
+// carries a Checks note inherits or repeats a prior decision and is refused
+// here, not silently re-checked. The flow calls it at each check boundary so
+// the FSM -- not the pass's own bookkeeping -- is the authority on whether a
+// head may be checked.
+func admitCheck(repoDir, head string) error {
+	_, hasChecks, err := readChecks(repoDir, head)
+	if err != nil {
+		return err
+	}
+	if hasChecks {
+		return fmt.Errorf("illegal transition %s --%s--> ?: revision already carries a checks note", statePushed, effectCheck)
+	}
+	if _, err := transit(statePushed, effectCheck, subjectFacts{revision: head, hasBranch: true}, "", "verifier"); err != nil {
+		return err
+	}
+	return nil
+}
+
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
 // in tokens; a discarded count makes every review look free.
@@ -324,11 +356,17 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 		DefSHA: a.DefSHA, RunID: runID, Time: nowRFC(),
 	}
 	// The review effect writes a Verdict, so it is only legal on a head whose
-	// Checks are green on this exact revision. The machine refuses otherwise,
-	// so a reviewer is never paid to read broken code and a Verdict never
-	// records against a failing head.
-	if _, err := transit(stateChecksRecorded, effectReview,
-		subjectFacts{revision: head, checksStatus: "pass"}, rv.Verdict, "verifier"); err != nil {
+	// Checks are green on this exact revision. The Checks note is read from the
+	// repository -- never a literal -- so the machine observes the exact fact
+	// and refuses if the note is absent or not green, and a Verdict never
+	// records against a failing or unchecked head.
+	ffacts := subjectFacts{revision: head, hasBranch: true}
+	if checks, found, readErr := readChecks(repoDir, head); readErr != nil {
+		return verdictNote{}, stats, fmt.Errorf("review: checks: %w", readErr)
+	} else if found {
+		ffacts.checksStatus = checks.Status
+	}
+	if _, err := transit(observe(ffacts), effectReview, ffacts, rv.Verdict, "verifier"); err != nil {
 		return verdictNote{}, stats, fmt.Errorf("review: %w", err)
 	}
 	if err := writeVerdict(repoDir, head, out); err != nil {
@@ -384,11 +422,24 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 	return head, nil
 }
 
-// mergeVerified lands an approved branch. The host path and the git path are
-// exclusive: a protected target branch means only the host may write it, and
-// building a local commit that is then discarded would waste the work and
-// confuse the next reader.
-func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
+// mergeVerified lands an approved branch, and only the exact head that was
+// admitted. The host path and the git path are exclusive: a protected target
+// branch means only the host may write it, and building a local commit that is
+// then discarded would waste the work and confuse the next reader.
+func mergeVerified(cfg Config, repoDir, branch string, it Item, expectedHead string) error {
+	// Expected-head admission closes the window admitMerge alone leaves open:
+	// the branch must still point at the exact head that was admitted. If the
+	// branch moved between admission and merge, its Checks and Verdict may no
+	// longer describe the head about to land, so landing it would violate the
+	// exact-revision invariant. Refuse instead of landing the wrong head.
+	current, err := branchHead(repoDir, branch)
+	if err != nil {
+		return fmt.Errorf("merge: %w", err)
+	}
+	if current != expectedHead {
+		return fmt.Errorf("merge: branch %s moved from %s to %s after admission; refusing",
+			branch, short(expectedHead), short(current))
+	}
 	if cfg.Projection.MergeViaHost {
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)

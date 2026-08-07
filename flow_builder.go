@@ -62,9 +62,27 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	}
 
 	// The build effect is only legal on an eligible item: never a subject
-	// another flow has already claimed. The machine is the authority, so a
-	// second builder (or a leftover branch) cannot re-claim the item.
-	if _, err := transit(stateEligible, effectBuild, subjectFacts{revision: s.Revision}, "", "builder"); err != nil {
+	// another flow has already claimed. The state is derived from git-visible
+	// facts -- whether a forest branch already covers this item and whether the
+	// item carries the failure label -- so a second builder, a leftover branch,
+	// or a concurrent claim is refused by the machine, never assumed away by a
+	// hard-coded state.
+	branches, err := forestBranches(repoDir)
+	if err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("branches: %w", err)
+	}
+	hasBranch := false
+	for _, b := range branches {
+		if itemIDFromBranch(b) == it.ID {
+			hasBranch = true
+			break
+		}
+	}
+	ffacts := subjectFacts{
+		revision: s.Revision, hasBranch: hasBranch, itemOpen: true,
+		failedLabel: it.hasTag(failedLabel),
+	}
+	if _, err := transit(observe(ffacts), effectBuild, ffacts, "", "builder"); err != nil {
 		return Outcome{Status: "item_failed"}, fmt.Errorf("build: %w", err)
 	}
 

@@ -186,6 +186,12 @@ func TestObserveDerivesStatesFromFacts(t *testing.T) {
 			subjectFacts{hasBranch: true, itemOpen: true, checksStatus: "fail", verdictStatus: "approve"}, stateChecksRecorded},
 		{"failing checks with rejecting verdict is fix work",
 			subjectFacts{hasBranch: true, itemOpen: true, checksStatus: "fail", verdictStatus: "changes"}, stateChecksRecorded},
+		// A Verdict without green Checks on the exact revision is a stranded
+		// signal, never an approved or rejected outcome a lane may act on.
+		{"approved without green checks is pushed, not approved",
+			subjectFacts{hasBranch: true, itemOpen: true, verdictStatus: "approve"}, statePushed},
+		{"rejected without green checks is pushed, not rejected",
+			subjectFacts{hasBranch: true, itemOpen: true, verdictStatus: "changes"}, statePushed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,4 +200,32 @@ func TestObserveDerivesStatesFromFacts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestObserveComposesWithTransit pins the reviewer's cross-cutting concerns: a
+// lane must derive its subject's state with observe and then ask transit, and
+// that composition is what actually stops the illegal moves. A rejected Verdict
+// with no green Checks cannot be fixed, an already-claimed item cannot be
+// built again, and a fix past the configured attempt cap cannot start.
+func TestObserveComposesWithTransit(t *testing.T) {
+	refuse := func(f subjectFacts, e effect, actor string) {
+		t.Helper()
+		from := observe(f)
+		if _, err := transit(from, e, f, "", actor); err == nil {
+			t.Fatalf("observe(%+v)=%s: transit(%s, %s) was legal, want refused", f, from, from, e)
+		}
+	}
+	// A rejected Verdict with no green Checks is a pushed, stranded head, so
+	// effectFix from it is refused: observe no longer treats a bare Verdict as a
+	// rejection a lane may act on.
+	refuse(subjectFacts{revision: "h", hasBranch: true, itemOpen: true, verdictStatus: "changes"}, effectFix, "fixer")
+	// A branch that already covers the item makes it non-eligible, so a second
+	// builder cannot claim it even when the Builder Flow used to hard-code the
+	// eligible state.
+	refuse(subjectFacts{revision: "i", hasBranch: true, itemOpen: true}, effectBuild, "builder")
+	// The configured attempt cap halts a fix: attempts reaching the cap place
+	// the subject in failed, and effectFix from failed is refused.
+	refuse(subjectFacts{revision: "h", hasBranch: true, checksStatus: "fail", attempts: 2, attemptsCap: 2}, effectFix, "fixer")
+	// The forest:failed label halts a fix the same way.
+	refuse(subjectFacts{revision: "h", hasBranch: true, checksStatus: "fail", failedLabel: true}, effectFix, "fixer")
 }

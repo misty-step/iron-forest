@@ -51,6 +51,37 @@ func isProtectedPath(path string) bool {
 	return false
 }
 
+// gateRejectedPaths scans git status --porcelain and returns an error if any
+// changed path -- including the source of a rename -- sits in the factory's
+// control plane. A rename is inspected on both sides: a staged rename that
+// moves a protected file out of agents/ or another protected path is still a
+// change to a protected path, so the Gate refuses it even though the
+// destination alone is outside the control plane.
+func gateRejectedPaths(porcelain string) error {
+	for _, line := range strings.Split(porcelain, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
+			continue
+		}
+		path := line[3:]
+		source := path
+		if i := strings.Index(path, " -> "); i >= 0 {
+			source = path[:i]
+			path = path[i+4:]
+		}
+		offender := ""
+		if isProtectedPath(source) {
+			offender = source
+		} else if isProtectedPath(path) {
+			offender = path
+		}
+		if offender != "" {
+			return fmt.Errorf("change touches protected path %q", offender)
+		}
+	}
+	return nil
+}
+
 // gate verifies the build agent's claims against reality after the run:
 //   - the agent did not commit (HEAD is still the base)
 //   - it did not touch a protected path
@@ -71,14 +102,16 @@ func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	if err != nil {
 		return nil, rep, err
 	}
+	// The protected-path check runs over the raw porcelain so a staged rename
+	// is inspected on both sides, not just its destination.
+	if err := gateRejectedPaths(out); err != nil {
+		return nil, rep, err
+	}
 	changed := parseChanged(out)
 	real := make([]string, 0, len(changed))
 	for _, path := range changed {
 		if isRunArtifact(path) {
 			continue // a build's own report, not the repo's change
-		}
-		if isProtectedPath(path) {
-			return nil, rep, fmt.Errorf("change touches protected path %q", path)
 		}
 		real = append(real, path)
 	}
