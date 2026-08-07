@@ -3,14 +3,19 @@ package main
 import "fmt"
 
 // memoryTracker is an in-memory tracker used by tests. Open items live in the
-// map; closing one removes it, exactly as a host would stop returning it.
+// map; closing one moves it to the closed map, exactly as a host would stop
+// returning it from ListOpen while still answering a tag query across all states.
 type memoryTracker struct {
-	items map[string]Item
+	items  map[string]Item
+	closed map[string]Item
 }
 
 // newMemoryTracker returns an empty in-memory tracker.
 func newMemoryTracker() *memoryTracker {
-	return &memoryTracker{items: make(map[string]Item)}
+	return &memoryTracker{
+		items:  make(map[string]Item),
+		closed: make(map[string]Item),
+	}
 }
 
 // seed inserts or replaces one item by id.
@@ -27,13 +32,43 @@ func (m *memoryTracker) ListOpen() ([]Item, error) {
 	return items, nil
 }
 
+// ListByTag implements Tracker. It returns every item, open or closed, that
+// carries the tag, so the Manager can find a ready assignment on an item closed
+// by hand.
+func (m *memoryTracker) ListByTag(tag string) ([]Item, error) {
+	var out []Item
+	for _, it := range m.items {
+		if it.hasTag(tag) {
+			out = append(out, it)
+		}
+	}
+	for _, it := range m.closed {
+		if it.hasTag(tag) {
+			out = append(out, it)
+		}
+	}
+	return out, nil
+}
+
 // Get implements Tracker.
 func (m *memoryTracker) Get(id string) (Item, error) {
-	it, ok := m.items[id]
-	if !ok {
-		return Item{}, fmt.Errorf("item %q not found", id)
+	if it, ok := m.items[id]; ok {
+		return it, nil
 	}
-	return it, nil
+	if it, ok := m.closed[id]; ok {
+		return it, nil
+	}
+	return Item{}, fmt.Errorf("item %q not found", id)
+}
+
+// put writes an item back to whichever state table it came from, so a tag edit
+// on a closed item never resurrects it into the open list.
+func (m *memoryTracker) put(it Item) {
+	if _, ok := m.closed[it.ID]; ok {
+		m.closed[it.ID] = it
+	} else {
+		m.items[it.ID] = it
+	}
 }
 
 // Comment implements Tracker.
@@ -43,16 +78,18 @@ func (m *memoryTracker) Comment(id, body string) error {
 		return err
 	}
 	it.Comments = append(it.Comments, comment{Body: body})
-	m.items[id] = it
+	m.put(it)
 	return nil
 }
 
 // Close implements Tracker.
 func (m *memoryTracker) Close(id string) error {
-	if _, ok := m.items[id]; !ok {
+	it, ok := m.items[id]
+	if !ok {
 		return fmt.Errorf("item %q not found", id)
 	}
 	delete(m.items, id)
+	m.closed[id] = it
 	return nil
 }
 
@@ -76,7 +113,7 @@ func (m *memoryTracker) SetTags(id string, add, remove []string) error {
 	for t := range tags {
 		it.Tags = append(it.Tags, t)
 	}
-	m.items[id] = it
+	m.put(it)
 	return nil
 }
 

@@ -18,6 +18,10 @@ type Item struct {
 type Tracker interface {
 	// ListOpen returns every open item.
 	ListOpen() ([]Item, error)
+	// ListByTag returns every item, open or closed, that carries one tag. The
+	// Manager uses it to find ready assignments the open list hides: an item
+	// closed by hand still holds forest:ready until the Manager withdraws it.
+	ListByTag(tag string) ([]Item, error)
 	// Get returns one item by its id.
 	Get(id string) (Item, error)
 	// Comment appends a comment to an item's discussion.

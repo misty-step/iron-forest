@@ -134,7 +134,7 @@ func (c *coreImpl) Trace(runID string) ([]byte, error) {
 	// the writer's join to reach that nested path, reading the name literally
 	// so a glob metacharacter in an item id never matches a sibling. Refuse any
 	// id whose joined path escapes the runs dir.
-	for _, suffix := range []string{".builder.jsonl", ".verifier.jsonl", ".fixer.jsonl"} {
+	for _, suffix := range []string{".builder.jsonl", ".verifier.jsonl", ".fixer.jsonl", ".manager.jsonl"} {
 		p := filepath.Join(runsDir, filepath.FromSlash(runID)+suffix)
 		rel, err := filepath.Rel(runsDir, p)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {

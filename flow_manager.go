@@ -43,15 +43,20 @@ func (managerFlow) Enabled(cfg Config) bool { return cfg.Flows.Manager.Enabled }
 func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
-	items, err := trackerFor(cfg.Repo).ListOpen()
+	tk := trackerFor(cfg.Repo)
+	items, err := tk.ListOpen()
 	if err != nil {
 		return nil, fmt.Errorf("items: %w", err)
+	}
+	ready, err := tk.ListByTag(readyTag)
+	if err != nil {
+		return nil, fmt.Errorf("ready assignments: %w", err)
 	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches)
+	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, ready, branches)
 	if err != nil {
 		return nil, err
 	}
@@ -85,15 +90,20 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 // and lays readyTag on that pick. Reaping is a write, which is why it lives in
 // Act and never in Select.
 func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	items, err := trackerFor(cfg.Repo).ListOpen()
+	tk := trackerFor(cfg.Repo)
+	items, err := tk.ListOpen()
 	if err != nil {
 		return Outcome{Status: "item_failed"}, fmt.Errorf("items: %w", err)
+	}
+	ready, err := tk.ListByTag(readyTag)
+	if err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("ready assignments: %w", err)
 	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return Outcome{Status: "branch_failed"}, fmt.Errorf("branches: %w", err)
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches)
+	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, ready, branches)
 	if err != nil {
 		return Outcome{Status: "flow_failed"}, err
 	}
@@ -101,7 +111,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	// Reap first: a dead assignment holds the slot only until its durable
 	// failure is withdrawn, so one failed build never starves the Builder.
 	for _, it := range plan.reap {
-		if err := reapManagerItem(trackerFor(cfg.Repo), it); err != nil {
+		if err := reapManagerItem(tk, it); err != nil {
 			return Outcome{Status: "tracker_failed"}, fmt.Errorf("reap item %s: %w", it.ID, err)
 		}
 	}
@@ -116,19 +126,22 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		return Outcome{Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
 	}
-	rep, err := runManagerJudge(repoDir, plan.cands, a, runID)
+	rep, err := managerJudge(repoDir, plan.cands, a, runID)
 	if err != nil {
 		return Outcome{Status: "agent_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, err
 	}
-	promoted, err := applyManagerPick(trackerFor(cfg.Repo), plan.cands, rep.Pick)
+	promoted, err := applyManagerPick(tk, plan.cands, rep.Pick)
 	if err != nil {
 		return Outcome{Status: "tracker_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("promote item %s: %w", rep.Pick, err)
 	}
 	if !promoted {
 		// The model named no candidate it was offered (a hallucination, or a
-		// blocked item the hard filter already removed). Promotes nothing and
-		// records the refusal on the ledger as a named status.
-		return Outcome{Status: "refused", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, nil
+		// blocked item the hard filter already removed). Promotes nothing. It
+		// records a "refused" status on the ledger and, because actOnSubject
+		// sees a non-nil error, engages the repeat-failure brake: an unchanged
+		// candidate set must not be re-judged every pass, so the lane waits for
+		// the backlog to move instead of re-sending the same judgement forever.
+		return Outcome{Status: "refused", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("refused: pick %q is outside the candidate set", rep.Pick)
 	}
 	return Outcome{Status: "done", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, nil
 }
@@ -151,11 +164,14 @@ func (p managerPlan) hasWork() bool {
 }
 
 // buildManagerPlan builds the plan for one pass. An assigned item (ready and
-// unbranched) is reaped on any durable failure or a reopened blocker; everything
-// else that is open, unbranched, unexcluded, unstalled, and unblocked is a
-// candidate. The slot holds readyDepth healthy assigned items; only an empty
-// slot calls the model.
-func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches []string) (managerPlan, error) {
+// unbranched) is reaped on any durable failure, a reopened blocker, or a closure
+// by hand; everything else that is open, unbranched, unexcluded, unstalled, and
+// unblocked is a candidate. The slot holds readyDepth healthy assigned items;
+// only an empty slot calls the model. The ready slice is the set of every ready
+// assignment across open and closed items, so an item closed by hand still has
+// its dead readyTag withdrawn instead of silently freeing no slot while another
+// item is promoted into a tray that was never empty.
+func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, ready []Item, branches []string) (managerPlan, error) {
 	covered := make(map[string]bool, len(branches))
 	for _, branch := range branches {
 		covered[itemIDFromBranch(branch)] = true
@@ -167,22 +183,39 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 	plan := managerPlan{key: managerSubject}
 	var reap []Item
 	healthyAssigned := 0
+	// Slot accounting and reaping run across every ready assignment, open or
+	// closed. A branch owns a ready item's slot and queue position downstream,
+	// so a covered item is left alone; a closed one is a durable end and is
+	// withdrawn; an open one is counted healthy or withdrawn on a durable fact.
+	for _, it := range ready {
+		if covered[it.ID] {
+			continue
+		}
+		if _, isOpen := open[it.ID]; !isOpen {
+			// Closed by hand: withdraw so the slot frees and no other item is
+			// promoted into a tray that was never actually empty.
+			reap = append(reap, it)
+			continue
+		}
+		withdraw, err := managerWithdraw(repoDir, it, open)
+		if err != nil {
+			return managerPlan{}, err
+		}
+		if withdraw {
+			reap = append(reap, it)
+		} else {
+			healthyAssigned++
+		}
+	}
 	var cands []Item
+	// The model only ever judges the deterministic candidate set: open, not
+	// assigned or branch-owned, unexcluded, unstalled, and unblocked.
 	for _, it := range items {
 		if covered[it.ID] {
-			// A branch owns it; the slot and the queue downstream do too.
 			continue
 		}
 		if it.hasTag(readyTag) {
-			withdraw, err := managerWithdraw(repoDir, it, open)
-			if err != nil {
-				return managerPlan{}, err
-			}
-			if withdraw {
-				reap = append(reap, it)
-			} else {
-				healthyAssigned++
-			}
+			// Already assigned; accounted above, never offered as a candidate.
 			continue
 		}
 		if hasExcludedTag(it, cfg.ExcludeTags) {
@@ -296,6 +329,11 @@ type managerReport struct {
 	Pick   string `json:"pick"`
 	Reason string `json:"reason"`
 }
+
+// managerJudge runs the one judgement pass and reads its report. It is a var
+// so the refusal and brake tests can stub the model without driving a real
+// agent, matching how trackerFor and ghJSON are injectable.
+var managerJudge = runManagerJudge
 
 // runManagerJudge runs the model in a throwaway directory, asks it to pick one
 // candidate, and reads its report. The run directory is not a checkout, so the

@@ -150,10 +150,11 @@ func defaultConfig() Config {
 				Attempts: 10,
 			},
 			// The Manager is opt-in: it is disabled until an operator declares it.
-			// It shares the Builder's agent declaration in the defaults; an operator
-			// who enables it should point it at a manager-capable agent.
+			// Its report contract (a single "pick") is the Manager's own, so an
+			// omitted agent defaults to the manager declaration, never the builder
+			// whose one-file report that lane cannot read.
 			Manager: ManagerFlowCfg{
-				FlowCfg:     FlowCfg{Enabled: false, Agent: "builder", IntervalSec: 60},
+				FlowCfg:     FlowCfg{Enabled: false, Agent: "manager", IntervalSec: 60},
 				ReadyDepth:  1,
 				ExcludeTags: []string{"parked", failedLabel},
 			},
