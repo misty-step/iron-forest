@@ -109,18 +109,22 @@ out of the managed repository's working tree, so a managed repository needs no
 factory.
 
 The factory still uses opencode to run an agent, and opencode still wants a
-config directory and per-provider packages. Where it gets them is what changed
-(#174). The factory now gives opencode a per-run config directory **outside** the
-managed worktree:
+config root and per-provider packages. Where it gets them is what changed
+(#174). The factory now points opencode at a per-run config root **outside** the
+managed worktree through opencode's supported external-config mechanism
+(`XDG_CONFIG_HOME` in the run's child environment). Under that root:
 
-- the rendered agent declaration (`agents/<name>.md`) is written there, not under
-  the worktree's `.opencode/`, and
-- the operator's provider configuration is preserved there alongside it, so the
-  run still reaches a provider route.
+- the rendered agent declaration (`opencode/agents/<name>.md`) is written there,
+  not under the worktree's `.opencode/`,
+- the provider configuration a real run actually uses — the factory's own
+  `.opencode/opencode.json`, falling back to the operator's global opencode
+  config — is preserved there as `opencode/opencode.json`, so the run still
+  reaches a provider route, and
+- the `node_modules` opencode installs for its provider packages land under that
+  root as well.
 
-The `node_modules` opencode installs for its provider packages also land in that
-per-run directory, never in a working tree a hook or a filesystem scanner reads.
-The directory is removed when the run completes.
+Nothing is placed in a working tree a hook or a filesystem scanner reads. The
+per-run root is removed when the run completes.
 
 A side effect of this placement: the rendered declaration cannot be staged by
 `git add -A` no matter what the managed repository's ignore rules are, because it
