@@ -143,11 +143,16 @@ func composeDigest(repoDir, name string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// renderMarkdown writes the agent's opencode markdown declaration into the
-// worktree so `opencode run --agent <name>` loads the real system prompt and
-// permissions. The file is generated per run and ignored by git.
-func renderMarkdown(wtDir string, a *Agent) error {
-	dir := filepath.Join(wtDir, ".opencode", "agents")
+// renderMarkdown writes the agent's opencode markdown declaration into cfgDir's
+// agents/ so `opencode run --agent <name>` loads the real system prompt and
+// permissions under XDG_CONFIG_HOME. cfgDir is opencode's global config
+// directory for the run and lives outside the managed worktree: nothing the
+// factory renders is ever placed under the worktree's .opencode/, where a
+// managed hook or a working-tree secret scanner would read it. The declaration
+// is generated per run and lives only in the factory-owned config space, never
+// in a repository the factory commits to.
+func renderMarkdown(cfgDir string, a *Agent) error {
+	dir := filepath.Join(cfgDir, "agents")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -196,6 +201,97 @@ func renderMarkdown(wtDir string, a *Agent) error {
 		sb.WriteString(a.ReportSchema)
 	}
 	return os.WriteFile(filepath.Join(dir, a.Name+".md"), []byte(sb.String()), 0o644)
+}
+
+// newRunConfigDir builds the per-run opencode configuration root that the child
+// environment points opencode at with XDG_CONFIG_HOME. opencode reads its global
+// config from <root>/opencode/: the rendered agent declaration under agents/ and
+// the provider configuration under opencode.json, and it installs the provider
+// packages it needs under node_modules/ there too. Because the whole root lives
+// outside every worktree, moving the run's config out of the managed worktree
+// neither loses the provider route the run needs (the config the factory project
+// actually uses is preserved) nor leaves a dependency in a working tree a hook
+// or a filesystem scanner reads. The directory is created outside every worktree
+// and the caller removes it when the run completes.
+func newRunConfigDir(repoDir string, a *Agent) (string, error) {
+	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
+	if err != nil {
+		return "", err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(cfgDir)
+		}
+	}()
+	ocDir := filepath.Join(cfgDir, "opencode")
+	if err := os.MkdirAll(ocDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := preserveProviderConfig(ocDir, repoDir); err != nil {
+		return "", err
+	}
+	if err := renderMarkdown(ocDir, a); err != nil {
+		return "", err
+	}
+	ok = true
+	return cfgDir, nil
+}
+
+// preserveProviderConfig copies the provider configuration a real run actually
+// uses into cfgDir as opencode.json, so the per-run config root keeps the
+// provider route the run needs under XDG_CONFIG_HOME. The first source is the
+// factory project's own .opencode/opencode.json (the one this program ships and
+// where the operator declares the provider route and key alias); if the factory
+// ships none, the operator's global opencode config is the fallback. Every
+// source is outside every worktree, so a managed repository never has to carry
+// it. A configuration the run can supply from elsewhere (for example the managed
+// repository's own project config) does not require one here: a missing file is
+// tolerated, not an error.
+func preserveProviderConfig(cfgDir, repoDir string) error {
+	src := projectProviderConfigPath(repoDir)
+	if src == "" {
+		src = openCodeProviderConfigPath()
+	}
+	if src == "" {
+		return nil
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read provider config %s: %w", src, err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "opencode.json"), b, 0o600); err != nil {
+		return fmt.Errorf("stage opencode provider config into run config: %w", err)
+	}
+	return nil
+}
+
+// projectProviderConfigPath returns the factory project's own opencode provider
+// configuration — the one a real run actually uses when opencode reads its
+// global config — or "" when the factory ships none.
+func projectProviderConfigPath(repoDir string) string {
+	p := filepath.Join(repoDir, ".opencode", "opencode.json")
+	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+		return p
+	}
+	return ""
+}
+
+// openCodeProviderConfigPath returns the operator's global opencode provider
+// configuration path, or "" when the process has no usable config directory. It
+// honours XDG_CONFIG_HOME and otherwise falls back to the user's ~/.config.
+func openCodeProviderConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "opencode", "opencode.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "opencode", "opencode.json")
 }
 
 // agentSkills lists the agent's skill markdown files in stable order.

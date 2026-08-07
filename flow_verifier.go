@@ -276,7 +276,7 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 		return out, stats, fmt.Errorf("review: prompt: %w", err)
 	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
-	stats, err = runPhase(wtDir, a, prompt, trace)
+	stats, err = runPhase(repoDir, wtDir, a, prompt, trace)
 	if err != nil {
 		return out, stats, fmt.Errorf("review: %w", err)
 	}

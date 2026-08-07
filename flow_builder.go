@@ -80,7 +80,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return Outcome{Status: "prompt_failed", Branch: branch, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, BaseSHA: baseSHA}, fmt.Errorf("prompt: %w", err)
 	}
 	trace := filepath.Join(workspace, "runs", runID+".builder.jsonl")
-	stats, err := runPhase(wtDir, a, prompt, trace)
+	stats, err := runPhase(repoDir, wtDir, a, prompt, trace)
 	out := Outcome{
 		Branch: branch, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
 		BaseSHA: baseSHA, TokIn: stats.tokensIn, TokOut: stats.tokensOut,

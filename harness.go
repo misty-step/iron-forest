@@ -21,18 +21,18 @@ type runStats struct {
 }
 
 // runPhase executes one named agent with opencode in a worktree and streams its
-// JSON event stream into the trace file. The run is unbounded: no step ceiling
-// and no deadline. A fixed bound is a guess about how much work an item needs,
-// and a wrong guess stops real work partway and reports it as a gate failure.
-// The context stays cancellable so a supervisor can stop a run on evidence
-// rather than on a constant. Any non-zero harness exit marks the run failed:
-// the error carries the exit status and stderr so a crash or truncation is
-// never mistaken for work the gate can publish.
-func runPhase(wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
+// JSON event stream into the trace file. repoDir is the factory project: the
+// provider configuration the run actually needs is read from its
+// .opencode/opencode.json and staged into the run's external config root. The
+// run is unbounded: no step ceiling and no deadline. A fixed bound is a guess
+// about how much work an item needs, and a wrong guess stops real work partway
+// and reports it as a gate failure. The context stays cancellable so a
+// supervisor can stop a run on evidence rather than on a constant. Any non-zero
+// harness exit marks the run failed: the error carries the exit status and
+// stderr so a crash or truncation is never mistaken for work the gate can
+// publish.
+func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
 	var stats runStats
-	if err := renderMarkdown(wtDir, a); err != nil {
-		return stats, err
-	}
 	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
 		return stats, err
 	}
@@ -50,6 +50,30 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string) (runStats, e
 		return stats, err
 	}
 	defer cleanup()
+
+	// The opencode config root lives outside the worktree so the managed
+	// repository's working tree never carries a factory artifact a hook or a
+	// working-tree secret scanner would read. The rendered agent declaration and
+	// the provider configuration the factory project actually uses both land in
+	// the run's global opencode config directory, and opencode is pointed at that
+	// root with XDG_CONFIG_HOME set in the child environment. The node_modules
+	// opencode installs for its provider packages also lands in that root, never
+	// under the worktree's .opencode/. The root is per-run and removed when the
+	// run is done.
+	cfgDir, err := newRunConfigDir(repoDir, a)
+	if err != nil {
+		return stats, err
+	}
+	defer os.RemoveAll(cfgDir)
+
+	env = append(env, "XDG_CONFIG_HOME="+cfgDir)
+	// opencode would otherwise also read a project-local .opencode/opencode.json
+	// it discovers in the worktree and install the provider packages it needs
+	// beside it, writing into a managed repository the factory commits to. That
+	// local project context is disabled here so opencode reads only the external
+	// root: the managed worktree stays free of factory artifacts regardless of
+	// whether it happens to ship a .opencode of its own.
+	env = append(env, "OPENCODE_DISABLE_PROJECT_CONFIG=1")
 
 	cmd := exec.CommandContext(ctx, "opencode", "run",
 		"--format", "json", "--model", a.Model, "--agent", a.Name,

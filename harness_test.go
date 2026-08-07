@@ -12,12 +12,16 @@ import (
 // much work an item needs, and a wrong guess stops a working run partway and
 // reports it as a gate failure. No agent definition may reintroduce one.
 func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
-	wt := t.TempDir()
-	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
-	if err := renderMarkdown(wt, a); err != nil {
+	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
+	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(filepath.Join(wt, ".opencode", "agents", "probe.md"))
+	defer os.RemoveAll(cfgDir)
+	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
+	if err := renderMarkdown(cfgDir, a); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(cfgDir, "agents", "probe.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,6 +29,196 @@ func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
 		if strings.Contains(string(b), key) {
 			t.Errorf("rendered agent declares %q; opencode must run unbounded", key)
 		}
+	}
+}
+
+// TestRunPhaseKeepsConfigOutOfWorktree pins option 1 of #174 against opencode's
+// supported external configuration mechanism: the per-run config root is handed
+// to opencode through XDG_CONFIG_HOME in the child environment, so opencode
+// reads the named agent from that root's opencode/agents/ (the declaration the
+// factory renders into the factory-owned config space), keeps the provider
+// configuration a real run actually uses from the factory project's own
+// .opencode/opencode.json, and installs the dependencies it needs under that
+// root. The stub is opencode's real config/agent interface in miniature: it
+// fails the run unless XDG_CONFIG_HOME is set, the agent loads, the provider
+// config survived, and no .opencode ever appeared in the managed worktree.
+func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
+	// The factory project's own .opencode/opencode.json is the provider config a
+	// real run actually uses; it must be preserved beside the rendered agent.
+	factory := t.TempDir()
+	factoryOC := filepath.Join(factory, ".opencode")
+	if err := os.MkdirAll(factoryOC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
+	if err := os.WriteFile(filepath.Join(factoryOC, "opencode.json"), providerCfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "loaded.txt")
+	script := "#!/bin/sh\n" +
+		"if [ -z \"$XDG_CONFIG_HOME\" ]; then echo 'opencode: XDG_CONFIG_HOME not set' >&2; exit 1; fi\n" +
+		"base=\"$XDG_CONFIG_HOME/opencode\"\n" +
+		"agent=\nprev=\nfor a in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"--agent\" ]; then agent=$a; fi\n" +
+		"  prev=$a\n" +
+		"done\n" +
+		"if [ -z \"$agent\" ]; then echo 'opencode: missing --agent' >&2; exit 1; fi\n" +
+		"if [ ! -f \"$base/agents/$agent.md\" ]; then echo \"opencode: agent $agent failed to load from $base/agents/\" >&2; exit 1; fi\n" +
+		"if [ ! -f \"$base/opencode.json\" ]; then echo 'opencode: provider config missing' >&2; exit 1; fi\n" +
+		// The dependencies opencode installs for its provider packages land in the
+		// run's own config root, never in the managed worktree's .opencode/.
+		"mkdir -p \"$base/node_modules\"\n" +
+		"if [ -e \".opencode\" ]; then echo 'opencode: created project .opencode in the worktree' >&2; exit 1; fi\n" +
+		"printf 'loaded\\n' > " + marker + "\n" +
+		"exit 0\n"
+	wt, trace := fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stub did not confirm the external config route: %v", err)
+	}
+	// The config root the stub read is discarded by runPhase; its agent and
+	// provider config reached the stub from outside the worktree, so no
+	// .opencode must ever appear inside the worktree either.
+	if _, err := os.Stat(filepath.Join(wt, ".opencode")); !os.IsNotExist(err) {
+		t.Fatalf("runPhase left .opencode in the worktree: %v", err)
+	}
+}
+
+// TestRunPhaseIgnoresWorktreeProjectConfig pins the other half of option 1 for
+// #174: opencode must not read a project-local .opencode/opencode.json it would
+// discover inside the managed worktree. A real pinned opencode, given a local
+// project config, installs the provider packages it needs into .opencode/ beside
+// that config and then reads it — writing a per-run artifact into the tree a
+// hook or a working-tree secret scanner reads. The run therefore disables local
+// project config discovery in the child environment while supplying the copied
+// provider config through the external root. The stub models opencode's
+// behaviour: it fails the run unless local project config discovery is disabled
+// and, were it not disabled, would simulate the unwanted install into the
+// managed tree.
+func TestRunPhaseIgnoresWorktreeProjectConfig(t *testing.T) {
+	// A managed repository that ships a .opencode/opencode.json of its own would
+	// otherwise be discovered as opencode's local project config.
+	factory := t.TempDir()
+	factoryOC := filepath.Join(factory, ".opencode")
+	if err := os.MkdirAll(factoryOC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
+	if err := os.WriteFile(filepath.Join(factoryOC, "opencode.json"), providerCfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "loaded.txt")
+	script := "#!/bin/sh\n" +
+		// A real opencode with local project config discovery enabled reads the
+		// worktree's .opencode/opencode.json and installs node_modules beside it.
+		"if [ \"$OPENCODE_DISABLE_PROJECT_CONFIG\" != \"1\" ]; then\n" +
+		"  mkdir -p .opencode/node_modules\n" +
+		"  printf 'installed\\n' > .opencode/node_modules/thing.js\n" +
+		"  echo 'opencode: local project config was discovered' >&2\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		// With local project config disabled, only the external root is read.
+		"base=\"$XDG_CONFIG_HOME/opencode\"\n" +
+		"if [ ! -f \"$base/opencode.json\" ]; then echo 'opencode: provider config missing' >&2; exit 1; fi\n" +
+		"if [ ! -f \"$base/agents/probe.md\" ]; then echo 'opencode: agent probe failed to load' >&2; exit 1; fi\n" +
+		"printf 'loaded\\n' > " + marker + "\n" +
+		"exit 0\n"
+
+	// The managed worktree starts by carrying its own project-local
+	// .opencode/opencode.json, exactly the shape the old per-worktree stub could
+	// not see. It must survive the run unchanged, with no factory artifact added.
+	wt, trace := fakeOpencode(t, script)
+	wtOC := filepath.Join(wt, ".opencode")
+	if err := os.MkdirAll(wtOC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtOC, "opencode.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stub did not confirm the external config was used: %v", err)
+	}
+	ents, err := os.ReadDir(wtOC)
+	if err != nil {
+		t.Fatalf("managed worktree project config lost: %v", err)
+	}
+	if len(ents) != 1 || ents[0].Name() != "opencode.json" {
+		t.Fatalf("runPhase wrote factory artifacts into the managed tree's .opencode: %v", ents)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".opencode", "node_modules")); !os.IsNotExist(err) {
+		t.Fatalf("runPhase left node_modules in the managed worktree")
+	}
+}
+
+// TestRunPhaseFallsBackToGlobalProviderConfig proves a factory that ships no
+// project .opencode/opencode.json still gets a usable run: the operator's global
+// opencode provider configuration is preserved as the fallback. The stub checks
+// that a provider config made it into the run config root without requiring the
+// factory project to carry one.
+func TestRunPhaseFallsBackToGlobalProviderConfig(t *testing.T) {
+	// The operator's global opencode provider configuration is the fallback when
+	// the factory ships no project config of its own.
+	xdg := t.TempDir()
+	opencfg := filepath.Join(xdg, "opencode")
+	if err := os.MkdirAll(opencfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
+	if err := os.WriteFile(filepath.Join(opencfg, "opencode.json"), providerCfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	marker := filepath.Join(t.TempDir(), "loaded.txt")
+	script := "#!/bin/sh\n" +
+		"base=\"$XDG_CONFIG_HOME/opencode\"\n" +
+		"if [ ! -f \"$base/opencode.json\" ]; then echo 'opencode: provider config missing' >&2; exit 1; fi\n" +
+		"printf 'ok\\n' > " + marker + "\n" +
+		"exit 0\n"
+	factory := t.TempDir() // ships no .opencode/opencode.json
+	wt, trace := fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stub did not confirm the fallback provider config: %v", err)
+	}
+}
+
+// TestRunPhaseFailsWhenAgentIsUnloadable proves runPhase surfaces an opencode
+// failure to load the agent from the external config root. A stub pinned to the
+// pre-#174 agent location under the worktree's .opencode/ cannot find the
+// declaration the factory now writes into the factory-owned config space, so the
+// run must fail with the load error recorded.
+func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(wt, ".opencode", "agents", "probe.md")
+	script := "#!/bin/sh\n" +
+		"if [ ! -f \"" + old + "\" ]; then echo 'opencode: agent probe failed to load' >&2; exit 1; fi\n" +
+		"exit 0\n"
+	trace := filepath.Join(t.TempDir(), "run", "agent.jsonl")
+	fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	if err == nil {
+		t.Fatal("runPhase must fail when opencode cannot load the agent")
+	}
+	if !strings.Contains(err.Error(), "failed to load") {
+		t.Errorf("error %q did not record why the agent could not be loaded", err)
 	}
 }
 
@@ -51,7 +245,7 @@ func fakeOpencode(t *testing.T, script string) (string, string) {
 func TestRunPhaseFailsOnHarnessCrash(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'model call rejected\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a crashed harness")
 	}
@@ -69,7 +263,7 @@ func TestRunPhaseFailsOnKilledHarness(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":1}}}\n'\nkill -KILL $$\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a signal-killed harness")
 	}
@@ -84,7 +278,7 @@ func TestRunPhaseFailsOnCrashAfterWork(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'model call rejected\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a non-zero crash after work")
 	}
@@ -105,7 +299,7 @@ func TestRunPhaseFailsOnAnyNonZeroExit(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'ran out of steps\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	stats, err := runPhase(wt, a, "task", trace)
+	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("non-zero exit must fail the run")
 	}
@@ -119,7 +313,7 @@ func TestRunPhaseFailsOnAnyNonZeroExit(t *testing.T) {
 func TestRunPhaseSuccessWithoutSteps(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nexit 0\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(wt, a, "task", trace); err != nil {
+	if _, err := runPhase(t.TempDir(), wt, a, "task", trace); err != nil {
 		t.Fatalf("clean zero exit must succeed: %v", err)
 	}
 }
