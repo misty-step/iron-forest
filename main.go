@@ -183,10 +183,11 @@ func cmdShow(api core.API, sha string) int {
 		Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
 		Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
 	}
-	// Leave the results slice nil when the checks note carries none, so a raw
-	// checks note with no rows still renders `results: null`, not `[]`.
+	// Preserve the nil/non-nil shape of the checks note's results field, so a
+	// raw checks note with no rows still renders `results: null` while an
+	// explicit empty array renders `results: []`.
 	var results []checkResult
-	if len(c.Results) > 0 {
+	if c.Results != nil {
 		results = make([]checkResult, 0, len(c.Results))
 		for _, r := range c.Results {
 			results = append(results, checkResult{

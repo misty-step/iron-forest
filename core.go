@@ -180,15 +180,21 @@ func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 	if ok2 {
 		checks = core.Checks{
 			Status:  ch.Status,
-			Results: make([]core.CheckResult, 0, len(ch.Results)),
 			RunID:   ch.RunID,
 			Time:    ch.Time,
 			Present: true,
 		}
-		for _, r := range ch.Results {
-			checks.Results = append(checks.Results, core.CheckResult{
-				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
-			})
+		// Preserve the nil/non-nil shape of the checks note's results field so a
+		// surface can tell an explicit empty array (`[]`) apart from an absent or
+		// null one, exactly as the raw note does. Only allocate when the note
+		// carried a non-nil slice.
+		if ch.Results != nil {
+			checks.Results = make([]core.CheckResult, 0, len(ch.Results))
+			for _, r := range ch.Results {
+				checks.Results = append(checks.Results, core.CheckResult{
+					Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
+				})
+			}
 		}
 	}
 	return verdict, checks, nil

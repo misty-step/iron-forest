@@ -194,17 +194,17 @@ type stubAPI struct {
 	notesFn func(sha string) (core.Verdict, core.Checks, error)
 }
 
-func (stubAPI) Config() (core.Config, error)                                  { return core.Config{}, nil }
-func (stubAPI) Agents() ([]core.AgentInfo, error)                             { return nil, nil }
-func (stubAPI) Ledger(core.LedgerQuery) ([]core.RunRecord, int, error)        { return nil, 0, nil }
-func (stubAPI) Trace(string) ([]byte, error)                                  { return nil, nil }
-func (s stubAPI) Notes(sha string) (core.Verdict, core.Checks, error)         { return s.notesFn(sha) }
-func (stubAPI) Items() ([]core.Item, error)                                   { return nil, nil }
-func (stubAPI) EligibleItems() ([]core.Item, error)                           { return nil, nil }
-func (stubAPI) Branches() ([]core.BranchState, error)                         { return nil, nil }
-func (stubAPI) Head() (string, error)                                         { return "", nil }
-func (stubAPI) Worktrees() ([]string, error)                                  { return nil, nil }
-func (stubAPI) Daemon() (core.Daemon, error)                                  { return core.Daemon{}, nil }
+func (stubAPI) Config() (core.Config, error)                           { return core.Config{}, nil }
+func (stubAPI) Agents() ([]core.AgentInfo, error)                      { return nil, nil }
+func (stubAPI) Ledger(core.LedgerQuery) ([]core.RunRecord, int, error) { return nil, 0, nil }
+func (stubAPI) Trace(string) ([]byte, error)                           { return nil, nil }
+func (s stubAPI) Notes(sha string) (core.Verdict, core.Checks, error)  { return s.notesFn(sha) }
+func (stubAPI) Items() ([]core.Item, error)                            { return nil, nil }
+func (stubAPI) EligibleItems() ([]core.Item, error)                    { return nil, nil }
+func (stubAPI) Branches() ([]core.BranchState, error)                  { return nil, nil }
+func (stubAPI) Head() (string, error)                                  { return "", nil }
+func (stubAPI) Worktrees() ([]string, error)                           { return nil, nil }
+func (stubAPI) Daemon() (core.Daemon, error)                           { return core.Daemon{}, nil }
 
 // TestCmdShowRestoresNoteErrorPrefixes pins the #176 show behavior: a failure
 // in each note subsystem keeps the per-subsystem stderr prefix the command has
@@ -274,5 +274,27 @@ func TestCmdShowPreservesPresenceAndNullResults(t *testing.T) {
 	}
 	if strings.Contains(out, `"results": []`) {
 		t.Errorf("empty-results checks output must not render an empty array:\n%s", out)
+	}
+}
+
+// TestCmdShowPreservesExplicitEmptyResultsArray pins the #176 regression: a
+// checks note whose results field is an explicit empty array must keep that
+// shape through the core API and render `results: []`, not be collapsed to
+// `null` like an absent field is.
+func TestCmdShowPreservesExplicitEmptyResultsArray(t *testing.T) {
+	api, work, sha := coreFixture(t)
+	if err := writeChecks(work, sha, checksNote{Status: "pass", Results: []checkResult{}}); err != nil {
+		t.Fatal(err)
+	}
+	code := 0
+	out, _ := captureOutput(t, func() { code = cmdShow(api, sha) })
+	if code != 0 {
+		t.Fatalf("cmdShow code = %d, want 0", code)
+	}
+	if !strings.Contains(out, `"results": []`) {
+		t.Errorf("explicit-empty checks output must render results as an empty array:\n%s", out)
+	}
+	if strings.Contains(out, `"results": null`) {
+		t.Errorf("explicit-empty checks output must not collapse results to null:\n%s", out)
 	}
 }
