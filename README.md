@@ -82,9 +82,11 @@ projection:
   merge_via_host: false
 ```
 
-`repo` names the Tracker repository. There is no `protected` key: `docs/adr/0003`
-removed it, so the Gate rejects nothing by path and independent review on the
-exact commit is what decides whether a change lands.
+`repo` names the Tracker repository. There is no `protected` key in
+`forest.yaml`: as an FSM invariant the Gate rejects changes to the factory's
+control plane (`.forest/`, `forest.yaml`, `agents/`, `.opencode/opencode.json`)
+— see `docs/adr/0004`, `docs/fsm.md`, and `AGENTS.md` — while independent
+review on the exact commit remains the audit surface.
 
 Attaching a second repository to a running installation is
 `docs/onboarding-managed-repo.md`.

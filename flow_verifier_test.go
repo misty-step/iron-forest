@@ -635,7 +635,137 @@ func TestAdmitCheckReadsTheExactNote(t *testing.T) {
 	}
 }
 
-// TestMergeVerifiedRefusesMovedBranch pins the expected-head admission that
+// TestActReusesGreenChecksOnReviewRetry pins the stall the reviewer named: a
+// head Select offers as fresh work -- green Checks, no Verdict, as left after a
+// review failed before recording a Verdict -- must not be rejected at the check
+// boundary. admitCheck refuses a head that already carries a Checks note, so Act
+// must read that note first and reuse it verbatim (no re-check, no check
+// transition) and proceed to review. The review is stubbed through reviewRunner
+// so the whole Act path runs deterministically without a model.
+func TestActReusesGreenChecksOnReviewRetry(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-reviewretry"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	// Seed only the green Checks note: a retry after a review that never wrote a
+	// Verdict. The branch is current, so Act's rebase is a no-op and this exact
+	// head (and its note) is the one Act must reuse.
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+		t.Fatalf("seed checks: %v", err)
+	}
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	reviewed := false
+	oldReview := reviewRunner
+	reviewRunner = func(cfg Config, repoDir, wtDir string, it Item, h, runID string, a *Agent) (verdictNote, runStats, error) {
+		reviewed = true
+		return verdictNote{Verdict: "changes", Reviewer: "verifier", Model: a.Model, DefSHA: "def", RunID: runID}, runStats{}, nil
+	}
+	defer func() { reviewRunner = oldReview }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-1")
+	if err != nil {
+		t.Fatalf("Act: %v", err)
+	}
+	if !reviewed {
+		t.Fatal("Act never reached review; it was stopped before review instead of reusing the green Checks note")
+	}
+	if out.Status != "reviewed" {
+		t.Fatalf("out.Status = %q, want reviewed after reusing a green Checks note and reviewing changes", out.Status)
+	}
+	// The persisted note must be reused, not re-run: a re-check would overwrite
+	// it with a fresh RunID.
+	if got, ok, err := readChecks(repo, head); err != nil || !ok || got.RunID != "seed" {
+		t.Fatalf("checks after Act = (found=%v, run=%q, err=%v), want seeded run %q", ok, got.RunID, err, "seed")
+	}
+}
+
+// TestActReusesGreenChecksOnMergePass pins the other stall the reviewer named:
+// a later pass returning to merge an already-approved branch offers a head that
+// already carries green Checks and an approved Verdict. Act must reuse both
+// notes (no re-check) and proceed straight to the merge, not fail at the check
+// boundary because admitCheck refuses a head with an existing Checks note.
+func TestActReusesGreenChecksOnMergePass(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-mergepass"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	masterBefore := remoteBranchHead(t, repo, "master")
+
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+		t.Fatalf("seed checks: %v", err)
+	}
+	if err := writeVerdict(repo, head, verdictNote{
+		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model", DefSHA: "def", RunID: "seed",
+	}); err != nil {
+		t.Fatalf("seed verdict: %v", err)
+	}
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-1")
+	if err != nil {
+		t.Fatalf("Act: %v", err)
+	}
+	if out.Status != "merged" {
+		t.Fatalf("approved, green head status = %q, want merged", out.Status)
+	}
+	if got := remoteBranchHead(t, repo, "master"); got == masterBefore {
+		t.Fatalf("master did not advance after the merge pass (%q)", got)
+	}
+	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out != "" {
+		t.Fatalf("merged branch %q still exists on origin: %s", branch, out)
+	}
+	// The persisted Checks note was reused, not re-run and overwritten.
+	if got, ok, err := readChecks(repo, head); err != nil || !ok || got.RunID != "seed" {
+		t.Fatalf("checks after merge = (found=%v, run=%q, err=%v), want seeded run %q", ok, got.RunID, err, "seed")
+	}
+}
+
 // closes the window between admitMerge and the merge itself: if the branch head
 // moved after admission, its Checks and Verdict may no longer describe the head
 // about to land, so landing it would violate the exact-revision invariant.

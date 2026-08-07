@@ -179,34 +179,53 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// key to; the value above was the pre-rebase head.
 	out.BaseSHA = newHead
 
-	// The check effect is only legal on a bare pushed head: it may not write
-	// over a Checks note that already exists on the exact revision.
-	if err := admitCheck(repoDir, baseSHA); err != nil {
+	// The check effect is only legal on a bare pushed head -- one carrying no
+	// Checks note on the exact revision. Select deliberately offers a head that
+	// already carries a green Checks note as work: a retry after a review failed
+	// before recording a Verdict, or a later pass returning to merge an
+	// already-approved branch. Such a head must not be re-checked, and admitCheck
+	// rightly refuses an effect that would write over a note that exists. So read
+	// the note first: a head that already has one takes no check transition and
+	// reuses the exact fact, while a bare head is admitted, checked, and recorded.
+	checks, hasChecks, err := readChecks(repoDir, baseSHA)
+	if err != nil {
 		out.Status = "checks_failed"
 		return out, fmt.Errorf("checks: %w", err)
 	}
-
-	checks, checkErr := runChecks(cfg, wtDir, runID)
-	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
-		if !errors.Is(err, errNoteExists) {
-			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: %w", err)
+	if !hasChecks {
+		if err := admitCheck(repoDir, baseSHA); err != nil {
+			out.Status = "checks_failed"
+			return out, fmt.Errorf("checks: %w", err)
 		}
-		winner, found, readErr := readChecks(repoDir, baseSHA)
-		if readErr != nil {
-			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: read winning check: %w", readErr)
+		var checkErr error
+		checks, checkErr = runChecks(cfg, wtDir, runID)
+		if err := writeChecks(repoDir, baseSHA, checks); err != nil {
+			if !errors.Is(err, errNoteExists) {
+				out.Status = "notes_failed"
+				return out, fmt.Errorf("notes: %w", err)
+			}
+			winner, found, readErr := readChecks(repoDir, baseSHA)
+			if readErr != nil {
+				out.Status = "notes_failed"
+				return out, fmt.Errorf("notes: read winning check: %w", readErr)
+			}
+			if !found {
+				out.Status = "notes_failed"
+				return out, fmt.Errorf("notes: check note disappeared: %w", err)
+			}
+			checks = winner
+			checkErr = nil
 		}
-		if !found {
-			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: check note disappeared: %w", err)
+		if checkErr != nil {
+			out.Status = "checks_failed"
+			return out, fmt.Errorf("checks: %w", checkErr)
 		}
-		checks = winner
-		checkErr = nil
-	}
-	if checkErr != nil {
+	} else if checks.Status == "fail" {
+		// A failing head belongs to the Fixer, never the Verifier; Select does
+		// not offer it, but guard the check boundary in case the note arrived
+		// between Select and Act.
 		out.Status = "checks_failed"
-		return out, fmt.Errorf("checks: %w", checkErr)
+		return out, nil
 	}
 
 	// A failing check is cheap and certain; a review is expensive. Stop here and
@@ -226,7 +245,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	if !found {
 		var stats runStats
-		verdict, stats, err = verifierReview(cfg, repoDir, wtDir, it, baseSHA, runID, a)
+		verdict, stats, err = reviewRunner(cfg, repoDir, wtDir, it, baseSHA, runID, a)
 		out.TokIn, out.TokOut = stats.tokensIn, stats.tokensOut
 		if err != nil {
 			out.Status = "review_failed"
@@ -327,6 +346,11 @@ func admitCheck(repoDir, head string) error {
 	}
 	return nil
 }
+
+// reviewRunner is the host boundary for one review. Production runs the real
+// verifier; a test replaces it to complete a review without a model call,
+// mirroring projectionCommand and trackerFor.
+var reviewRunner = verifierReview
 
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
