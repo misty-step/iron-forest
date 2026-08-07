@@ -98,13 +98,12 @@ func eligibleFrom(items []issue, branches, excluded, required []string) []issue 
 			continue
 		}
 		// Declared required labels turn selection into an opt-in: a promoter's
-		// label earns an item its turn. Otherwise the opt-out contract applies,
-		// so an item stays eligible unless an excluded label names it.
-		if len(required) > 0 {
-			if !hasLabels(item, required) {
-				continue
-			}
-		} else if hasExcludedLabel(item, excluded) {
+		// label earns an item its turn. The two label filters compose, so an
+		// item stays eligible only when it also carries no excluded label.
+		if len(required) > 0 && !hasLabels(item, required) {
+			continue
+		}
+		if hasExcludedLabel(item, excluded) {
 			continue
 		}
 		ready = append(ready, item)

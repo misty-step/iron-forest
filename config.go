@@ -85,8 +85,9 @@ type FlowCfg struct {
 // tracker-side signals that make an item ineligible; they are a convenience of
 // the current tracker, not part of the factory's state. RequireLabels, when
 // non-empty, switches selection from opt-out to opt-in: an open item is
-// eligible only when it carries every required label, and ExcludeLabels is not
-// consulted. An empty RequireLabels keeps the opt-out selection unchanged.
+// eligible only when it carries every required label. ExcludeLabels
+// composes with the opt-in, so a braked item stays ineligible. An empty
+// RequireLabels keeps the opt-out selection unchanged.
 type BuilderFlowCfg struct {
 	FlowCfg       `yaml:",inline"`
 	ExcludeLabels []string `yaml:"exclude_labels"`
