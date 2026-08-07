@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"io"
+	"path/filepath"
+	"testing"
+
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"strings"
-	"testing"
+
+	"github.com/misty-step/iron-forest/core"
 )
 
 // surfaceFiles are the read-command surfaces that must reach state only through
@@ -75,5 +82,197 @@ func TestSurfacesDoNotMentionFlowSelector(t *testing.T) {
 		if strings.Contains(string(b), "builderFlow") {
 			t.Errorf("%s references the builder Flow selector; route list through the core API instead", name)
 		}
+	}
+}
+
+// captureOutput runs fn with os.Stdout and os.Stderr redirected to pipes and
+// returns whatever the function wrote to each.
+func captureOutput(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	rOut, wOut, _ := os.Pipe()
+	rErr, wErr, _ := os.Pipe()
+	os.Stdout, os.Stderr = wOut, wErr
+	defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+
+	done := make(chan struct{})
+	var outBuf, errBuf bytes.Buffer
+	go func() {
+		_, _ = io.Copy(&outBuf, rOut)
+		_, _ = io.Copy(&errBuf, rErr)
+		close(done)
+	}()
+	fn()
+	_ = wOut.Close()
+	_ = wErr.Close()
+	<-done
+	return outBuf.String(), errBuf.String()
+}
+
+// TestCoreEligibleKeepsStalledWhileItemsFilters pins the #176 selection
+// semantics: `watch --live-gh` must keep showing the raw eligible backlog even
+// after an item hits the builder's stall brake, because that brake is what
+// `forest list` narrows away.
+func TestCoreEligibleKeepsStalledWhileItemsFilters(t *testing.T) {
+	old := trackerFor
+	trackerFor = func(repo string) Tracker {
+		return trackerStub{items: []Item{
+			{ID: "hab_01J9X", Title: "opaque", UpdatedAt: "r"},
+		}}
+	}
+	defer func() { trackerFor = old }()
+
+	api, work, _ := coreFixture(t)
+	for range stalledRunLimit {
+		if err := recordStalled(work, "builder", "item-hab_01J9X", "r"); err != nil {
+			t.Fatalf("recordStalled: %v", err)
+		}
+	}
+
+	items, err := api.Items()
+	if err != nil {
+		t.Fatalf("Items: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Items = %+v, want the stalled item filtered out of the list backlog", items)
+	}
+
+	eligible, err := api.EligibleItems()
+	if err != nil {
+		t.Fatalf("EligibleItems: %v", err)
+	}
+	if len(eligible) != 1 || eligible[0].ID != "hab_01J9X" {
+		t.Fatalf("EligibleItems = %+v, want the stalled item kept for the live board", eligible)
+	}
+}
+
+// TestCmdAgentsReportsMalformedAndContinues pins the #176 agents behavior: one
+// malformed declaration is reported on stderr but the rest still list, instead
+// of the first error aborting the whole command.
+func TestCmdAgentsReportsMalformedAndContinues(t *testing.T) {
+	api, work, _ := coreFixture(t)
+	good := filepath.Join(work, DefaultAgentsDir, "good")
+	if err := os.MkdirAll(good, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(good, "agent.yaml"), []byte("description: good\nmodel: g-model\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(good, "instructions.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(work, DefaultAgentsDir, "bad")
+	if err := os.MkdirAll(bad, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No model: loadAgent refuses the declaration, but the command must not stop.
+	if err := os.WriteFile(filepath.Join(bad, "agent.yaml"), []byte("description: broken\nmode: primary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, "instructions.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code := 0
+	stdout, stderr := captureOutput(t, func() { code = cmdAgents(api) })
+	if code != 0 {
+		t.Fatalf("cmdAgents code = %d, want 0", code)
+	}
+	if !strings.Contains(stderr, "forest: agent bad: model is required") {
+		t.Errorf("stderr missing malformed-agent report:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "good\tmodel=g-model") {
+		t.Errorf("stdout missing the good agent listing after a malformed one:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "bad\tmodel=") {
+		t.Errorf("stdout must not list the malformed agent:\n%s", stdout)
+	}
+}
+
+// stubAPI is a minimal core.API for command tests that exercise one method.
+type stubAPI struct {
+	notesFn func(sha string) (core.Verdict, core.Checks, error)
+}
+
+func (stubAPI) Config() (core.Config, error)                                  { return core.Config{}, nil }
+func (stubAPI) Agents() ([]core.AgentInfo, error)                             { return nil, nil }
+func (stubAPI) Ledger(core.LedgerQuery) ([]core.RunRecord, int, error)        { return nil, 0, nil }
+func (stubAPI) Trace(string) ([]byte, error)                                  { return nil, nil }
+func (s stubAPI) Notes(sha string) (core.Verdict, core.Checks, error)         { return s.notesFn(sha) }
+func (stubAPI) Items() ([]core.Item, error)                                   { return nil, nil }
+func (stubAPI) EligibleItems() ([]core.Item, error)                           { return nil, nil }
+func (stubAPI) Branches() ([]core.BranchState, error)                         { return nil, nil }
+func (stubAPI) Head() (string, error)                                         { return "", nil }
+func (stubAPI) Worktrees() ([]string, error)                                  { return nil, nil }
+func (stubAPI) Daemon() (core.Daemon, error)                                  { return core.Daemon{}, nil }
+
+// TestCmdShowRestoresNoteErrorPrefixes pins the #176 show behavior: a failure
+// in each note subsystem keeps the per-subsystem stderr prefix the command has
+// always printed.
+func TestCmdShowRestoresNoteErrorPrefixes(t *testing.T) {
+	cases := []struct {
+		stage core.ErrorStage
+		want  string
+	}{
+		{core.StageFetch, "forest: notes:"},
+		{core.StageVerdict, "forest: verdict:"},
+		{core.StageChecks, "forest: checks:"},
+	}
+	for _, tc := range cases {
+		api := stubAPI{notesFn: func(string) (core.Verdict, core.Checks, error) {
+			return core.Verdict{}, core.Checks{}, &core.StageError{Stage: tc.stage, Err: errors.New("boom")}
+		}}
+		code := 0
+		_, stderr := captureOutput(t, func() { code = cmdShow(api, "abc") })
+		if code != 1 {
+			t.Fatalf("stage %s: cmdShow code = %d, want 1", tc.stage, code)
+		}
+		if want := tc.want + " boom"; !strings.Contains(stderr, want) {
+			t.Errorf("stage %s: stderr %q, want it to contain %q", tc.stage, stderr, want)
+		}
+	}
+}
+
+// TestCmdShowPreservesPresenceAndNullResults pins the #176 show byte-for-byte
+// behavior: note presence drives what is emitted (not field heuristics), and a
+// checks note that carries no rows still renders `results: null`, never [].
+func TestCmdShowPreservesPresenceAndNullResults(t *testing.T) {
+	api, work, sha := coreFixture(t)
+
+	code := 0
+	out, _ := captureOutput(t, func() { code = cmdShow(api, sha) })
+	if code != 0 {
+		t.Fatalf("cmdShow(no notes) code = %d, want 0", code)
+	}
+	if strings.TrimSpace(out) != "{}" {
+		t.Errorf("no-notes output = %q, want {}", strings.TrimSpace(out))
+	}
+
+	if err := writeVerdict(work, sha, verdictNote{Verdict: "approve", Reviewer: "r", Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = captureOutput(t, func() { code = cmdShow(api, sha) })
+	if code != 0 {
+		t.Fatalf("cmdShow(verdict) code = %d, want 0", code)
+	}
+	if !strings.Contains(out, `"verdict"`) {
+		t.Errorf("verdict-only output missing the verdict object:\n%s", out)
+	}
+	if strings.Contains(out, `"checks"`) {
+		t.Errorf("verdict-only output must not include checks:\n%s", out)
+	}
+
+	if err := writeChecks(work, sha, checksNote{Status: "pass"}); err != nil {
+		t.Fatal(err)
+	}
+	out, _ = captureOutput(t, func() { code = cmdShow(api, sha) })
+	if code != 0 {
+		t.Fatalf("cmdShow(checks) code = %d, want 0", code)
+	}
+	if !strings.Contains(out, `"results": null`) {
+		t.Errorf("empty-results checks output must render results as null:\n%s", out)
+	}
+	if strings.Contains(out, `"results": []`) {
+		t.Errorf("empty-results checks output must not render an empty array:\n%s", out)
 	}
 }

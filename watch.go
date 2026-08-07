@@ -62,7 +62,10 @@ func cmdWatch(api core.API, repoDir string, args []string) int {
 	)
 	if liveGH {
 		refresh := func() {
-			got, err := api.Items()
+			// The live board shows the raw tracker backlog (eligible, not
+			// stalled-filtered) exactly as it always did; list is the surface
+			// that applies the builder's stall filter.
+			got, err := api.EligibleItems()
 			mu.Lock()
 			if err != nil {
 				itemErr = err.Error()

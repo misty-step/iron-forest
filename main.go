@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -136,6 +137,10 @@ func cmdAgents(api core.API) int {
 		return 0
 	}
 	for _, a := range agents {
+		if a.Err != "" {
+			fmt.Fprintln(os.Stderr, "forest:", a.Err)
+			continue
+		}
 		fmt.Printf("%s\tmodel=%s%s mode=%s def_sha=%s\n",
 			a.Name, a.Model, variantSuffix(a.Variant), a.Mode, a.DefSHA)
 		fmt.Printf("  %s\n", a.Description)
@@ -157,25 +162,43 @@ func cmdAgents(api core.API) int {
 func cmdShow(api core.API, sha string) int {
 	v, c, err := api.Notes(sha)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
+		// The core API tags which note subsystem failed so the operator keeps
+		// the per-subsystem prefix the command always printed.
+		prefix := "forest:"
+		var se *core.StageError
+		if errors.As(err, &se) {
+			switch se.Stage {
+			case core.StageFetch:
+				prefix = "forest: notes:"
+			case core.StageVerdict:
+				prefix = "forest: verdict:"
+			case core.StageChecks:
+				prefix = "forest: checks:"
+			}
+		}
+		fmt.Fprintln(os.Stderr, prefix, err)
 		return 1
 	}
-	haveVerdict := v.Time != "" || v.RunID != ""
-	haveChecks := c.Time != "" || c.RunID != ""
 	verdict := verdictNote{
 		Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
 		Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
 	}
+	// Leave the results slice nil when the checks note carries none, so a raw
+	// checks note with no rows still renders `results: null`, not `[]`.
+	var results []checkResult
+	if len(c.Results) > 0 {
+		results = make([]checkResult, 0, len(c.Results))
+		for _, r := range c.Results {
+			results = append(results, checkResult{
+				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
+			})
+		}
+	}
 	checks := checksNote{
 		Status:  c.Status,
-		Results: make([]checkResult, 0, len(c.Results)),
+		Results: results,
 		RunID:   c.RunID,
 		Time:    c.Time,
-	}
-	for _, r := range c.Results {
-		checks.Results = append(checks.Results, checkResult{
-			Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
-		})
 	}
 	value := struct {
 		Verdict *verdictNote `json:"verdict,omitempty"`
@@ -183,10 +206,10 @@ func cmdShow(api core.API, sha string) int {
 	}{
 		Checks: &checks,
 	}
-	if haveVerdict {
+	if v.Present {
 		value.Verdict = &verdict
 	}
-	if !haveChecks {
+	if !c.Present {
 		value.Checks = nil
 	}
 	b, err := json.MarshalIndent(value, "", "  ")

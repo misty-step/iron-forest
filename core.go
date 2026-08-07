@@ -75,7 +75,11 @@ func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 	for _, name := range names {
 		a, err := loadAgent(c.repoDir, name)
 		if err != nil {
-			return nil, err
+			// Keep listing the rest: one malformed declaration must not hide the
+			// agents that follow it, matching what the agents command reported
+			// before this seam existed. The caller prints the error and moves on.
+			out = append(out, core.AgentInfo{Name: name, Err: err.Error()})
+			continue
 		}
 		mcps := make([]core.McpSpec, 0, len(a.MCP))
 		for _, m := range a.MCP {
@@ -155,22 +159,22 @@ func (c *coreImpl) Trace(runID string) ([]byte, error) {
 // verdict and checks notes for one commit.
 func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 	if err := fetchNotes(c.repoDir); err != nil {
-		return core.Verdict{}, core.Checks{}, err
+		return core.Verdict{}, core.Checks{}, &core.StageError{Stage: core.StageFetch, Err: err}
 	}
 	v, ok, err := readVerdict(c.repoDir, sha)
 	if err != nil {
-		return core.Verdict{}, core.Checks{}, err
+		return core.Verdict{}, core.Checks{}, &core.StageError{Stage: core.StageVerdict, Err: err}
 	}
 	var verdict core.Verdict
 	if ok {
 		verdict = core.Verdict{
 			Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
-			Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
+			Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time, Present: true,
 		}
 	}
 	ch, ok2, err := readChecks(c.repoDir, sha)
 	if err != nil {
-		return verdict, core.Checks{}, err
+		return verdict, core.Checks{}, &core.StageError{Stage: core.StageChecks, Err: err}
 	}
 	var checks core.Checks
 	if ok2 {
@@ -179,6 +183,7 @@ func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 			Results: make([]core.CheckResult, 0, len(ch.Results)),
 			RunID:   ch.RunID,
 			Time:    ch.Time,
+			Present: true,
 		}
 		for _, r := range ch.Results {
 			checks.Results = append(checks.Results, core.CheckResult{
@@ -200,18 +205,47 @@ func (c *coreImpl) Items() ([]core.Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]core.Item, 0, len(subjects))
+	return toCoreItems(subjectsToItems(subjects)), nil
+}
+
+func subjectsToItems(subjects []Subject) []Item {
+	items := make([]Item, 0, len(subjects))
 	for _, s := range subjects {
-		comments := make([]core.Comment, 0, len(s.Item.Comments))
-		for _, cm := range s.Item.Comments {
+		items = append(items, s.Item)
+	}
+	return items
+}
+
+// EligibleItems returns the tracker backlog without the builder's stalled-item
+// filtering: every open item that is not already covered by a forest branch and
+// passes the builder's label filters. The live watch board polls this exact
+// backlog, which is what it displayed before #176 routed it through the API.
+func (c *coreImpl) EligibleItems() ([]core.Item, error) {
+	cfg, err := loadConfig(filepath.Join(c.repoDir, "forest.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	items, err := eligibleItems(cfg, c.repoDir)
+	if err != nil {
+		return nil, err
+	}
+	return toCoreItems(items), nil
+}
+
+// toCoreItems adapts controller items into the core package's owned shape.
+func toCoreItems(items []Item) []core.Item {
+	out := make([]core.Item, 0, len(items))
+	for _, it := range items {
+		comments := make([]core.Comment, 0, len(it.Comments))
+		for _, cm := range it.Comments {
 			comments = append(comments, core.Comment{Body: cm.Body, CreatedAt: cm.CreatedAt})
 		}
 		out = append(out, core.Item{
-			ID: s.Item.ID, Title: s.Item.Title, Body: s.Item.Body,
-			UpdatedAt: s.Item.UpdatedAt, Tags: s.Item.Tags, Comments: comments,
+			ID: it.ID, Title: it.Title, Body: it.Body,
+			UpdatedAt: it.UpdatedAt, Tags: it.Tags, Comments: comments,
 		})
 	}
-	return out, nil
+	return out
 }
 
 func (c *coreImpl) Branches() ([]core.BranchState, error) {

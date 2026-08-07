@@ -97,7 +97,11 @@ type McpSpec struct {
 	Enabled bool
 }
 
-// AgentInfo summarizes one declared agent for a surface.
+// AgentInfo summarizes one declared agent for a surface. Presence in the
+// returned slice does not mean the declaration was readable: a directory that
+// fails to load is still reported so a surface can show the failure and keep
+// listing the rest, exactly as the agents command did before it used this API.
+// When Err is non-empty the remaining fields carry nothing useful.
 type AgentInfo struct {
 	Name        string
 	Description string
@@ -106,6 +110,7 @@ type AgentInfo struct {
 	Mode        string
 	DefSHA      string
 	Mcps        []McpSpec
+	Err         string
 }
 
 // RunRecord is one append-only ledger row in the shape a surface reads.
@@ -147,7 +152,9 @@ type Daemon struct {
 	Note   string
 }
 
-// Verdict is the review decision note for one commit.
+// Verdict is the review decision note for one commit. Present reports whether a
+// verdict note exists for the commit; when it is false the remaining fields are
+// the zero value and are not a meaningful "absent" rendering.
 type Verdict struct {
 	Verdict  string
 	Notes    string
@@ -156,6 +163,7 @@ type Verdict struct {
 	DefSHA   string
 	RunID    string
 	Time     string
+	Present  bool
 }
 
 // CheckResult is one gate command and its observed result.
@@ -166,12 +174,15 @@ type CheckResult struct {
 	Output  string
 }
 
-// Checks is the gate results note for one commit.
+// Checks is the gate results note for one commit. Present reports whether a
+// checks note exists for the commit; when it is false the remaining fields are
+// the zero value and are not a meaningful "absent" rendering.
 type Checks struct {
 	Status  string
 	Results []CheckResult
 	RunID   string
 	Time    string
+	Present bool
 }
 
 // Comment is one tracker comment in source order.
@@ -197,6 +208,34 @@ type BranchState struct {
 	Head string
 }
 
+// ErrorStage names the note subsystem that failed inside a Notes call, so a
+// surface reproduces the per-subsystem error prefix it used before the #176
+// seam without re-deriving which read failed.
+type ErrorStage string
+
+const (
+	// StageFetch marks the remote note fetch failing.
+	StageFetch ErrorStage = "fetch"
+	// StageVerdict marks the verdict-note read failing.
+	StageVerdict ErrorStage = "verdict"
+	// StageChecks marks the checks-note read failing.
+	StageChecks ErrorStage = "checks"
+)
+
+// StageError wraps an error with the note subsystem that produced it. Its
+// Error text is exactly the underlying error's, so a surface can prefix it
+// without echoing the subsystem name twice.
+type StageError struct {
+	Stage ErrorStage
+	Err   error
+}
+
+// Error returns the wrapped error's message unchanged.
+func (e *StageError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes the wrapped error for errors.Is and errors.As.
+func (e *StageError) Unwrap() error { return e.Err }
+
 // API is every durable operation a surface may perform. Live-run operations
 // are deliberately absent: they need the daemon (see #163).
 type API interface {
@@ -206,6 +245,7 @@ type API interface {
 	Trace(runID string) ([]byte, error)
 	Notes(sha string) (Verdict, Checks, error)
 	Items() ([]Item, error)
+	EligibleItems() ([]Item, error)
 	Branches() ([]BranchState, error)
 	Head() (string, error)
 	Worktrees() ([]string, error)
