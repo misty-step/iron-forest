@@ -1,0 +1,1 @@
+{"status":"pass","results":[{"name":"build","code":0,"seconds":0.210856409,"output":""},{"name":"vet","code":0,"seconds":0.057909557,"output":""},{"name":"test","code":0,"seconds":1.720505636,"output":"ok  \tgithub.com/misty-step/iron-forest\t1.428s\n"}],"run_id":"20260807T202637Z-branch-forest/175-do-not-blame-the-agent-for-an-op","time":"2026-08-07T20:26:40Z"}
