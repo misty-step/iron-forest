@@ -76,10 +76,10 @@ func eligibleItems(cfg Config, repoDir string) ([]issue, error) {
 	if err != nil {
 		return nil, err
 	}
-	return eligibleFrom(items, branches, cfg.Flows.Builder.ExcludeLabels), nil
+	return eligibleFrom(items, branches, cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels), nil
 }
 
-func eligibleFrom(items []issue, branches, excluded []string) []issue {
+func eligibleFrom(items []issue, branches, excluded, required []string) []issue {
 	covered := make(map[int]bool)
 	for _, branch := range branches {
 		name := strings.TrimPrefix(strings.TrimPrefix(branch, "refs/heads/"), BranchPrefix)
@@ -94,12 +94,31 @@ func eligibleFrom(items []issue, branches, excluded []string) []issue {
 	}
 	var ready []issue
 	for _, item := range items {
-		if covered[item.Number] || hasExcludedLabel(item, excluded) {
+		if covered[item.Number] {
+			continue
+		}
+		// Declared required labels turn selection into an opt-in: a promoter's
+		// label earns an item its turn. Otherwise the opt-out contract applies,
+		// so an item stays eligible unless an excluded label names it.
+		if len(required) > 0 {
+			if !hasLabels(item, required) {
+				continue
+			}
+		} else if hasExcludedLabel(item, excluded) {
 			continue
 		}
 		ready = append(ready, item)
 	}
 	return ready
+}
+
+func hasLabels(item issue, required []string) bool {
+	for _, label := range required {
+		if !item.hasLabel(label) {
+			return false
+		}
+	}
+	return true
 }
 
 func hasExcludedLabel(item issue, excluded []string) bool {

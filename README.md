@@ -87,7 +87,9 @@ Iron Forest runs each command in `checks:` and writes one Checks note.
 It never reads a Host check or review.
 Labels such as `exclude_labels` are Tracker inputs, not factory state.
 
-`flows.builder` selects items. `flows.verifier.merge` is `squash` or `ff`.
+`flows.builder` selects items; declaring `require_labels` (for example
+`require_labels: [forest:ready]`) turns selection from opt-out into opt-in, so
+an open item is eligible only when it carries every declared label. `flows.verifier.merge` is `squash` or `ff`.
 `flows.verifier.auto_merge` controls the merge Effect. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
 
 ## Requirements
