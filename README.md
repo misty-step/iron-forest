@@ -83,10 +83,10 @@ projection:
 ```
 
 `repo` names the Tracker repository. There is no `protected` key in
-`forest.yaml`: as an FSM invariant the Gate rejects changes to the factory's
-control plane (`.forest/`, `forest.yaml`, `agents/`, `.opencode/opencode.json`)
-— see `docs/adr/0004`, `docs/fsm.md`, and `AGENTS.md` — while independent
-review on the exact commit remains the audit surface.
+`forest.yaml` and the Gate rejects nothing by path: `docs/adr/0003` removed the
+protected-path list, so an agent may change any path its Subject requires. See
+`docs/fsm.md` and `AGENTS.md`. Independent review on the exact commit is the
+audit surface.
 
 Attaching a second repository to a running installation is
 `docs/onboarding-managed-repo.md`.
