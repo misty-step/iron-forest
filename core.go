@@ -4,144 +4,83 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/misty-step/iron-forest/core"
 )
-
-// AgentInfo summarizes one declared agent for a surface. It is the read view a
-// surface needs to list agents without touching the declaration files.
-type AgentInfo struct {
-	Name        string
-	Description string
-	Model       string
-	Variant     string
-	Mode        string
-	DefSHA      string
-	Mcps        []McpSpec
-}
-
-// RunRecord is one append-only ledger row in the shape a surface reads. It
-// mirrors runRecord so a surface never depends on the controller's rows.
-type RunRecord struct {
-	Time          string
-	RunID         string
-	Flow          string
-	Subject       string
-	Revision      string
-	ID            string
-	Branch        string
-	PRURL         string
-	Status        string
-	TokensIn      int64
-	TokensOut     int64
-	Agent         string
-	Model         string
-	BaseSHA       string
-	DefSHA        string
-	ReviewVerdict string
-	Error         string
-}
-
-// LedgerQuery filters the read of the run ledger. A zero value reads every row,
-// which is exactly what the stats command aggregates today.
-type LedgerQuery struct {
-	Flow string
-}
-
-// Verdict is the review decision note for one commit.
-type Verdict struct {
-	Verdict  string
-	Notes    string
-	Reviewer string
-	Model    string
-	DefSHA   string
-	RunID    string
-	Time     string
-}
-
-// CheckResult is one gate command and its observed result.
-type CheckResult struct {
-	Name    string
-	Code    int
-	Seconds float64
-	Output  string
-}
-
-// Checks is the gate results note for one commit.
-type Checks struct {
-	Status  string
-	Results []CheckResult
-	RunID   string
-	Time    string
-}
-
-// BranchState is one forest branch and its head commit.
-type BranchState struct {
-	Name string
-	Head string
-}
-
-// API is every durable operation a surface may perform. Live-run operations
-// are deliberately absent: they need the daemon (see #163).
-type API interface {
-	Config() (Config, error)
-	Agents() ([]AgentInfo, error)
-	Ledger(LedgerQuery) ([]RunRecord, error)
-	Trace(runID string) ([]byte, error)
-	Notes(sha string) (Verdict, Checks, error)
-	Items() ([]Item, error)
-	Branches() ([]BranchState, error)
-	DaemonPresent() (bool, error)
-}
 
 // core forwards every durable operation to the existing package functions. It
 // is a forwarding layer on purpose: this card defines the seam, not the move.
-type core struct {
+// It implements core.API and adapts the controller's internal state into the
+// core package's owned types.
+type coreImpl struct {
 	repoDir string
 }
 
 // NewCore returns the API for a checkout at repoDir, usable without a daemon.
-func NewCore(repoDir string) API {
-	return &core{repoDir: repoDir}
+func NewCore(repoDir string) core.API {
+	return &coreImpl{repoDir: repoDir}
 }
 
-func (c *core) Config() (Config, error) {
-	return loadConfig(filepath.Join(c.repoDir, "forest.yaml"))
+func (c *coreImpl) Config() (core.Config, error) {
+	cfg, err := loadConfig(filepath.Join(c.repoDir, "forest.yaml"))
+	if err != nil {
+		return core.Config{}, err
+	}
+	checks := make([]core.Check, 0, len(cfg.Checks))
+	for _, ch := range cfg.Checks {
+		checks = append(checks, core.Check{Name: ch.Name, Run: ch.Run})
+	}
+	return core.Config{
+		Repo:   cfg.Repo,
+		Checks: checks,
+		Flows: core.Flows{
+			Builder:  flowConfig(cfg.Flows.Builder.Enabled, cfg.Flows.Builder.Agent, cfg.Flows.Builder.IntervalSec),
+			Verifier: flowConfig(cfg.Flows.Verifier.Enabled, cfg.Flows.Verifier.Agent, cfg.Flows.Verifier.IntervalSec),
+			Fixer:    flowConfig(cfg.Flows.Fixer.Enabled, cfg.Flows.Fixer.Agent, cfg.Flows.Fixer.IntervalSec),
+		},
+	}, nil
 }
 
-func (c *core) Agents() ([]AgentInfo, error) {
+func flowConfig(enabled bool, agent string, interval int) core.FlowConfig {
+	return core.FlowConfig{Enabled: enabled, Agent: agent, IntervalSec: interval}
+}
+
+func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 	names, err := discoverAgents(c.repoDir)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]AgentInfo, 0, len(names))
+	out := make([]core.AgentInfo, 0, len(names))
 	for _, name := range names {
 		a, err := loadAgent(c.repoDir, name)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, AgentInfo{
-			Name:        a.Name,
-			Description: a.Description,
-			Model:       a.Model,
-			Variant:     a.Variant,
-			Mode:        a.Mode,
-			DefSHA:      a.DefSHA,
-			Mcps:        a.MCP,
+		mcps := make([]core.McpSpec, 0, len(a.MCP))
+		for _, m := range a.MCP {
+			mcps = append(mcps, core.McpSpec{
+				Name: m.Name, Type: m.Type, URL: m.URL, Header: m.Header, Enabled: m.Enabled,
+			})
+		}
+		out = append(out, core.AgentInfo{
+			Name: a.Name, Description: a.Description, Model: a.Model,
+			Variant: a.Variant, Mode: a.Mode, DefSHA: a.DefSHA, Mcps: mcps,
 		})
 	}
 	return out, nil
 }
 
-func (c *core) Ledger(q LedgerQuery) ([]RunRecord, error) {
+func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, error) {
 	runs, _, err := loadLedger(ledgerPath(c.repoDir))
 	if err != nil {
 		return nil, err
 	}
-	out := make([]RunRecord, 0, len(runs))
+	out := make([]core.RunRecord, 0, len(runs))
 	for _, r := range runs {
 		if q.Flow != "" && q.Flow != r.Flow {
 			continue
 		}
-		out = append(out, RunRecord{
+		out = append(out, core.RunRecord{
 			Time:          r.Time,
 			RunID:         r.RunID,
 			Flow:          r.Flow,
@@ -164,7 +103,7 @@ func (c *core) Ledger(q LedgerQuery) ([]RunRecord, error) {
 	return out, nil
 }
 
-func (c *core) Trace(runID string) ([]byte, error) {
+func (c *coreImpl) Trace(runID string) ([]byte, error) {
 	runsDir := filepath.Join(c.repoDir, WorkspaceDir, "runs")
 	matches, err := filepath.Glob(filepath.Join(runsDir, runID+".*.jsonl"))
 	if err != nil {
@@ -176,37 +115,37 @@ func (c *core) Trace(runID string) ([]byte, error) {
 	return os.ReadFile(matches[0])
 }
 
-func (c *core) Notes(sha string) (Verdict, Checks, error) {
+// Notes fetches the remote notes, exactly as cmdShow does, then reads the
+// verdict and checks notes for one commit.
+func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
+	if err := fetchNotes(c.repoDir); err != nil {
+		return core.Verdict{}, core.Checks{}, err
+	}
 	v, ok, err := readVerdict(c.repoDir, sha)
 	if err != nil {
-		return Verdict{}, Checks{}, err
+		return core.Verdict{}, core.Checks{}, err
 	}
-	var verdict Verdict
+	var verdict core.Verdict
 	if ok {
-		verdict = Verdict{
-			Verdict:  v.Verdict,
-			Notes:    v.Notes,
-			Reviewer: v.Reviewer,
-			Model:    v.Model,
-			DefSHA:   v.DefSHA,
-			RunID:    v.RunID,
-			Time:     v.Time,
+		verdict = core.Verdict{
+			Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
+			Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
 		}
 	}
 	ch, ok2, err := readChecks(c.repoDir, sha)
 	if err != nil {
-		return verdict, Checks{}, err
+		return verdict, core.Checks{}, err
 	}
-	var checks Checks
+	var checks core.Checks
 	if ok2 {
-		checks = Checks{
+		checks = core.Checks{
 			Status:  ch.Status,
-			Results: make([]CheckResult, 0, len(ch.Results)),
+			Results: make([]core.CheckResult, 0, len(ch.Results)),
 			RunID:   ch.RunID,
 			Time:    ch.Time,
 		}
 		for _, r := range ch.Results {
-			checks.Results = append(checks.Results, CheckResult{
+			checks.Results = append(checks.Results, core.CheckResult{
 				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
 			})
 		}
@@ -214,31 +153,44 @@ func (c *core) Notes(sha string) (Verdict, Checks, error) {
 	return verdict, checks, nil
 }
 
-func (c *core) Items() ([]Item, error) {
+// Items returns the backlog the builder selector would act on, including its
+// stalled-item filtering, so a surface sees exactly what `forest list` shows.
+func (c *coreImpl) Items() ([]core.Item, error) {
 	cfg, err := loadConfig(filepath.Join(c.repoDir, "forest.yaml"))
 	if err != nil {
 		return nil, err
 	}
-	return eligibleItems(cfg, c.repoDir)
+	subjects, err := (builderFlow{}).Select(cfg, c.repoDir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.Item, 0, len(subjects))
+	for _, s := range subjects {
+		out = append(out, core.Item{
+			ID: s.Item.ID, Title: s.Item.Title, Body: s.Item.Body,
+			UpdatedAt: s.Item.UpdatedAt, Tags: s.Item.Tags,
+		})
+	}
+	return out, nil
 }
 
-func (c *core) Branches() ([]BranchState, error) {
+func (c *coreImpl) Branches() ([]core.BranchState, error) {
 	names, err := forestBranches(c.repoDir)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]BranchState, 0, len(names))
+	out := make([]core.BranchState, 0, len(names))
 	for _, name := range names {
 		head, err := branchHead(c.repoDir, name)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, BranchState{Name: name, Head: head})
+		out = append(out, core.BranchState{Name: name, Head: head})
 	}
 	return out, nil
 }
 
-func (c *core) DaemonPresent() (bool, error) {
+func (c *coreImpl) DaemonPresent() (bool, error) {
 	s := probeDaemon(c.repoDir)
 	return s.Active, nil
 }

@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/misty-step/iron-forest/core"
 )
 
 // coreFixture builds a checkout on a local remote with a valid forest.yaml and
 // returns the API plus the checkout dir and target commit sha.
-func coreFixture(t *testing.T) (API, string, string) {
+func coreFixture(t *testing.T) (core.API, string, string) {
 	t.Helper()
 	_, work, sha := notesTestRepository(t)
 	if err := os.WriteFile(filepath.Join(work, "forest.yaml"), []byte(
@@ -85,7 +87,7 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if err := os.WriteFile(ws, []byte(rows), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	all, err := api.Ledger(LedgerQuery{})
+	all, err := api.Ledger(core.LedgerQuery{})
 	if err != nil {
 		t.Fatalf("Ledger: %v", err)
 	}
@@ -95,7 +97,7 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if all[0].Flow != "builder" || all[0].TokensIn != 10 {
 		t.Fatalf("row 0 = %+v, want builder with 10 tokens in", all[0])
 	}
-	builder, err := api.Ledger(LedgerQuery{Flow: "builder"})
+	builder, err := api.Ledger(core.LedgerQuery{Flow: "builder"})
 	if err != nil {
 		t.Fatalf("Ledger(builder): %v", err)
 	}
@@ -156,7 +158,7 @@ func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 	}
 }
 
-func TestCoreItemsReturnsEligibleBacklog(t *testing.T) {
+func TestCoreItemsReturnsBuilderSelectorBacklog(t *testing.T) {
 	old := trackerFor
 	trackerFor = func(repo string) Tracker {
 		return trackerStub{items: []Item{{ID: "hab_01J9X", Title: "opaque", UpdatedAt: "r"}}}
