@@ -314,7 +314,7 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 		return managerReport{}, err
 	}
 	trace := filepath.Join(workspace, "runs", runID+".manager.jsonl")
-	if _, err := runPhase(runDir, a, prompt, trace); err != nil {
+	if _, err := runPhase(repoDir, runDir, a, prompt, trace); err != nil {
 		return managerReport{}, err
 	}
 	return readManagerReportFile(runDir)
