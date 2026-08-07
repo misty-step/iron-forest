@@ -119,33 +119,26 @@ func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, error) {
 
 func (c *coreImpl) Trace(runID string) ([]byte, error) {
 	runsDir := filepath.Join(c.repoDir, WorkspaceDir, "runs")
-	entries, err := os.ReadDir(runsDir)
-	if err != nil {
-		return nil, fmt.Errorf("read runs dir %s: %w", runsDir, err)
-	}
-	// Run IDs embed opaque item identities, so they may carry glob
-	// metacharacters. Compare names literally and never treat the id as a glob
-	// or as a path: both could match the wrong trace or escape the runs dir.
-	var trace []byte
-	for _, e := range entries {
-		if e.IsDir() {
+
+	// Verifier and fixer run ids embed the branch ("branch-forest/<branch>"),
+	// and filepath.Join in those flows nests the trace below a subdirectory of
+	// the runs dir (runs/<timestamp>-branch-forest/<branch>.jsonl). Reproduce
+	// the writer's join to reach that nested path, reading the name literally
+	// so a glob metacharacter in an item id never matches a sibling. Refuse any
+	// id whose joined path escapes the runs dir.
+	for _, suffix := range []string{".builder.jsonl", ".verifier.jsonl", ".fixer.jsonl"} {
+		p := filepath.Join(runsDir, filepath.FromSlash(runID)+suffix)
+		rel, err := filepath.Rel(runsDir, p)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
-		name := e.Name()
-		if !strings.HasPrefix(name, runID+".") || !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(runsDir, name))
+		b, err := os.ReadFile(p)
 		if err != nil {
-			return nil, fmt.Errorf("read trace %s: %w", name, err)
+			continue
 		}
-		trace = b
-		break
+		return b, nil
 	}
-	if trace == nil {
-		return nil, fmt.Errorf("trace for run %s not found", runID)
-	}
-	return trace, nil
+	return nil, fmt.Errorf("trace for run %s not found", runID)
 }
 
 // Notes fetches the remote notes, exactly as cmdShow does, then reads the

@@ -191,6 +191,29 @@ func TestCoreTraceMatchesMetacharactersLiterally(t *testing.T) {
 	}
 }
 
+func TestCoreTraceReadsNestedVerifierTrace(t *testing.T) {
+	api, work, _ := coreFixture(t)
+	// The verifier flow writes run ids that embed the branch
+	// ("branch-forest/<branch>"), so filepath.Join in that flow nests the trace
+	// below a subdirectory of the runs dir. Trace must reach that nested file.
+	runID := "20260807T150405Z-branch-forest/7-example"
+	nested := filepath.Join(work, WorkspaceDir, "runs", "20260807T150405Z-branch-forest")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("{\"step\":1}\n{\"step\":2}\n")
+	if err := os.WriteFile(filepath.Join(nested, "7-example.verifier.jsonl"), want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := api.Trace(runID)
+	if err != nil {
+		t.Fatalf("Trace of nested verifier run: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Trace = %q, want %q", got, want)
+	}
+}
+
 func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 	api, work, sha := coreFixture(t)
 	if v, c, err := api.Notes(sha); err != nil || v.Verdict != "" || c.Status != "" {
