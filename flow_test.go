@@ -79,3 +79,35 @@ func TestAgentFailureStillCounts(t *testing.T) {
 		t.Fatalf("real failures did not reach the brake; they must count")
 	}
 }
+
+// TestClaimKeyNormalizesAcrossFlows pins the no-double-claim invariant across
+// lanes. The Builder reserves a subject as "item-<id>" while the Verifier and
+// Fixer reserve the same work as "branch-<branch>"; without normalization these
+// are different keys, so a Builder that has just published could hold "item-9"
+// while another Flow claims "branch-forest/9-x" for the same Subject. claimKey
+// reduces every subject to its opaque item id, so both reservations collide and
+// the in-process guard refuses the second claim.
+func TestClaimKeyNormalizesAcrossFlows(t *testing.T) {
+	builder := Subject{Key: "item-9", Kind: "item", ID: "9"}
+	verifier := Subject{Key: "branch-forest/9-add", Kind: "branch", ID: "9", Branch: "forest/9-add"}
+	if claimKey(builder) != claimKey(verifier) {
+		t.Fatalf("claimKey(builder)=%q claimKey(verifier)=%q; same item must share one claim", claimKey(builder), claimKey(verifier))
+	}
+	if got := claimKey(verifier); got != "item-9" {
+		t.Fatalf("claimKey(verifier) = %q, want item-9", got)
+	}
+
+	// The real reservation path honors the normalized key: a second subject for
+	// the same item is refused once one is in flight.
+	set := newSubjectSet()
+	if !set.claim(claimKey(builder)) {
+		t.Fatal("first claim of the item was refused")
+	}
+	if set.claim(claimKey(verifier)) {
+		t.Fatal("second claim of the same item as a different key was accepted; double-claim")
+	}
+	set.release(claimKey(builder))
+	if !set.claim(claimKey(verifier)) {
+		t.Fatal("claim after release was refused")
+	}
+}

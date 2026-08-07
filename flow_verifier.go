@@ -302,6 +302,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
+	// failed is terminal and never resumed. The label was checked at Act entry,
+	// but a Fixer -- or a human -- can apply it while this pass is checking or
+	// reviewing, so re-read the item at the latest Effect boundary before the
+	// merge. Without this revalidation an approved green branch could still land
+	// after its item was marked failed mid-pass.
+	if err := assertNotFailed(cfg, s); err != nil {
+		out.Status = "item_failed"
+		return out, err
+	}
 	// The merge effect is only legal when Checks and an approved Verdict both
 	// key to this exact revision. Read them from the repository -- not from the
 	// pass's own variables -- so a flow that ever skipped a required note is
@@ -323,6 +332,23 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	out.Status = "merged"
 	return out, nil
+}
+
+// assertNotFailed re-reads the item from the tracker and refuses when it now
+// carries the terminal forest:failed label. failed is terminal and never
+// resumed, so a label that lands while a pass is already in flight -- after the
+// Act-entry check, during checking or reviewing -- must stop the subject before
+// it can merge. Each later Effect boundary calls it so the machine observes the
+// newest terminal fact, not the copy the pass started with.
+func assertNotFailed(cfg Config, s Subject) error {
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
+	if err != nil {
+		return fmt.Errorf("item: %w", err)
+	}
+	if it.hasTag(failedLabel) {
+		return fmt.Errorf("item %s carries %s: failed subjects are terminal and never resumed", s.ID, failedLabel)
+	}
+	return nil
 }
 
 // admitMerge is the verifier's merge admission. It reads the Checks and Verdict
@@ -495,7 +521,7 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item, expectedHead str
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
 		}
-		return finishMerge(cfg, repoDir, branch, it)
+		return finishMerge(cfg, repoDir, branch, it, expectedHead)
 	}
 	workspace := workspaceDir(repoDir)
 	mergeDir := filepath.Join(workspace, "worktrees", "merge-"+slug(branch))
@@ -511,18 +537,23 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item, expectedHead str
 	if err := git(repoDir, "worktree", "add", "--detach", mergeDir, "origin/master"); err != nil {
 		return fmt.Errorf("merge: worktree: %w", err)
 	}
+	// The merge consumes the admitted immutable head, never the live branch ref.
+	// The branchHead check above closed the window up to this point; merging the
+	// SHA (not the symbolic branch) guarantees that if the branch moves between
+	// that check and this merge, the exact admitted revision still lands and its
+	// Checks and Verdict still describe the tree about to land.
 	switch cfg.Flows.Verifier.Merge {
 	case "squash":
 		// One commit per subject on master is the history shape this factory
 		// has always produced; the strategy is declared, never assumed.
-		if err := git(mergeDir, "merge", "--squash", branch); err != nil {
+		if err := git(mergeDir, "merge", "--squash", expectedHead); err != nil {
 			return fmt.Errorf("merge: squash: %w", err)
 		}
 		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
 			return fmt.Errorf("merge: commit: %w", err)
 		}
 	case "ff":
-		if err := git(mergeDir, "merge", "--ff-only", branch); err != nil {
+		if err := git(mergeDir, "merge", "--ff-only", expectedHead); err != nil {
 			return fmt.Errorf("merge: ff: %w", err)
 		}
 	default:
@@ -531,13 +562,17 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item, expectedHead str
 	if err := git(mergeDir, "push", "origin", "HEAD:master"); err != nil {
 		return fmt.Errorf("merge: push: %w", err)
 	}
-	return finishMerge(cfg, repoDir, branch, it)
+	return finishMerge(cfg, repoDir, branch, it, expectedHead)
 }
 
 // finishMerge retires a landed subject: the branch is gone and the item is
-// closed, so no lane selects it again.
-func finishMerge(cfg Config, repoDir, branch string, it Item) error {
-	if err := git(repoDir, "push", "origin", "--delete", branch); err != nil {
+// closed, so no lane selects it again. The branch deletion is a compare-and-swap
+// against the admitted head -- --force-with-lease -- so retirement succeeds only
+// if the branch still points at the exact admitted revision. A branch that moved
+// after the merge landed is left alone for a human to inspect, never silently
+// deleted.
+func finishMerge(cfg Config, repoDir, branch string, it Item, expectedHead string) error {
+	if err := deleteRef(repoDir, "refs/heads/"+branch, expectedHead); err != nil {
 		return fmt.Errorf("merge: delete branch: %w", err)
 	}
 	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {

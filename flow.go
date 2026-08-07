@@ -40,6 +40,19 @@ func subjectFailed(repo string, s Subject) (bool, error) {
 	return it.hasTag(failedLabel), nil
 }
 
+// claimKey returns the identity under which a subject is reserved across flows.
+// The Builder reserves work by "item-<id>" and the Verifier and Fixer reserve
+// the same work by "branch-<branch>", but both describe one opaque item -- each
+// item has at most one forest branch -- so the same Subject must not be claimed
+// twice under two different keys when the flows race. Reducing every subject to
+// its opaque item id makes the in-process double-claim guard hold across lanes.
+func claimKey(s Subject) string {
+	if s.ID != "" {
+		return "item-" + s.ID
+	}
+	return s.Key
+}
+
 // An Outcome is what one Act call did. It becomes one ledger row. There is no
 // money in it: spend is bounded by the provider key, not counted here.
 type Outcome struct {
@@ -250,10 +263,17 @@ func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string)
 func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) int {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
-	if !inFlight.claim(s.Key) {
+	// One subject may be claimed under two different keys: the Builder reserves
+	// an item by "item-<id>" while the Verifier and Fixer reserve the same work
+	// by "branch-<branch>". Both reduce to the same opaque item id (one forest
+	// branch per item), so normalize the reservation to that id. Without this a
+	// Builder that has just published would still hold "item-<id>" while another
+	// Flow claimed the same Subject as "branch-<branch>" -- a double claim.
+	claim := claimKey(s)
+	if !inFlight.claim(claim) {
 		return codeBusy
 	}
-	defer inFlight.release(s.Key)
+	defer inFlight.release(claim)
 
 	runID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), s.Key)
 

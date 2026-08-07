@@ -118,14 +118,6 @@ func TestGateRejectsProtoProtectedSourceDirectly(t *testing.T) {
 	}
 }
 
-func gitT(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
-	}
-}
-
 // TestParseChangedKeepsFirstPathIntact pins the column contract. Porcelain
 // leaves the first column blank for a change that is not staged, so a modified
 // tracked file arrives as " M path". Trimming that blank shifts the fields left
@@ -141,5 +133,80 @@ func TestParseChangedKeepsFirstPathIntact(t *testing.T) {
 		if changed[i] != want[i] {
 			t.Fatalf("changed[%d] = %q, want %q", i, changed[i], want[i])
 		}
+	}
+}
+
+// TestGateRejectsIgnoredProtectedPathAlongsideWork pins the hole the reviewer
+// named: /.forest/ is git-ignored, so git status --porcelain never lists a
+// change inside it. A run that mutates .forest/foo while also changing an
+// ordinary source file would therefore hide the control-plane mutation and pass
+// the Gate. The Gate must refuse it when the protected path is ignored, not pass
+// it for the wrong reason (because the ignored change left no visible one).
+func TestGateRejectsIgnoredProtectedPathAlongsideWork(t *testing.T) {
+	wtDir, baseSHA := gateProtectedRepo(t, map[string]string{
+		"work.go":     "package main\n",
+		".gitignore":  "/.forest/\n",
+		"report.json": `{"summary":"s","changed_files":["work.go",".forest/foo"]}`,
+	})
+	// Change an ordinary tracked file and, in the same run, a git-ignored
+	// protected path. Git reports only the tracked file, so the Gate must find
+	// the ignored mutation itself.
+	if err := os.WriteFile(filepath.Join(wtDir, "work.go"), []byte("package main\n// v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wtDir, ".forest"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, ".forest", "foo"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := gate(wtDir, baseSHA, ""); err == nil {
+		t.Fatal("gate accepted a change to an ignored protected path (.forest/foo) alongside source work")
+	}
+}
+
+// TestGateRejectsIgnoredProtectedPathWithoutWork pins the same rule when the
+// ignored protected mutation is the only change: it must still be refused, and
+// not evade the Gate by leaving no tracked change at all.
+func TestGateRejectsIgnoredProtectedPathWithoutWork(t *testing.T) {
+	wtDir, baseSHA := gateProtectedRepo(t, map[string]string{
+		".gitignore": "/.forest/\n",
+	})
+	if err := os.MkdirAll(filepath.Join(wtDir, ".forest"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, ".forest", "foo"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := gate(wtDir, baseSHA, ""); err == nil {
+		t.Fatal("gate accepted a change to an ignored protected path (.forest/foo)")
+	}
+}
+
+// TestGateAcceptsIgnoredNonProtectedPath pins that the ignored scan does not
+// over-reach: a run that only writes an ignored file outside the control plane
+// along with real source work is still ordinary, not a rejected run.
+func TestGateAcceptsIgnoredNonProtectedPath(t *testing.T) {
+	wtDir, baseSHA := gateProtectedRepo(t, map[string]string{
+		"work.go":     "package main\n",
+		".gitignore":  "*.log\n",
+		"report.json": `{"summary":"s","changed_files":["work.go"]}`,
+	})
+	if err := os.WriteFile(filepath.Join(wtDir, "work.go"), []byte("package main\n// v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "build.log"), []byte("noise\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := gate(wtDir, baseSHA, ""); err != nil {
+		t.Fatalf("gate rejected an ignored non-protected change: %v", err)
+	}
+}
+
+func gitT(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
 	}
 }

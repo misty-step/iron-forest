@@ -947,3 +947,107 @@ func TestMergeVerifiedRefusesMovedBranch(t *testing.T) {
 		t.Errorf("error %q does not name the expected-head refusal", err)
 	}
 }
+
+// TestFinishMergeRefusesToRetireAMovedBranch pins the compare-and-swap on the
+// branch retirement: finishMerge deletes the branch only when it still points at
+// the exact admitted head. A branch that landed elsewhere -- one a human or a
+// concurrent flow moved after the merge -- must not be silently deleted, so the
+// retirement is --force-with-lease against the admitted SHA rather than a plain
+// delete.
+func TestFinishMergeRefusesToRetireAMovedBranch(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+	branch := "forest/9-retire"
+	notesTestGit(t, work, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "add", "branch.txt")
+	notesTestGit(t, work, "commit", "-qm", "branch work")
+	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
+	admitted := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+
+	// The branch advances after it was admitted, so the compare-and-swap delete
+	// must refuse and leave the moved branch on origin untouched.
+	if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "commit", "-qam", "branch moved")
+	notesTestGit(t, work, "push", "-q", "origin", branch)
+	moved := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	err := finishMerge(cfg, work, branch, Item{ID: "9", Title: "retire"}, admitted)
+	if err == nil {
+		t.Fatal("finishMerge deleted a branch that moved after admission")
+	}
+	if got := remoteBranchHead(t, work, branch); got != moved {
+		t.Fatalf("branch head after refused retirement = %q, want the moved head %q", got, moved)
+	}
+}
+
+// TestVerifierStopsAfterFailedLabelArrivesMidPass is the falsifier for the
+// terminal-fact race the reviewer named: failed is checked at Act entry, but a
+// Fixer (or a human) can apply forest:failed while a Verifier is already
+// checking or reviewing. If the merge boundary did not re-read the label, an
+// approved green review could land after the item was marked failed. This test
+// applies the label from inside the review -- exactly when a concurrent flow
+// would -- and requires the Verifier to refuse the merge with master unchanged.
+func TestVerifierStopsAfterFailedLabelArrivesMidPass(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-midfail"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	masterBefore := remoteBranchHead(t, repo, "master")
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	// The tracker starts without the label; the review then applies it, as a
+	// Fixer exhausting its label would while this Verifier is in flight.
+	mem := newMemoryTracker()
+	mem.seed(Item{ID: "9"})
+	oldTracker := trackerFor
+	trackerFor = func(repo string) Tracker { return mem }
+	defer func() { trackerFor = oldTracker }()
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","state":"open","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	oldReview := reviewRunner
+	reviewRunner = func(cfg Config, repoDir, wtDir string, it Item, h, runID string, a *Agent) (verdictNote, runStats, error) {
+		if err := mem.SetTags("9", []string{failedLabel}, nil); err != nil {
+			return verdictNote{}, runStats{}, err
+		}
+		return verdictNote{Verdict: "approve", Reviewer: "verifier", Model: a.Model, DefSHA: "def", RunID: runID}, runStats{}, nil
+	}
+	defer func() { reviewRunner = oldReview }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-1")
+	if err == nil {
+		t.Fatalf("Act merged despite forest:failed applied mid-pass: %#v", out)
+	}
+	if out.Status != "item_failed" {
+		t.Fatalf("Act status = %q, want item_failed", out.Status)
+	}
+	if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
+		t.Fatalf("master advanced to %s despite a mid-pass failure label, want %s", got, masterBefore)
+	}
+}

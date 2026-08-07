@@ -82,6 +82,30 @@ func gateRejectedPaths(porcelain string) error {
 	return nil
 }
 
+// gateIgnoredProtected scans the output of `git status --porcelain --ignored`
+// and returns an error if any ignored path sits in the factory's control plane.
+// The plain porcelain never lists an ignored path: /.forest/ is git-ignored, so
+// a run that changes .forest/foo alongside an ordinary source file would hide
+// the control-plane mutation and pass the Gate. Because the plain porcelain
+// cannot see it, an ignored protected path is checked on its own, from the set
+// of paths git reports as ignored.
+func gateIgnoredProtected(porcelain string) error {
+	for _, line := range strings.Split(porcelain, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
+			continue
+		}
+		path := line[3:]
+		if i := strings.Index(path, " -> "); i >= 0 {
+			path = path[i+4:]
+		}
+		if isProtectedPath(path) {
+			return fmt.Errorf("change touches protected path %q", path)
+		}
+	}
+	return nil
+}
+
 // gate verifies the build agent's claims against reality after the run:
 //   - the agent did not commit (HEAD is still the base)
 //   - it did not touch a protected path
@@ -105,6 +129,17 @@ func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	// The protected-path check runs over the raw porcelain so a staged rename
 	// is inspected on both sides, not just its destination.
 	if err := gateRejectedPaths(out); err != nil {
+		return nil, rep, err
+	}
+	// A protected path that is git-ignored never appears in the porcelain above:
+	// /.forest/ is git-ignored, so a run mutating .forest/foo alongside ordinary
+	// work must not hide the control-plane change. Ask git for the ignored set
+	// and refuse if any ignored path is protected.
+	ign, err := gitOutRaw(wtDir, "status", "--porcelain", "--ignored", "--untracked-files=all")
+	if err != nil {
+		return nil, rep, err
+	}
+	if err := gateIgnoredProtected(ign); err != nil {
 		return nil, rep, err
 	}
 	changed := parseChanged(out)

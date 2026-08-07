@@ -120,15 +120,22 @@ boundary using `observe` of the exact git-visible facts it actually read:
    `admitMerge` (`flow_verifier.go`) at the merge boundary, which reads both
    notes on the exact head and asks the machine, so a flow that ever skips a
    required note is refused there. `mergeVerified` then requires the branch still
-   point at that exact admitted head, so a branch updated between admission and
-   merge cannot land a head its Checks and Verdict no longer describe.
+   point at that exact admitted head, and merges that immutable SHA -- not the
+   live branch ref -- so a branch updated between admission and merge cannot land
+   a head its Checks and Verdict no longer describe. The Verifier also re-reads
+   the terminal `forest:failed` label at this Effect boundary, so a Fixer that
+   halts a subject while the Verifier is already reviewing stops the merge.
 2. **Never double-claim one Subject across concurrent Flows.** `transit`
    refuses a second `build`/`fix` once the Subject is `building`/`fixing`, and
    `flow.go` `inFlight.claim` excludes the Subject within one process. The
-   Builder `Act` derives its state from `hasBranch`/`failedLabel` facts (not a
-   hard-coded state), so an already-claimed item is refused. `transit` also
-   enforces ownership: each Effect names the Flow that owns it (`owns`), and a
-   lane that attempts another lane's Effect is refused.
+   Builder reserves work by `item-<id>` while the Verifier and Fixer reserve it
+   by `branch-<branch>`; `claimKey` reduces every Subject to its opaque item id,
+   so the in-process guard cannot be beaten by claiming the same Subject under
+   two keys. The Builder `Act` also derives its state from
+   `hasBranch`/`failedLabel` facts (not a hard-coded state), so an
+   already-claimed item is refused. `transit` also enforces ownership: each
+   Effect names the Flow that owns it (`owns`), and a lane that attempts another
+   lane's Effect is refused.
 3. **Fix attempts respect the configured cap.** The Fixer `Act` supplies the
    spent attempts, the configured cap, and the failure label to `observe`, so
    the machine reports `failed` once the cap is reached and refuses `effectFix`
@@ -145,8 +152,12 @@ boundary using `observe` of the exact git-visible facts it actually read:
    anything the report claims. `gateRejectedPaths` inspects the raw porcelain so
    a staged rename is checked on **both** its source and destination: a rename
    that moves a file out of a protected path is still a change to it and is
-   refused. It also requires no commit, a real change, and a `report.json` that
-   satisfies the agent's declared schema; `gateReview` requires a valid Verdict.
+   refused. Because `/.forest/` is git-ignored, the plain porcelain never lists
+   a change inside it; `gate` therefore also scans `git status --ignored` and
+   refuses a protected path there, so a run mutating `.forest/foo` alongside an
+   ordinary file is caught instead of hidden. It also requires no commit, a real
+   change, and a `report.json` that satisfies the agent's declared schema;
+   `gateReview` requires a valid Verdict.
    (See ADR 0004, which supersedes the earlier ADR 0003 rejection of protected
    paths.)
 5. **A new commit has no inherited Verdict or Checks.** Every `publish` lands a
