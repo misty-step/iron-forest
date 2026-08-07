@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -94,6 +95,15 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return out, fmt.Errorf("prompt: %w", err)
 	}
 	trace := filepath.Join(workspace, "runs", runID+".manager.jsonl")
+	// Snapshot the repo and remote refs before the agent runs. The worktree file
+	// checks below cannot see a `git branch` that leaves a ref while the working
+	// tree stays clean, or a push that mutates a remote ref, so the only reliable
+	// way to hold "the Manager moves no ref" is to prove the refs did not move.
+	before, err := snapshotManagerState(wtDir)
+	if err != nil {
+		out.Status = "worktree_failed"
+		return out, fmt.Errorf("snapshot refs: %w", err)
+	}
 	stats, err := runPhase(wtDir, a, prompt, trace)
 	out.TokIn, out.TokOut = stats.tokensIn, stats.tokensOut
 	if err != nil {
@@ -105,7 +115,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := gateManagerWorktree(wtDir, baseSHA); err != nil {
+	if err := gateManagerWorktree(wtDir, baseSHA, before); err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
@@ -115,7 +125,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "tracker_failed"
 		return out, fmt.Errorf("tracker: %w", err)
 	}
-	if err := recordManagerSeen(repoDir, cands, judged); err != nil {
+	if err := recordManagerSeen(repoDir, trackerFor(cfg.Repo), cands, judged); err != nil {
 		out.Status = "notes_failed"
 		return out, fmt.Errorf("notes: %w", err)
 	}
@@ -152,14 +162,16 @@ type managerReject struct {
 	Reason string `json:"reason"`
 }
 
-// gateManagerReport validates the Manager's report against the candidate set:
-// every item it names, promote or reject, must be one the lane actually offered
-// it, and a report naming an unselected item is rejected. The Manager's arrays
-// are legitimately empty (nothing to promote or refuse), but each array must
-// actually be an array — a null in either is a schema violation — and each
-// reject entry must carry a non-empty id and reason, so a report cannot sneak
-// an unshaped judgement past by omitting the fields the shaping rule keys on.
-// The controller applies only what survives this gate, never the agent directly.
+// gateManagerReport validates the Manager's report against the candidate set
+// and requires the agent to actually judge every item it was offered: each
+// candidate must be decided exactly once, as either a promote or a reject entry,
+// and duplicate or conflicting (promote and reject for the same id) entries are
+// rejected. This closes the hole where `{"promote":[],"reject":[]}` — or any
+// partial set — passed as a successful judgement, recorded no seen revisions,
+// and made the daemon immediately rerun the lane instead of resolving (and
+// commenting on) the backlog. A report naming an item the lane did not offer, a
+// null field, or a reject entry missing its id or reason is also rejected. The
+// controller applies only what survives this gate, never the agent directly.
 func gateManagerReport(wtDir string, cands []Item) (managerReport, error) {
 	var rep managerReport
 	repFile := filepath.Join(wtDir, "report.json")
@@ -190,6 +202,11 @@ func gateManagerReport(wtDir string, cands []Item) (managerReport, error) {
 	for _, it := range cands {
 		selected[it.ID] = true
 	}
+	// decided tracks whether a candidate has already been resolved and how, so a
+	// duplicate promote, a duplicate reject, and a promote+reject conflict on the
+	// same id all fail, and an undecided candidate is caught at the end.
+	decided := make(map[string]string, len(cands))
+	seenPromote := make(map[string]bool)
 	for _, id := range rep.Promote {
 		if strings.TrimSpace(id) == "" {
 			return rep, fmt.Errorf("report promote entry is empty")
@@ -197,7 +214,16 @@ func gateManagerReport(wtDir string, cands []Item) (managerReport, error) {
 		if !selected[id] {
 			return rep, fmt.Errorf("report promotes unselected item %q", id)
 		}
+		if seenPromote[id] {
+			return rep, fmt.Errorf("report promotes item %q more than once", id)
+		}
+		if kind := decided[id]; kind != "" {
+			return rep, fmt.Errorf("report promotes item %q already decided as %q", id, kind)
+		}
+		seenPromote[id] = true
+		decided[id] = "promote"
 	}
+	seenReject := make(map[string]bool)
 	for i, r := range rep.Reject {
 		if strings.TrimSpace(r.ID) == "" {
 			return rep, fmt.Errorf("report reject[%d] missing required field %q", i, "id")
@@ -208,17 +234,84 @@ func gateManagerReport(wtDir string, cands []Item) (managerReport, error) {
 		if !selected[r.ID] {
 			return rep, fmt.Errorf("report rejects unselected item %q", r.ID)
 		}
+		if seenReject[r.ID] {
+			return rep, fmt.Errorf("report rejects item %q more than once", r.ID)
+		}
+		if kind := decided[r.ID]; kind != "" {
+			return rep, fmt.Errorf("report rejects item %q already decided as %q", r.ID, kind)
+		}
+		seenReject[r.ID] = true
+		decided[r.ID] = "reject"
+	}
+	// Completeness: every candidate the lane offered must be decided exactly
+	// once. An agent that cannot judge must fail the pass, not succeed silently.
+	var missing []string
+	for _, it := range cands {
+		if _, ok := decided[it.ID]; !ok {
+			missing = append(missing, it.ID)
+		}
+	}
+	if len(missing) > 0 {
+		return rep, fmt.Errorf("report leaves %d offered item(s) undecided: %s", len(missing), strings.Join(missing, ", "))
 	}
 	return rep, nil
 }
 
+// managerState is a frozen picture of the refs the Manager is not allowed to
+// touch. The lane owns no branch and pushes nothing, so any local or remote ref
+// the agent creates, moves, or deletes while it runs is a violation that a
+// clean worktree file check alone cannot see.
+type managerState struct {
+	local  []refRecord
+	remote []refRecord
+}
+
+// snapshotManagerState records every local ref and every remote ref reachable
+// from the checkout. local uses for-each-ref so it sees refs/heads, refs/remotes,
+// and the per-worktree bookkeeping a `git branch` would leave behind even when
+// the visible tree stays clean; remote uses ls-remote so a push that only lives
+// on the host is still caught. Both are sorted for a stable comparison.
+func snapshotManagerState(repo string) (managerState, error) {
+	local, err := listLocalRefs(repo)
+	if err != nil {
+		return managerState{}, err
+	}
+	remote, err := listRefs(repo, "")
+	if err != nil {
+		return managerState{}, err
+	}
+	return managerState{local: local, remote: remote}, nil
+}
+
+// listLocalRefs enumerates the local refs of a checkout via for-each-ref. It is
+// separate from listRefs (which talks to origin) because the Manager's authority
+// bound is on both sides of the seam: a branch left behind locally and a branch
+// pushed remotely are each a violation.
+func listLocalRefs(repo string) ([]refRecord, error) {
+	out, err := gitOut(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/")
+	if err != nil {
+		return nil, err
+	}
+	var refs []refRecord
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			refs = append(refs, refRecord{Ref: fields[0], SHA: fields[1]})
+		}
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Ref < refs[j].Ref })
+	return refs, nil
+}
+
 // gateManagerWorktree enforces the lane's authority bounds after the agent
 // runs: the Manager owns no branch and writes no code, so the worktree must
-// still sit at the base commit with only the run artifact present. The agent
-// has edit and bash permissions, so this check — not the prompt — is what makes
-// "the Manager cannot modify or push code" hold: HEAD may not move, and no
-// repository file may change.
-func gateManagerWorktree(wtDir, baseSHA string) error {
+// still sit at the base commit, no repository file may change, and no ref may
+// have moved locally or remotely. The agent has edit permission and writes
+// report.json, so this check — not the prompt — is what makes "the Manager
+// cannot modify, branch, or push" hold. HEAD may not move (no commit), no
+// repository file may change (no code), and the before/after ref snapshots must
+// match (no branch created or pushed).
+func gateManagerWorktree(wtDir, baseSHA string, before managerState) error {
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("cannot read manager worktree HEAD: %w", err)
@@ -235,6 +328,45 @@ func gateManagerWorktree(wtDir, baseSHA string) error {
 			continue
 		}
 		return fmt.Errorf("manager modified repository file %q", path)
+	}
+	after, err := snapshotManagerState(wtDir)
+	if err != nil {
+		return fmt.Errorf("re-snapshot refs: %w", err)
+	}
+	for _, side := range []struct {
+		kind   string
+		before []refRecord
+		after  []refRecord
+	}{
+		{"remote", before.remote, after.remote},
+		{"local", before.local, after.local},
+	} {
+		if err := refDiff(side.before, side.after); err != nil {
+			return fmt.Errorf("manager mutated a %s ref: %w", side.kind, err)
+		}
+	}
+	return nil
+}
+
+// refDiff returns nil when two sorted ref lists describe the same refs, or an
+// error naming the first ref whose value or existence differs.
+func refDiff(before, after []refRecord) error {
+	i, j := 0, 0
+	for i < len(before) || j < len(after) {
+		switch {
+		case j >= len(after):
+			return fmt.Errorf("ref %s deleted", before[i].Ref)
+		case i >= len(before):
+			return fmt.Errorf("ref %s created", after[j].Ref)
+		case before[i].Ref < after[j].Ref:
+			return fmt.Errorf("ref %s deleted", before[i].Ref)
+		case before[i].Ref > after[j].Ref:
+			return fmt.Errorf("ref %s created", after[j].Ref)
+		case before[i].SHA != after[j].SHA:
+			return fmt.Errorf("ref %s moved %s -> %s", before[i].Ref, short(before[i].SHA), short(after[j].SHA))
+		}
+		i++
+		j++
 	}
 	return nil
 }
@@ -483,15 +615,27 @@ func readManagerSeen(repoDir string) (map[string]string, error) {
 // the pass actually resolved are recorded; an item deferred by the level cap or
 // refused only because an open blocker exists stays untracked, so it is revisited
 // when capacity frees or the blocker closes.
-func recordManagerSeen(repoDir string, cands []Item, judged map[string]bool) error {
+//
+// The recorded revision is the item's post-effect update stamp, re-read from the
+// tracker: GitHub bumps updatedAt on the label and comment mutations the pass
+// just made, so storing the pre-effect stamp (as the pass saw it) would make the
+// next selection rejudge the Manager's own changes instead of suppressing a
+// static item. A re-read failure falls back to the stamp the pass saw rather
+// than failing the whole run.
+func recordManagerSeen(repoDir string, tk Tracker, cands []Item, judged map[string]bool) error {
 	seen, err := readManagerSeen(repoDir)
 	if err != nil {
 		return err
 	}
 	for _, it := range cands {
-		if judged[it.ID] {
-			seen[it.ID] = it.UpdatedAt
+		if !judged[it.ID] {
+			continue
 		}
+		revision := it.UpdatedAt
+		if fresh, gerr := tk.Get(it.ID); gerr == nil && fresh.UpdatedAt != "" {
+			revision = fresh.UpdatedAt
+		}
+		seen[it.ID] = revision
 	}
 	payload, err := json.Marshal(seen)
 	if err != nil {
