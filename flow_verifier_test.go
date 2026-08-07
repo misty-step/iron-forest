@@ -285,6 +285,60 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	}
 }
 
+// TestVerifierOffersStrandedVerdictHead pins the reviewer's alignment fix: a
+// head carrying a Verdict but no green Checks is observed as pushed, so the
+// Verifier must offer it -- the pushed -> check transition is the only way it
+// can move -- while the Fixer must not (effectFix from pushed is refused).
+// Before this fix the Verifier skipped every non-approve Verdict and skipped
+// approve without Checks, so such a head was stuck.
+func TestVerifierOffersStrandedVerdictHead(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+	branch := "forest/9-stranded"
+	notesTestGit(t, work, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "commit", "-qam", "branch work")
+	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
+	head := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+
+	cfg := defaultConfig()
+	cfg.Repo = "example/repo"
+
+	old := trackerFor
+	trackerFor = func(repo string) Tracker {
+		mem := newMemoryTracker()
+		mem.seed(Item{ID: "9"})
+		return mem
+	}
+	defer func() { trackerFor = old }()
+
+	// Seed a stranded "changes" Verdict with no Checks note on the head.
+	if err := writeVerdict(work, head, verdictNote{
+		Verdict: "changes", Reviewer: "verifier", Model: "verifier-model", DefSHA: "def", RunID: "seq",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readChecks(work, head); err != nil || ok {
+		t.Fatalf("checks present before the test: (ok=%v err=%v), want a stranded bare head", ok, err)
+	}
+
+	subjects, err := verifierFlow{}.Select(cfg, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 || subjects[0].Head != head {
+		t.Fatalf("verifier subjects = %#v, want the stranded head %s", subjects, head)
+	}
+	repairs, err := fixerFlow{}.Select(cfg, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repairs) != 0 {
+		t.Fatalf("fixer offered a stranded pushed head: %#v", repairs)
+	}
+}
+
 // TestVerifierMergeRequiresApproveAndPassingChecks is the falsifier for the
 // merge admission gate: a branch reaches master only when its checks pass and
 // its verdict approves, and auto_merge alone must never outweigh a rejection.

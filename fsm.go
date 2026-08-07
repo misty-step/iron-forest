@@ -219,9 +219,26 @@ func transit(from deliveryState, e effect, f subjectFacts, outcome, actor string
 			return stateMerged, nil
 		}
 	case effectFail:
-		if from != stateMerged && from != stateFailed {
+		// failed and merged are terminal. A Fixer halts a subject only once its
+		// repair attempts are exhausted: a fresh subject -- one whose attempts
+		// are below the cap -- cannot be marked failed by the machine, so the
+		// FSM API cannot label work that still has attempts left. A subject that
+		// observe already reports as failed (attempts at the cap) is exactly
+		// that exhaustion, so the Fixer's halt is the one legal move out of it.
+		// An operator may halt any working subject for review.
+		if from == stateMerged {
+			break
+		}
+		if actor == "fixer" {
+			if !(f.attemptsCap > 0 && f.attempts >= f.attemptsCap) {
+				break
+			}
 			return stateFailed, nil
 		}
+		if from == stateFailed {
+			break
+		}
+		return stateFailed, nil
 	}
 	return stateFailed, fmt.Errorf("illegal transition %s --%s--> ?", from, e)
 }

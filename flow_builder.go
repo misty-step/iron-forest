@@ -80,7 +80,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		}
 	}
 	ffacts := subjectFacts{
-		revision: s.Revision, hasBranch: hasBranch, itemOpen: true,
+		revision: s.Revision, hasBranch: hasBranch, itemOpen: it.Open,
 		failedLabel: it.hasTag(failedLabel),
 	}
 	if _, err := transit(observe(ffacts), effectBuild, ffacts, "", "builder"); err != nil {

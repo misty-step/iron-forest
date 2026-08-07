@@ -13,8 +13,11 @@ func newMemoryTracker() *memoryTracker {
 	return &memoryTracker{items: make(map[string]Item)}
 }
 
-// seed inserts or replaces one item by id.
+// seed inserts or replaces one item by id. Items living in the map are open by
+// definition (closing one removes it), mirroring a host that stops returning a
+// closed item.
 func (m *memoryTracker) seed(it Item) {
+	it.Open = true
 	m.items[it.ID] = it
 }
 

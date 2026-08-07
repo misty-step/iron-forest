@@ -60,14 +60,30 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if err != nil {
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)
 		}
-		if !found {
-			// A head whose checks already failed belongs to the Fixer: rechecking
-			// the same commit buys the same fact and pays for it again. A repaired
-			// branch has a new head carrying no notes, so it returns here.
-			checks, hasChecks, cerr := readChecks(repoDir, head)
-			if cerr != nil {
-				return nil, fmt.Errorf("checks %s: %w", branch, cerr)
-			}
+		checks, hasChecks, err := readChecks(repoDir, head)
+		if err != nil {
+			return nil, fmt.Errorf("checks %s: %w", branch, err)
+		}
+		// Derive the durable state from the same facts observe() reads, so this
+		// selector and the machine never drift. A head the machine places in a
+		// state this lane owns is offered; every other state belongs to another
+		// lane or to a human and is skipped. In particular a stranded Verdict
+		// with no green Checks is observed as pushed and is this lane's work --
+		// it still needs its check transition run -- never a dead end.
+		ffacts := subjectFacts{revision: head, hasBranch: true}
+		if hasChecks {
+			ffacts.checksStatus = checks.Status
+		}
+		if found {
+			ffacts.verdictStatus = v.Verdict
+		}
+		switch observe(ffacts) {
+		case statePushed, stateChecksRecorded:
+			// A failing check is a fact the Fixer repairs: rechecking the same
+			// commit buys the same fact and pays for it again. Every other
+			// pushed head (bare, or carrying a stranded Verdict) and
+			// checks_recorded head (green, awaiting a review) is this lane's
+			// work: run the check transition, or reuse the green note and review.
 			if hasChecks && checks.Status == "fail" {
 				continue
 			}
@@ -79,29 +95,22 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 				continue
 			}
 			fresh = append(fresh, s)
-			continue
+		case stateVerdictApproved:
+			// An approved, green branch is only a subject when it can actually
+			// land. Every reason it cannot is named by mergeBlocked, so a branch
+			// waiting on an operator is a state to read, not an action to run.
+			attempts, err := readAttempts(repoDir, s.Key)
+			if err != nil {
+				return nil, fmt.Errorf("attempts %s: %w", branch, err)
+			}
+			if mergeBlocked(cfg, attempts) != "" {
+				continue
+			}
+			mergeable = append(mergeable, s)
+		default:
+			// stateVerdictRejected, stateFailed, stateMerged: another lane's
+			// work or a human's call; never offered here.
 		}
-		if v.Verdict != "approve" {
-			continue
-		}
-		checks, found, err := readChecks(repoDir, head)
-		if err != nil {
-			return nil, fmt.Errorf("checks %s: %w", branch, err)
-		}
-		if !found || checks.Status != "pass" {
-			continue
-		}
-		// An approved, green branch is only a subject when it can actually land.
-		// Every reason it cannot is named by mergeBlocked, so a branch waiting on
-		// an operator is a state to read, not an action to run.
-		attempts, err := readAttempts(repoDir, s.Key)
-		if err != nil {
-			return nil, fmt.Errorf("attempts %s: %w", branch, err)
-		}
-		if mergeBlocked(cfg, attempts) != "" {
-			continue
-		}
-		mergeable = append(mergeable, s)
 	}
 	return append(fresh, mergeable...), nil
 }

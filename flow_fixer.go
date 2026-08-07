@@ -53,7 +53,8 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if err != nil {
 			return nil, fmt.Errorf("checks %s: %w", branch, err)
 		}
-		if !(hasVerdict && v.Verdict == "changes") && !(hasChecks && checks.Status == "fail") {
+		if !(hasChecks && checks.Status == "fail") &&
+			!(hasChecks && checks.Status == "pass" && hasVerdict && v.Verdict == "changes") {
 			continue
 		}
 		attempts, err := readAttempts(repoDir, key)
@@ -172,6 +173,19 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		return out, fmt.Errorf("attempts: %w", err)
 	}
 	if count >= cfg.Flows.Fixer.Attempts {
+		// The halt is itself a transition the machine owns. Ask it before
+		// applying the durable label, with the spent attempts and the cap as
+		// facts, so a subject that somehow still has attempts left cannot be
+		// failed -- observe reports the exhausted subject as failed and the
+		// machine confirms the move rather than letting the caller hard-code it.
+		efacts := subjectFacts{
+			revision: s.Head, hasBranch: true,
+			attempts: count, attemptsCap: cfg.Flows.Fixer.Attempts,
+		}
+		if _, err := transit(observe(efacts), effectFail, efacts, "", "fixer"); err != nil {
+			out.Status = "tracker_failed"
+			return out, fmt.Errorf("fail: %w", err)
+		}
 		if err := markFixerFailed(cfg.Repo, it); err != nil {
 			out.Status = "tracker_failed"
 			return out, fmt.Errorf("tracker: %w", err)

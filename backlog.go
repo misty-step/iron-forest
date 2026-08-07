@@ -31,7 +31,7 @@ type githubTracker struct {
 // ListOpen returns every open item on the host.
 func (t githubTracker) ListOpen() ([]Item, error) {
 	out, err := ghJSON("issue", "list", "-R", t.repo, "--state", "open",
-		"--json", "number,title,body,updatedAt,comments,labels", "--limit", "200")
+		"--json", "number,title,body,updatedAt,state,comments,labels", "--limit", "200")
 	if err != nil {
 		return nil, err
 	}
@@ -46,10 +46,13 @@ func (t githubTracker) ListOpen() ([]Item, error) {
 	return items, nil
 }
 
-// Get reads one item by its opaque id.
+// Get reads one item by its opaque id. It always succeeds for an item the host
+// still knows -- open or closed -- carrying its durable Open state, so a flow
+// that re-reads an item at its effect boundary can tell that a subject closed
+// between Select and Act is no longer eligible.
 func (t githubTracker) Get(id string) (Item, error) {
 	out, err := ghJSON("issue", "view", id, "-R", t.repo,
-		"--json", "number,title,body,updatedAt,comments,labels")
+		"--json", "number,title,body,updatedAt,state,comments,labels")
 	if err != nil {
 		return Item{}, err
 	}
@@ -95,6 +98,7 @@ type issueJSON struct {
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	UpdatedAt string    `json:"updatedAt"`
+	State     string    `json:"state"`
 	Comments  []comment `json:"comments"`
 	Labels    []struct {
 		Name string `json:"name"`
@@ -103,13 +107,15 @@ type issueJSON struct {
 
 // asItem converts one GitHub issue into the opaque Item the controller reads.
 // The issue number becomes a string id so the controller never parses it; a
-// second work source feeds Item directly and never needs this converter.
+// second work source feeds Item directly and never needs this converter. State
+// is compared case-insensitively because the host CLI reports it both ways.
 func (i issueJSON) asItem() Item {
 	item := Item{
 		ID:        strconv.Itoa(i.Number),
 		Title:     i.Title,
 		Body:      i.Body,
 		UpdatedAt: i.UpdatedAt,
+		Open:      strings.EqualFold(i.State, "open"),
 		Comments:  i.Comments,
 	}
 	for _, label := range i.Labels {

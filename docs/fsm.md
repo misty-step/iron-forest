@@ -86,12 +86,17 @@ boundary using `observe` of the exact git-visible facts it actually read:
   Builder or a leftover branch is refused rather than re-claimed. `Act` re-reads
   the current Tracker item at its boundary (it never trusts the copy embedded in
   the Subject), so a `forest:failed` label applied after `Select` still halts the
-  lane before any build Effect.
-- `flow_verifier.go` `Select` reads Verdict/Checks notes, and `Act` enforces
-  `admitCheck` (only a bare head is checked), `verifierReview` observes the
-  exact Checks note (review requires green Checks), `admitMerge` reads both
-  notes on the exact head, and `mergeVerified` requires the branch still point
-  at that admitted head.
+  lane before any build Effect, and an item closed between Select and Act is no
+  longer open, so `observe` places it `merged` and refuses the build.
+- `flow_verifier.go` `Select` reads Verdict/Checks notes and derives each
+  branch's state with `observe`, offering only heads the machine places in a
+  state the Verifier owns. A stranded Verdict with no green Checks is observed
+  `pushed` — it still needs its check transition run — so it is offered, never
+  a dead end; a failing head and a rejected head are another lane's work and
+  are skipped. `Act` enforces `admitCheck` (only a bare head is checked),
+  `verifierReview` observes the exact Checks note (review requires green
+  Checks), `admitMerge` reads both notes on the exact head, and `mergeVerified`
+  requires the branch still point at that admitted head.
 - `failed` is terminal: the Verifier and Fixer Selectors both read the Tracker
   label (`subjectFailed`) and never offer a labeled item, even one whose git
   facts — a green head, an approved Verdict — would otherwise look actionable.
@@ -127,8 +132,13 @@ boundary using `observe` of the exact git-visible facts it actually read:
 3. **Fix attempts respect the configured cap.** The Fixer `Act` supplies the
    spent attempts, the configured cap, and the failure label to `observe`, so
    the machine reports `failed` once the cap is reached and refuses `effectFix`
-   at the boundary -- not just in `Select`. On exhaustion `markFixerFailed`
-   labels the item for a human. `transit` only reaches `failed` through `fail`.
+   at the boundary -- not just in `Select`. On exhaustion the Fixer asks
+   `transit` with the `fail` Effect (so the machine, not the caller, confirms the
+   halt) and `markFixerFailed` labels the item for a human. `transit` only
+   reaches `failed` through `fail`, and the Fixer's `fail` is refused until the
+   cap is reached, so a fresh subject can never be marked failed by the machine
+   and a crash after `bumpAttempts` still leaves `observe` reporting the
+   exhausted subject `failed`.
 4. **Gate rejects a change to a protected path.** `gate.go` `gate` refuses any
    run whose change touches `.forest/`, `forest.yaml`, `agents/`, or
    `.opencode/opencode.json` — the factory's control plane — before trusting

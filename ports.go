@@ -9,6 +9,7 @@ type Item struct {
 	Title     string
 	Body      string
 	UpdatedAt string
+	Open      bool // whether the tracker still carries the item as open
 	Tags      []string
 	Comments  []comment
 }

@@ -46,6 +46,10 @@ func TestTransitLegal(t *testing.T) {
 		// Fixer attempts exhausted -> halted for a human.
 		{from: stateVerdictRejected, effect: effectFail,
 			facts: subjectFacts{revision: "h", attempts: 2, attemptsCap: 2}, actor: "fixer", to: stateFailed},
+		// observe already reports an exhausted subject failed, so the Fixer's
+		// halt at the cap is the one legal move out of that state.
+		{from: stateFailed, effect: effectFail,
+			facts: subjectFacts{revision: "h", attempts: 2, attemptsCap: 2}, actor: "fixer", to: stateFailed},
 		// The effectFail halt is also an operator decision.
 		{from: statePushed, effect: effectFail, facts: rev("h"), actor: "human", to: stateFailed},
 	}
@@ -116,6 +120,12 @@ func TestTransitIllegal(t *testing.T) {
 		{from: stateMerged, effect: effectMerge, actor: "verifier"},
 		{from: stateFailed, effect: effectFix, actor: "fixer"},
 		{from: stateFailed, effect: effectFail, actor: "human"},
+		// The Fixer's halt is capped: a fresh subject with attempts below the cap
+		// cannot be marked failed through the machine, only a human may pause any
+		// working subject.
+		{from: stateEligible, effect: effectFail, facts: rev("i"), actor: "fixer"},
+		{from: statePushed, effect: effectFail,
+			facts: subjectFacts{revision: "h", attempts: 1, attemptsCap: 2}, actor: "fixer"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.from.String()+"->"+tc.effect.String(), func(t *testing.T) {
@@ -223,6 +233,9 @@ func TestObserveComposesWithTransit(t *testing.T) {
 	// builder cannot claim it even when the Builder Flow used to hard-code the
 	// eligible state.
 	refuse(subjectFacts{revision: "i", hasBranch: true, itemOpen: true}, effectBuild, "builder")
+	// An item closed between Select and Act is no longer eligible: observe
+	// reports it merged (no branch), so the build effect is refused.
+	refuse(subjectFacts{revision: "i", hasBranch: false, itemOpen: false}, effectBuild, "builder")
 	// The configured attempt cap halts a fix: attempts reaching the cap place
 	// the subject in failed, and effectFix from failed is refused.
 	refuse(subjectFacts{revision: "h", hasBranch: true, checksStatus: "fail", attempts: 2, attemptsCap: 2}, effectFix, "fixer")
