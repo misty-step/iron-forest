@@ -96,17 +96,27 @@ Each check runs in a child environment with a private `HOME` and a scrubbed
   before the mise shims, so a working host binary wins over a dead shim.
 
 A host binary is often only a proxy that must read toolchain metadata to find
-its real driver (rustup's `cargo` needs `RUSTUP_HOME`, and per its toolchain
-layout `CARGO_HOME`, to locate the default toolchain; with a private empty
-`HOME` and only the proxy on `PATH` it reports "no default is configured"). Name
-that metadata with `FOREST_CHECK_ENV` on the host running the Factory, a
-newline-separated list of `KEY=VALUE` pairs (for example one line `RUSTUP_HOME`
-and one `CARGO_HOME`) added to the child environment. Like `FOREST_CHECK_PATH`
-it is stack-agnostic and non-credential: it carries only the metadata a
-toolchain needs, never secrets. Host toolchain metadata that names a key the
-harness already manages (`HOME`, `PATH`, the mise dirs, or a Go cache) or that
-names a credential or token (such as `GH_TOKEN`) is dropped, so the private
-environment stays authoritative and no secret reaches the child.
+its real driver (rustup's `cargo` needs `RUSTUP_HOME` to locate the default
+toolchain; with a private empty `HOME` and only the proxy on `PATH` it reports
+"no default is configured"). Name that metadata with `FOREST_CHECK_ENV` on the
+host running the Factory, a newline-separated list of `KEY=VALUE` pairs, one per
+line, added to the check child environment.
+
+Both variables reach only the **check** child, never an agent run: the host
+toolchain mechanism is applied where a managed repo's `checks:` needs to find
+its declared tools, and is withheld from the opencode agent, so neither host
+binaries on `PATH` nor toolchain metadata can bleed into agent reach.
+
+`FOREST_CHECK_ENV` carries only a curated allowlist of metadata variables, and
+drops everything else. Today the single allowlisted variable is `RUSTUP_HOME`,
+which points at the rustup install root (settings and toolchains) and holds no
+credentials. A substring denylist would be unsound — `CI_JOB_JWT`,
+`AWS_ACCESS_KEY_ID`, `KUBECONFIG`, or `GIT_CONFIG_GLOBAL` could slip through,
+and `CARGO_HOME` deliberately is *not* allowlisted because `~/.cargo` holds
+`credentials.toml`, so pointing a check at it would expose the operator's
+registry token. An explicit allowlist is the only defensible boundary: it can
+never be fooled by an unlisted credential name or path, and it keeps the private
+`HOME`, the scrubbed `PATH`, and the managed caches authoritative.
 
 Building the wrong thing is worse than not building: Iron Forest does not guess a
 stack. If a `checks:` command's tool is missing, the check fails and the note

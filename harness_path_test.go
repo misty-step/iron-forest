@@ -107,13 +107,13 @@ func TestRunChecksFindsHostToolchainDriver(t *testing.T) {
 // TestCheckHostEnvParsesMetadata pins the generic metadata mechanism: a host
 // toolchain proxy reads metadata that lives outside the private child HOME, so
 // FOREST_CHECK_ENV carries newline-separated KEY=VALUE pairs into the child
-// environment, ignoring blank lines and entries with no "=" separator.
+// environment, ignoring blank lines and entries with no "=" separator. Only keys
+// on the curated allowlist are carried in.
 func TestCheckHostEnvParsesMetadata(t *testing.T) {
 	rustup := filepath.Join("home", ".rustup")
-	cargo := filepath.Join("home", ".cargo")
-	t.Setenv("FOREST_CHECK_ENV", "RUSTUP_HOME="+rustup+"\n\nCARGO_HOME="+cargo+"\nNOT_A_PAIR")
+	t.Setenv("FOREST_CHECK_ENV", "RUSTUP_HOME="+rustup+"\n\nNOT_A_PAIR")
 	entries := checkHostEnv()
-	want := []string{"RUSTUP_HOME=" + rustup, "CARGO_HOME=" + cargo}
+	want := []string{"RUSTUP_HOME=" + rustup}
 	if len(entries) != len(want) {
 		t.Fatalf("checkHostEnv() = %v, want %v", entries, want)
 	}
@@ -124,15 +124,19 @@ func TestCheckHostEnvParsesMetadata(t *testing.T) {
 	}
 }
 
-// TestCheckHostEnvBlocksProtectedAndCredentialKeys pins the regression the
-// reviewer flagged: checkHostEnv must not let FOREST_CHECK_ENV override the
-// private HOME, the scrubbed PATH, or a managed cache directory, and must not
-// leak a credential such as GH_TOKEN into the child. os/exec.Cmd.Env resolves
-// duplicate keys by last occurrence, so any such key surviving into the env
-// would defeat the harness; filtering here keeps the private environment
-// authoritative while still passing legitimate host toolchain metadata through.
-func TestCheckHostEnvBlocksProtectedAndCredentialKeys(t *testing.T) {
-	t.Setenv("FOREST_CHECK_ENV", strings.Join([]string{
+// TestCheckHostEnvAllowsOnlyAllowlistedMetadata pins the regression the reviewer
+// flagged: the old substring denylist was unsound, so a credential under any
+// unlisted key name (CI_JOB_JWT, AWS_ACCESS_KEY_ID) or any credential-bearing
+// path (KUBECONFIG, GIT_CONFIG_GLOBAL) reached the child, and even the then
+// allowed CARGO_HOME pointed at ~/.cargo where credentials.toml lives. The
+// policy is now an explicit allowlist: only RUSTUP_HOME passes, and every other
+// key — harness-managed, value-credential, path-credential, or the credential-
+// bearing CARGO_HOME — is dropped. os/exec.Cmd.Env resolves duplicates by last
+// occurrence, so any such key surviving into the env would defeat the harness;
+// dropping everything outside the allowlist keeps the private environment
+// authoritative and guarantees no secret reaches the child.
+func TestCheckHostEnvAllowsOnlyAllowlistedMetadata(t *testing.T) {
+	forbidden := []string{
 		"HOME=/overridden",
 		"PATH=/overridden",
 		"MISE_CONFIG_DIR=/overridden",
@@ -142,11 +146,16 @@ func TestCheckHostEnvBlocksProtectedAndCredentialKeys(t *testing.T) {
 		"GH_TOKEN=super-secret",
 		"GITHUB_TOKEN=super-secret",
 		"MY_SETUP_SECRET=super-secret",
-		"RUSTUP_HOME=/host/.rustup",
-		"CARGO_HOME=/host/.cargo",
-	}, "\n"))
+		"CI_JOB_JWT=pastebin-token",
+		"AWS_ACCESS_KEY_ID=AKIAEXAMPLE",
+		"KUBECONFIG=/home/op/.kube/config",
+		"GIT_CONFIG_GLOBAL=/home/op/.gitconfig",
+		"CARGO_HOME=/home/op/.cargo",
+	}
+	t.Setenv("FOREST_CHECK_ENV", strings.Join(
+		append(forbidden, "RUSTUP_HOME=/host/.rustup"), "\n"))
 	entries := checkHostEnv()
-	want := []string{"RUSTUP_HOME=/host/.rustup", "CARGO_HOME=/host/.cargo"}
+	want := []string{"RUSTUP_HOME=/host/.rustup"}
 	if len(entries) != len(want) {
 		t.Fatalf("checkHostEnv() = %v, want %v", entries, want)
 	}
@@ -157,19 +166,76 @@ func TestCheckHostEnvBlocksProtectedAndCredentialKeys(t *testing.T) {
 	}
 	for _, e := range entries {
 		key, _, _ := strings.Cut(e, "=")
-		if hostEnvBlocked(key) {
-			t.Fatalf("checkHostEnv() leaked blocked key %q", key)
+		if !hostEnvAllowed(key) {
+			t.Fatalf("checkHostEnv() leaked non-allowlisted key %q", key)
 		}
+	}
+}
+
+// envValue returns the value for key in env, or "" if absent.
+func envValue(t *testing.T, env []string, key string) string {
+	t.Helper()
+	for _, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if ok && k == key {
+			return v
+		}
+	}
+	return ""
+}
+
+// TestHostToolchainMechanismScopedToChecks pins that the operator-declared host
+// toolchain mechanism (FOREST_CHECK_PATH and FOREST_CHECK_ENV) is applied only
+// to the check environment. The old code fed one childEnvironment to runPhase and
+// runChecks alike, so path and metadata reach leaked into the agent run; now the
+// agent env (childEnvironment) carries neither, and only checkEnvironment does.
+func TestHostToolchainMechanismScopedToChecks(t *testing.T) {
+	toolchain := filepath.Join(t.TempDir(), "toolchain-bin")
+	t.Setenv("FOREST_CHECK_PATH", toolchain)
+	t.Setenv("FOREST_CHECK_ENV", "RUSTUP_HOME=/host/.rustup")
+
+	agent, cleanup, err := childEnvironment()
+	if err != nil {
+		t.Fatalf("childEnvironment returned error: %v", err)
+	}
+	defer cleanup()
+	if got := envValue(t, agent, "RUSTUP_HOME"); got != "" {
+		t.Fatalf("agent env leaked RUSTUP_HOME=%q, want none", got)
+	}
+	for _, dir := range strings.Split(envValue(t, agent, "PATH"), string(os.PathListSeparator)) {
+		if filepath.Clean(dir) == filepath.Clean(toolchain) {
+			t.Fatalf("agent env leaked host toolchain dir %q on PATH", dir)
+		}
+	}
+
+	check, cleanup, err := checkEnvironment()
+	if err != nil {
+		t.Fatalf("checkEnvironment returned error: %v", err)
+	}
+	defer cleanup()
+	if got := envValue(t, check, "RUSTUP_HOME"); got != "/host/.rustup" {
+		t.Fatalf("check env RUSTUP_HOME = %q, want /host/.rustup", got)
+	}
+	var onPath bool
+	for _, dir := range strings.Split(envValue(t, check, "PATH"), string(os.PathListSeparator)) {
+		if filepath.Clean(dir) == filepath.Clean(toolchain) {
+			onPath = true
+		}
+	}
+	if !onPath {
+		t.Fatalf("check env PATH missing host toolchain dir %q", toolchain)
 	}
 }
 
 // TestRunChecksHostProxyResolvesWithMetadata pins the actual proxy behavior the
 // item calls out, not a self-contained fake. A host toolchain "cargo" is a
-// proxy that reads RUSTUP_HOME (falling back to $HOME/.rustup) to find its real
-// driver. With a private HOME and only ~/.cargo/bin on PATH, that lookup finds
-// nothing and the proxy reports "no default is configured"; pointing RUSTUP_HOME
-// at the host rustup home makes the proxy resolve and run the real driver.
-// FOREST_CHECK_PATH supplies the proxy, FOREST_CHECK_ENV supplies its metadata.
+// proxy that reads RUSTUP_HOME to find its real driver. With a private HOME and
+// only ~/.cargo/bin on PATH, that lookup finds nothing and the proxy reports "no
+// default is configured"; pointing RUSTUP_HOME at the host rustup home makes the
+// proxy resolve and run the real driver. FOREST_CHECK_PATH supplies the proxy;
+// FOREST_CHECK_ENV supplies the allowlisted metadata. A CARGO_HOME entry is also
+// present to prove the allowlist drops it (it would point at ~/.cargo, which
+// holds credentials.toml) without breaking the allowlisted RUSTUP_HOME lookup.
 func TestRunChecksHostProxyResolvesWithMetadata(t *testing.T) {
 	cargoBin := filepath.Join(t.TempDir(), "cargo", "bin")
 	rustupHome := filepath.Join(t.TempDir(), ".rustup")

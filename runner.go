@@ -17,7 +17,7 @@ func runChecks(cfg Config, wtDir, runID string) (checksNote, error) {
 		RunID:  runID,
 		Time:   time.Now().UTC().Format(time.RFC3339),
 	}
-	env, cleanup, err := childEnvironment()
+	env, cleanup, err := checkEnvironment()
 	if err != nil {
 		return note, err
 	}
