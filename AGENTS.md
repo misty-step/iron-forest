@@ -32,17 +32,14 @@ The Verifier writes `review.json` after it produces a Verdict.
 The Builder declaration currently includes `skills/go-style.md`.
 The Verifier declaration has no skills directory.
 
-## Gate and protected paths
+## Gate
 
-The Gate rejects changes to these protected paths:
+The Gate validates the agent output against its `report.schema.json`.
 
-- `.forest/`
-- `forest.yaml`
-- `agents/`
-- `.opencode/opencode.json`
-
-Keep these paths unchanged in an agent worktree. The Gate also validates the
-agent output against its `report.schema.json`.
+There is no protected-path check. `docs/adr/0003` removed it: the list was not a
+security boundary, and independent review on the exact commit is what decides
+whether a change lands. An agent may change any path its Subject requires,
+including `forest.yaml` and `agents/`.
 
 Iron Forest runs its own commands from `checks:` and writes their results as git
 notes. It never reads a Host's review or check state.
