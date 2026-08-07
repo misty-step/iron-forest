@@ -83,7 +83,10 @@ boundary using `observe` of the exact git-visible facts it actually read:
 
 - `flow_builder.go` `Select` → `eligibleItems` offers `eligible` Subjects, and
   `Act` derives the state from `hasBranch`/`failedLabel` facts so a second
-  Builder or a leftover branch is refused rather than re-claimed.
+  Builder or a leftover branch is refused rather than re-claimed. `Act` re-reads
+  the current Tracker item at its boundary (it never trusts the copy embedded in
+  the Subject), so a `forest:failed` label applied after `Select` still halts the
+  lane before any build Effect.
 - `flow_verifier.go` `Select` reads Verdict/Checks notes, and `Act` enforces
   `admitCheck` (only a bare head is checked), `verifierReview` observes the
   exact Checks note (review requires green Checks), `admitMerge` reads both

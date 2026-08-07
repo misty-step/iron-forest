@@ -172,3 +172,56 @@ func TestBranchSelectRecoversOpaqueID(t *testing.T) {
 		t.Fatalf("verifier subject ID = %q, want %q", subjects[0].ID, id)
 	}
 }
+
+// TestBuilderRefusesFailedLabelArrivingAfterSelect is the flow-level falsifier
+// for the Builder boundary: a forest:failed label applied between Select and Act
+// must halt the lane before any build Effect, because failed is terminal. Before
+// this guard Act reused the Item embedded in the Subject, so a stale Subject
+// could still run and publish a failed item, contradicting the fsm.md invariant.
+// Select sees an eligible item; the label then lands; Act must refuse and push
+// no branch.
+func TestBuilderRefusesFailedLabelArrivingAfterSelect(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+
+	mem := newMemoryTracker()
+	mem.seed(Item{ID: "9", Title: "change", UpdatedAt: "r"})
+	old := trackerFor
+	trackerFor = func(repo string) Tracker { return mem }
+	defer func() { trackerFor = old }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+
+	subjects, err := (builderFlow{}).Select(cfg, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 {
+		t.Fatalf("builder selected %d subjects, want the eligible item", len(subjects))
+	}
+	s := subjects[0]
+	if s.ID != "9" {
+		t.Fatalf("subject ID = %q, want 9", s.ID)
+	}
+
+	// The failure label arrives after Select: the Subject is now stale, and Act
+	// must re-read the tracker at its boundary rather than trust this copy.
+	if err := mem.SetTags("9", []string{failedLabel}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (builderFlow{}).Act(cfg, work, s, "run-1")
+	if err == nil {
+		t.Fatalf("Act built a failed-labeled item: %#v", out)
+	}
+	if out.Status != "item_failed" {
+		t.Fatalf("Act status = %q, want item_failed", out.Status)
+	}
+	branches, err := forestBranches(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 0 {
+		t.Fatalf("builder pushed branches %v for a failed-labeled item", branches)
+	}
+}

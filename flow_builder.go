@@ -52,13 +52,14 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it := s.Item
-	if it.ID == "" {
-		var err error
-		it, err = trackerFor(cfg.Repo).Get(s.ID)
-		if err != nil {
-			return Outcome{Status: "item_failed"}, fmt.Errorf("item: %w", err)
-		}
+	// Re-read the current item at this effect boundary instead of trusting the
+	// copy embedded in the Subject. The Subject may be stale: a label applied
+	// between Select and Act (forest:failed, or any other change) must be
+	// honored, because failed is terminal and a failed item must never be built
+	// and published. This read is what the machine's observe() below sees.
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
+	if err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
 
 	// The build effect is only legal on an eligible item: never a subject
