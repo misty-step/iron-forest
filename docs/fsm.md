@@ -158,20 +158,13 @@ boundary using `observe` of the exact git-visible facts it actually read:
    exhausted subject `failed`. The Verifier feeds the spent cap through its own
    Select facts and re-derives it before each durable effect, so an exhausted
    subject is also refused there -- never re-checked, re-reviewed, or merged.
-4. **Gate rejects a change to a protected path.** `gate.go` `gate` refuses any
-   run whose change touches `.forest/`, `forest.yaml`, `agents/`, or
-   `.opencode/opencode.json` — the factory's control plane — before trusting
-   anything the report claims. `gateRejectedPaths` inspects the raw porcelain so
-   a staged rename is checked on **both** its source and destination: a rename
-   that moves a file out of a protected path is still a change to it and is
-   refused. Because `/.forest/` is git-ignored, the plain porcelain never lists
-   a change inside it; `gate` therefore also scans `git status --ignored` and
-   refuses a protected path there, so a run mutating `.forest/foo` alongside an
-   ordinary file is caught instead of hidden. It also requires no commit, a real
-   change, and a `report.json` that satisfies the agent's declared schema;
-   `gateReview` requires a valid Verdict.
-   (See ADR 0004, which supersedes the earlier ADR 0003 rejection of protected
-   paths.)
+4. **The Gate refuses a run that produced nothing real.** `gate.go` `gate`
+   requires no commit, a real change, and a `report.json` that satisfies the
+   agent's declared schema; `gateReview` requires a valid Verdict. It rejects
+   nothing by path: `docs/adr/0003` removed the protected-path list, so an agent
+   may change any path its Subject requires, including `forest.yaml` and
+   `agents/`. Independent review on the exact Revision is what decides whether a
+   change lands.
 5. **A new commit has no inherited Verdict or Checks.** Every `publish` lands a
    bare `pushed` head, so no staleness comparison is needed and none is made.
 

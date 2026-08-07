@@ -36,15 +36,10 @@ The Verifier declaration has no skills directory.
 
 The Gate validates the agent output against its `report.schema.json`.
 
-There is a protected-path check. The Gate refuses any Build run whose change
-touches the factory's control plane — `.forest/`, `forest.yaml`, `agents/`, and
-`.opencode/opencode.json` — before trusting anything the report claims. `docs/adr/
-0003` once removed that check; `docs/adr/0004` superseded it and restored it as
-an FSM invariant of the delivery machine. Independent review on the exact commit
-remains the audit surface. An agent may not change a protected path; a change to
-`forest.yaml` or `agents/` is deliberate, reviewed work, done through a card
-whose run the Gate accepts. See `docs/fsm.md` (invariant 4), `docs/adr/0004`,
-and `README.md`.
+There is no protected-path check. `docs/adr/0003` removed it: the list was not a
+security boundary, and independent review on the exact commit is what decides
+whether a change lands. An agent may change any path its Subject requires,
+including `forest.yaml` and `agents/`.
 
 Iron Forest runs its own commands from `checks:` and writes their results as git
 notes. It never reads a Host's review or check state.

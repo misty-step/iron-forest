@@ -27,92 +27,17 @@ type review struct {
 // gate and publish step treat them as records, not repository changes.
 var runArtifacts = []string{"report.json", "review.json"}
 
-// protectedPaths are the factory's own control plane. A build run must not
-// change them, because a run that rewrites the daemon's configuration, its
-// agent declarations, its orchestration state, or its harness wiring could
-// rewrite the very rules, prompts, permissions, and budget it runs under. These
-// are the paths that keep a delivery machine honest, so the Gate refuses any
-// run whose change touches one -- independent of anything the report claims.
-var protectedPaths = []string{
-	".forest/",
-	"forest.yaml",
-	"agents/",
-	".opencode/opencode.json",
-}
-
-// isProtectedPath reports whether a changed path sits in the factory's control
-// plane and is therefore off-limits to a run.
-func isProtectedPath(path string) bool {
-	for _, p := range protectedPaths {
-		if strings.HasPrefix(path, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// gateRejectedPaths scans git status --porcelain and returns an error if any
-// changed path -- including the source of a rename -- sits in the factory's
-// control plane. A rename is inspected on both sides: a staged rename that
-// moves a protected file out of agents/ or another protected path is still a
-// change to a protected path, so the Gate refuses it even though the
-// destination alone is outside the control plane.
-func gateRejectedPaths(porcelain string) error {
-	for _, line := range strings.Split(porcelain, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if len(line) < 4 {
-			continue
-		}
-		path := line[3:]
-		source := path
-		if i := strings.Index(path, " -> "); i >= 0 {
-			source = path[:i]
-			path = path[i+4:]
-		}
-		offender := ""
-		if isProtectedPath(source) {
-			offender = source
-		} else if isProtectedPath(path) {
-			offender = path
-		}
-		if offender != "" {
-			return fmt.Errorf("change touches protected path %q", offender)
-		}
-	}
-	return nil
-}
-
-// gateIgnoredProtected scans the output of `git status --porcelain --ignored`
-// and returns an error if any ignored path sits in the factory's control plane.
-// The plain porcelain never lists an ignored path: /.forest/ is git-ignored, so
-// a run that changes .forest/foo alongside an ordinary source file would hide
-// the control-plane mutation and pass the Gate. Because the plain porcelain
-// cannot see it, an ignored protected path is checked on its own, from the set
-// of paths git reports as ignored.
-func gateIgnoredProtected(porcelain string) error {
-	for _, line := range strings.Split(porcelain, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if len(line) < 4 {
-			continue
-		}
-		path := line[3:]
-		if i := strings.Index(path, " -> "); i >= 0 {
-			path = path[i+4:]
-		}
-		if isProtectedPath(path) {
-			return fmt.Errorf("change touches protected path %q", path)
-		}
-	}
-	return nil
-}
-
 // gate verifies the build agent's claims against reality after the run:
 //   - the agent did not commit (HEAD is still the base)
-//   - it did not touch a protected path
 //   - it produced a non-empty change
 //   - report.json exists and satisfies its declared schema
 //
 // It returns the changed file list that becomes the pull request body.
+//
+// There is no protected-path check. See docs/adr/0003: the list was not a
+// security boundary, because the code enforcing it was itself writable by any
+// run, and it blocked the factory from working on its own declarations. The
+// boundary that holds is independent review on the exact commit.
 func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	var rep report
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
@@ -126,27 +51,11 @@ func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	if err != nil {
 		return nil, rep, err
 	}
-	// The protected-path check runs over the raw porcelain so a staged rename
-	// is inspected on both sides, not just its destination.
-	if err := gateRejectedPaths(out); err != nil {
-		return nil, rep, err
-	}
-	// A protected path that is git-ignored never appears in the porcelain above:
-	// /.forest/ is git-ignored, so a run mutating .forest/foo alongside ordinary
-	// work must not hide the control-plane change. Ask git for the ignored set
-	// and refuse if any ignored path is protected.
-	ign, err := gitOutRaw(wtDir, "status", "--porcelain", "--ignored", "--untracked-files=all")
-	if err != nil {
-		return nil, rep, err
-	}
-	if err := gateIgnoredProtected(ign); err != nil {
-		return nil, rep, err
-	}
 	changed := parseChanged(out)
 	real := make([]string, 0, len(changed))
 	for _, path := range changed {
-		if isRunArtifact(path) {
-			continue // a build's own report, not the repo's change
+		if strings.HasPrefix(path, ".forest/") || isRunArtifact(path) {
+			continue // a run record, not the repo's change
 		}
 		real = append(real, path)
 	}

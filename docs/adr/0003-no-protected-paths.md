@@ -1,13 +1,6 @@
 # 0003 — No protected paths
 
-Status: superseded by 0004, 2026-08-07 (see docs/adr/0004)
-
-> This decision deleted the protected-path list from the Gate to let the factory
-> work on its own declarations. The delivery-machine work in item #171 reversed
-> it: the Gate must reject changes to the factory's control plane (`.forest/`,
-> `forest.yaml`, `agents/`, `.opencode/opencode.json`) as a machine invariant.
-> Read the record below for what changed, then ADR 0004 for why the machine
-> keeps the boundary.
+Status: accepted, 2026-08-07
 
 ## Context
 
