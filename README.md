@@ -8,6 +8,11 @@ Three independent Flows run in one process and coordinate through git state.
 Each Flow selects a Subject, performs its Effect, and records a Run.
 Each lane uses its own interval. The process excludes duplicate work on one Subject.
 
+The delivery state machine is documented in [docs/fsm.md](docs/fsm.md): its
+states, its legal transitions, which Flow owns each transition, and the
+invariants that must never break. `fsm.go` encodes the machine as a pure
+function and the tests refuse every illegal transition.
+
 | Flow | Selector | Effects |
 | --- | --- | --- |
 | Builder | Eligible Tracker items without a forest branch and without configured exclude labels. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It may create a Projection. |
