@@ -260,7 +260,7 @@ func cmdSelfcheck(repoDir string) int {
 		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
 		return 1
 	}
-	for _, name := range []string{cfg.Flows.Builder.Agent, cfg.Flows.Verifier.Agent, cfg.Flows.Fixer.Agent} {
+	for _, name := range []string{cfg.Flows.Builder.Agent, cfg.Flows.Verifier.Agent, cfg.Flows.Fixer.Agent, cfg.Flows.Manager.Agent} {
 		if name == "" {
 			continue
 		}
