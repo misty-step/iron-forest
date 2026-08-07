@@ -16,7 +16,7 @@ func commitAndPush(repo, wtDir, branch, expectedSHA string, id CommitIdentity, i
 	// keep report.json and review.json out of the tree: they are the run's
 	// records, not the repo's change
 	_ = git(wtDir, "reset", "-q", "--", "report.json", "review.json")
-	if err := gitCommit(wtDir, id, fmt.Sprintf("forest: %s (#%d)", it.Title, it.Number)); err != nil {
+	if err := gitCommit(wtDir, id, fmt.Sprintf("forest: %s (#%s)", it.Title, issueID(it))); err != nil {
 		return err
 	}
 	args := []string{"push", "-u", "origin", branch}

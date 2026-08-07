@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestSubjectSetReportsContentionAndIdle(t *testing.T) {
 	set := newSubjectSet()
@@ -21,6 +25,35 @@ func TestSubjectSetReportsContentionAndIdle(t *testing.T) {
 		t.Fatal("released key must become available")
 	}
 	set.release("branch-forest/7-fix")
+}
+
+// TestLedgerReadsLegacyIntegerAndOpaqueStringIssue pins the decided
+// compatibility shape: the ledger's `issue` field is now an opaque string, but
+// the loader still reads rows written before the migration that carry an
+// integer, so an append-only ledger never breaks the report.
+func TestLedgerReadsLegacyIntegerAndOpaqueStringIssue(t *testing.T) {
+	dir := t.TempDir()
+	oldRow := `{"time":"t","flow":"builder","subject":"item-69","revision":"r","issue":69}`
+	newRow := `{"time":"t","flow":"builder","subject":"item-hab_01J9X","revision":"r","issue":"hab_01J9X"}`
+	if err := os.WriteFile(filepath.Join(dir, "runs.jsonl"), []byte(oldRow+"\n"+newRow+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runs, invalid, err := loadLedger(filepath.Join(dir, "runs.jsonl"))
+	if err != nil {
+		t.Fatalf("loadLedger: %v", err)
+	}
+	if invalid != 0 {
+		t.Fatalf("invalid rows = %d, want 0", invalid)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("loaded %d rows, want 2", len(runs))
+	}
+	if runs[0].ID != "69" {
+		t.Errorf("legacy integer row id = %q, want 69", runs[0].ID)
+	}
+	if runs[1].ID != "hab_01J9X" {
+		t.Errorf("opaque string row id = %q, want hab_01J9X", runs[1].ID)
+	}
 }
 
 func TestEligibleItemsExcludesLabelsAndCoveredBranches(t *testing.T) {

@@ -111,7 +111,7 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 
 	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
 		Key: "branch-forest/9-change", Kind: "branch", Revision: oldHead,
-		Label: "forest/9-change", Issue: 9, Branch: "forest/9-change", Head: oldHead,
+		Label: "forest/9-change", ID: "9", Branch: "forest/9-change", Head: oldHead,
 	}, "run-1")
 	if err != nil {
 		t.Fatalf("Act: %v", err)
@@ -331,7 +331,7 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 
 		out, err := (verifierFlow{}).Act(cfg, repo, Subject{
 			Key: "branch-" + branch, Kind: "branch", Revision: head,
-			Label: branch, Issue: 9, Branch: branch, Head: head,
+			Label: branch, ID: "9", Branch: branch, Head: head,
 		}, "run-1")
 		if err != nil {
 			t.Fatalf("Act: %v", err)

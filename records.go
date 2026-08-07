@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,7 +20,7 @@ type runRecord struct {
 	Flow          string `json:"flow"`
 	Subject       string `json:"subject"`
 	Revision      string `json:"revision"`
-	Issue         int    `json:"issue"`
+	ID            string `json:"issue"`
 	Branch        string `json:"branch"`
 	PRURL         string `json:"pr_url"`
 	Status        string `json:"status"`
@@ -31,6 +32,40 @@ type runRecord struct {
 	DefSHA        string `json:"def_sha"`
 	ReviewVerdict string `json:"review,omitempty"`
 	Error         string `json:"error,omitempty"`
+}
+
+// UnmarshalJSON reads one ledger row and tolerates both the legacy integer
+// `issue` value and the opaque string id this build writes. The ledger is
+// append-only, so rows written before the migration carry `"issue": 69` and
+// must stay readable; a non-numeric id can only arrive as a string.
+func (r *runRecord) UnmarshalJSON(data []byte) error {
+	type runRecordAlias runRecord
+	var aux struct {
+		runRecordAlias
+		Issue json.RawMessage `json:"issue"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = runRecord(aux.runRecordAlias)
+	raw := bytes.TrimSpace(aux.Issue)
+	switch {
+	case len(raw) == 0, string(raw) == "null":
+		// no issue field at all
+	case len(raw) > 0 && raw[0] == '"':
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return err
+		}
+		r.ID = s
+	default:
+		var n int
+		if err := json.Unmarshal(raw, &n); err != nil {
+			return err
+		}
+		r.ID = strconv.Itoa(n)
+	}
+	return nil
 }
 
 // nowRFC returns the UTC timestamp used by ledger records.

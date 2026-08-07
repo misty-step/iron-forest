@@ -35,6 +35,11 @@ func (it issue) hasLabel(name string) bool {
 	return false
 }
 
+// issueID is the GitHub adapter's contribution to the opaque item identity: the
+// tracker id this build carries is the issue number as a string. A second work
+// source supplies its own native id here; the controller never parses it.
+func issueID(it issue) string { return strconv.Itoa(it.Number) }
+
 // ghJSON runs the host CLI once. Tests replace it to stub the tracker without
 // invoking the host binary.
 var ghJSON = func(args ...string) ([]byte, error) {
@@ -54,8 +59,8 @@ func listOpenIssues(repo string) ([]issue, error) {
 	return items, nil
 }
 
-func getItem(repo string, n int) (issue, error) {
-	out, err := ghJSON("issue", "view", strconv.Itoa(n), "-R", repo,
+func getItem(repo, id string) (issue, error) {
+	out, err := ghJSON("issue", "view", id, "-R", repo,
 		"--json", "number,title,body,updatedAt,comments,labels")
 	if err != nil {
 		return issue{}, err
@@ -80,21 +85,18 @@ func eligibleItems(cfg Config, repoDir string) ([]issue, error) {
 }
 
 func eligibleFrom(items []issue, branches, excluded, required []string) []issue {
-	covered := make(map[int]bool)
+	covered := make(map[string]bool)
 	for _, branch := range branches {
 		name := strings.TrimPrefix(strings.TrimPrefix(branch, "refs/heads/"), BranchPrefix)
 		dash := strings.IndexByte(name, '-')
 		if dash <= 0 {
 			continue
 		}
-		n, err := strconv.Atoi(name[:dash])
-		if err == nil {
-			covered[n] = true
-		}
+		covered[name[:dash]] = true
 	}
 	var ready []issue
 	for _, item := range items {
-		if covered[item.Number] {
+		if covered[issueID(item)] {
 			continue
 		}
 		// Declared required labels turn selection into an opt-in: a promoter's
@@ -161,18 +163,18 @@ func branchHead(repoDir, branch string) (string, error) {
 	return fields[0], nil
 }
 
-func commentItem(repo string, n int, body string) error {
-	_, err := ghJSON("issue", "comment", "-R", repo, strconv.Itoa(n), "--body", body)
+func commentItem(repo, id, body string) error {
+	_, err := ghJSON("issue", "comment", "-R", repo, id, "--body", body)
 	return err
 }
 
-func closeItem(repo string, n int) error {
-	_, err := ghJSON("issue", "close", "-R", repo, strconv.Itoa(n))
+func closeItem(repo, id string) error {
+	_, err := ghJSON("issue", "close", "-R", repo, id)
 	return err
 }
 
-func labelItem(repo string, n int, add, remove []string) error {
-	args := []string{"issue", "edit", "-R", repo, strconv.Itoa(n)}
+func labelItem(repo, id string, add, remove []string) error {
+	args := []string{"issue", "edit", "-R", repo, id}
 	for _, label := range add {
 		args = append(args, "--add-label", label)
 	}

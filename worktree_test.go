@@ -67,7 +67,7 @@ func currentWorktrees(t *testing.T, repo string) []string {
 func TestReapOrphanWorktreesRemovesStaleRun(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
-	wtDir, _, _, err := createWorktree(repo, workspace, issue{Number: 44, Title: "leak"})
+	wtDir, _, _, err := createWorktree(repo, workspace, "44", "leak")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestReapOrphanWorktreesRemovesStaleRun(t *testing.T) {
 func TestCreateWorktreeStartsAtTheRemoteTip(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
-	wtDir, branch, baseSHA, err := createWorktree(repo, workspace, issue{Number: 5, Title: "tip"})
+	wtDir, branch, baseSHA, err := createWorktree(repo, workspace, "5", "tip")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,18 +109,46 @@ func TestCreateWorktreeStartsAtTheRemoteTip(t *testing.T) {
 	}
 }
 
+// TestItemIdentityRoundTripNonNumeric proves branch derivation and the reverse
+// lookup tolerate an opaque, non-numeric tracker id: the branch keeps the
+// forest/<id>-<slug> shape for a Habitat-style id and itemIDFromBranch returns
+// that id unchanged, without assuming the segment is an integer.
+func TestItemIdentityRoundTripNonNumeric(t *testing.T) {
+	const id = "hab_01J9X"
+	branch := "forest/" + id + "-parking"
+
+	if got := itemIDFromBranch(branch); got != id {
+		t.Fatalf("itemIDFromBranch(%q) = %q, want %q", branch, got, id)
+	}
+	// A numeric GitHub id keeps its readable, unchanged shape too.
+	if got := itemIDFromBranch("forest/69-notes"); got != "69" {
+		t.Fatalf("itemIDFromBranch(numeric) = %q, want 69", got)
+	}
+
+	repo := setupTestRepo(t)
+	workspace := filepath.Join(repo, WorkspaceDir)
+	wtDir, derived, _, err := createWorktree(repo, workspace, id, "parking")
+	if err != nil {
+		t.Fatalf("createWorktree with opaque id: %v", err)
+	}
+	defer removeWorktree(repo, wtDir)
+	if derived != branch {
+		t.Fatalf("branch = %q, want %q", derived, branch)
+	}
+}
+
 // TestTrackedWorktreesIsolateLanes pins the contract the drain handler depends
 // on: every live worktree is listed, and clearing one lane's worktree never
 // hides another lane's, which would leak it on an abrupt exit.
 func TestTrackedWorktreesIsolateLanes(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
-	first, _, _, err := createWorktree(repo, workspace, issue{Number: 7, Title: "one"})
+	first, _, _, err := createWorktree(repo, workspace, "7", "one")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer removeWorktree(repo, first)
-	second, _, _, err := createWorktree(repo, workspace, issue{Number: 8, Title: "two"})
+	second, _, _, err := createWorktree(repo, workspace, "8", "two")
 	if err != nil {
 		t.Fatal(err)
 	}

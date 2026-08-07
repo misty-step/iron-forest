@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -41,7 +40,7 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			Kind:     "branch",
 			Revision: head,
 			Label:    branch,
-			Issue:    itemNumberFromBranch(branch),
+			ID:       itemIDFromBranch(branch),
 			Branch:   branch,
 			Head:     head,
 		}
@@ -95,7 +94,7 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it, err := getItem(cfg.Repo, s.Issue)
+	it, err := getItem(cfg.Repo, s.ID)
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
@@ -219,8 +218,8 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		if _, berr := bumpAttempts(repoDir, s.Key); berr != nil {
 			return out, fmt.Errorf("merge: %w (attempt record failed: %v)", err, berr)
 		}
-		_ = labelItem(cfg.Repo, it.Number, []string{failedLabel}, nil)
-		_ = commentItem(cfg.Repo, it.Number, "Merge blocked: "+err.Error())
+		_ = labelItem(cfg.Repo, issueID(it), []string{failedLabel}, nil)
+		_ = commentItem(cfg.Repo, issueID(it), "Merge blocked: "+err.Error())
 		return out, err
 	}
 	out.Status = "merged"
@@ -339,7 +338,7 @@ func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
 		if err := git(mergeDir, "merge", "--squash", branch); err != nil {
 			return fmt.Errorf("merge: squash: %w", err)
 		}
-		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%d)", it.Title, it.Number)); err != nil {
+		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, issueID(it))); err != nil {
 			return fmt.Errorf("merge: commit: %w", err)
 		}
 	case "ff":
@@ -361,7 +360,7 @@ func finishMerge(cfg Config, repoDir, branch string, it issue) error {
 	if err := git(repoDir, "push", "origin", "--delete", branch); err != nil {
 		return fmt.Errorf("merge: delete branch: %w", err)
 	}
-	if err := closeItem(cfg.Repo, it.Number); err != nil {
+	if err := closeItem(cfg.Repo, issueID(it)); err != nil {
 		return fmt.Errorf("merge: close item: %w", err)
 	}
 	if err := dropAttempts(repoDir, "branch-"+branch); err != nil {
@@ -370,11 +369,14 @@ func finishMerge(cfg Config, repoDir, branch string, it issue) error {
 	return nil
 }
 
-func itemNumberFromBranch(branch string) int {
+// itemIDFromBranch recovers the opaque item identity from a forest branch. The
+// branch keeps the forest/<id>-<slug> shape, and the id segment is read as an
+// opaque string: it stays a numeric GitHub id or a Habitat id without assuming
+// it is an integer.
+func itemIDFromBranch(branch string) string {
 	name := strings.TrimPrefix(branch, "forest/")
 	if i := strings.IndexByte(name, '-'); i >= 0 {
 		name = name[:i]
 	}
-	n, _ := strconv.Atoi(name)
-	return n
+	return name
 }

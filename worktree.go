@@ -89,8 +89,11 @@ func gitCommit(wtDir string, id CommitIdentity, msg string) error {
 }
 
 // createWorktree makes a fresh linked worktree for one item at the remote tip.
-func createWorktree(repo, workspace string, it issue) (wtDir, branch, baseSHA string, err error) {
-	branch = fmt.Sprintf("forest/%d-%s", it.Number, slug(it.Title))
+// The branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as
+// they always have; the id segment is opaque, so a non-numeric tracker id
+// derives an equally valid branch.
+func createWorktree(repo, workspace, id, title string) (wtDir, branch, baseSHA string, err error) {
+	branch = fmt.Sprintf("forest/%s-%s", id, slug(title))
 	wtDir = filepath.Join(workspace, "worktrees", branch)
 	trackWorktree(wtDir)
 	defer func() {
