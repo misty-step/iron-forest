@@ -61,6 +61,7 @@ type Flows struct {
 	Builder  BuilderFlowCfg  `yaml:"builder"`
 	Verifier VerifierFlowCfg `yaml:"verifier"`
 	Fixer    FixerFlowCfg    `yaml:"fixer"`
+	Manager  ManagerFlowCfg  `yaml:"manager"`
 }
 
 // FlowCfg is what every lane declares: whether it is on, which agent it runs,
@@ -102,6 +103,18 @@ type FixerFlowCfg struct {
 	Attempts int `yaml:"attempts"`
 }
 
+// ManagerFlowCfg owns the promotion queue. MaxOpenReady is the level of
+// promoted-but-unbuilt work the lane tolerates: once that many items carry the
+// promote tag and have no branch, the Manager promotes nothing, so a fast
+// interval cannot flood the queue. PromoteTag is the label that earns an item
+// its turn with the Builder. ExcludeTags mark items the Manager never promotes.
+type ManagerFlowCfg struct {
+	FlowCfg      `yaml:",inline"`
+	MaxOpenReady int      `yaml:"max_open_ready"`
+	PromoteTag   string   `yaml:"promote_tag"`
+	ExcludeTags  []string `yaml:"exclude_tags"`
+}
+
 // ProjectionConfig is the optional, one-way human surface: publish a branch as
 // a pull request and mirror decisions as comments. The factory never reads it
 // back. MergeViaHost is for a protected target branch, where only the host may
@@ -131,6 +144,16 @@ func defaultConfig() Config {
 				// ceiling is a runaway guard, not a policy on how many passes a fix
 				// may take. Progress on one revision is bounded separately.
 				Attempts: 10,
+			},
+			// The Manager lane ships disabled. Enabling it is an operator commit,
+			// so the daemon self-updates without a promotion policy nobody has
+			// read taking over the queue. It promotes at most one open item at a
+			// time until configured otherwise.
+			Manager: ManagerFlowCfg{
+				FlowCfg:      FlowCfg{Enabled: false, Agent: "manager", IntervalSec: 120},
+				MaxOpenReady: 1,
+				PromoteTag:   "forest:ready",
+				ExcludeTags:  []string{failedLabel, "parked"},
 			},
 		},
 		Projection: ProjectionConfig{Enabled: true, MergeViaHost: false},
@@ -183,6 +206,21 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Flows.Fixer.IntervalSec <= 0 {
 		cfg.Flows.Fixer.IntervalSec = d.Flows.Fixer.IntervalSec
+	}
+	if cfg.Flows.Manager.Agent == "" {
+		cfg.Flows.Manager.Agent = d.Flows.Manager.Agent
+	}
+	if cfg.Flows.Manager.IntervalSec <= 0 {
+		cfg.Flows.Manager.IntervalSec = d.Flows.Manager.IntervalSec
+	}
+	if cfg.Flows.Manager.MaxOpenReady <= 0 {
+		cfg.Flows.Manager.MaxOpenReady = d.Flows.Manager.MaxOpenReady
+	}
+	if cfg.Flows.Manager.PromoteTag == "" {
+		cfg.Flows.Manager.PromoteTag = d.Flows.Manager.PromoteTag
+	}
+	if len(cfg.Flows.Manager.ExcludeTags) == 0 {
+		cfg.Flows.Manager.ExcludeTags = d.Flows.Manager.ExcludeTags
 	}
 	switch cfg.Flows.Verifier.Merge {
 	case "":

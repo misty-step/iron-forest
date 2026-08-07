@@ -36,6 +36,16 @@ flows:
     agent: builder
     interval_seconds: 40
     attempts: 10
+  # The manager lane owns the promotion queue. It ships disabled: enabling it is
+  # a separate operator commit, so the daemon self-updates without a promotion
+  # policy nobody has read taking over the queue.
+  manager:
+    enabled: false
+    agent: manager
+    interval_seconds: 120
+    max_open_ready: 1
+    promote_tag: "forest:ready"
+    exclude_tags: ["forest:failed", "parked"]
 
 # The human-facing surface. One way out: Iron Forest never reads it back.
 projection:

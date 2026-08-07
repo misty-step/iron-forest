@@ -65,7 +65,7 @@ type Flow interface {
 // flowsFor builds the declared flows. Adding a lane is adding one entry here
 // plus one file: the supervisor and the ledger need no change.
 func flowsFor() []Flow {
-	return []Flow{builderFlow{}, verifierFlow{}, fixerFlow{}}
+	return []Flow{builderFlow{}, verifierFlow{}, fixerFlow{}, managerFlow{}}
 }
 
 // codeBusy is a pass's answer when another worker already handles the subject.
@@ -268,6 +268,11 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "forest:", err)
 			return 1
+		}
+		// The Manager's subject is the whole backlog, not one item, so any
+		// manager run is a full pass regardless of the named subject.
+		if f.Name() == "manager" && len(subjects) > 0 {
+			return actOnSubject(f, cfg, repoDir, subjects[0])
 		}
 		for _, s := range subjects {
 			if s.Key == subject || s.Branch == subject ||

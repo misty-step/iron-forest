@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "manager report",
+  "description": "Output contract for report.json from the Manager lane.",
+  "type": "object",
+  "required": ["promote", "reject"],
+  "properties": {
+    "promote": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "ids of open items judged ready to promote"
+    },
+    "reject": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "reason"],
+        "properties": {
+          "id": { "type": "string", "description": "the open item refused" },
+          "reason": {
+            "type": "string",
+            "description": "the specific thing the item lacks, or \"none\""
+          }
+        }
+      }
+    }
+  }
+}
