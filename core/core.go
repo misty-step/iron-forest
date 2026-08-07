@@ -7,12 +7,22 @@
 // imports the main package.
 package core
 
+// CommitIdentity is the author every flow's commits carry. It is declared, not
+// derived from a host account, so a run is attributable in any repository.
+type CommitIdentity struct {
+	Name  string
+	Email string
+}
+
 // Config is the read view of forest.yaml a surface needs: the work source, the
-// gate checks, and the flow declarations.
+// gate checks, the flow declarations, the commit identity, and the optional
+// projection.
 type Config struct {
-	Repo   string
-	Checks []Check
-	Flows  Flows
+	Repo       string
+	Commit     CommitIdentity
+	Checks     []Check
+	Flows      Flows
+	Projection ProjectionConfig
 }
 
 // Check is one gate command and its name, as declared in forest.yaml.
@@ -21,19 +31,51 @@ type Check struct {
 	Run  string
 }
 
-// Flows declares the lanes: builder, verifier, and fixer.
+// Flows declares the lanes: builder, verifier, and fixer. Each lane carries the
+// settings that only that lane reads.
 type Flows struct {
-	Builder  FlowConfig
-	Verifier FlowConfig
-	Fixer    FlowConfig
+	Builder  BuilderFlowConfig
+	Verifier VerifierFlowConfig
+	Fixer    FixerFlowConfig
 }
 
-// FlowConfig is one lane's declaration: whether it is on, which agent it runs,
-// and how long it sleeps between passes.
+// FlowConfig is what every lane declares: whether it is on, which agent it
+// runs, and how long it sleeps between passes.
 type FlowConfig struct {
 	Enabled     bool
 	Agent       string
 	IntervalSec int
+}
+
+// BuilderFlowConfig is the builder lane: the shared lane settings plus the
+// tracker label policies that shape item selection.
+type BuilderFlowConfig struct {
+	FlowConfig
+	ExcludeLabels []string
+	RequireLabels []string
+}
+
+// VerifierFlowConfig is the verifier lane: the shared lane settings plus the
+// merge policy.
+type VerifierFlowConfig struct {
+	FlowConfig
+	Merge     string
+	AutoMerge bool
+}
+
+// FixerFlowConfig is the fixer lane: the shared lane settings plus the repair
+// ceiling.
+type FixerFlowConfig struct {
+	FlowConfig
+	Attempts int
+}
+
+// ProjectionConfig is the optional, one-way human surface: publish a branch as
+// a pull request and mirror decisions as comments. The factory never reads it
+// back.
+type ProjectionConfig struct {
+	Enabled      bool
+	MergeViaHost bool
 }
 
 // McpSpec declares one MCP server the agent may reach, in the read shape a
@@ -111,6 +153,12 @@ type Checks struct {
 	Time    string
 }
 
+// Comment is one tracker comment in source order.
+type Comment struct {
+	Body      string
+	CreatedAt string
+}
+
 // Item is one tracker item and its discussion in a host-independent shape. The
 // id is a string so a second work source can carry its own identity.
 type Item struct {
@@ -119,6 +167,7 @@ type Item struct {
 	Body      string
 	UpdatedAt string
 	Tags      []string
+	Comments  []Comment
 }
 
 // BranchState is one forest branch and its head commit.

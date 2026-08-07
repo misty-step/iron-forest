@@ -16,6 +16,9 @@ func coreFixture(t *testing.T) (core.API, string, string) {
 	_, work, sha := notesTestRepository(t)
 	if err := os.WriteFile(filepath.Join(work, "forest.yaml"), []byte(
 		"repo: owner/repo\n"+
+			"commit:\n"+
+			"  name: forest\n"+
+			"  email: forest@invalid\n"+
 			"checks:\n"+
 			"  - name: test\n"+
 			"    run: \"true\"\n"+
@@ -23,7 +26,22 @@ func coreFixture(t *testing.T) (core.API, string, string) {
 			"  builder:\n"+
 			"    enabled: true\n"+
 			"    agent: builder\n"+
-			"    interval_seconds: 30\n",
+			"    interval_seconds: 30\n"+
+			"    exclude_labels: [parked]\n"+
+			"  verifier:\n"+
+			"    enabled: true\n"+
+			"    agent: verifier\n"+
+			"    interval_seconds: 20\n"+
+			"    merge: squash\n"+
+			"    auto_merge: false\n"+
+			"  fixer:\n"+
+			"    enabled: true\n"+
+			"    agent: builder\n"+
+			"    interval_seconds: 40\n"+
+			"    attempts: 5\n"+
+			"projection:\n"+
+			"  enabled: true\n"+
+			"  merge_via_host: false\n",
 	), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +62,21 @@ func TestCoreConfigReadsForestYAML(t *testing.T) {
 	}
 	if len(cfg.Checks) != 1 || cfg.Checks[0].Name != "test" {
 		t.Fatalf("Config checks = %+v, want one test check", cfg.Checks)
+	}
+	if cfg.Commit.Name != "forest" || cfg.Commit.Email != "forest@invalid" {
+		t.Fatalf("Config commit = %+v, want forest/forest@invalid", cfg.Commit)
+	}
+	if len(cfg.Flows.Builder.ExcludeLabels) != 1 || cfg.Flows.Builder.ExcludeLabels[0] != "parked" {
+		t.Fatalf("Config builder labels = %v, want [parked]", cfg.Flows.Builder.ExcludeLabels)
+	}
+	if cfg.Flows.Verifier.Merge != "squash" || cfg.Flows.Verifier.AutoMerge {
+		t.Fatalf("Config verifier = %+v, want squash no automerge", cfg.Flows.Verifier)
+	}
+	if cfg.Flows.Fixer.Attempts != 5 {
+		t.Fatalf("Config fixer attempts = %d, want 5", cfg.Flows.Fixer.Attempts)
+	}
+	if !cfg.Projection.Enabled || cfg.Projection.MergeViaHost {
+		t.Fatalf("Config projection = %+v, want enabled without merge_via_host", cfg.Projection)
 	}
 }
 
@@ -128,6 +161,36 @@ func TestCoreTraceReturnsTheBytesTheHarnessWrote(t *testing.T) {
 	}
 }
 
+func TestCoreTraceMatchesMetacharactersLiterally(t *testing.T) {
+	api, work, _ := coreFixture(t)
+	runsDir := filepath.Join(work, WorkspaceDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A run id may embed opaque item identities that carry glob metacharacters.
+	// The id must match literally, never as a glob, and never escape runsDir.
+	special := "20260807T150405Z-subject[1].*?"
+	specialTrace := []byte("{\"step\":1}\n")
+	if err := os.WriteFile(filepath.Join(runsDir, special+".builder.jsonl"), specialTrace, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling lookalike must not be matched by treating the id as a glob.
+	if err := os.WriteFile(filepath.Join(runsDir, "20260807T150405Z-subjectX.builder.jsonl"), []byte("wrong\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := api.Trace(special)
+	if err != nil {
+		t.Fatalf("Trace of metacharacter id: %v", err)
+	}
+	if !bytes.Equal(got, specialTrace) {
+		t.Fatalf("Trace = %q, want %q", got, specialTrace)
+	}
+	// A path-like id must not escape the runs directory.
+	if _, err := api.Trace("../outside"); err == nil {
+		t.Fatal("Trace of a path-like id must error, not escape runsDir")
+	}
+}
+
 func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 	api, work, sha := coreFixture(t)
 	if v, c, err := api.Notes(sha); err != nil || v.Verdict != "" || c.Status != "" {
@@ -161,7 +224,12 @@ func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 func TestCoreItemsReturnsBuilderSelectorBacklog(t *testing.T) {
 	old := trackerFor
 	trackerFor = func(repo string) Tracker {
-		return trackerStub{items: []Item{{ID: "hab_01J9X", Title: "opaque", UpdatedAt: "r"}}}
+		return trackerStub{items: []Item{
+			{
+				ID: "hab_01J9X", Title: "opaque", UpdatedAt: "r",
+				Comments: []comment{{Body: "a note", CreatedAt: "t"}},
+			},
+		}}
 	}
 	defer func() { trackerFor = old }()
 
@@ -172,6 +240,9 @@ func TestCoreItemsReturnsBuilderSelectorBacklog(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ID != "hab_01J9X" {
 		t.Fatalf("Items = %+v, want the opaque item", items)
+	}
+	if len(items[0].Comments) != 1 || items[0].Comments[0].Body != "a note" {
+		t.Fatalf("Items comments = %+v, want the discussion", items[0].Comments)
 	}
 }
 

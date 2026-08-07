@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/misty-step/iron-forest/core"
 )
@@ -32,12 +33,25 @@ func (c *coreImpl) Config() (core.Config, error) {
 	}
 	return core.Config{
 		Repo:   cfg.Repo,
+		Commit: core.CommitIdentity{Name: cfg.Commit.Name, Email: cfg.Commit.Email},
 		Checks: checks,
 		Flows: core.Flows{
-			Builder:  flowConfig(cfg.Flows.Builder.Enabled, cfg.Flows.Builder.Agent, cfg.Flows.Builder.IntervalSec),
-			Verifier: flowConfig(cfg.Flows.Verifier.Enabled, cfg.Flows.Verifier.Agent, cfg.Flows.Verifier.IntervalSec),
-			Fixer:    flowConfig(cfg.Flows.Fixer.Enabled, cfg.Flows.Fixer.Agent, cfg.Flows.Fixer.IntervalSec),
+			Builder: core.BuilderFlowConfig{
+				FlowConfig:    flowConfig(cfg.Flows.Builder.Enabled, cfg.Flows.Builder.Agent, cfg.Flows.Builder.IntervalSec),
+				ExcludeLabels: cfg.Flows.Builder.ExcludeLabels,
+				RequireLabels: cfg.Flows.Builder.RequireLabels,
+			},
+			Verifier: core.VerifierFlowConfig{
+				FlowConfig: flowConfig(cfg.Flows.Verifier.Enabled, cfg.Flows.Verifier.Agent, cfg.Flows.Verifier.IntervalSec),
+				Merge:      cfg.Flows.Verifier.Merge,
+				AutoMerge:  cfg.Flows.Verifier.AutoMerge,
+			},
+			Fixer: core.FixerFlowConfig{
+				FlowConfig: flowConfig(cfg.Flows.Fixer.Enabled, cfg.Flows.Fixer.Agent, cfg.Flows.Fixer.IntervalSec),
+				Attempts:   cfg.Flows.Fixer.Attempts,
+			},
 		},
+		Projection: core.ProjectionConfig{Enabled: cfg.Projection.Enabled, MergeViaHost: cfg.Projection.MergeViaHost},
 	}, nil
 }
 
@@ -105,14 +119,33 @@ func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, error) {
 
 func (c *coreImpl) Trace(runID string) ([]byte, error) {
 	runsDir := filepath.Join(c.repoDir, WorkspaceDir, "runs")
-	matches, err := filepath.Glob(filepath.Join(runsDir, runID+".*.jsonl"))
+	entries, err := os.ReadDir(runsDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read runs dir %s: %w", runsDir, err)
 	}
-	if len(matches) == 0 {
+	// Run IDs embed opaque item identities, so they may carry glob
+	// metacharacters. Compare names literally and never treat the id as a glob
+	// or as a path: both could match the wrong trace or escape the runs dir.
+	var trace []byte
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, runID+".") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(runsDir, name))
+		if err != nil {
+			return nil, fmt.Errorf("read trace %s: %w", name, err)
+		}
+		trace = b
+		break
+	}
+	if trace == nil {
 		return nil, fmt.Errorf("trace for run %s not found", runID)
 	}
-	return os.ReadFile(matches[0])
+	return trace, nil
 }
 
 // Notes fetches the remote notes, exactly as cmdShow does, then reads the
@@ -166,9 +199,13 @@ func (c *coreImpl) Items() ([]core.Item, error) {
 	}
 	out := make([]core.Item, 0, len(subjects))
 	for _, s := range subjects {
+		comments := make([]core.Comment, 0, len(s.Item.Comments))
+		for _, cm := range s.Item.Comments {
+			comments = append(comments, core.Comment{Body: cm.Body, CreatedAt: cm.CreatedAt})
+		}
 		out = append(out, core.Item{
 			ID: s.Item.ID, Title: s.Item.Title, Body: s.Item.Body,
-			UpdatedAt: s.Item.UpdatedAt, Tags: s.Item.Tags,
+			UpdatedAt: s.Item.UpdatedAt, Tags: s.Item.Tags, Comments: comments,
 		})
 	}
 	return out, nil
