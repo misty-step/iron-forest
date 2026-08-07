@@ -144,16 +144,25 @@ func TestItemIdentityRoundTripNonNumeric(t *testing.T) {
 // round-trip survives ids that collide with the escaping vocabulary.
 func TestEncodeBranchIDBijective(t *testing.T) {
 	cases := []string{
-		"69",         // numeric GitHub id, unchanged
-		"hab_01J9X",  // hyphen-free Habitat id, unchanged
-		"a-b",        // a '-' must be escaped to survive parse
-		"100%",       // a '%' must be escaped
-		"%2D",        // literal escape sequence as a real id
-		"%252D",      // a double-escaped id, keeps its percent
-		"x%2D-y%25z", // mixed '-' and '%' escapes
+		"69",            // numeric GitHub id, unchanged
+		"hab_01J9X",     // hyphen-free Habitat id, unchanged
+		"a-b",           // a '-' must be escaped to survive parse
+		"100%",          // a '%' must be escaped
+		"%2D",           // literal escape sequence as a real id
+		"%252D",         // a double-escaped id, keeps its percent
+		"x%2D-y%25z",    // mixed '-' and '%' escapes
+		"hab/01J9X",     // a '/' is a path separator and git-invalid, must escape
+		"a b",           // a space is git-invalid
+		"~^:?*[\\",      // git's special refname characters
+		"../evil",       // '..' segments and leading dots must not survive literally
+		"@",             // a lone '@' is not a valid refname tail
+		"id\x07ctl\x7f", // control bytes are git-invalid
 	}
 	for _, id := range cases {
 		enc := encodeBranchID(id)
+		if strings.ContainsAny(enc, "/ ~^:?*[\\\x07\x7f") {
+			t.Errorf("encodeBranchID(%q) = %q still contains a git/path-invalid byte", id, enc)
+		}
 		if got := itemIDFromBranch("forest/" + enc + "-slug"); got != id {
 			t.Errorf("round-trip(%q): encode = %q, decode = %q, want %q", id, enc, got, id)
 		}
