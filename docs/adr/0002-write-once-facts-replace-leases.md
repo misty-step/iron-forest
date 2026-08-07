@@ -53,8 +53,7 @@ without any liveness estimate.
 What is genuinely given up: duplicate agent work becomes possible if two processes
 ever share a repository, costing about $0.0072 per item; and the human-facing
 comments on issues and pull requests are not idempotent, so a duplicate process
-could post a duplicate comment. Existing card #82 covers making remote writes
-replay-safe.
+could post a duplicate comment. Local issue/PR comment idempotency is card #148. Remote runner replay under cloud packaging remains #82.
 
 `VISION.md` no longer promises two hosts on one repository. Any future need for it
 must re-derive coordination from write-once facts, not reintroduce a timed lock.
