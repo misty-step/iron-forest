@@ -379,6 +379,12 @@ func encodeBranchID(id string) string {
 	return strings.NewReplacer("%", "%25", "-", "%2D").Replace(id)
 }
 
+// branchIDDecoder reverses encodeBranchID in a single left-to-right pass. A
+// sequential pair of ReplaceAll would re-scan its own output and mis-decode an
+// id containing the literal escape `%2D` (e.g. `%252D` would become `-` instead
+// of `%2D`); one Replacer keeps the mapping bijective so any opaque id round-trips.
+var branchIDDecoder = strings.NewReplacer("%25", "%", "%2D", "-")
+
 // itemIDFromBranch recovers the opaque item identity from a forest branch,
 // undoing encodeBranchID on the id segment. It never assumes the segment is an
 // integer: it stays a numeric GitHub id or a Habitat id as written.
@@ -387,6 +393,5 @@ func itemIDFromBranch(branch string) string {
 	if i := strings.IndexByte(name, '-'); i >= 0 {
 		name = name[:i]
 	}
-	name = strings.ReplaceAll(name, "%25", "%")
-	return strings.ReplaceAll(name, "%2D", "-")
+	return branchIDDecoder.Replace(name)
 }

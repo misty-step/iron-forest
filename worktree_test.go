@@ -137,6 +137,29 @@ func TestItemIdentityRoundTripNonNumeric(t *testing.T) {
 	}
 }
 
+// TestEncodeBranchIDBijective pins that encodeBranchID and itemIDFromBranch are
+// genuinely inverse for every opaque id, including one whose characters spell
+// out an escape sequence. An id containing the literal `%2D` encodes to `%252D`;
+// the decoder must turn that back into `%2D`, not into a stray `-`, so the
+// round-trip survives ids that collide with the escaping vocabulary.
+func TestEncodeBranchIDBijective(t *testing.T) {
+	cases := []string{
+		"69",         // numeric GitHub id, unchanged
+		"hab_01J9X",  // hyphen-free Habitat id, unchanged
+		"a-b",        // a '-' must be escaped to survive parse
+		"100%",       // a '%' must be escaped
+		"%2D",        // literal escape sequence as a real id
+		"%252D",      // a double-escaped id, keeps its percent
+		"x%2D-y%25z", // mixed '-' and '%' escapes
+	}
+	for _, id := range cases {
+		enc := encodeBranchID(id)
+		if got := itemIDFromBranch("forest/" + enc + "-slug"); got != id {
+			t.Errorf("round-trip(%q): encode = %q, decode = %q, want %q", id, enc, got, id)
+		}
+	}
+}
+
 // TestTrackedWorktreesIsolateLanes pins the contract the drain handler depends
 // on: every live worktree is listed, and clearing one lane's worktree never
 // hides another lane's, which would leak it on an abrupt exit.
