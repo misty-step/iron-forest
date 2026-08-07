@@ -132,6 +132,10 @@ does not live in the repository at all.
 
 If a repository already carries its own `.opencode/` — its own provider
 configuration, say — it is left untouched. The factory no longer writes there.
+To keep it that way, the run disables opencode's local project-config discovery
+for the managed worktree (`OPENCODE_DISABLE_PROJECT_CONFIG` in the child
+environment), so a `.opencode/opencode.json` the repository ships is not read
+and does not trigger an install into the managed tree.
 
 This was not always true. Before #174, the factory rendered `.opencode/agents/`
 and node_modules into the worktree. On Cantrip the `pre-push` hook ran

@@ -88,6 +88,78 @@ func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
 	}
 }
 
+// TestRunPhaseIgnoresWorktreeProjectConfig pins the other half of option 1 for
+// #174: opencode must not read a project-local .opencode/opencode.json it would
+// discover inside the managed worktree. A real pinned opencode, given a local
+// project config, installs the provider packages it needs into .opencode/ beside
+// that config and then reads it — writing a per-run artifact into the tree a
+// hook or a working-tree secret scanner reads. The run therefore disables local
+// project config discovery in the child environment while supplying the copied
+// provider config through the external root. The stub models opencode's
+// behaviour: it fails the run unless local project config discovery is disabled
+// and, were it not disabled, would simulate the unwanted install into the
+// managed tree.
+func TestRunPhaseIgnoresWorktreeProjectConfig(t *testing.T) {
+	// A managed repository that ships a .opencode/opencode.json of its own would
+	// otherwise be discovered as opencode's local project config.
+	factory := t.TempDir()
+	factoryOC := filepath.Join(factory, ".opencode")
+	if err := os.MkdirAll(factoryOC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
+	if err := os.WriteFile(filepath.Join(factoryOC, "opencode.json"), providerCfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "loaded.txt")
+	script := "#!/bin/sh\n" +
+		// A real opencode with local project config discovery enabled reads the
+		// worktree's .opencode/opencode.json and installs node_modules beside it.
+		"if [ \"$OPENCODE_DISABLE_PROJECT_CONFIG\" != \"1\" ]; then\n" +
+		"  mkdir -p .opencode/node_modules\n" +
+		"  printf 'installed\\n' > .opencode/node_modules/thing.js\n" +
+		"  echo 'opencode: local project config was discovered' >&2\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		// With local project config disabled, only the external root is read.
+		"base=\"$XDG_CONFIG_HOME/opencode\"\n" +
+		"if [ ! -f \"$base/opencode.json\" ]; then echo 'opencode: provider config missing' >&2; exit 1; fi\n" +
+		"if [ ! -f \"$base/agents/probe.md\" ]; then echo 'opencode: agent probe failed to load' >&2; exit 1; fi\n" +
+		"printf 'loaded\\n' > " + marker + "\n" +
+		"exit 0\n"
+
+	// The managed worktree starts by carrying its own project-local
+	// .opencode/opencode.json, exactly the shape the old per-worktree stub could
+	// not see. It must survive the run unchanged, with no factory artifact added.
+	wt, trace := fakeOpencode(t, script)
+	wtOC := filepath.Join(wt, ".opencode")
+	if err := os.MkdirAll(wtOC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtOC, "opencode.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stub did not confirm the external config was used: %v", err)
+	}
+	ents, err := os.ReadDir(wtOC)
+	if err != nil {
+		t.Fatalf("managed worktree project config lost: %v", err)
+	}
+	if len(ents) != 1 || ents[0].Name() != "opencode.json" {
+		t.Fatalf("runPhase wrote factory artifacts into the managed tree's .opencode: %v", ents)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".opencode", "node_modules")); !os.IsNotExist(err) {
+		t.Fatalf("runPhase left node_modules in the managed worktree")
+	}
+}
+
 // TestRunPhaseFallsBackToGlobalProviderConfig proves a factory that ships no
 // project .opencode/opencode.json still gets a usable run: the operator's global
 // opencode provider configuration is preserved as the fallback. The stub checks

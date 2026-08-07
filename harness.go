@@ -67,6 +67,13 @@ func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (ru
 	defer os.RemoveAll(cfgDir)
 
 	env = append(env, "XDG_CONFIG_HOME="+cfgDir)
+	// opencode would otherwise also read a project-local .opencode/opencode.json
+	// it discovers in the worktree and install the provider packages it needs
+	// beside it, writing into a managed repository the factory commits to. That
+	// local project context is disabled here so opencode reads only the external
+	// root: the managed worktree stays free of factory artifacts regardless of
+	// whether it happens to ship a .opencode of its own.
+	env = append(env, "OPENCODE_DISABLE_PROJECT_CONFIG=1")
 
 	cmd := exec.CommandContext(ctx, "opencode", "run",
 		"--format", "json", "--model", a.Model, "--agent", a.Name,
