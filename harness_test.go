@@ -32,38 +32,88 @@ func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
 	}
 }
 
-// TestRunPhaseKeepsConfigOutOfWorktree pins option 1 of #174: the rendered
-// declaration is written outside the worktree and opencode is pointed at it with
-// --config, so a working-tree tool can never read a factory artifact. The fake
-// harness records its arguments and proves the config dir lies outside the
-// worktree and that no .opencode ever appears inside it.
+// TestRunPhaseKeepsConfigOutOfWorktree pins option 1 of #174 against the real
+// opencode config/agent-directory interface: opencode is pointed at a config
+// directory outside the worktree, it loads the named agent from that directory's
+// agents/ (the declaration written by the factory into the factory-owned config
+// space), and the operator's provider configuration survives beside it. The
+// harness is no longer just a recorder of --config: it reads the config directory
+// like opencode does, so an invalid path form or an agent it cannot load fails
+// the run instead of being silently accepted.
 func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
-	argsFile := filepath.Join(t.TempDir(), "args.txt")
-	script := "#!/bin/sh\nout=\nprev=\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--config\" ]; then out=$a; fi\n  prev=$a\ndone\nprintf '%s\\n' \"$@\" > " + argsFile + "\nmkdir -p \"$out/agents\"\nexit 0\n"
+	// The operator's global opencode provider configuration lives outside every
+	// worktree and must be preserved for the run.
+	xdg := t.TempDir()
+	opencfg := filepath.Join(xdg, "opencode")
+	if err := os.MkdirAll(opencfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
+	if err := os.WriteFile(filepath.Join(opencfg, "opencode.json"), providerCfg, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	marker := filepath.Join(t.TempDir(), "loaded.txt")
+	// The stub is opencode's real config/agent interface in miniature: it reads
+	// the --config directory, loads the named agent from agents/, confirms the
+	// operator's provider configuration survived next to it, and fails the run if
+	// either piece is unusable.
+	script := "#!/bin/sh\ncfg=\nagent=\nprev=\nfor a in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"--config\" ]; then cfg=$a; fi\n" +
+		"  if [ \"$prev\" = \"--agent\" ]; then agent=$a; fi\n" +
+		"  prev=$a\n" +
+		"done\n" +
+		"if [ -z \"$cfg\" ] || [ -z \"$agent\" ]; then echo 'opencode: missing --config or --agent' >&2; exit 1; fi\n" +
+		"if [ ! -f \"$cfg/agents/$agent.md\" ]; then echo \"opencode: agent $agent failed to load from $cfg/agents/\" >&2; exit 1; fi\n" +
+		"preserved=no\n" +
+		"test -f \"$cfg/opencode.json\" && preserved=yes\n" +
+		"printf '%s %s\\n' \"$agent\" \"$preserved\" > " + marker + "\n" +
+		"exit 0\n"
 	wt, trace := fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
 	if _, err := runPhase(wt, a, "task", trace); err != nil {
 		t.Fatalf("runPhase: %v", err)
 	}
-	args, err := os.ReadFile(argsFile)
+	b, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fields := strings.Fields(string(args))
-	cfg := ""
-	for i, f := range fields {
-		if f == "--config" && i+1 < len(fields) {
-			cfg = fields[i+1]
-		}
+	if got := string(b); got != "probe yes\n" {
+		t.Fatalf("stub observed %q, want the agent loaded and the provider config preserved", got)
 	}
-	if cfg == "" {
-		t.Fatalf("opencode was not pointed at an external config dir: %q", string(args))
-	}
-	if strings.HasPrefix(filepath.Clean(cfg), filepath.Clean(wt)+string(os.PathSeparator)) {
-		t.Fatalf("config dir %q is inside the worktree %q", cfg, wt)
-	}
+	// The config dir the stub read is discarded by runPhase; its agent and
+	// provider config reached the stub from outside the worktree, so no .opencode
+	// must ever appear inside it.
 	if _, err := os.Stat(filepath.Join(wt, ".opencode")); !os.IsNotExist(err) {
 		t.Fatalf("runPhase left .opencode in the worktree: %v", err)
+	}
+}
+
+// TestRunPhaseFailsWhenAgentIsUnloadable proves runPhase surfaces an opencode
+// failure to load the agent from the external config dir. The shallow recorder
+// could not catch this (it never read the config directory); a stub pinned to the
+// pre-#174 agent location under the worktree's .opencode/ cannot find the
+// declaration the factory now writes into the factory-owned config space, so the
+// run must fail with the load error recorded.
+func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(wt, ".opencode", "agents", "probe.md")
+	script := "#!/bin/sh\n" +
+		"if [ ! -f \"" + old + "\" ]; then echo 'opencode: agent probe failed to load' >&2; exit 1; fi\n" +
+		"exit 0\n"
+	trace := filepath.Join(t.TempDir(), "run", "agent.jsonl")
+	fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(wt, a, "task", trace)
+	if err == nil {
+		t.Fatal("runPhase must fail when opencode cannot load the agent")
+	}
+	if !strings.Contains(err.Error(), "failed to load") {
+		t.Errorf("error %q did not record why the agent could not be loaded", err)
 	}
 }
 

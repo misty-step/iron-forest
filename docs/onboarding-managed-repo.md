@@ -103,34 +103,38 @@ partway (`99b3b74`).
 
 ## 4. Keep the factory out of the repository's gates
 
-**Do this before the first run.** A worktree the factory works in carries two
-things the repository never asked for:
+**No ignore or exclude entries are needed.** Per-run factory artifacts are kept
+out of the managed repository's working tree, so a managed repository needs no
+`.gitignore`, no `.trufflehog-exclude`, and no hook change to be worked by the
+factory.
 
-- `.opencode/agents/<name>.md`, the rendered agent declaration, which carries
-  provider configuration.
-- `.opencode/node_modules/`, which opencode installs for its provider packages.
-  On Cantrip this was 63 MB across 3,653 files.
+The factory still uses opencode to run an agent, and opencode still wants a
+config directory and per-provider packages. Where it gets them is what changed
+(#174). The factory now gives opencode a per-run config directory **outside** the
+managed worktree:
 
-Add to the managed repository's `.gitignore`:
+- the rendered agent declaration (`agents/<name>.md`) is written there, not under
+  the worktree's `.opencode/`, and
+- the operator's provider configuration is preserved there alongside it, so the
+  run still reaches a provider route.
 
-```
-.opencode/agents/
-.opencode/node_modules/
-```
+The `node_modules` opencode installs for its provider packages also land in that
+per-run directory, never in a working tree a hook or a filesystem scanner reads.
+The directory is removed when the run completes.
 
-If the repository runs a **working-tree** secret scanner or any other
-filesystem-wide hook, exclude `.opencode/` from it as well. `.gitignore` does not
-help there: a filesystem scanner reads the tree, not the git index.
+A side effect of this placement: the rendered declaration cannot be staged by
+`git add -A` no matter what the managed repository's ignore rules are, because it
+does not live in the repository at all.
 
-Observed on Cantrip: its `pre-push` hook ran `trufflehog filesystem .`, found 11
-findings in third-party `effect` and `zod` test fixtures under
-`.opencode/node_modules`, and correctly refused every factory push. All agent
-work on the repository was blocked until this step was done.
+If a repository already carries its own `.opencode/` — its own provider
+configuration, say — it is left untouched. The factory no longer writes there.
 
-Needing this step at all is a factory defect, tracked as
-[#174](https://github.com/misty-step/iron-forest/issues/174) and
-[#146](https://github.com/misty-step/iron-forest/issues/146). Until those land,
-a managed repository has to know about the factory.
+This was not always true. Before #174, the factory rendered `.opencode/agents/`
+and node_modules into the worktree. On Cantrip the `pre-push` hook ran
+`trufflehog filesystem .`, read 63 MB of third-party `effect` and `zod` test
+fixtures under `.opencode/node_modules`, found 11 findings, and refused every
+factory push. Needing a `.gitignore` workaround for that was the defect #174
+removed.
 
 ## 5. Give the check child its toolchain
 

@@ -202,6 +202,72 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 	return os.WriteFile(filepath.Join(dir, a.Name+".md"), []byte(sb.String()), 0o644)
 }
 
+// newRunConfigDir builds the per-run opencode config root that opencode is
+// pointed at with --config. It holds the rendered agent declaration under
+// agents/ and the operator's provider configuration copied in from the global
+// opencode config, so moving the run's config out of the managed worktree does
+// not lose the provider route the run needs. The directory is created outside
+// every worktree and the caller removes it when the run completes.
+func newRunConfigDir(a *Agent) (string, error) {
+	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
+	if err != nil {
+		return "", err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.RemoveAll(cfgDir)
+		}
+	}()
+	if err := preserveProviderConfig(cfgDir); err != nil {
+		return "", err
+	}
+	if err := renderMarkdown(cfgDir, a); err != nil {
+		return "", err
+	}
+	ok = true
+	return cfgDir, nil
+}
+
+// preserveProviderConfig copies the operator's global opencode provider
+// configuration into cfgDir as opencode.json, so the per-run config root keeps
+// the provider route the run needs under --config. The source is the operator's
+// opencode config directory (out of the way of every worktree), so a managed
+// repository never has to carry it. A provider configuration the run can supply
+// from elsewhere (for example the managed repository's own project config) does
+// not require one here: a missing global file is tolerated, not an error.
+func preserveProviderConfig(cfgDir string) error {
+	src := openCodeProviderConfigPath()
+	if src == "" {
+		return nil
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read global opencode provider config %s: %w", src, err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "opencode.json"), b, 0o600); err != nil {
+		return fmt.Errorf("stage opencode provider config into run config: %w", err)
+	}
+	return nil
+}
+
+// openCodeProviderConfigPath returns the operator's global opencode provider
+// configuration path, or "" when the process has no usable config directory. It
+// honours XDG_CONFIG_HOME and otherwise falls back to the user's ~/.config.
+func openCodeProviderConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "opencode", "opencode.json")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "opencode", "opencode.json")
+}
+
 // agentSkills lists the agent's skill markdown files in stable order.
 func agentSkills(dir string) []string {
 	files, _ := filepath.Glob(filepath.Join(dir, "skills", "*.md"))
