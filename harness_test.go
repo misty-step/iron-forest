@@ -12,12 +12,16 @@ import (
 // much work an item needs, and a wrong guess stops a working run partway and
 // reports it as a gate failure. No agent definition may reintroduce one.
 func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
-	wt := t.TempDir()
-	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
-	if err := renderMarkdown(wt, a); err != nil {
+	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
+	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(filepath.Join(wt, ".opencode", "agents", "probe.md"))
+	defer os.RemoveAll(cfgDir)
+	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
+	if err := renderMarkdown(cfgDir, a); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(cfgDir, "agents", "probe.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,6 +29,41 @@ func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
 		if strings.Contains(string(b), key) {
 			t.Errorf("rendered agent declares %q; opencode must run unbounded", key)
 		}
+	}
+}
+
+// TestRunPhaseKeepsConfigOutOfWorktree pins option 1 of #174: the rendered
+// declaration is written outside the worktree and opencode is pointed at it with
+// --config, so a working-tree tool can never read a factory artifact. The fake
+// harness records its arguments and proves the config dir lies outside the
+// worktree and that no .opencode ever appears inside it.
+func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	script := "#!/bin/sh\nout=\nprev=\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--config\" ]; then out=$a; fi\n  prev=$a\ndone\nprintf '%s\\n' \"$@\" > " + argsFile + "\nmkdir -p \"$out/agents\"\nexit 0\n"
+	wt, trace := fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	if _, err := runPhase(wt, a, "task", trace); err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(args))
+	cfg := ""
+	for i, f := range fields {
+		if f == "--config" && i+1 < len(fields) {
+			cfg = fields[i+1]
+		}
+	}
+	if cfg == "" {
+		t.Fatalf("opencode was not pointed at an external config dir: %q", string(args))
+	}
+	if strings.HasPrefix(filepath.Clean(cfg), filepath.Clean(wt)+string(os.PathSeparator)) {
+		t.Fatalf("config dir %q is inside the worktree %q", cfg, wt)
+	}
+	if _, err := os.Stat(filepath.Join(wt, ".opencode")); !os.IsNotExist(err) {
+		t.Fatalf("runPhase left .opencode in the worktree: %v", err)
 	}
 }
 

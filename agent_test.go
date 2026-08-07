@@ -3,18 +3,32 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func rendered(t *testing.T, wtDir, name string) string {
+func rendered(t *testing.T, cfgDir, name string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(wtDir, ".opencode", "agents", name+".md"))
+	b, err := os.ReadFile(filepath.Join(cfgDir, "agents", name+".md"))
 	if err != nil {
 		t.Fatalf("read rendered agent: %v", err)
 	}
 	return string(b)
+}
+
+// renderCfg builds a per-run opencode config directory outside any worktree and
+// returns it, so a caller can assert both that the declaration rendered where
+// the factory owns it and that the worktree stayed clean.
+func renderCfg(t *testing.T, prefix string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func writeAgentFixture(t *testing.T, repoDir, name, model string) {
@@ -33,6 +47,7 @@ func writeAgentFixture(t *testing.T, repoDir, name, model string) {
 }
 
 func TestRenderMarkdownCarriesVariant(t *testing.T) {
+	cfgDir := renderCfg(t, "forest-opencode-config-")
 	wtDir := t.TempDir()
 	a := &Agent{
 		Name: "verifier", Dir: t.TempDir(), Description: "independent reviewer",
@@ -40,10 +55,10 @@ func TestRenderMarkdownCarriesVariant(t *testing.T) {
 		Instructions: "judge the change",
 		Permission:   map[string]string{"read": "allow", "edit": "deny"},
 	}
-	if err := renderMarkdown(wtDir, a); err != nil {
+	if err := renderMarkdown(cfgDir, a); err != nil {
 		t.Fatal(err)
 	}
-	md := rendered(t, wtDir, "verifier")
+	md := rendered(t, cfgDir, "verifier")
 	for _, want := range []string{
 		"variant: max", "model: openrouter/openai/gpt-5.6-luna",
 		"read: allow", "edit: deny",
@@ -52,6 +67,9 @@ func TestRenderMarkdownCarriesVariant(t *testing.T) {
 			t.Fatalf("rendered agent lacks %q:\n%s", want, md)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(wtDir, ".opencode")); !os.IsNotExist(err) {
+		t.Fatalf("renderMarkdown wrote .opencode into the worktree: %v", err)
+	}
 }
 
 func TestRenderMarkdownTemperatureIsOptional(t *testing.T) {
@@ -59,7 +77,7 @@ func TestRenderMarkdownTemperatureIsOptional(t *testing.T) {
 		return &Agent{Name: "verifier", Dir: t.TempDir(), Model: "m", Mode: "primary",
 			Instructions: "judge the change"}
 	}
-	omitted := t.TempDir()
+	omitted := renderCfg(t, "forest-opencode-config-")
 	if err := renderMarkdown(omitted, base()); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +88,7 @@ func TestRenderMarkdownTemperatureIsOptional(t *testing.T) {
 	temp := 0.2
 	a := base()
 	a.Temperature = &temp
-	declared := t.TempDir()
+	declared := renderCfg(t, "forest-opencode-config-")
 	if err := renderMarkdown(declared, a); err != nil {
 		t.Fatal(err)
 	}
@@ -199,5 +217,67 @@ func TestRunCategory(t *testing.T) {
 	}
 	if got := runCategory("unknown"); got != "other" {
 		t.Errorf("runCategory(unknown) = %q, want other", got)
+	}
+}
+
+// TestPublishedBranchHasNoOpenCodePath pins the outcome invariant: after a full
+// pass on a repository with no factory-specific ignore or exclude entries, the
+// published branch must contain no .opencode path. The rendered declaration is
+// written by renderMarkdown into a factory-owned directory outside the worktree,
+// so even `git add -A` cannot reach it regardless of the managed repository's
+// ignore rules. This is what keeps a hook or a working-tree secret scanner from
+// ever reading a factory artifact inside a repository the factory commits to.
+func TestPublishedBranchHasNoOpenCodePath(t *testing.T) {
+	wtDir := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", wtDir}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
+		}
+		return string(out)
+	}
+	run("init", "-b", "master")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(wtDir, "file.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-m", "init")
+	run("tag", "base")
+
+	// Render the agent into a factory-owned config directory outside the
+	// worktree, exactly as runPhase does, then stage the whole working tree the
+	// way publish does. The rendered declaration must not appear in the commit.
+	cfgDir := renderCfg(t, "forest-opencode-config-")
+	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
+	if err := renderMarkdown(cfgDir, a); err != nil {
+		t.Fatal(err)
+	}
+	decl := filepath.Join(cfgDir, "agents", "probe.md")
+	if _, err := os.Stat(decl); err != nil {
+		t.Fatalf("rendered declaration missing: %v", err)
+	}
+
+	// The agent's real change lands in the worktree; publish stages it with
+	// git add -A. The rendered declaration must not ride along.
+	if err := os.WriteFile(filepath.Join(wtDir, "result.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-m", "publish")
+	tree := run("ls-tree", "-r", "HEAD", "--name-only")
+	for _, p := range strings.Split(strings.TrimSpace(tree), "\n") {
+		if strings.HasPrefix(p, ".opencode") {
+			t.Fatalf("published branch contains factory path %q", p)
+		}
+	}
+	if strings.Contains(tree, "probe.md") {
+		t.Fatalf("published branch contains the rendered declaration:\n%s", tree)
+	}
+	if !strings.Contains(tree, "result.go") {
+		t.Fatalf("published branch lost the agent's change:\n%s", tree)
 	}
 }

@@ -143,11 +143,15 @@ func composeDigest(repoDir, name string) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// renderMarkdown writes the agent's opencode markdown declaration into the
-// worktree so `opencode run --agent <name>` loads the real system prompt and
-// permissions. The file is generated per run and ignored by git.
-func renderMarkdown(wtDir string, a *Agent) error {
-	dir := filepath.Join(wtDir, ".opencode", "agents")
+// renderMarkdown writes the agent's opencode markdown declaration into cfgDir's
+// agents/ so `opencode run --agent <name> --config <cfgDir>` loads the real
+// system prompt and permissions. cfgDir is a per-run directory outside the
+// managed worktree: nothing the factory renders is ever placed under the
+// worktree's .opencode/, where a managed hook or a working-tree secret scanner
+// would read it. The declaration is generated per run and lives only in the
+// factory-owned config space, never in a repository the factory commits to.
+func renderMarkdown(cfgDir string, a *Agent) error {
+	dir := filepath.Join(cfgDir, "agents")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

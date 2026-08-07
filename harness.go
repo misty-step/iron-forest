@@ -30,9 +30,6 @@ type runStats struct {
 // never mistaken for work the gate can publish.
 func runPhase(wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
 	var stats runStats
-	if err := renderMarkdown(wtDir, a); err != nil {
-		return stats, err
-	}
 	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
 		return stats, err
 	}
@@ -51,7 +48,24 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string) (runStats, e
 	}
 	defer cleanup()
 
+	// The opencode config directory lives outside the worktree so the managed
+	// repository's working tree never carries a factory artifact a hook or a
+	// working-tree secret scanner would read. The rendered agent declaration is
+	// written here and opencode is pointed at it with --config; the node_modules
+	// opencode materialises for its provider packages also lands here, never
+	// under the worktree's .opencode/. The directory is per-run and removed when
+	// the run is done.
+	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
+	if err != nil {
+		return stats, err
+	}
+	defer os.RemoveAll(cfgDir)
+	if err := renderMarkdown(cfgDir, a); err != nil {
+		return stats, err
+	}
+
 	cmd := exec.CommandContext(ctx, "opencode", "run",
+		"--config", cfgDir,
 		"--format", "json", "--model", a.Model, "--agent", a.Name,
 		"--auto", userPrompt)
 	cmd.Dir = wtDir
