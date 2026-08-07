@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,25 @@ func TestRunChecksContinuesAfterFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(later); err != nil {
 		t.Fatalf("later check did not run: %v", err)
+	}
+}
+
+func TestRunChecksPreflightFailureHasNoStatus(t *testing.T) {
+	oldEnv := checkEnvironment
+	checkEnvironment = func() ([]string, func(), error) {
+		return nil, func() {}, errors.New("locate mise: missing")
+	}
+	defer func() { checkEnvironment = oldEnv }()
+
+	note, err := runChecks(Config{Checks: []Check{{Name: "true", Run: "true"}}}, t.TempDir(), "run-preflight")
+	if err == nil {
+		t.Fatal("runChecks returned no error for a preflight failure")
+	}
+	if note.Status != "" {
+		t.Fatalf("preflight note status = %q, want empty so no pass is written", note.Status)
+	}
+	if len(note.Results) != 0 {
+		t.Fatalf("preflight note has %d results, want none: no declared check ran", len(note.Results))
 	}
 }
 

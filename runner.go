@@ -10,12 +10,16 @@ import (
 
 const checkOutputTailBytes = 4000
 
-// The note records check facts for later flows.
+// runChecks runs every declared check and records the result as a durable
+// note. A check that exits non-zero sets the note to "fail"; a command that
+// cannot start does too. A preflight failure — building the child environment,
+// locating the toolchain, resolving FOREST_CHECK_PATH — means no declared check
+// ran, so the returned note keeps an empty status and the caller must not write
+// it as pass. The status is built from the observed result, never assumed.
 func runChecks(cfg Config, wtDir, runID string) (checksNote, error) {
 	note := checksNote{
-		Status: "pass",
-		RunID:  runID,
-		Time:   time.Now().UTC().Format(time.RFC3339),
+		RunID: runID,
+		Time:  time.Now().UTC().Format(time.RFC3339),
 	}
 	env, cleanup, err := checkEnvironment()
 	if err != nil {
@@ -51,7 +55,13 @@ func runChecks(cfg Config, wtDir, runID string) (checksNote, error) {
 		note.Results = append(note.Results, result)
 	}
 	if startErr != nil {
+		note.Status = "fail"
 		return note, startErr
+	}
+	// Every check that set a failure already marked the note "fail"; an empty
+	// status means all of them passed, so record the pass explicitly.
+	if note.Status == "" {
+		note.Status = "pass"
 	}
 	return note, nil
 }

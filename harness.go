@@ -140,8 +140,9 @@ func childEnvironment() ([]string, func(), error) {
 // toolchain metadata escape into an opencode run. Host toolchain directories
 // are named in FOREST_CHECK_PATH (see checkHostBins); toolchain metadata a host
 // proxy must read to resolve its real driver arrives via FOREST_CHECK_ENV (see
-// checkHostEnv).
-func checkEnvironment() ([]string, func(), error) {
+// checkHostEnv). It is a variable so a test can force a preflight failure and
+// drive the durable-fact path end to end.
+var checkEnvironment = func() ([]string, func(), error) {
 	return childBaseEnv(true)
 }
 

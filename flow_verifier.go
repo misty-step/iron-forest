@@ -177,6 +177,16 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	out.BaseSHA = newHead
 
 	checks, checkErr := runChecks(cfg, wtDir, runID)
+	// A preflight failure means no declared check ran: the child environment
+	// could not be built, the toolchain was missing, or FOREST_CHECK_PATH did
+	// not resolve. There is nothing to record, so no Checks note exists, and the
+	// head is not broken code for the Fixer to repair. Write no note, classify it
+	// as a mechanical failure for an operator, and let the stalled brake park the
+	// head here instead of reviewing or merging a Revision whose checks never ran.
+	if checkErr != nil && checks.Status == "" {
+		out.Status = "checks_environment_failed"
+		return out, fmt.Errorf("checks: %w", checkErr)
+	}
 	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
 		if !errors.Is(err, errNoteExists) {
 			out.Status = "notes_failed"
@@ -191,8 +201,10 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			out.Status = "notes_failed"
 			return out, fmt.Errorf("notes: check note disappeared: %w", err)
 		}
+		// The winner note is the write-once fact for this Revision, but its mere
+		// existence never clears a real check error below: the note's own status
+		// decides routing, and a preflight failure can never reach this branch.
 		checks = winner
-		checkErr = nil
 	}
 	if checkErr != nil {
 		out.Status = "checks_failed"

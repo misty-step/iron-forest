@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,6 +381,156 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 			t.Fatalf("merged branch %q still exists on origin: %s", r.branch, out)
 		}
 	})
+}
+
+// TestVerifierPreflightFailureWritesNoPassNote proves the durable-fact outcome
+// of item #187: with the check environment forced to fail, no declared check
+// runs, no pass note is written on the Revision, the failure is classified as
+// a mechanical one for an operator, and Select does not offer the head as
+// mergeable. This is the falsifier for the old bug that initialised the note to
+// "pass" before resolving the environment and then wrote that note anyway.
+func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	// An approve verdict makes the head a merge candidate that only a
+	// trustworthy checks note may admit; a preflight failure must never pass it.
+	if err := writeVerdict(repo, head, verdictNote{
+		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
+		DefSHA: "def", RunID: "seed",
+	}); err != nil {
+		t.Fatalf("seed verdict: %v", err)
+	}
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	oldEnv := checkEnvironment
+	checkEnvironment = func() ([]string, func(), error) {
+		return nil, func() {}, errors.New("locate mise: missing")
+	}
+	defer func() { checkEnvironment = oldEnv }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-1")
+	if err == nil {
+		t.Fatalf("preflight failure returned no error: %#v", out)
+	}
+	if out.Status != "checks_environment_failed" {
+		t.Fatalf("preflight failure status = %q, want checks_environment_failed", out.Status)
+	}
+
+	if _, ok, err := readChecks(repo, head); err != nil || ok {
+		t.Fatalf("checks note on head = (found=%v, err=%v), want no note when checks never ran", ok, err)
+	}
+
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range subjects {
+		if s.Branch == branch {
+			t.Fatalf("verifier offered the preflight-failed head as mergeable: %#v", s)
+		}
+	}
+	repairs, err := (fixerFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range repairs {
+		if s.Branch == branch {
+			t.Fatalf("fixer took a preflight-failed head as if its code were wrong: %#v", s)
+		}
+	}
+}
+
+// TestVerifierPreflightRetryIgnoresExistingNote proves item #187's second pass:
+// once a (stale) checks note exists on a Revision, a retry over the same head
+// with a failing preflight must not clear checkErr because a note exists. The
+// old code read the existing note as the winner and set checkErr to nil, which
+// let an approved head review and merge without a single executed check. A
+// preflight failure is classified early, before any note is read or written.
+func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	masterBefore := remoteBranchHead(t, repo, "master")
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	if err := writeVerdict(repo, head, verdictNote{
+		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
+		DefSHA: "def", RunID: "seed",
+	}); err != nil {
+		t.Fatalf("seed verdict: %v", err)
+	}
+	// A stale pass note from an earlier, buggy pass already keys this Revision.
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "stale", Time: nowRFC()}); err != nil {
+		t.Fatalf("seed stale checks: %v", err)
+	}
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	oldEnv := checkEnvironment
+	checkEnvironment = func() ([]string, func(), error) {
+		return nil, func() {}, errors.New("locate mise: missing")
+	}
+	defer func() { checkEnvironment = oldEnv }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-2")
+	if err == nil {
+		t.Fatalf("retry over an existing note returned no error: %#v", out)
+	}
+	if out.Status != "checks_environment_failed" {
+		t.Fatalf("retry over an existing note status = %q, want checks_environment_failed (note must not clear checkErr)", out.Status)
+	}
+	if out.Status == "merged" {
+		t.Fatalf("retry merged a Revision whose checks never ran once: %#v", out)
+	}
+	if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
+		t.Fatalf("master advanced to %s on a retry whose checks never ran, want %s", got, masterBefore)
+	}
 }
 
 // TestStalledOnPersistsOutsideLedger pins the durable progress brake: three
