@@ -50,6 +50,11 @@ func (c *coreImpl) Config() (core.Config, error) {
 				FlowConfig: flowConfig(cfg.Flows.Fixer.Enabled, cfg.Flows.Fixer.Agent, cfg.Flows.Fixer.IntervalSec),
 				Attempts:   cfg.Flows.Fixer.Attempts,
 			},
+			Manager: core.ManagerFlowConfig{
+				FlowConfig:  flowConfig(cfg.Flows.Manager.Enabled, cfg.Flows.Manager.Agent, cfg.Flows.Manager.IntervalSec),
+				ReadyDepth:  cfg.Flows.Manager.ReadyDepth,
+				ExcludeTags: cfg.Flows.Manager.ExcludeTags,
+			},
 		},
 		Projection: core.ProjectionConfig{Enabled: cfg.Projection.Enabled, MergeViaHost: cfg.Projection.MergeViaHost},
 	}, nil

@@ -22,6 +22,10 @@ const (
 	// failedLabel is the human hint a lane leaves when a subject needs a person.
 	// It is a tracker convenience, never state the factory reads back.
 	failedLabel = "forest:failed"
+	// readyTag is the opt-in label the Manager lays on one unstarted item so the
+	// Builder (which requires it) can act. It is exactly the tag forest.yaml
+	// declares for the Builder's require_labels.
+	readyTag = "forest:ready"
 )
 
 // CommitIdentity is the author every flow's commits carry. It is declared, not
@@ -61,6 +65,7 @@ type Flows struct {
 	Builder  BuilderFlowCfg  `yaml:"builder"`
 	Verifier VerifierFlowCfg `yaml:"verifier"`
 	Fixer    FixerFlowCfg    `yaml:"fixer"`
+	Manager  ManagerFlowCfg  `yaml:"manager"`
 }
 
 // FlowCfg is what every lane declares: whether it is on, which agent it runs,
@@ -102,6 +107,18 @@ type FixerFlowCfg struct {
 	Attempts int `yaml:"attempts"`
 }
 
+// ManagerFlowCfg keeps exactly one unstarted assignment in the ready queue. It
+// judges (via an agent) only the candidate set that deterministic code has
+// already filtered and lays one readyTag on one pick per pass. ReadyDepth is
+// the number of unbranched, ready-tagged items the lane keeps in flight; it is
+// a knob, not a promise. ExcludeTags are tracker signals that make an item
+// ineligible, as for the Builder lane.
+type ManagerFlowCfg struct {
+	FlowCfg     `yaml:",inline"`
+	ReadyDepth  int      `yaml:"ready_depth"`
+	ExcludeTags []string `yaml:"exclude_labels"`
+}
+
 // ProjectionConfig is the optional, one-way human surface: publish a branch as
 // a pull request and mirror decisions as comments. The factory never reads it
 // back. MergeViaHost is for a protected target branch, where only the host may
@@ -131,6 +148,14 @@ func defaultConfig() Config {
 				// ceiling is a runaway guard, not a policy on how many passes a fix
 				// may take. Progress on one revision is bounded separately.
 				Attempts: 10,
+			},
+			// The Manager is opt-in: it is disabled until an operator declares it.
+			// It shares the Builder's agent declaration in the defaults; an operator
+			// who enables it should point it at a manager-capable agent.
+			Manager: ManagerFlowCfg{
+				FlowCfg:     FlowCfg{Enabled: false, Agent: "builder", IntervalSec: 60},
+				ReadyDepth:  1,
+				ExcludeTags: []string{"parked", failedLabel},
 			},
 		},
 		Projection: ProjectionConfig{Enabled: true, MergeViaHost: false},
@@ -175,6 +200,9 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Flows.Fixer.Agent == "" {
 		cfg.Flows.Fixer.Agent = d.Flows.Fixer.Agent
 	}
+	if cfg.Flows.Manager.Agent == "" {
+		cfg.Flows.Manager.Agent = d.Flows.Manager.Agent
+	}
 	if cfg.Flows.Builder.IntervalSec <= 0 {
 		cfg.Flows.Builder.IntervalSec = d.Flows.Builder.IntervalSec
 	}
@@ -193,6 +221,15 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Flows.Fixer.Attempts <= 0 {
 		cfg.Flows.Fixer.Attempts = d.Flows.Fixer.Attempts
+	}
+	if cfg.Flows.Manager.IntervalSec <= 0 {
+		cfg.Flows.Manager.IntervalSec = d.Flows.Manager.IntervalSec
+	}
+	if cfg.Flows.Manager.ReadyDepth <= 0 {
+		cfg.Flows.Manager.ReadyDepth = d.Flows.Manager.ReadyDepth
+	}
+	if len(cfg.Flows.Manager.ExcludeTags) == 0 {
+		cfg.Flows.Manager.ExcludeTags = d.Flows.Manager.ExcludeTags
 	}
 	for i, c := range cfg.Checks {
 		if c.Name == "" || c.Run == "" {
