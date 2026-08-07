@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -84,42 +83,30 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	}
 
 	workspace := workspaceDir(repoDir)
-	wtDir, baseSHA, err := createManagerWorktree(repoDir, workspace)
+	runDir, cleanup, err := createManagerRunDir(workspace)
 	if err != nil {
-		return Outcome{Status: "worktree_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("worktree: %w", err)
+		return Outcome{Status: "worktree_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("run dir: %w", err)
 	}
-	defer func() {
-		removeWorktree(repoDir, wtDir)
-		untrackWorktree(wtDir)
-	}()
-	out := Outcome{Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, BaseSHA: baseSHA}
+	defer cleanup()
+	out := Outcome{Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
 	prompt, err := renderManagerPrompt(a, cands)
 	if err != nil {
 		out.Status = "prompt_failed"
 		return out, fmt.Errorf("prompt: %w", err)
 	}
 	trace := filepath.Join(workspace, "runs", runID+".manager.jsonl")
-	// Snapshot the repo and remote refs before the agent runs. The worktree file
-	// checks below cannot see a `git branch` that leaves a ref while the working
-	// tree stays clean, or a push that mutates a remote ref, so the only reliable
-	// way to hold "the Manager moves no ref" is to prove the refs did not move.
-	before, err := snapshotManagerState(wtDir)
-	if err != nil {
-		out.Status = "worktree_failed"
-		return out, fmt.Errorf("snapshot refs: %w", err)
-	}
-	stats, err := runPhase(wtDir, a, prompt, trace)
+	stats, err := runPhase(runDir, a, prompt, trace)
 	out.TokIn, out.TokOut = stats.tokensIn, stats.tokensOut
 	if err != nil {
 		out.Status = "agent_failed"
 		return out, fmt.Errorf("agent: %w", err)
 	}
-	rep, err := gateManagerReport(wtDir, cands)
+	rep, err := gateManagerReport(runDir, cands)
 	if err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := gateManagerWorktree(wtDir, baseSHA, before); err != nil {
+	if err := gateManagerRunDir(runDir); err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
@@ -261,116 +248,30 @@ func gateManagerReport(wtDir string, cands []Item) (managerReport, error) {
 	return rep, nil
 }
 
-// managerState is a frozen picture of the refs the Manager is not allowed to
-// touch. The lane owns no branch and pushes nothing, so any local or remote ref
-// the agent creates, moves, or deletes while it runs is a violation that a
-// clean worktree file check alone cannot see.
-type managerState struct {
-	local  []refRecord
-	remote []refRecord
-}
-
-// snapshotManagerState records every local ref and every remote ref reachable
-// from the checkout. local uses for-each-ref so it sees refs/heads, refs/remotes,
-// and the per-worktree bookkeeping a `git branch` would leave behind even when
-// the visible tree stays clean; remote uses ls-remote so a push that only lives
-// on the host is still caught. Both are sorted for a stable comparison.
-func snapshotManagerState(repo string) (managerState, error) {
-	local, err := listLocalRefs(repo)
+// gateManagerRunDir enforces the lane's authority bound: the Manager writes
+// exactly one file, its report. The run directory is not a git checkout, so
+// there is no HEAD to move, no tracked file to modify, and no ref to push. The
+// bound holds because the lane has no repository, not because a check watches
+// one.
+//
+// An earlier version ran the agent in a detached worktree and proved innocence
+// by snapshotting every local and remote ref before and after. That could not
+// work: Builder, Verifier and Fixer run concurrently in this process, so a
+// sibling lane's push or note during a multi-minute Manager run moved refs the
+// Manager never touched and failed its gate. Removing the repository removes
+// the question.
+func gateManagerRunDir(runDir string) error {
+	entries, err := os.ReadDir(runDir)
 	if err != nil {
-		return managerState{}, err
+		return fmt.Errorf("cannot read manager run directory: %w", err)
 	}
-	remote, err := listRefs(repo, "")
-	if err != nil {
-		return managerState{}, err
-	}
-	return managerState{local: local, remote: remote}, nil
-}
-
-// listLocalRefs enumerates the local refs of a checkout via for-each-ref. It is
-// separate from listRefs (which talks to origin) because the Manager's authority
-// bound is on both sides of the seam: a branch left behind locally and a branch
-// pushed remotely are each a violation.
-func listLocalRefs(repo string) ([]refRecord, error) {
-	out, err := gitOut(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/")
-	if err != nil {
-		return nil, err
-	}
-	var refs []refRecord
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			refs = append(refs, refRecord{Ref: fields[0], SHA: fields[1]})
-		}
-	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].Ref < refs[j].Ref })
-	return refs, nil
-}
-
-// gateManagerWorktree enforces the lane's authority bounds after the agent
-// runs: the Manager owns no branch and writes no code, so the worktree must
-// still sit at the base commit, no repository file may change, and no ref may
-// have moved locally or remotely. The agent has edit permission and writes
-// report.json, so this check — not the prompt — is what makes "the Manager
-// cannot modify, branch, or push" hold. HEAD may not move (no commit), no
-// repository file may change (no code), and the before/after ref snapshots must
-// match (no branch created or pushed).
-func gateManagerWorktree(wtDir, baseSHA string, before managerState) error {
-	head, err := gitOut(wtDir, "rev-parse", "HEAD")
-	if err != nil {
-		return fmt.Errorf("cannot read manager worktree HEAD: %w", err)
-	}
-	if head != baseSHA {
-		return fmt.Errorf("manager committed: HEAD moved %s -> %s", short(baseSHA), short(head))
-	}
-	out, err := gitOutRaw(wtDir, "status", "--porcelain")
-	if err != nil {
-		return err
-	}
-	for _, path := range parseChanged(out) {
-		if isRunArtifact(path) {
+	for _, e := range entries {
+		name := e.Name()
+		// The harness renders the agent declaration here before the run.
+		if name == ".opencode" || isRunArtifact(name) {
 			continue
 		}
-		return fmt.Errorf("manager modified repository file %q", path)
-	}
-	after, err := snapshotManagerState(wtDir)
-	if err != nil {
-		return fmt.Errorf("re-snapshot refs: %w", err)
-	}
-	for _, side := range []struct {
-		kind   string
-		before []refRecord
-		after  []refRecord
-	}{
-		{"remote", before.remote, after.remote},
-		{"local", before.local, after.local},
-	} {
-		if err := refDiff(side.before, side.after); err != nil {
-			return fmt.Errorf("manager mutated a %s ref: %w", side.kind, err)
-		}
-	}
-	return nil
-}
-
-// refDiff returns nil when two sorted ref lists describe the same refs, or an
-// error naming the first ref whose value or existence differs.
-func refDiff(before, after []refRecord) error {
-	i, j := 0, 0
-	for i < len(before) || j < len(after) {
-		switch {
-		case j >= len(after):
-			return fmt.Errorf("ref %s deleted", before[i].Ref)
-		case i >= len(before):
-			return fmt.Errorf("ref %s created", after[j].Ref)
-		case before[i].Ref < after[j].Ref:
-			return fmt.Errorf("ref %s deleted", before[i].Ref)
-		case before[i].Ref > after[j].Ref:
-			return fmt.Errorf("ref %s created", after[j].Ref)
-		case before[i].SHA != after[j].SHA:
-			return fmt.Errorf("ref %s moved %s -> %s", before[i].Ref, short(before[i].SHA), short(after[j].SHA))
-		}
-		i++
-		j++
+		return fmt.Errorf("manager wrote unexpected file %q", name)
 	}
 	return nil
 }
@@ -551,31 +452,21 @@ func formatBlockers(ids []string) string {
 	return strings.Join(parts, ", ")
 }
 
-// createManagerWorktree makes a throwaway, detached worktree at the remote tip
-// for the Manager to run in. Unlike the build lanes the Manager owns no branch:
-// the worktree is detached at origin/master, so no local ref is created or
-// deleted and nothing is ever pushed from this lane.
-func createManagerWorktree(repo, workspace string) (wtDir, baseSHA string, err error) {
-	wtDir = filepath.Join(workspace, "worktrees", "manager")
-	trackWorktree(wtDir)
-	defer func() {
-		if err != nil {
-			untrackWorktree(wtDir)
-		}
-	}()
-	_ = os.RemoveAll(wtDir)
-	_ = git(repo, "worktree", "prune")
-	if err := git(repo, "fetch", "origin", "master"); err != nil {
-		return "", "", fmt.Errorf("fetch origin/master: %w", err)
+// createManagerRunDir makes a throwaway empty directory for the Manager to run
+// in. The lane reads its items from the Tracker and writes one report, so it
+// needs no checkout: giving it a git worktree would hand a judgement-only agent
+// a repository it has no business touching, and would make the lane's authority
+// a thing to police instead of a thing it lacks.
+func createManagerRunDir(workspace string) (string, func(), error) {
+	base := filepath.Join(workspace, "runs")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", nil, err
 	}
-	baseSHA, err = gitOut(repo, "rev-parse", "origin/master")
+	dir, err := os.MkdirTemp(base, "manager-")
 	if err != nil {
-		return "", "", fmt.Errorf("origin/master: %w", err)
+		return "", nil, err
 	}
-	if err := git(repo, "worktree", "add", "--detach", wtDir, baseSHA); err != nil {
-		return "", "", fmt.Errorf("worktree add: %w", err)
-	}
-	return wtDir, baseSHA, nil
+	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // managerCandidates returns the open items that need a fresh judgement now:

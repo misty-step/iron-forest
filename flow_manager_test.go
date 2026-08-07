@@ -504,78 +504,44 @@ func TestManagerRecordsPostEffectRevision(t *testing.T) {
 	}
 }
 
-// TestManagerRefDiffDetectsMutation proves the ref comparator used by
-// gateManagerWorktree flags every kind of ref change: a created ref, a deleted
-// ref, and a moved ref.
-func TestManagerRefDiffDetectsMutation(t *testing.T) {
-	base := []refRecord{
-		{Ref: "refs/heads/forest/1-x", SHA: "aaaa"},
-		{Ref: "refs/heads/master", SHA: "bbbb"},
+// TestManagerRunDirIsNotARepository pins the authority bound structurally. The
+// Manager reads items from the Tracker and writes one report, so it gets a bare
+// directory: there is no HEAD to move, no tracked file to change, and no ref to
+// push. An earlier version ran the agent in a detached worktree and proved
+// innocence by diffing every local and remote ref, which could not work because
+// sibling lanes move refs concurrently during a multi-minute Manager run.
+func TestManagerRunDirIsNotARepository(t *testing.T) {
+	workspace := t.TempDir()
+	runDir, cleanup, err := createManagerRunDir(workspace)
+	if err != nil {
+		t.Fatal(err)
 	}
-	created := []refRecord{
-		{Ref: "refs/heads/escape", SHA: "cccc"},
-		{Ref: "refs/heads/forest/1-x", SHA: "aaaa"},
-		{Ref: "refs/heads/master", SHA: "bbbb"},
-	}
-	if err := refDiff(base, created); err == nil {
-		t.Fatal("refDiff must reject a created ref")
-	}
-	deleted := []refRecord{
-		{Ref: "refs/heads/master", SHA: "bbbb"},
-	}
-	if err := refDiff(base, deleted); err == nil {
-		t.Fatal("refDiff must reject a deleted ref")
-	}
-	moved := []refRecord{
-		{Ref: "refs/heads/forest/1-x", SHA: "dddd"},
-		{Ref: "refs/heads/master", SHA: "bbbb"},
-	}
-	if err := refDiff(base, moved); err == nil {
-		t.Fatal("refDiff must reject a moved ref")
-	}
-	if err := refDiff(base, base); err != nil {
-		t.Fatalf("identical refs rejected: %v", err)
-	}
-}
+	defer cleanup()
 
-// TestManagerGateWorktreeRejectsRefMutation proves the authority gate catches a
-// run that leaves a ref behind or pushes one to the host even though HEAD and
-// the visible worktree files are untouched. The Manager must neither branch nor
-// push, and this is the check that makes that hold.
-func TestManagerGateWorktreeRejectsRefMutation(t *testing.T) {
-	repo := setupTestRepo(t)
-	wtDir, baseSHA, err := createManagerWorktree(repo, filepath.Join(repo, WorkspaceDir))
-	if err != nil {
+	if _, err := os.Stat(filepath.Join(runDir, ".git")); !os.IsNotExist(err) {
+		t.Fatal("manager run directory is a git checkout; the lane must have no repository")
+	}
+	if _, err := gitOut(runDir, "rev-parse", "HEAD"); err == nil {
+		t.Fatal("manager run directory resolves a HEAD; the lane must have no repository")
+	}
+
+	// A clean run writes only its report; the harness renders .opencode itself.
+	if err := os.WriteFile(filepath.Join(runDir, "report.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		removeWorktree(repo, wtDir)
-		untrackWorktree(wtDir)
-	}()
-	before, err := snapshotManagerState(wtDir)
-	if err != nil {
+	if err := os.MkdirAll(filepath.Join(runDir, ".opencode", "agents"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// A clean run: HEAD unmoved, no file changes, no ref moves. This must pass.
-	if err := gateManagerWorktree(wtDir, baseSHA, before); err != nil {
+	if err := gateManagerRunDir(runDir); err != nil {
 		t.Fatalf("clean run rejected: %v", err)
 	}
-	// An agent leaves a branch behind while the tree stays clean; the gate must
-	// reject it because a ref moved.
-	rebaseTestGit(t, wtDir, "branch", "escape")
-	if err := gateManagerWorktree(wtDir, baseSHA, before); err == nil {
-		t.Fatal("gate must reject a run that created a local ref")
-	}
-	// Clean up the local ref, then simulate a push to the host that leaves no
-	// local trace; the gate must reject the remote change too.
-	rebaseTestGit(t, wtDir, "branch", "-D", "escape")
-	before, err = snapshotManagerState(wtDir)
-	if err != nil {
+
+	// Anything else the agent leaves behind is a violation.
+	if err := os.WriteFile(filepath.Join(runDir, "escape.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rebaseTestGit(t, wtDir, "push", "-q", "origin", "HEAD:refs/heads/forest/evil")
-	if err := gateManagerWorktree(wtDir, baseSHA, before); err == nil {
-		t.Fatal("gate must reject a run that pushed a remote ref")
+	if err := gateManagerRunDir(runDir); err == nil {
+		t.Fatal("gate accepted a file the Manager had no business writing")
 	}
 }
 
