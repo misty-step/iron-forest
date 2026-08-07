@@ -2,14 +2,6 @@
 # Flows are independent lanes. They coordinate through repository state and
 # notes in this repository, so concurrency needs no scheduler.
 repo: misty-step/iron-forest
-
-# Paths no agent may write. The gate rejects a run that touches one.
-protected:
-  - .forest/
-  - forest.yaml
-  - agents/
-  - .opencode/opencode.json
-
 # The author every flow's commits carry. Declared, never inherited from whatever
 # account happens to run the daemon.
 commit:

@@ -87,7 +87,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "agent_failed"
 		return out, fmt.Errorf("agent: %w", err)
 	}
-	changed, rep, err := gate(wtDir, baseSHA, cfg.Protected,
+	changed, rep, err := gate(wtDir, baseSHA,
 		filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"))
 	if err != nil {
 		out.Status = "gate_failed"

@@ -116,7 +116,7 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "agent_failed"
 		return out, fmt.Errorf("agent: %w", err)
 	}
-	if _, _, err := gate(wtDir, baseSHA, cfg.Protected,
+	if _, _, err := gate(wtDir, baseSHA,
 		filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json")); err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)

@@ -62,6 +62,20 @@ func gitOut(repo string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// gitOutRaw returns git's stdout byte for byte. Porcelain output is
+// column-significant: a status line is two status characters, a space, then the
+// path, and an unmodified index leaves the first column blank. Trimming that
+// blank shifts every field left and eats the first character of the path, so
+// any caller parsing by column must use this instead of gitOut.
+func gitOutRaw(repo string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return string(out), nil
+}
+
 func gitCommit(wtDir string, id CommitIdentity, msg string) error {
 	cmd := exec.Command("git",
 		"-c", "user.name="+id.Name,

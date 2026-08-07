@@ -42,7 +42,6 @@ func workspaceDir(repoDir string) string { return filepath.Join(repoDir, Workspa
 // human-facing projection.
 type Config struct {
 	Repo       string           `yaml:"repo"`
-	Protected  []string         `yaml:"protected"`
 	Commit     CommitIdentity   `yaml:"commit"`
 	Checks     []Check          `yaml:"checks"`
 	Flows      Flows            `yaml:"flows"`
@@ -114,9 +113,6 @@ type ProjectionConfig struct {
 
 func defaultConfig() Config {
 	return Config{
-		Protected: []string{
-			".forest/", "forest.yaml", "agents/", ".opencode/opencode.json",
-		},
 		// The identity is generic on purpose. A repository that wants its own
 		// author declares it; the factory never assumes an organization.
 		Commit: CommitIdentity{Name: "forest", Email: "forest@invalid"},

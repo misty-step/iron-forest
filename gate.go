@@ -30,11 +30,15 @@ var runArtifacts = []string{"report.json", "review.json"}
 // gate verifies the build agent's claims against reality after the run:
 //   - the agent did not commit (HEAD is still the base)
 //   - it produced a non-empty change
-//   - it did not touch a protected path
 //   - report.json exists and satisfies its declared schema
 //
 // It returns the changed file list that becomes the pull request body.
-func gate(wtDir, baseSHA string, protected []string, schemaPath string) ([]string, report, error) {
+//
+// There is no protected-path check. See docs/adr/0003: the list was not a
+// security boundary, because the code enforcing it was itself writable by any
+// run, and it blocked the factory from working on its own declarations. The
+// boundary that holds is independent review on the exact commit.
+func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	var rep report
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
@@ -43,28 +47,17 @@ func gate(wtDir, baseSHA string, protected []string, schemaPath string) ([]strin
 	if head != baseSHA {
 		return nil, rep, fmt.Errorf("agent committed: HEAD moved %s -> %s", short(baseSHA), short(head))
 	}
-	out, err := gitOut(wtDir, "status", "--porcelain")
+	out, err := gitOutRaw(wtDir, "status", "--porcelain")
 	if err != nil {
 		return nil, rep, err
 	}
-	changed, renamed := parseChanged(out)
+	changed := parseChanged(out)
 	real := make([]string, 0, len(changed))
 	for _, path := range changed {
 		if strings.HasPrefix(path, ".forest/") || isRunArtifact(path) {
 			continue // a run record, not the repo's change
 		}
-		if isProtected(path, protected) {
-			return nil, rep, fmt.Errorf("agent touched protected path %q", path)
-		}
 		real = append(real, path)
-	}
-	// parseChanged keeps only the destination of a rename, so the protected
-	// list would never see a protected path being moved away; reject any
-	// rename whose original path is protected.
-	for _, path := range renamed {
-		if isProtected(path, protected) {
-			return nil, rep, fmt.Errorf("agent renamed protected path %q", path)
-		}
 	}
 	if len(real) == 0 {
 		return nil, rep, fmt.Errorf("agent produced no real changes")
@@ -163,22 +156,10 @@ func isRunArtifact(path string) bool {
 	return false
 }
 
-// isProtected reports whether path is covered by one of the protected paths.
-func isProtected(path string, protected []string) bool {
-	for _, prot := range protected {
-		if prot != "" && (path == prot || strings.HasPrefix(path, prot)) {
-			return true
-		}
-	}
-	return false
-}
-
 // parseChanged turns `git status --porcelain` into a changed file list,
-// stripping rename arrows (`R  old -> new` keeps `new`). The original path of
-// each rename is returned separately so the gate can reject renames that move
-// a protected path out from under it.
-func parseChanged(porcelain string) ([]string, []string) {
-	var out, renamed []string
+// stripping rename arrows (`R  old -> new` keeps `new`).
+func parseChanged(porcelain string) []string {
+	var out []string
 	for _, line := range strings.Split(porcelain, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if len(line) < 4 {
@@ -186,12 +167,11 @@ func parseChanged(porcelain string) ([]string, []string) {
 		}
 		path := line[3:]
 		if i := strings.Index(path, " -> "); i >= 0 {
-			renamed = append(renamed, path[:i])
 			path = path[i+4:]
 		}
 		out = append(out, path)
 	}
-	return out, renamed
+	return out
 }
 
 func short(sha string) string {

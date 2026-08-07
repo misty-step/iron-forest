@@ -30,8 +30,10 @@ One item spans one repository. A person sequences work that crosses two.
 ## What ships today
 
 Each repository declares its own factory in its own `forest.yaml`: the checks,
-the agents, the paths no agent may touch. There is no central policy, which is
-why there is no authority reconciler.
+the agents, the merge rules. There is no central policy, which is why there is
+no authority reconciler. No path is withheld from an agent; the factory may
+work on its own declarations, and independent review on the exact commit is
+what decides whether that work lands.
 
 Coordination is facts, not locks. A Verdict or Checks note is keyed to the exact
 reviewed commit and written once; git refuses the second writer. Attempts and the
@@ -61,18 +63,43 @@ source may move it; the others rebuild from it.
 
 Cost is bounded by the provider key. The Ledger records tokens, not currency.
 
+## Surfaces
+
+The core is a headless program. It runs with no terminal, no operator present,
+and no network listener, and it is complete on its own. Everything it knows is
+in the repository, the refs, the notes, and the Ledger.
+
+Every operation the core performs is reachable through one internal API. Each
+surface is a client of that API with no privileged path around it:
+
+- **CLI** — the reference surface and the contract. Scriptable, pipeable, and
+  usable by an agent that is not part of Iron Forest.
+- **TUI** — the same operations with a live view, for an operator watching work.
+- **UI** — the same operations again, for reading traces and configuration
+  comfortably.
+
+Surfaces have parity. Anything readable in Iron Forest is readable from any of
+them, and anything writable is writable from any of them. A capability that
+exists in only one surface is a defect, not a roadmap item.
+
+One exception shapes the design rather than breaking the rule. Which subject is
+in flight, and cancelling a live run, exist only inside the running process.
+Those operations are served by the daemon over a local transport. Everything
+else is durable state that any surface may read directly.
+
 ## Standards
 
 - **The Gate is deterministic.** Agents propose; the Gate decides from explicit evidence.
 - **The Ledger is append-only and honest.** A Run that cannot be recorded must fail loudly.
 - **Agent definitions are data.** Model, permissions, prompts, and output contracts stay inspectable.
+- **Surfaces have parity.** Every read and every write is reachable from the CLI, and no surface holds a capability the others lack.
 - **Authority is bounded by the worktree.** A run must not change the host outside the worktree it was given, and must not hold a credential for anything else.
 - **A fact about a commit is written once.** Coordination never guesses whether a holder is alive.
 
 ## Bets
 
 - A deterministic Gate on explicit evidence is enough to make an unattended merge safe.
-- Repository evidence stays sufficient to explain every Run without a database or a dashboard.
+- Repository evidence stays sufficient to explain every Run without a database. A surface presents that evidence; it never becomes the source of it.
 - An operator can replace the Tracker and the Host without moving factory state out of git.
 - Facts and idempotent writes coordinate work as well as locks, for less.
 
@@ -87,12 +114,13 @@ checks, and the Ledger. The Gate has demonstrably rejected a real regression.
 Iron Forest favours boring local operation, explicit repository evidence, and
 small ports over hidden integrations. It grows by deleting premises, not by
 matching features. Replace the direct `gh` calls with a declared Tracker port and
-Projection port.
+Projection port. Put one API in front of the core so the CLI, the TUI, and a UI
+are the same program seen from three places.
 
 ## Non-goals
 
 - A hosted multi-tenant service that holds another organization's credentials.
-- A web control plane or dashboard.
+- A surface that becomes the source of truth. A UI and a TUI are in scope; state that lives only in one of them is not.
 - Reading Host checks, reviews, or merge state as factory state.
 - Central policy for repositories the installation does not own.
 - A coordinated merge across repositories.
