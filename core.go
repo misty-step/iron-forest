@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/misty-step/iron-forest/core"
 )
@@ -89,10 +91,10 @@ func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 	return out, nil
 }
 
-func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, error) {
-	runs, _, err := loadLedger(ledgerPath(c.repoDir))
+func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, int, error) {
+	runs, invalid, err := loadLedger(ledgerPath(c.repoDir))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := make([]core.RunRecord, 0, len(runs))
 	for _, r := range runs {
@@ -122,7 +124,7 @@ func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, error) {
 			Error:         r.Error,
 		})
 	}
-	return out, nil
+	return out, invalid, nil
 }
 
 func (c *coreImpl) Trace(runID string) ([]byte, error) {
@@ -228,7 +230,57 @@ func (c *coreImpl) Branches() ([]core.BranchState, error) {
 	return out, nil
 }
 
-func (c *coreImpl) DaemonPresent() (bool, error) {
-	s := probeDaemon(c.repoDir)
-	return s.Active, nil
+func (c *coreImpl) Head() (string, error) {
+	return gitOut(c.repoDir, "rev-parse", "--short", "HEAD")
+}
+
+func (c *coreImpl) Worktrees() ([]string, error) {
+	return worktreePaths(c.repoDir), nil
+}
+
+func (c *coreImpl) Daemon() (core.Daemon, error) {
+	return probeDaemon(c.repoDir), nil
+}
+
+// probeDaemon reports whether the factory service is active, preferring
+// systemd --user and falling back to the workspace daemon lock.
+func probeDaemon(repoDir string) core.Daemon {
+	d := core.Daemon{Unit: "forest.service"}
+	out, err := exec.Command("systemctl", "--user", "is-active", "forest").Output()
+	active := err == nil && strings.TrimSpace(string(out)) == "active"
+	d.Active = active
+	if active {
+		if pid, err := exec.Command("systemctl", "--user", "show", "forest", "-p", "MainPID", "--value").Output(); err == nil {
+			d.PID = strings.TrimSpace(string(pid))
+		}
+		d.Note = "systemd --user"
+		return d
+	}
+	lock := filepath.Join(repoDir, WorkspaceDir, "daemon.lock")
+	if f, err := os.Open(lock); err == nil {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		_ = f.Close()
+		if err != nil {
+			d.Active = true
+			d.Note = "daemon.lock held (not via systemd?)"
+			return d
+		}
+	}
+	d.Note = "inactive"
+	return d
+}
+
+// worktreePaths lists every worktree path for the checkout.
+func worktreePaths(repoDir string) []string {
+	out, err := gitOut(repoDir, "worktree", "list", "--porcelain")
+	if err != nil || out == "" {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if path := strings.TrimPrefix(line, "worktree "); path != line && path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }

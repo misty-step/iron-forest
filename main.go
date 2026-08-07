@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/misty-step/iron-forest/core"
 )
 
 func main() {
@@ -38,19 +40,19 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
 	}
-	cfg, err := loadConfig(filepath.Join(repoDir, "forest.yaml"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
-		return 1
-	}
+	api := NewCore(repoDir)
 	switch args[0] {
 	case "list":
-		return cmdList(cfg)
+		return cmdList(api)
 	case "agents":
-		return cmdAgents(repoDir)
+		return cmdAgents(api)
 	case "stats":
-		return cmdStats(repoDir, args[1:])
+		return cmdStats(api, args[1:])
 	case "serve":
+		cfg, code := repoConfig(repoDir)
+		if code != 0 {
+			return code
+		}
 		var names []string
 		for i := 1; i < len(args); i++ {
 			if i+1 >= len(args) {
@@ -70,6 +72,10 @@ func run(args []string) int {
 		}
 		return serve(cfg, repoDir, names)
 	case "run":
+		cfg, code := repoConfig(repoDir)
+		if code != 0 {
+			return code
+		}
 		if len(args) != 3 {
 			usage()
 			return 2
@@ -80,60 +86,61 @@ func run(args []string) int {
 			usage()
 			return 2
 		}
-		return cmdShow(repoDir, args[1])
+		return cmdShow(api, args[1])
 	case "version":
 		fmt.Printf("forest %s\n", version)
 		return 0
 	case "selfcheck":
 		return cmdSelfcheck(repoDir)
 	case "watch":
-		return cmdWatch(cfg, repoDir, args[1:])
+		return cmdWatch(api, repoDir, args[1:])
 	default:
 		usage()
 		return 2
 	}
 }
 
-func cmdList(cfg Config) int {
-	repoDir, err := os.Getwd()
+// repoConfig loads forest.yaml for the live-run commands that need it.
+func repoConfig(repoDir string) (Config, int) {
+	cfg, err := loadConfig(filepath.Join(repoDir, "forest.yaml"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
-		return 1
+		return Config{}, 1
 	}
+	return cfg, 0
+}
+
+func cmdList(api core.API) int {
 	// Ask the lane, not the tracker: an operator needs to know what the Builder
-	// will take, which is narrower than what the tracker calls eligible.
-	subjects, err := builderFlow{}.Select(cfg, repoDir)
+	// will take, which is narrower than what the tracker calls eligible. The
+	// core API returns exactly that backlog.
+	items, err := api.Items()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
 	}
-	for _, s := range subjects {
-		fmt.Printf("#%s\t%s\n", s.ID, s.Item.Title)
+	for _, it := range items {
+		fmt.Printf("#%s\t%s\n", it.ID, it.Title)
 	}
 	return 0
 }
 
-func cmdAgents(repoDir string) int {
-	names, err := discoverAgents(repoDir)
+func cmdAgents(api core.API) int {
+	agents, err := api.Agents()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
 	}
-	if len(names) == 0 {
+	if len(agents) == 0 {
 		fmt.Println("forest: no agents declared under agents/")
 		return 0
 	}
-	for _, name := range names {
-		a, err := loadAgent(repoDir, name)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "forest: %v\n", err)
-			continue
-		}
+	for _, a := range agents {
 		fmt.Printf("%s\tmodel=%s%s mode=%s def_sha=%s\n",
-			name, a.Model, variantSuffix(a), a.Mode, a.DefSHA)
+			a.Name, a.Model, variantSuffix(a.Variant), a.Mode, a.DefSHA)
 		fmt.Printf("  %s\n", a.Description)
 		var mcps []string
-		for _, m := range a.MCP {
+		for _, m := range a.Mcps {
 			state := "off"
 			if m.Enabled {
 				state = "on"
@@ -147,20 +154,28 @@ func cmdAgents(repoDir string) int {
 	return 0
 }
 
-func cmdShow(repoDir, sha string) int {
-	if err := fetchNotes(repoDir); err != nil {
-		fmt.Fprintln(os.Stderr, "forest: notes:", err)
+func cmdShow(api core.API, sha string) int {
+	v, c, err := api.Notes(sha)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
 	}
-	verdict, haveVerdict, err := readVerdict(repoDir, sha)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest: verdict:", err)
-		return 1
+	haveVerdict := v.Time != "" || v.RunID != ""
+	haveChecks := c.Time != "" || c.RunID != ""
+	verdict := verdictNote{
+		Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
+		Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
 	}
-	checks, haveChecks, err := readChecks(repoDir, sha)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest: checks:", err)
-		return 1
+	checks := checksNote{
+		Status:  c.Status,
+		Results: make([]checkResult, 0, len(c.Results)),
+		RunID:   c.RunID,
+		Time:    c.Time,
+	}
+	for _, r := range c.Results {
+		checks.Results = append(checks.Results, checkResult{
+			Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
+		})
 	}
 	value := struct {
 		Verdict *verdictNote `json:"verdict,omitempty"`

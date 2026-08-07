@@ -120,9 +120,12 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if err := os.WriteFile(ws, []byte(rows), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	all, err := api.Ledger(core.LedgerQuery{})
+	all, invalid, err := api.Ledger(core.LedgerQuery{})
 	if err != nil {
 		t.Fatalf("Ledger: %v", err)
+	}
+	if invalid != 0 {
+		t.Fatalf("Ledger invalid = %d, want 0", invalid)
 	}
 	if len(all) != 2 {
 		t.Fatalf("Ledger returned %d rows, want 2", len(all))
@@ -130,7 +133,7 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if all[0].Flow != "builder" || all[0].TokensIn != 10 || all[0].CacheRead != 30 || all[0].CacheWrite != 4 || all[0].Reasoning != 5 {
 		t.Fatalf("row 0 = %+v, want builder with 10 fresh, 30 cached-read, 4 cached-write, 5 reasoning in", all[0])
 	}
-	builder, err := api.Ledger(core.LedgerQuery{Flow: "builder"})
+	builder, _, err := api.Ledger(core.LedgerQuery{Flow: "builder"})
 	if err != nil {
 		t.Fatalf("Ledger(builder): %v", err)
 	}
@@ -293,11 +296,11 @@ func TestCoreBranchesListsForestBranches(t *testing.T) {
 
 func TestCoreDaemonPresentWithNoDaemon(t *testing.T) {
 	api, _, _ := coreFixture(t)
-	up, err := api.DaemonPresent()
+	d, err := api.Daemon()
 	if err != nil {
-		t.Fatalf("DaemonPresent: %v", err)
+		t.Fatalf("Daemon: %v", err)
 	}
-	if up {
-		t.Fatal("DaemonPresent reported a daemon in a bare test environment")
+	if d.Active {
+		t.Fatal("Daemon reported active in a bare test environment")
 	}
 }

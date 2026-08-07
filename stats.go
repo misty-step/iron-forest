@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/misty-step/iron-forest/core"
 )
 
 // statsCmd aggregates valid ledger rows without changing the append-only file.
@@ -58,7 +59,7 @@ func (k *keyed) add(key string, r runRecord) {
 	k.totals[key] = t
 }
 
-func cmdStats(repoDir string, args []string) int {
+func cmdStats(api core.API, args []string) int {
 	asJSON := false
 	for _, a := range args {
 		switch a {
@@ -70,7 +71,7 @@ func cmdStats(repoDir string, args []string) int {
 		}
 	}
 	s := &statsCmd{}
-	if err := s.load(filepath.Join(repoDir, WorkspaceDir, "runs.jsonl")); err != nil {
+	if err := s.load(api); err != nil {
 		fmt.Fprintf(os.Stderr, "forest: stats: %v\n", err)
 		return 1
 	}
@@ -80,12 +81,39 @@ func cmdStats(repoDir string, args []string) int {
 	return s.emitText(os.Stdout)
 }
 
-func (s *statsCmd) load(path string) error {
-	runs, invalid, err := loadLedger(path)
+// coreRunRecord adapts a core ledger row back into the aggregator's internal
+// shape so the reporting code below needs no further churn.
+func coreRunRecord(r core.RunRecord) runRecord {
+	return runRecord{
+		Time:          r.Time,
+		RunID:         r.RunID,
+		Flow:          r.Flow,
+		Subject:       r.Subject,
+		Revision:      r.Revision,
+		ID:            r.ID,
+		Branch:        r.Branch,
+		PRURL:         r.PRURL,
+		Status:        r.Status,
+		TokensIn:      r.TokensIn,
+		TokOut:        r.TokensOut,
+		Agent:         r.Agent,
+		Model:         r.Model,
+		BaseSHA:       r.BaseSHA,
+		DefSHA:        r.DefSHA,
+		ReviewVerdict: r.ReviewVerdict,
+		Error:         r.Error,
+	}
+}
+
+func (s *statsCmd) load(api core.API) error {
+	records, invalid, err := api.Ledger(core.LedgerQuery{})
 	if err != nil {
 		return err
 	}
-	s.runs = runs
+	s.runs = make([]runRecord, 0, len(records))
+	for _, r := range records {
+		s.runs = append(s.runs, coreRunRecord(r))
+	}
 	s.invalid = invalid
 	s.computeRange()
 	return nil

@@ -138,6 +138,15 @@ type LedgerQuery struct {
 	Flow string
 }
 
+// Daemon is the operator-visible state of the factory service: whether it is
+// active and, when it is, how the operator can reach it.
+type Daemon struct {
+	Active bool
+	PID    string
+	Unit   string
+	Note   string
+}
+
 // Verdict is the review decision note for one commit.
 type Verdict struct {
 	Verdict  string
@@ -193,10 +202,12 @@ type BranchState struct {
 type API interface {
 	Config() (Config, error)
 	Agents() ([]AgentInfo, error)
-	Ledger(LedgerQuery) ([]RunRecord, error)
+	Ledger(LedgerQuery) ([]RunRecord, int, error)
 	Trace(runID string) ([]byte, error)
 	Notes(sha string) (Verdict, Checks, error)
 	Items() ([]Item, error)
 	Branches() ([]BranchState, error)
-	DaemonPresent() (bool, error)
+	Head() (string, error)
+	Worktrees() ([]string, error)
+	Daemon() (Daemon, error)
 }
