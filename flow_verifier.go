@@ -518,7 +518,7 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item, expectedHead str
 			branch, short(expectedHead), short(current))
 	}
 	if cfg.Projection.MergeViaHost {
-		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
+		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, expectedHead); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
 		}
 		return finishMerge(cfg, repoDir, branch, it, expectedHead)

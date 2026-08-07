@@ -13,13 +13,14 @@ import (
 var projectionCommand = ghJSON
 
 type projectionPullRequest struct {
-	Number int    `json:"number"`
-	URL    string `json:"url"`
+	Number  int    `json:"number"`
+	URL     string `json:"url"`
+	HeadSHA string `json:"headRefOid"`
 }
 
 func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error) {
 	out, err := projectionCommand("pr", "list", "-R", cfg.Repo, "--state", "open",
-		"--head", branch, "--json", "number,url")
+		"--head", branch, "--json", "number,url,headRefOid")
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +102,14 @@ func projectChecks(cfg Config, branch string, c checksNote) error {
 	return err
 }
 
-// projectMerge asks the host to merge a pull request when it owns the target branch.
-func projectMerge(cfg Config, branch, strategy string) error {
+// projectMerge asks the host to merge a pull request when it owns the target
+// branch. expectedHead is the exact revision the git side already admitted, and
+// the host merge is only legal when the projection still points at it: a push to
+// the branch after admission would otherwise make the host land an unchecked,
+// unreviewed commit that no local checks or Verdict describe. The PR's head is
+// therefore matched against expectedHead before the merge call, a provider-side
+// compare-and-swap that closes the window the git-only branchHead check cannot.
+func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	if !cfg.Projection.Enabled {
 		return errors.New("projection disabled")
 	}
@@ -112,6 +119,10 @@ func projectMerge(cfg Config, branch, strategy string) error {
 	}
 	if len(prs) == 0 || prs[0].Number == 0 {
 		return fmt.Errorf("no open pull request for branch %q", branch)
+	}
+	if prs[0].HeadSHA != "" && prs[0].HeadSHA != expectedHead {
+		return fmt.Errorf("projection head %s moved from admitted %s for branch %q; refusing",
+			short(prs[0].HeadSHA), short(expectedHead), branch)
 	}
 	method := ""
 	switch strategy {
