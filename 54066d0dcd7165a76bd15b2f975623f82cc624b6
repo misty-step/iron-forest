@@ -1,0 +1,1 @@
+{"status":"pass","results":[{"name":"build","code":0,"seconds":0.151818966,"output":""},{"name":"vet","code":0,"seconds":0.045123864,"output":""},{"name":"test","code":0,"seconds":1.120239422,"output":"ok  \tgithub.com/misty-step/iron-forest\t0.984s\n"}],"run_id":"20260807T164038Z-branch-forest/166-child-path-must-resolve-host-lan","time":"2026-08-07T16:40:41Z"}
