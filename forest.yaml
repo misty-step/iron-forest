@@ -36,7 +36,8 @@ flows:
     enabled: true
     agent: builder
     interval_seconds: 30
-    exclude_labels: [parked, "forest:failed"]
+    require_labels: ["forest:ready"]
+    exclude_labels: ["forest:failed"]
   verifier:
     enabled: true
     agent: verifier
