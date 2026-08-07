@@ -161,8 +161,31 @@ func TestEligibleItemsExcludesLabelsAndCoveredBranches(t *testing.T) {
 		Name string `json:"name"`
 	}{Name: "parked"})
 	items := []issue{{Number: 1, Title: "ready"}, labelled, {Number: 3, Title: "covered"}}
-	got := eligibleFrom(items, []string{"forest/3-covered"}, []string{"parked"})
+	got := eligibleFrom(items, []string{"forest/3-covered"}, []string{"parked"}, nil)
 	if len(got) != 1 || got[0].Number != 1 {
 		t.Fatalf("eligible items = %+v, want only item 1", got)
+	}
+}
+
+func TestEligibleItemsRequireLabelsOptIn(t *testing.T) {
+	label := func(number int, names ...string) issue {
+		it := issue{Number: number}
+		for _, name := range names {
+			it.Labels = append(it.Labels, struct {
+				Name string `json:"name"`
+			}{Name: name})
+		}
+		return it
+	}
+	unlabelled := label(1)
+	promoted := label(2, "forest:ready")
+	parked := label(3, "parked", "forest:ready")
+	items := []issue{unlabelled, promoted, parked}
+
+	// With require_labels declared, only promoted items are selected; an open
+	// unlabelled item is not, and "parked" no longer brakes a promoted item.
+	got := eligibleFrom(items, nil, []string{"parked"}, []string{"forest:ready"})
+	if len(got) != 2 || got[0].Number != 2 || got[1].Number != 3 {
+		t.Fatalf("opt-in eligible items = %+v, want items 2 and 3", got)
 	}
 }

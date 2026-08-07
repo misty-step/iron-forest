@@ -83,10 +83,14 @@ type FlowCfg struct {
 
 // BuilderFlowCfg turns tracker items into branches. ExcludeLabels are the
 // tracker-side signals that make an item ineligible; they are a convenience of
-// the current tracker, not part of the factory's state.
+// the current tracker, not part of the factory's state. RequireLabels, when
+// non-empty, switches selection from opt-out to opt-in: an open item is
+// eligible only when it carries every required label, and ExcludeLabels is not
+// consulted. An empty RequireLabels keeps the opt-out selection unchanged.
 type BuilderFlowCfg struct {
 	FlowCfg       `yaml:",inline"`
 	ExcludeLabels []string `yaml:"exclude_labels"`
+	RequireLabels []string `yaml:"require_labels"`
 }
 
 // VerifierFlowCfg reviews branches and owns the merge. Merge names the history
