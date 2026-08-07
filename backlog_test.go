@@ -179,13 +179,14 @@ func TestEligibleItemsRequireLabelsOptIn(t *testing.T) {
 	}
 	unlabelled := label(1)
 	promoted := label(2, "forest:ready")
-	parked := label(3, "parked", "forest:ready")
-	items := []issue{unlabelled, promoted, parked}
+	braked := label(3, "forest:failed", "forest:ready")
+	items := []issue{unlabelled, promoted, braked}
 
-	// With require_labels declared, only promoted items are selected; an open
-	// unlabelled item is not, and "parked" no longer brakes a promoted item.
-	got := eligibleFrom(items, nil, []string{"parked"}, []string{"forest:ready"})
-	if len(got) != 2 || got[0].Number != 2 || got[1].Number != 3 {
-		t.Fatalf("opt-in eligible items = %+v, want items 2 and 3", got)
+	// With require_labels declared, selection is an opt-in: only an open item
+	// carrying the required label is selected. ExcludeLabels composes with the
+	// opt-in, so an item that also carries the excluded label is not selected.
+	got := eligibleFrom(items, nil, []string{"forest:failed"}, []string{"forest:ready"})
+	if len(got) != 1 || got[0].Number != 2 {
+		t.Fatalf("opt-in eligible items = %+v, want only item 2", got)
 	}
 }
