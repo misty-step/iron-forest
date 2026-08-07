@@ -15,6 +15,12 @@ protected:
 lease:
   ttl_seconds: 7200
 
+# The author every flow's commits carry. Declared, never inherited from whatever
+# account happens to run the daemon.
+commit:
+  name: forest
+  email: forest@mistystep.io
+
 # The checks Iron Forest runs itself. The result is a note on the commit, not a
 # status read back from a host.
 checks:
@@ -41,7 +47,7 @@ flows:
     enabled: true
     agent: builder
     interval_seconds: 40
-    attempts: 2
+    attempts: 10
 
 # The human-facing surface. One way out: Iron Forest never reads it back.
 projection:

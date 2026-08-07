@@ -23,6 +23,10 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err := fetchNotes(repoDir); err != nil {
 		return nil, fmt.Errorf("notes: %w", err)
 	}
+	runs, _, err := loadLedger(ledgerPath(repoDir))
+	if err != nil {
+		return nil, err
+	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return nil, err
@@ -50,6 +54,12 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			return nil, fmt.Errorf("attempts %s: %w", branch, err)
 		}
 		if attempts >= cfg.Flows.Fixer.Attempts {
+			continue
+		}
+		// The attempt ceiling bounds published repairs; this bounds the repairs
+		// that never reached a commit, so a lane that cannot even publish stops
+		// paying an agent to retry one unchanged situation.
+		if stalledOn(runs, "fixer", key, head) {
 			continue
 		}
 		subjects = append(subjects, Subject{
@@ -111,7 +121,7 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := commitAndPush(repoDir, wtDir, s.Branch, it); err != nil {
+	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}

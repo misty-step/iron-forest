@@ -84,7 +84,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := commitAndPush(repoDir, wtDir, branch, it); err != nil {
+	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}

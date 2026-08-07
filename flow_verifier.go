@@ -25,6 +25,10 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err := fetchNotes(repoDir); err != nil {
 		return nil, fmt.Errorf("notes: %w", err)
 	}
+	runs, _, err := loadLedger(ledgerPath(repoDir))
+	if err != nil {
+		return nil, err
+	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return nil, err
@@ -49,6 +53,19 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)
 		}
 		if !found {
+			// A head whose checks already failed belongs to the Fixer: rechecking
+			// the same commit buys the same fact and pays for it again. A repaired
+			// branch has a new head carrying no notes, so it returns here.
+			checks, hasChecks, cerr := readChecks(repoDir, head)
+			if cerr != nil {
+				return nil, fmt.Errorf("checks %s: %w", branch, cerr)
+			}
+			if hasChecks && checks.Status == "fail" {
+				continue
+			}
+			if stalledOn(runs, "verifier", s.Key, head) {
+				continue
+			}
 			fresh = append(fresh, s)
 			continue
 		}
@@ -99,23 +116,32 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// Rebase the branch onto current master before checking or reviewing it: a
 	// Verdict and its checks must key to the exact tree that will land, not to a
 	// tree built from an ancient master. Every later step uses the returned head.
-	if newHead, err := rebaseOntoMaster(wtDir, s.Branch); err != nil {
-		// A branch that cannot move onto current master can never land through
-		// this factory. Spend one attempt, as the merge-failure path does, so the
-		// verifier stops offering it, and say the reason on the item for a human.
-		out.Status = "merge_failed"
-		if _, berr := bumpAttempts(repoDir, s.Key); berr != nil {
-			return out, fmt.Errorf("rebase: %w (attempt record failed: %v)", err, berr)
+	newHead, rebaseErr := rebaseOntoMaster(wtDir, s.Branch)
+	if rebaseErr != nil {
+		// A conflict is a fact about this head, so record it where every lane
+		// already looks: a failing check on the commit. The Fixer selects failing
+		// checks, so a conflict becomes work instead of a dead end, and this lane
+		// stops offering the head because the fact outlives the pass. A tracker
+		// label cannot do this job: the factory never reads its own labels back.
+		out.Status = "checks_failed"
+		note := checksNote{
+			Status:  "fail",
+			RunID:   runID,
+			Time:    nowRFC(),
+			Results: []checkResult{{Name: "rebase", Code: 1, Output: rebaseErr.Error()}},
 		}
-		_ = labelItem(cfg.Repo, it.Number, []string{failedLabel}, nil)
-		_ = commentItem(cfg.Repo, it.Number, "Merge blocked: "+err.Error())
-		return out, fmt.Errorf("rebase: %w", err)
-	} else {
-		baseSHA = newHead
-		// The ledger must record the head the checks, the Verdict, and the merge
-		// all key to; the init value above was the pre-rebase head.
-		out.BaseSHA = newHead
+		if err := writeChecks(repoDir, baseSHA, note); err != nil {
+			return out, fmt.Errorf("rebase: %w (notes: %v)", rebaseErr, err)
+		}
+		if err := projectChecks(cfg, s.Branch, note); err != nil {
+			return out, fmt.Errorf("rebase: %w (projection: %v)", rebaseErr, err)
+		}
+		return out, fmt.Errorf("rebase: %w", rebaseErr)
 	}
+	baseSHA = newHead
+	// The ledger must record the head the checks, the Verdict, and the merge all
+	// key to; the value above was the pre-rebase head.
+	out.BaseSHA = newHead
 
 	checks, checkErr := runChecks(cfg, wtDir, runID)
 	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
@@ -278,7 +304,7 @@ func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
 		if err := git(mergeDir, "merge", "--squash", branch); err != nil {
 			return fmt.Errorf("merge: squash: %w", err)
 		}
-		if err := gitCommit(mergeDir, fmt.Sprintf("forest: %s (#%d)", it.Title, it.Number)); err != nil {
+		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%d)", it.Title, it.Number)); err != nil {
 			return fmt.Errorf("merge: commit: %w", err)
 		}
 	case "ff":

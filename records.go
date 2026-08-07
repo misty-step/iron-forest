@@ -70,6 +70,37 @@ func loadLedger(path string) ([]runRecord, int, error) {
 	return out, invalid, nil
 }
 
+// ledgerPath is the run ledger for a checkout.
+func ledgerPath(repoDir string) string {
+	return filepath.Join(workspaceDir(repoDir), "runs.jsonl")
+}
+
+// stalledRunLimit is how many times one flow may fail on one revision before it
+// stops selecting it.
+const stalledRunLimit = 3
+
+// stalledOn reports whether flow already failed on this exact revision of
+// subject at least stalledRunLimit times. A healthy repair loop always produces
+// a new commit, so repeated failure on one revision means the lane is arguing
+// with itself. This bounds every failure mode, including the ones no counter
+// records, without capping a loop that is getting somewhere: a real repair moves
+// the revision and starts the count over.
+func stalledOn(runs []runRecord, flow, subject, revision string) bool {
+	if revision == "" {
+		return false
+	}
+	failures := 0
+	for _, r := range runs {
+		if r.Flow != flow || r.Subject != subject || r.Revision != revision {
+			continue
+		}
+		if runCategory(r.Status) == "failed" {
+			failures++
+		}
+	}
+	return failures >= stalledRunLimit
+}
+
 // runCategory groups ledger statuses for operator summaries.
 func runCategory(status string) string {
 	switch status {

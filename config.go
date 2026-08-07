@@ -20,11 +20,14 @@ const (
 	// failedLabel is the human hint a lane leaves when a subject needs a person.
 	// It is a tracker convenience, never state the factory reads back.
 	failedLabel = "forest:failed"
-
-	commitAuthorName = "forest"
-	commitAuthorMail = "forest@mistystep.io"
-	modelDefault     = "openrouter-mint/deepseek-v4-flash-0731"
 )
+
+// CommitIdentity is the author every flow's commits carry. It is declared, not
+// derived from a host account, so a run is attributable in any repository.
+type CommitIdentity struct {
+	Name  string `yaml:"name"`
+	Email string `yaml:"email"`
+}
 
 // configPath is the composition file for a checkout.
 func configPath(repoDir string) string { return filepath.Join(repoDir, "forest.yaml") }
@@ -36,12 +39,13 @@ func workspaceDir(repoDir string) string { return filepath.Join(repoDir, Workspa
 // lease policy, the checks the factory runs itself, the flows that are on, and
 // the optional human-facing projection.
 type Config struct {
-	Repo       string      `yaml:"repo"`
-	Protected  []string    `yaml:"protected"`
-	Lease      LeasePolicy `yaml:"lease"`
-	Checks     []Check     `yaml:"checks"`
-	Flows      Flows       `yaml:"flows"`
-	Projection Projection  `yaml:"projection"`
+	Repo       string         `yaml:"repo"`
+	Protected  []string       `yaml:"protected"`
+	Lease      LeasePolicy    `yaml:"lease"`
+	Commit     CommitIdentity `yaml:"commit"`
+	Checks     []Check        `yaml:"checks"`
+	Flows      Flows          `yaml:"flows"`
+	Projection Projection     `yaml:"projection"`
 }
 
 // LeasePolicy bounds how long one worker may own a subject. A lease older than
@@ -111,22 +115,15 @@ type Projection struct {
 	MergeViaHost bool `yaml:"merge_via_host"`
 }
 
-// defaultChecks is what the factory runs when a config declares no checks.
-func defaultChecks() []Check {
-	return []Check{
-		{Name: "build", Run: "mise exec -- go build ./..."},
-		{Name: "vet", Run: "mise exec -- go vet ./..."},
-		{Name: "test", Run: "mise exec -- go test ./..."},
-	}
-}
-
 func defaultConfig() Config {
 	return Config{
 		Protected: []string{
 			".forest/", "forest.yaml", "agents/", ".opencode/opencode.json",
 		},
-		Lease:  LeasePolicy{TTLSeconds: 7200},
-		Checks: defaultChecks(),
+		Lease: LeasePolicy{TTLSeconds: 7200},
+		// The identity is generic on purpose. A repository that wants its own
+		// author declares it; the factory never assumes an organization.
+		Commit: CommitIdentity{Name: "forest", Email: "forest@invalid"},
 		Flows: Flows{
 			Builder: BuilderFlowCfg{
 				FlowCfg:       FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 30},
@@ -137,8 +134,11 @@ func defaultConfig() Config {
 				Merge:   "squash", AutoMerge: false,
 			},
 			Fixer: FixerFlowCfg{
-				FlowCfg:  FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 40},
-				Attempts: 2,
+				FlowCfg: FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 40},
+				// A repair loop that keeps producing new commits is working, so this
+				// ceiling is a runaway guard, not a policy on how many passes a fix
+				// may take. Progress on one revision is bounded separately.
+				Attempts: 10,
 			},
 		},
 		Projection: Projection{Enabled: true, MergeViaHost: false},
@@ -158,8 +158,17 @@ func loadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("%s: repo is required", path)
 	}
 	d := defaultConfig()
+	// The checks are the gate, and only this repository knows how to build and
+	// test itself. A factory that guessed a toolchain would verify the wrong
+	// thing, so an undeclared gate is a configuration error.
 	if len(cfg.Checks) == 0 {
-		cfg.Checks = d.Checks
+		return cfg, fmt.Errorf("%s: at least one check is required", path)
+	}
+	if cfg.Commit.Name == "" {
+		cfg.Commit.Name = d.Commit.Name
+	}
+	if cfg.Commit.Email == "" {
+		cfg.Commit.Email = d.Commit.Email
 	}
 	if cfg.Lease.TTLSeconds < 0 {
 		cfg.Lease.TTLSeconds = 0

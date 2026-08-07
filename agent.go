@@ -64,8 +64,10 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if a.Harness == "" {
 		a.Harness = "opencode"
 	}
+	// No default model: a default would name one operator's provider route and
+	// silently spend on it. The declaration owns this choice.
 	if a.Model == "" {
-		a.Model = modelDefault
+		return nil, fmt.Errorf("agent %s: model is required", name)
 	}
 	if a.Mode == "" {
 		a.Mode = "primary"

@@ -62,10 +62,10 @@ func gitOut(repo string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func gitCommit(wtDir, msg string) error {
+func gitCommit(wtDir string, id CommitIdentity, msg string) error {
 	cmd := exec.Command("git",
-		"-c", "user.name="+commitAuthorName,
-		"-c", "user.email="+commitAuthorMail,
+		"-c", "user.name="+id.Name,
+		"-c", "user.email="+id.Email,
 		"-C", wtDir, "commit", "-m", msg)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

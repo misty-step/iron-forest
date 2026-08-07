@@ -205,3 +205,147 @@ func remoteBranchHead(t *testing.T, repo, branch string) string {
 	}
 	return fields[0]
 }
+
+// TestVerifierSkipsHeadOwnedByTheFixer pins the spin this factory already paid
+// for: a head whose checks failed carries a fact, and re-offering it re-runs
+// every check and re-reviews the same commit forever. The lane that can repair
+// it must be the one that selects it, and a new head must clear the fact.
+func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+	branch := "forest/9-conflicted"
+	notesTestGit(t, work, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "commit", "-qam", "branch work")
+	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
+	head := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+
+	cfg := defaultConfig()
+	cfg.Repo = "example/repo"
+
+	// With no notes at all the head is fresh work for the Verifier.
+	subjects, err := verifierFlow{}.Select(cfg, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 || subjects[0].Head != head {
+		t.Fatalf("fresh head = %#v, want one subject at %s", subjects, head)
+	}
+
+	// A failing check is the fact a rebase conflict or a broken build leaves.
+	fail := checksNote{
+		Status:  "fail",
+		RunID:   "run-1",
+		Time:    nowRFC(),
+		Results: []checkResult{{Name: "rebase", Code: 1, Output: "conflicts in file.txt"}},
+	}
+	if err := writeChecks(work, head, fail); err != nil {
+		t.Fatal(err)
+	}
+	subjects, err = verifierFlow{}.Select(cfg, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 0 {
+		t.Fatalf("verifier still offers a failed head: %#v", subjects)
+	}
+	repairs, err := fixerFlow{}.Select(cfg, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repairs) != 1 || repairs[0].Head != head {
+		t.Fatalf("fixer subjects = %#v, want the failed head %s", repairs, head)
+	}
+
+	// A repair moves the branch, and notes key to the commit, so the new head is
+	// fresh work again without deleting anything.
+	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("repaired\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "commit", "-qam", "repair")
+	notesTestGit(t, work, "push", "-q", "origin", branch)
+	newHead := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+	subjects, err = verifierFlow{}.Select(cfg, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 || subjects[0].Head != newHead {
+		t.Fatalf("repaired head = %#v, want one subject at %s", subjects, newHead)
+	}
+}
+
+// TestStalledOnCountsFailuresPerRevision pins the progress rule: a lane stops
+// retrying one unchanged situation, and a real repair clears the count because
+// it moves the revision.
+func TestStalledOnCountsFailuresPerRevision(t *testing.T) {
+	rows := []runRecord{
+		{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "publish_failed"},
+		{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "agent_failed"},
+		{Flow: "verifier", Subject: "branch-forest/9-x", Revision: "aaa", Status: "checks_failed"},
+		{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "fixed"},
+	}
+	if stalledOn(rows, "fixer", "branch-forest/9-x", "aaa") {
+		t.Fatal("two failures and one success must not stall a lane")
+	}
+	rows = append(rows, runRecord{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "gate_failed"})
+	if !stalledOn(rows, "fixer", "branch-forest/9-x", "aaa") {
+		t.Fatal("three failures on one revision must stall the lane")
+	}
+	if stalledOn(rows, "fixer", "branch-forest/9-x", "bbb") {
+		t.Fatal("a new revision must start the count over")
+	}
+	if stalledOn(rows, "verifier", "branch-forest/9-x", "aaa") {
+		t.Fatal("one lane's failures must not stall another lane")
+	}
+}
+
+// TestCommitAndPushLeaseLandsARewrittenBranch pins the capability the Fixer
+// needs to resolve a conflict: a rebased branch must be able to land, and only
+// against the commit the run actually observed.
+func TestCommitAndPushLeaseLandsARewrittenBranch(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+	branch := "forest/9-rewrite"
+	notesTestGit(t, work, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("branch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "add", "branch.txt")
+	notesTestGit(t, work, "commit", "-qm", "branch work")
+	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
+	observed := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+
+	// Master moves, and the branch is rebased onto it, so the branch's history is
+	// rewritten and a plain push would be rejected.
+	notesTestGit(t, work, "checkout", "-q", "master")
+	if err := os.WriteFile(filepath.Join(work, "master.txt"), []byte("master\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "add", "master.txt")
+	notesTestGit(t, work, "commit", "-qm", "master work")
+	notesTestGit(t, work, "push", "-q", "origin", "master")
+	notesTestGit(t, work, "checkout", "-q", branch)
+	notesTestGit(t, work, "rebase", "-q", "master")
+
+	id := CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
+	it := issue{Number: 9, Title: "rewrite"}
+	// Each attempt needs its own change: a failed push leaves its commit behind,
+	// and a run that has nothing to commit is a different failure.
+	if err := os.WriteFile(filepath.Join(work, "stale.txt"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitAndPush(work, work, branch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", id, it); err == nil {
+		t.Fatal("a stale lease must lose the push")
+	}
+	if err := os.WriteFile(filepath.Join(work, "fix.txt"), []byte("repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitAndPush(work, work, branch, observed, id, it); err != nil {
+		t.Fatalf("rebased branch with the observed lease = %v, want nil", err)
+	}
+	remote := notesTestGitOutput(t, work, "rev-parse", "refs/remotes/origin/"+branch)
+	local := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+	if remote != local {
+		t.Fatalf("remote %s != local %s after a leased push", remote, local)
+	}
+}
