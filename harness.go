@@ -140,7 +140,9 @@ func childEnvironment() ([]string, func(), error) {
 		"GOCACHE=" + goBuildCache(),
 	}
 	// Operator-declared host toolchain metadata (see checkHostEnv) is appended
-	// last so it can never shadow the private HOME or the scrubbed PATH.
+	// after the private environment. checkHostEnv drops any key the harness owns
+	// or that names a credential, so FOREST_CHECK_ENV can never shadow the
+	// private HOME, the scrubbed PATH, or a managed cache, nor leak a secret.
 	env = append(env, checkHostEnv()...)
 	return env, cleanup, nil
 }
@@ -166,8 +168,12 @@ func checkHostBins() []string {
 // them as child environment entries. Like FOREST_CHECK_PATH, it is a
 // stack-agnostic, non-credential mechanism: it carries the metadata a host
 // toolchain proxy needs to resolve its real driver under a private HOME (for
-// example RUSTUP_HOME and CARGO_HOME for rustup). Blank lines and entries with
-// no "=" separators are ignored.
+// example RUSTUP_HOME and CARGO_HOME for rustup). Blank lines, entries with no
+// "=" separator, and entries whose key is harness-managed or names a credential
+// are dropped, so FOREST_CHECK_ENV cannot override HOME, the scrubbed PATH, or
+// a managed cache directory, and cannot leak a secret such as GH_TOKEN into the
+// child. os/exec.Cmd.Env resolves duplicates by last occurrence, so filtering
+// here is what guarantees the harness environment stays authoritative.
 func checkHostEnv() []string {
 	var entries []string
 	for _, line := range strings.Split(os.Getenv("FOREST_CHECK_ENV"), "\n") {
@@ -175,12 +181,42 @@ func checkHostEnv() []string {
 		if line == "" {
 			continue
 		}
-		if _, _, ok := strings.Cut(line, "="); !ok {
+		key, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if hostEnvBlocked(key) {
 			continue
 		}
 		entries = append(entries, line)
 	}
 	return entries
+}
+
+// hostEnvBlocked reports whether an operator-declared FOREST_CHECK_ENV key must
+// be dropped. The harness owns HOME, PATH, and the managed cache and state
+// directories, so a key naming one of those would otherwise override the private
+// environment under os/exec.Cmd.Env's last-duplicate-wins rule. The mechanism is
+// also non-credential, so any key that names a secret or token is refused too.
+// It keys on spelled-out secret words rather than guessing from value shape, so
+// legitimate metadata such as RUSTUP_HOME or CARGO_HOME passes through.
+func hostEnvBlocked(key string) bool {
+	upper := strings.ToUpper(key)
+	for _, protected := range []string{
+		"HOME", "PATH", "MISE_CONFIG_DIR", "MISE_DATA_DIR", "GOMODCACHE", "GOCACHE",
+	} {
+		if upper == protected {
+			return true
+		}
+	}
+	for _, secret := range []string{
+		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "APIKEY",
+	} {
+		if strings.Contains(upper, secret) {
+			return true
+		}
+	}
+	return false
 }
 
 // childPath assembles the PATH for a child environment. Order is load-bearing:

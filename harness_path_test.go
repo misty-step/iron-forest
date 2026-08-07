@@ -124,6 +124,45 @@ func TestCheckHostEnvParsesMetadata(t *testing.T) {
 	}
 }
 
+// TestCheckHostEnvBlocksProtectedAndCredentialKeys pins the regression the
+// reviewer flagged: checkHostEnv must not let FOREST_CHECK_ENV override the
+// private HOME, the scrubbed PATH, or a managed cache directory, and must not
+// leak a credential such as GH_TOKEN into the child. os/exec.Cmd.Env resolves
+// duplicate keys by last occurrence, so any such key surviving into the env
+// would defeat the harness; filtering here keeps the private environment
+// authoritative while still passing legitimate host toolchain metadata through.
+func TestCheckHostEnvBlocksProtectedAndCredentialKeys(t *testing.T) {
+	t.Setenv("FOREST_CHECK_ENV", strings.Join([]string{
+		"HOME=/overridden",
+		"PATH=/overridden",
+		"MISE_CONFIG_DIR=/overridden",
+		"MISE_DATA_DIR=/overridden",
+		"GOMODCACHE=/overridden",
+		"GOCACHE=/overridden",
+		"GH_TOKEN=super-secret",
+		"GITHUB_TOKEN=super-secret",
+		"MY_SETUP_SECRET=super-secret",
+		"RUSTUP_HOME=/host/.rustup",
+		"CARGO_HOME=/host/.cargo",
+	}, "\n"))
+	entries := checkHostEnv()
+	want := []string{"RUSTUP_HOME=/host/.rustup", "CARGO_HOME=/host/.cargo"}
+	if len(entries) != len(want) {
+		t.Fatalf("checkHostEnv() = %v, want %v", entries, want)
+	}
+	for i := range want {
+		if entries[i] != want[i] {
+			t.Fatalf("checkHostEnv()[%d] = %q, want %q", i, entries[i], want[i])
+		}
+	}
+	for _, e := range entries {
+		key, _, _ := strings.Cut(e, "=")
+		if hostEnvBlocked(key) {
+			t.Fatalf("checkHostEnv() leaked blocked key %q", key)
+		}
+	}
+}
+
 // TestRunChecksHostProxyResolvesWithMetadata pins the actual proxy behavior the
 // item calls out, not a self-contained fake. A host toolchain "cargo" is a
 // proxy that reads RUSTUP_HOME (falling back to $HOME/.rustup) to find its real

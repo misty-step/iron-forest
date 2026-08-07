@@ -103,8 +103,10 @@ that metadata with `FOREST_CHECK_ENV` on the host running the Factory, a
 newline-separated list of `KEY=VALUE` pairs (for example one line `RUSTUP_HOME`
 and one `CARGO_HOME`) added to the child environment. Like `FOREST_CHECK_PATH`
 it is stack-agnostic and non-credential: it carries only the metadata a
-toolchain needs, never secrets, and it is appended after the private environment
-so it cannot override `HOME` or the scrubbed `PATH`.
+toolchain needs, never secrets. Host toolchain metadata that names a key the
+harness already manages (`HOME`, `PATH`, the mise dirs, or a Go cache) or that
+names a credential or token (such as `GH_TOKEN`) is dropped, so the private
+environment stays authoritative and no secret reaches the child.
 
 Building the wrong thing is worse than not building: Iron Forest does not guess a
 stack. If a `checks:` command's tool is missing, the check fails and the note
