@@ -37,8 +37,8 @@ func TestRenderMarkdownCarriesVariant(t *testing.T) {
 	a := &Agent{
 		Name: "verifier", Dir: t.TempDir(), Description: "independent reviewer",
 		Model: "openrouter/openai/gpt-5.6-luna", Variant: "max", Mode: "primary",
-		Steps: 30, Instructions: "judge the change",
-		Permission: map[string]string{"read": "allow", "edit": "deny"},
+		Instructions: "judge the change",
+		Permission:   map[string]string{"read": "allow", "edit": "deny"},
 	}
 	if err := renderMarkdown(wtDir, a); err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestRenderMarkdownCarriesVariant(t *testing.T) {
 func TestRenderMarkdownTemperatureIsOptional(t *testing.T) {
 	base := func() *Agent {
 		return &Agent{Name: "verifier", Dir: t.TempDir(), Model: "m", Mode: "primary",
-			Steps: 30, Instructions: "judge the change"}
+			Instructions: "judge the change"}
 	}
 	omitted := t.TempDir()
 	if err := renderMarkdown(omitted, base()); err != nil {

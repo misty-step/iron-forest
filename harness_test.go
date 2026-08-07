@@ -5,35 +5,26 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-// TestPhaseContextUnboundedWithoutBudget pins the no-deadline contract. An agent
-// reasoning at maximum effort can work for a long time and still be productive,
-// so an undeclared budget must produce a context with no deadline: a clock here
-// kills a working run and throws away every token it already spent.
-func TestPhaseContextUnboundedWithoutBudget(t *testing.T) {
-	for _, budget := range []time.Duration{0, -time.Second} {
-		ctx, cancel := phaseContext(budget)
-		if deadline, ok := ctx.Deadline(); ok {
-			t.Errorf("budget %v produced a deadline at %v", budget, deadline)
+// TestRenderedAgentDeclaresNoStepCeiling pins the unbounded contract. opencode
+// reads an absent `steps` key as no limit; any value there is a guess about how
+// much work an item needs, and a wrong guess stops a working run partway and
+// reports it as a gate failure. No agent definition may reintroduce one.
+func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
+	wt := t.TempDir()
+	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
+	if err := renderMarkdown(wt, a); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(wt, ".opencode", "agents", "probe.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"steps:", "maxSteps:"} {
+		if strings.Contains(string(b), key) {
+			t.Errorf("rendered agent declares %q; opencode must run unbounded", key)
 		}
-		cancel()
-	}
-}
-
-// TestPhaseContextHonorsDeclaredBudget keeps the opt-in bound working: an agent
-// that declares a budget is still stopped at it.
-func TestPhaseContextHonorsDeclaredBudget(t *testing.T) {
-	ctx, cancel := phaseContext(30 * time.Second)
-	defer cancel()
-
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		t.Fatal("declared budget produced no deadline")
-	}
-	if left := time.Until(deadline); left <= 0 || left > 30*time.Second {
-		t.Fatalf("deadline in %v, want inside 30s", left)
 	}
 }
 
@@ -59,8 +50,8 @@ func fakeOpencode(t *testing.T, script string) (string, string) {
 // failed and records the stderr in the error.
 func TestRunPhaseFailsOnHarnessCrash(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'model call rejected\\n' >&2\nexit 1\n")
-	a := &Agent{Name: "probe", Model: "probe-model", Steps: 5, Instructions: "probe"}
-	_, err := runPhase(wt, a, "task", trace, 0)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a crashed harness")
 	}
@@ -77,8 +68,8 @@ func TestRunPhaseFailsOnHarnessCrash(t *testing.T) {
 func TestRunPhaseFailsOnKilledHarness(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":1}}}\n'\nkill -KILL $$\n")
-	a := &Agent{Name: "probe", Model: "probe-model", Steps: 5, Instructions: "probe"}
-	_, err := runPhase(wt, a, "task", trace, 0)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a signal-killed harness")
 	}
@@ -92,8 +83,8 @@ func TestRunPhaseFailsOnKilledHarness(t *testing.T) {
 func TestRunPhaseFailsOnCrashAfterWork(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'model call rejected\\n' >&2\nexit 1\n")
-	a := &Agent{Name: "probe", Model: "probe-model", Steps: 5, Instructions: "probe"}
-	_, err := runPhase(wt, a, "task", trace, 0)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a non-zero crash after work")
 	}
@@ -105,39 +96,30 @@ func TestRunPhaseFailsOnCrashAfterWork(t *testing.T) {
 	}
 }
 
-// TestRunPhaseOutOfStepsWithZeroTokenEvents proves a step_finish counts as work
-// even when it reports zero tokens: failure classification tracks the presence
-// of completed steps, not the token totals.
-func TestRunPhaseOutOfStepsWithZeroTokenEvents(t *testing.T) {
-	wt, trace := fakeOpencode(t,
-		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":0}}}\n'\nprintf 'ran out of steps\\n' >&2\nexit 1\n")
-	a := &Agent{Name: "probe", Model: "probe-model", Steps: 5, Instructions: "probe"}
-	if _, err := runPhase(wt, a, "task", trace, 0); err != nil {
-		t.Fatalf("out-of-steps with zero-token step_finish must not fail: %v", err)
-	}
-}
-
-// TestRunPhaseToleratesOutOfStepsExit pins the documented out-of-steps case:
-// opencode exits non-zero after producing work, and the gate decides.
-func TestRunPhaseToleratesOutOfStepsExit(t *testing.T) {
+// TestRunPhaseFailsOnAnyNonZeroExit pins the stricter contract left behind by
+// deleting the step ceiling. With no ceiling opencode never announces "out of
+// steps", so that exit no longer has a benign reading: a non-zero exit after
+// real work is a crash or a truncation, and tokens already spent must not buy
+// the run a trip to the gate.
+func TestRunPhaseFailsOnAnyNonZeroExit(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'ran out of steps\\n' >&2\nexit 1\n")
-	a := &Agent{Name: "probe", Model: "probe-model", Steps: 5, Instructions: "probe"}
-	stats, err := runPhase(wt, a, "task", trace, 0)
-	if err != nil {
-		t.Fatalf("out-of-steps non-zero exit must not fail the run: %v", err)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	stats, err := runPhase(wt, a, "task", trace)
+	if err == nil {
+		t.Fatal("non-zero exit must fail the run")
 	}
 	if stats.tokensIn != 2 {
-		t.Errorf("tokensIn = %d, want 2", stats.tokensIn)
+		t.Errorf("tokensIn = %d, want the spend recorded even on failure", stats.tokensIn)
 	}
 }
 
 // TestRunPhaseSuccessWithoutSteps covers a clean exit with no agent work: not a
-// crash, not out of steps, so no error.
+// crash, so no error.
 func TestRunPhaseSuccessWithoutSteps(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nexit 0\n")
-	a := &Agent{Name: "probe", Model: "probe-model", Steps: 5, Instructions: "probe"}
-	if _, err := runPhase(wt, a, "task", trace, 0); err != nil {
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	if _, err := runPhase(wt, a, "task", trace); err != nil {
 		t.Fatalf("clean zero exit must succeed: %v", err)
 	}
 }

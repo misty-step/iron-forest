@@ -9,11 +9,6 @@ mode: primary
 model: openrouter/openai/gpt-5.6-luna
 variant: max
 # A large diff costs the reviewer reads before it can judge. Keep headroom so a
-# verdict is a judgement, not a step-limit artefact.
-steps: 80
-# No deadline: the operator stops a run with a signal, not a timer.
-budget_seconds: 0
-# Luna declares no temperature parameter, so this lane sends none.
 permission:
   read: allow
   edit: allow

@@ -129,12 +129,8 @@ func cmdAgents(repoDir string) int {
 			fmt.Fprintf(os.Stderr, "forest: %v\n", err)
 			continue
 		}
-		budget := "none"
-		if a.BudgetSec > 0 {
-			budget = fmt.Sprintf("%ds", a.BudgetSec)
-		}
-		fmt.Printf("%s\tmodel=%s%s mode=%s steps=%d budget=%s def_sha=%s\n",
-			name, a.Model, variantSuffix(a), a.Mode, a.Steps, budget, a.DefSHA)
+		fmt.Printf("%s\tmodel=%s%s mode=%s def_sha=%s\n",
+			name, a.Model, variantSuffix(a), a.Mode, a.DefSHA)
 		fmt.Printf("  %s\n", a.Description)
 		var mcps []string
 		for _, m := range a.MCP {

@@ -39,9 +39,9 @@ type Agent struct {
 	Variant     string   `yaml:"variant"`
 	Mode        string   `yaml:"mode"`
 	Temperature *float64 `yaml:"temperature"`
-	Steps       int      `yaml:"steps"`
-	// BudgetSec bounds one agent run. Zero or absent means no deadline.
-	BudgetSec  int               `yaml:"budget_seconds"`
+	// No step ceiling and no deadline: opencode treats an absent `steps` as
+	// unbounded, which is the honest shape for work whose size is not known
+	// before an agent reads the item.
 	Permission map[string]string `yaml:"permission"`
 	MCP        []McpSpec         `yaml:"mcp"`
 
@@ -71,9 +71,6 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	}
 	if a.Mode == "" {
 		a.Mode = "primary"
-	}
-	if a.Steps == 0 {
-		a.Steps = 50
 	}
 	ins, err := os.ReadFile(filepath.Join(dir, "instructions.md"))
 	if err != nil {
@@ -172,12 +169,11 @@ func renderMarkdown(wtDir string, a *Agent) error {
 		Variant     string            `yaml:"variant,omitempty"`
 		Mode        string            `yaml:"mode"`
 		Temperature *float64          `yaml:"temperature,omitempty"`
-		Steps       int               `yaml:"steps"`
 		Permission  map[string]string `yaml:"permission"`
 	}
 	fm, err := yaml.Marshal(frontmatter{
 		Description: a.Description, Model: a.Model, Variant: a.Variant, Mode: a.Mode,
-		Temperature: a.Temperature, Steps: a.Steps, Permission: perm,
+		Temperature: a.Temperature, Permission: perm,
 	})
 	if err != nil {
 		return err
