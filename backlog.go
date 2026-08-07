@@ -46,26 +46,6 @@ func (t githubTracker) ListOpen() ([]Item, error) {
 	return items, nil
 }
 
-// ListByTag returns every item, open or closed, that carries one tag. The
-// GitHub CLI's --state all with a --label filter makes closed ready assignments
-// visible so the Manager can withdraw a promotion from an item closed by hand.
-func (t githubTracker) ListByTag(tag string) ([]Item, error) {
-	out, err := ghJSON("issue", "list", "-R", t.repo, "--state", "all",
-		"--label", tag, "--json", "number,title,body,updatedAt,comments,labels", "--limit", "200")
-	if err != nil {
-		return nil, err
-	}
-	var raw []issueJSON
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, err
-	}
-	items := make([]Item, 0, len(raw))
-	for _, it := range raw {
-		items = append(items, it.asItem())
-	}
-	return items, nil
-}
-
 // Get reads one item by its opaque id.
 func (t githubTracker) Get(id string) (Item, error) {
 	out, err := ghJSON("issue", "view", id, "-R", t.repo,

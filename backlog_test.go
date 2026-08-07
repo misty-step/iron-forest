@@ -91,7 +91,6 @@ func TestEligibleItemsRequireLabelsOptIn(t *testing.T) {
 type trackerStub struct{ items []Item }
 
 func (t trackerStub) ListOpen() ([]Item, error)                   { return t.items, nil }
-func (trackerStub) ListByTag(tag string) ([]Item, error)          { return nil, nil }
 func (trackerStub) Get(id string) (Item, error)                   { return Item{ID: id}, nil }
 func (trackerStub) Comment(id, body string) error                 { return nil }
 func (trackerStub) Close(id string) error                         { return nil }

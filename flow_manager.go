@@ -48,15 +48,11 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err != nil {
 		return nil, fmt.Errorf("items: %w", err)
 	}
-	ready, err := tk.ListByTag(readyTag)
-	if err != nil {
-		return nil, fmt.Errorf("ready assignments: %w", err)
-	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, ready, branches)
+	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches)
 	if err != nil {
 		return nil, err
 	}
@@ -95,15 +91,11 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		return Outcome{Status: "item_failed"}, fmt.Errorf("items: %w", err)
 	}
-	ready, err := tk.ListByTag(readyTag)
-	if err != nil {
-		return Outcome{Status: "item_failed"}, fmt.Errorf("ready assignments: %w", err)
-	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return Outcome{Status: "branch_failed"}, fmt.Errorf("branches: %w", err)
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, ready, branches)
+	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches)
 	if err != nil {
 		return Outcome{Status: "flow_failed"}, err
 	}
@@ -163,15 +155,14 @@ func (p managerPlan) hasWork() bool {
 	return len(p.reap) > 0 || p.needModel
 }
 
-// buildManagerPlan builds the plan for one pass. An assigned item (ready and
-// unbranched) is reaped on any durable failure, a reopened blocker, or a closure
-// by hand; everything else that is open, unbranched, unexcluded, unstalled, and
-// unblocked is a candidate. The slot holds readyDepth healthy assigned items;
-// only an empty slot calls the model. The ready slice is the set of every ready
-// assignment across open and closed items, so an item closed by hand still has
-// its dead readyTag withdrawn instead of silently freeing no slot while another
-// item is promoted into a tray that was never empty.
-func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, ready []Item, branches []string) (managerPlan, error) {
+// buildManagerPlan builds the plan for one pass. An assigned item (open, ready
+// and unbranched) is reaped on any durable failure: it is stalled on the builder
+// flow, it carries forest:failed, or a blocker reopened. A closed item needs no
+// reap: it leaves ListOpen, so the slot frees and nothing can build it. Everything
+// else that is open, unbranched, unexcluded, unstalled, and unblocked is a
+// candidate. The slot holds readyDepth healthy assigned items; only an empty slot
+// calls the model.
+func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches []string) (managerPlan, error) {
 	covered := make(map[string]bool, len(branches))
 	for _, branch := range branches {
 		covered[itemIDFromBranch(branch)] = true
@@ -183,18 +174,15 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, ready []
 	plan := managerPlan{key: managerSubject}
 	var reap []Item
 	healthyAssigned := 0
-	// Slot accounting and reaping run across every ready assignment, open or
-	// closed. A branch owns a ready item's slot and queue position downstream,
-	// so a covered item is left alone; a closed one is a durable end and is
-	// withdrawn; an open one is counted healthy or withdrawn on a durable fact.
-	for _, it := range ready {
-		if covered[it.ID] {
+	// Slot accounting and reaping run across the open, ready, branchless
+	// assignments. A branch owns a ready item's slot and queue position
+	// downstream, so a covered item is left alone; an open one is counted healthy
+	// or withdrawn on a durable fact. Closed items never appear here.
+	for _, it := range items {
+		if !it.hasTag(readyTag) {
 			continue
 		}
-		if _, isOpen := open[it.ID]; !isOpen {
-			// Closed by hand: withdraw so the slot frees and no other item is
-			// promoted into a tray that was never actually empty.
-			reap = append(reap, it)
+		if covered[it.ID] {
 			continue
 		}
 		withdraw, err := managerWithdraw(repoDir, it, open)

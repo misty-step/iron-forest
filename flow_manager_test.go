@@ -22,7 +22,7 @@ func TestManagerPromotesExactlyOneWhenSlotEmpty(t *testing.T) {
 		{ID: "2", Title: "beta", UpdatedAt: "u2", Body: "clear scope"},
 		{ID: "3", Title: "gamma", UpdatedAt: "u3", Body: "clear scope"},
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, items, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestManagerSlotOccupiedPromotesNothing(t *testing.T) {
 		{ID: "1", Title: "in flight build", UpdatedAt: "u1", Tags: []string{readyTag}},
 		{ID: "2", Title: "next", UpdatedAt: "u2", Body: "clear scope"},
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, items, []Item{items[0]}, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, items, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestManagerInProgressBuildKeepsSlotOccupied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, freshItems, freshItems, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, freshItems, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 		{ID: "149", Title: "still open", UpdatedAt: "u1"},
 		{ID: "70", Title: "waiting", UpdatedAt: "u2", Body: "Blocked by: #149"},
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, items, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestManagerReapsStalledAssignment(t *testing.T) {
 		}
 	}
 
-	plan, err := buildManagerPlan(managerCfg(), repo, []Item{item}, []Item{item}, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, []Item{item}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestManagerReapsStalledAssignment(t *testing.T) {
 	}
 
 	// After reaping, the item is excluded and the tray is free.
-	plan2, err := buildManagerPlan(managerCfg(), repo, []Item{fresh}, nil, nil)
+	plan2, err := buildManagerPlan(managerCfg(), repo, []Item{fresh}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,11 +301,11 @@ func TestManagerRewisesWhenBacklogMoves(t *testing.T) {
 		{ID: "1", Title: "a", UpdatedAt: "u1"},
 		{ID: "2", Title: "b", UpdatedAt: "u2"},
 	}
-	pa, err := buildManagerPlan(cfg, repo, a, nil, nil)
+	pa, err := buildManagerPlan(cfg, repo, a, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pab, err := buildManagerPlan(cfg, repo, ab, nil, nil)
+	pab, err := buildManagerPlan(cfg, repo, ab, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,107 +314,6 @@ func TestManagerRewisesWhenBacklogMoves(t *testing.T) {
 	}
 	if pa.revision == pab.revision {
 		t.Fatalf("revision did not move with the backlog: %q", pa.revision)
-	}
-}
-
-// TestManagerReapsClosedReadyItem proves the Manager enumerates ready
-// assignments across closed items, not just the open list: an item closed by
-// hand still holds the ready tag, and the plan withdraws it (removes ready,
-// adds failed) so the slot it would otherwise silently vacate is not filled by
-// a second promotion into a tray that was never empty.
-func TestManagerReapsClosedReadyItem(t *testing.T) {
-	repo := newRefGitRepo(t)
-	tk := newMemoryTracker()
-	item := Item{ID: "9", Title: "done by hand", UpdatedAt: "u1", Tags: []string{readyTag}}
-	tk.seed(item)
-	if err := tk.Close("9"); err != nil {
-		t.Fatal(err)
-	}
-
-	// The open list hides the closed item; the tag query over all states finds it.
-	items, err := tk.ListOpen()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ready, err := tk.ListByTag(readyTag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 0 {
-		t.Fatalf("open items = %d, want 0", len(items))
-	}
-	if len(ready) != 1 || ready[0].ID != "9" {
-		t.Fatalf("ready assignments = %v, want the closed item 9", ready)
-	}
-
-	plan, err := buildManagerPlan(managerCfg(), repo, items, ready, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.reap) != 1 || plan.reap[0].ID != "9" {
-		t.Fatalf("plan reaps %v, want the closed item 9", plan.reap)
-	}
-	if plan.needModel {
-		t.Fatal("a pass that must reap must not call the model")
-	}
-
-	if err := reapManagerItem(tk, plan.reap[0]); err != nil {
-		t.Fatal(err)
-	}
-	fresh, err := tk.Get("9")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh.hasTag(readyTag) {
-		t.Fatal("a closed item reaped must lose the ready tag")
-	}
-	if !fresh.hasTag(failedLabel) {
-		t.Fatal("a reaped closed item must gain the failed tag")
-	}
-}
-
-// TestManagerSelectReapsClosedReadyItem proves the end-to-end Manager wiring
-// acts on a closed ready assignment: Select returns the singleton subject and
-// Act withdraws the tag, so the dead assignment is reaped across the closed set.
-func TestManagerSelectReapsClosedReadyItem(t *testing.T) {
-	repo := newRefGitRepo(t)
-	writeAgentFixture(t, repo, "manager", "manager-model")
-	tk := newMemoryTracker()
-	tk.seed(Item{ID: "31", Title: "hand-closed", UpdatedAt: "u1", Tags: []string{readyTag}})
-	if err := tk.Close("31"); err != nil {
-		t.Fatal(err)
-	}
-
-	old := trackerFor
-	trackerFor = func(string) Tracker { return tk }
-	defer func() { trackerFor = old }()
-
-	cfg := managerFlowConfig(repo)
-	cfg.Flows.Manager.Agent = "manager"
-
-	subjects, err := (managerFlow{}).Select(cfg, repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(subjects) != 1 || subjects[0].Key != managerSubject {
-		t.Fatalf("Select returned %v, want one manager subject to reap", subjects)
-	}
-	out, err := (managerFlow{}).Act(cfg, repo, subjects[0], "run-reap")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Status != "reaped" {
-		t.Fatalf("Act status = %q, want reaped", out.Status)
-	}
-	fresh, err := tk.Get("31")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh.hasTag(readyTag) {
-		t.Fatal("Act must withdraw the ready tag from the hand-closed item")
-	}
-	if !fresh.hasTag(failedLabel) {
-		t.Fatal("Act must add the failed tag to the hand-closed item")
 	}
 }
 
