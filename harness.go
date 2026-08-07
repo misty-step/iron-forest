@@ -98,10 +98,36 @@ const childSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 // childEnvironment gives each run a private home so operator configuration and
 // credentials stay unreachable. The home sits outside the worktree: the worktree
 // is committed with `git add -A`, so a tool that writes to $HOME there would put
-// its cache directories into the published branch.
-// It preserves only the pinned toolchain and caches the factory checks need, and
-// excludes gh, whose credential would reach far beyond the given worktree.
+// its cache directories into the published branch. It preserves only the pinned
+// toolchain and caches the factory needs, and excludes gh, whose credential
+// would reach far beyond the given worktree. Non-Go tools the managed repo
+// declares reach the check child through mise-managed tools with working shims
+// (already on PATH) or the host toolchain mechanism (see checkEnvironment); an
+// agent run gets neither, so host toolchain reach stays scoped to checks.
 func childEnvironment() ([]string, func(), error) {
+	return childBaseEnv(false)
+}
+
+// checkEnvironment is the child environment for a runChecks run: the common
+// environment plus the operator-declared host toolchain mechanism that lets a
+// managed repo's checks: reach a non-Go toolchain whose driver lives outside
+// the scrubbed PATH. The mechanism is applied only here and never to an agent
+// run (see childEnvironment), so neither host binaries on PATH nor allowlisted
+// toolchain metadata escape into an opencode run. Host toolchain directories
+// are named in FOREST_CHECK_PATH (see checkHostBins); toolchain metadata a host
+// proxy must read to resolve its real driver arrives via FOREST_CHECK_ENV (see
+// checkHostEnv).
+func checkEnvironment() ([]string, func(), error) {
+	return childBaseEnv(true)
+}
+
+// childBaseEnv builds the child environment used by every run. When
+// hostToolchain is true (check runs only), the operator-declared host toolchain
+// directories and metadata are applied: FOREST_CHECK_PATH directories go on the
+// child PATH ahead of the mise shims so a working host driver resolves before a
+// dead shim, and allowlisted FOREST_CHECK_ENV metadata is appended. Agent runs
+// pass false and get neither.
+func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
 	mise, err := exec.LookPath("mise")
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("locate mise: %w", err)
@@ -121,10 +147,14 @@ func childEnvironment() ([]string, func(), error) {
 		return nil, func() {}, fmt.Errorf("stage mise for child: %w", err)
 	}
 
+	var hostBins []string
+	if hostToolchain {
+		hostBins = checkHostBins()
+	}
 	miseDataDir, miseShims := miseLocations(mise)
 	env := []string{
 		"HOME=" + home,
-		"PATH=" + strings.Join([]string{binDir, miseShims, childSystemPath}, string(os.PathListSeparator)),
+		"PATH=" + childPath(binDir, miseShims, hostBins),
 		"MISE_CONFIG_DIR=" + filepath.Join(binDir, "config"),
 		"MISE_DATA_DIR=" + miseDataDir,
 		"GOMODCACHE=" + goModuleCache(),
@@ -133,7 +163,94 @@ func childEnvironment() ([]string, func(), error) {
 		// world: measured 22s cold against about 1s warm.
 		"GOCACHE=" + goBuildCache(),
 	}
+	// Operator-declared host toolchain metadata (see checkHostEnv) is appended
+	// after the private environment only for check runs. checkHostEnv drops any
+	// key outside the allowlist, so FOREST_CHECK_ENV can never shadow the
+	// private HOME, the scrubbed PATH, or a managed cache, nor introduce a
+	// credential by value or by path.
+	if hostToolchain {
+		env = append(env, checkHostEnv()...)
+	}
 	return env, cleanup, nil
+}
+
+// checkHostBins reads the operator-declared host toolchain directories from
+// FOREST_CHECK_PATH, a platform path-list. These are directories whose drivers
+// live outside the scrubbed child PATH (for example rustup's ~/.cargo/bin).
+// They are inserted ahead of the mise shims so a working host binary resolves
+// before a dead shim. Blank entries are ignored.
+func checkHostBins() []string {
+	var dirs []string
+	for _, entry := range filepath.SplitList(os.Getenv("FOREST_CHECK_PATH")) {
+		if entry == "" {
+			continue
+		}
+		dirs = append(dirs, filepath.Clean(entry))
+	}
+	return dirs
+}
+
+// hostEnvAllowlist is the set of host toolchain metadata variables checkHostEnv
+// is allowed to carry into a check child. It is deliberately small and curated:
+// an explicit allowlist is sound where a substring denylist is not, so a
+// credential under any name — CI_JOB_JWT, AWS_ACCESS_KEY_ID, KUBECONFIG,
+// GIT_CONFIG_GLOBAL, GH_TOKEN — can never reach the child. Only variables that
+// name a metadata store that provably holds no credentials are listed.
+// RUSTUP_HOME points at the rustup install root (settings and toolchains), which
+// holds no credentials; CARGO_HOME is deliberately absent because ~/.cargo holds
+// credentials.toml, so pointing a check at it would expose the operator's
+// registry token.
+var hostEnvAllowlist = map[string]bool{
+	"RUSTUP_HOME": true,
+}
+
+// checkHostEnv reads the operator-declared host toolchain metadata from
+// FOREST_CHECK_ENV, a newline-separated list of KEY=VALUE pairs, and returns
+// them as child environment entries. Only entries whose key is on
+// hostEnvAllowlist are carried in; every other key is dropped. Blank lines and
+// entries with no "=" separator are ignored. Because os/exec.Cmd.Env resolves
+// duplicates by last occurrence, dropping anything outside the allowlist is what
+// keeps the private environment authoritative and guarantees a credential cannot
+// leak into the child either by value or by the path a value names.
+func checkHostEnv() []string {
+	var entries []string
+	for _, line := range strings.Split(os.Getenv("FOREST_CHECK_ENV"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, _, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		if !hostEnvAllowed(key) {
+			continue
+		}
+		entries = append(entries, line)
+	}
+	return entries
+}
+
+// hostEnvAllowed reports whether an operator-declared FOREST_CHECK_ENV key is on
+// the curated metadata allowlist. Anything not listed is refused: the mechanism
+// is non-credential by construction, so it never needs to guess a secret's name
+// from substrings and can never be fooled by an unlisted variant (a JWT, an
+// access-keys value, a kubeconfig path, a git config path).
+func hostEnvAllowed(key string) bool {
+	return hostEnvAllowlist[strings.ToUpper(key)]
+}
+
+// childPath assembles the PATH for a child environment. Order is load-bearing:
+// the private bin directory (the mise symlink) comes first so the harness is
+// authoritative, then the declared host toolchain directories, then the mise
+// shims, then the fixed system path. Host toolchains precede the shims so a
+// working host binary wins over a dead mise shim.
+func childPath(binDir, miseShims string, hostBins []string) string {
+	dirs := make([]string, 0, 2+len(hostBins))
+	dirs = append(dirs, binDir)
+	dirs = append(dirs, hostBins...)
+	dirs = append(dirs, miseShims, childSystemPath)
+	return strings.Join(dirs, string(os.PathListSeparator))
 }
 
 func goModuleCache() string {
