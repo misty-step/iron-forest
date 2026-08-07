@@ -48,7 +48,6 @@ Run the binary from the repository root. The command surface is:
 
 ```yaml
 repo: owner/name                 # required; no default
-protected: [.forest/, forest.yaml, agents/, .opencode/opencode.json]
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -78,7 +77,12 @@ projection:
   merge_via_host: false
 ```
 
-`repo` names the Tracker repository. `protected` lists paths the Gate rejects.
+`repo` names the Tracker repository. There is no `protected` key: `docs/adr/0003`
+removed it, so the Gate rejects nothing by path and independent review on the
+exact commit is what decides whether a change lands.
+
+Attaching a second repository to a running installation is
+`docs/onboarding-managed-repo.md`.
 
 Iron Forest runs each command in `checks:` and writes one Checks note.
 It never reads a Host check or review.
