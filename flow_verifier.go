@@ -45,18 +45,59 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			Branch:   branch,
 			Head:     head,
 		}
+		// failed is terminal and never resumed, so a labeled item is not offered
+		// even when a green, approved head makes it look actionable. The label is
+		// read from the Tracker -- never from a branch head -- so a selector that
+		// derives only git facts must consult it before any effect.
+		failed, err := subjectFailed(cfg.Repo, s)
+		if err != nil {
+			return nil, fmt.Errorf("tracker %s: %w", branch, err)
+		}
+		if failed {
+			continue
+		}
 		v, found, err := readVerdict(repoDir, head)
 		if err != nil {
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)
 		}
-		if !found {
-			// A head whose checks already failed belongs to the Fixer: rechecking
-			// the same commit buys the same fact and pays for it again. A repaired
-			// branch has a new head carrying no notes, so it returns here.
-			checks, hasChecks, cerr := readChecks(repoDir, head)
-			if cerr != nil {
-				return nil, fmt.Errorf("checks %s: %w", branch, cerr)
-			}
+		checks, hasChecks, err := readChecks(repoDir, head)
+		if err != nil {
+			return nil, fmt.Errorf("checks %s: %w", branch, err)
+		}
+		// The durable attempt count is a cap fact, not just a merge-decided one.
+		// The Fixer bumps the ref and only then applies forest:failed; a crash
+		// between the two leaves the cap spent but no label. observe must see the
+		// spent cap so such a head is reported failed -- and never offered for a
+		// check, a review, or a merge -- exactly as the documented invariant
+		// claims. Feed it through this selector's facts for every branch, not
+		// only the approved merge path.
+		attempts, err := readAttempts(repoDir, s.Key)
+		if err != nil {
+			return nil, fmt.Errorf("attempts %s: %w", branch, err)
+		}
+		// Derive the durable state from the same facts observe() reads, so this
+		// selector and the machine never drift. A head the machine places in a
+		// state this lane owns is offered; every other state belongs to another
+		// lane or to a human and is skipped. In particular a stranded Verdict
+		// with no green Checks is observed as pushed and is this lane's work --
+		// it still needs its check transition run -- never a dead end.
+		ffacts := subjectFacts{
+			revision: head, hasBranch: true,
+			attempts: attempts, attemptsCap: cfg.Flows.Fixer.Attempts,
+		}
+		if hasChecks {
+			ffacts.checksStatus = checks.Status
+		}
+		if found {
+			ffacts.verdictStatus = v.Verdict
+		}
+		switch observe(ffacts) {
+		case statePushed, stateChecksRecorded:
+			// A failing check is a fact the Fixer repairs: rechecking the same
+			// commit buys the same fact and pays for it again. Every other
+			// pushed head (bare, or carrying a stranded Verdict) and
+			// checks_recorded head (green, awaiting a review) is this lane's
+			// work: run the check transition, or reuse the green note and review.
 			if hasChecks && checks.Status == "fail" {
 				continue
 			}
@@ -68,29 +109,18 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 				continue
 			}
 			fresh = append(fresh, s)
-			continue
+		case stateVerdictApproved:
+			// An approved, green branch is only a subject when it can actually
+			// land. Every reason it cannot is named by mergeBlocked, so a branch
+			// waiting on an operator is a state to read, not an action to run.
+			if mergeBlocked(cfg, attempts) != "" {
+				continue
+			}
+			mergeable = append(mergeable, s)
+		default:
+			// stateVerdictRejected, stateFailed, stateMerged: another lane's
+			// work or a human's call; never offered here.
 		}
-		if v.Verdict != "approve" {
-			continue
-		}
-		checks, found, err := readChecks(repoDir, head)
-		if err != nil {
-			return nil, fmt.Errorf("checks %s: %w", branch, err)
-		}
-		if !found || checks.Status != "pass" {
-			continue
-		}
-		// An approved, green branch is only a subject when it can actually land.
-		// Every reason it cannot is named by mergeBlocked, so a branch waiting on
-		// an operator is a state to read, not an action to run.
-		attempts, err := readAttempts(repoDir, s.Key)
-		if err != nil {
-			return nil, fmt.Errorf("attempts %s: %w", branch, err)
-		}
-		if mergeBlocked(cfg, attempts) != "" {
-			continue
-		}
-		mergeable = append(mergeable, s)
 	}
 	return append(fresh, mergeable...), nil
 }
@@ -121,6 +151,14 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
+	// failed is terminal and never resumed. A labeled or exhausted item must not
+	// be checked, reviewed, or merged even if the branch moved after Select; this
+	// entry guard re-derives the durable terminal facts (the label and the way
+	// the attempt cap may already be spent) so the lane does not pay to claim or
+	// work a subject another lane already halted.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, err
+	}
 	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
@@ -146,12 +184,21 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		// checks, so a conflict becomes work instead of a dead end, and this lane
 		// stops offering the head because the fact outlives the pass. A tracker
 		// label cannot do this job: the factory never reads its own labels back.
+		// But a subject the machine now reports failed is terminal, so a Checks
+		// note is never written for it.
 		out.Status = "checks_failed"
+		if err := verifierTerminal(cfg, repoDir, s); err != nil {
+			out.Status = "item_failed"
+			return out, err
+		}
 		note := checksNote{
 			Status:  "fail",
 			RunID:   runID,
 			Time:    nowRFC(),
 			Results: []checkResult{{Name: "rebase", Code: 1, Output: rebaseErr.Error()}},
+		}
+		if err := admitCheck(repoDir, baseSHA); err != nil {
+			return out, fmt.Errorf("rebase: %w (pre-check: %v)", rebaseErr, err)
 		}
 		if err := writeChecks(repoDir, baseSHA, note); err != nil {
 			if !errors.Is(err, errNoteExists) {
@@ -173,30 +220,79 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	baseSHA = newHead
 	// The ledger must record the head the checks, the Verdict, and the merge all
-	// key to; the value above was the pre-rebase head.
+	// key to; the value above was the pre-rebase head. The Subject passed to every
+	// later step -- verifierReview, the terminal re-derivations -- must carry the
+	// same rebased Revision: verifierReview writes the Verdict on s.Head, so
+	// leaving it at the pre-rebase head would key the Verdict to a Revision the
+	// merge will never see, leaving a branch behind master stuck and eventually
+	// marked failed. Update the Subject too, so the notes it reads, reviews, and
+	// writes all agree with the head admitMerge will admit.
 	out.BaseSHA = newHead
+	s.Head = newHead
 
-	checks, checkErr := runChecks(cfg, wtDir, runID)
-	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
-		if !errors.Is(err, errNoteExists) {
-			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: %w", err)
-		}
-		winner, found, readErr := readChecks(repoDir, baseSHA)
-		if readErr != nil {
-			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: read winning check: %w", readErr)
-		}
-		if !found {
-			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: check note disappeared: %w", err)
-		}
-		checks = winner
-		checkErr = nil
+	// The check effect is only legal on a bare pushed head -- one carrying no
+	// Checks note on the exact revision. Select deliberately offers a head that
+	// already carries a green Checks note as work: a retry after a review failed
+	// before recording a Verdict, or a later pass returning to merge an
+	// already-approved branch. Such a head must not be re-checked, and admitCheck
+	// rightly refuses an effect that would write over a note that exists. So read
+	// the note first: a head that already has one takes no check transition and
+	// reuses the exact fact, while a bare head is admitted, checked, and recorded.
+	// Before any Checks note is written, re-derive the terminal facts: the rebase
+	// gave another lane time to exhaust the subject or label it, so the durable
+	// decision must not land on a now-failed head.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
+		out.Status = "item_failed"
+		return out, err
 	}
-	if checkErr != nil {
+	checks, hasChecks, err := readChecks(repoDir, baseSHA)
+	if err != nil {
 		out.Status = "checks_failed"
-		return out, fmt.Errorf("checks: %w", checkErr)
+		return out, fmt.Errorf("checks: %w", err)
+	}
+	if !hasChecks {
+		if err := admitCheck(repoDir, baseSHA); err != nil {
+			out.Status = "checks_failed"
+			return out, fmt.Errorf("checks: %w", err)
+		}
+		var checkErr error
+		checks, checkErr = runChecks(cfg, wtDir, runID)
+		// Re-derive the terminal facts immediately before any Checks note is
+		// written. verifierTerminal was checked at Act entry and again after the
+		// rebase, but the check run itself gave another lane time to apply
+		// forest:failed or exhaust the attempt cap, so a label or a spent cap
+		// arriving during checks must not land a Checks note on a terminal Subject.
+		if err := verifierTerminal(cfg, repoDir, s); err != nil {
+			out.Status = "item_failed"
+			return out, err
+		}
+		if err := writeChecks(repoDir, baseSHA, checks); err != nil {
+			if !errors.Is(err, errNoteExists) {
+				out.Status = "notes_failed"
+				return out, fmt.Errorf("notes: %w", err)
+			}
+			winner, found, readErr := readChecks(repoDir, baseSHA)
+			if readErr != nil {
+				out.Status = "notes_failed"
+				return out, fmt.Errorf("notes: read winning check: %w", readErr)
+			}
+			if !found {
+				out.Status = "notes_failed"
+				return out, fmt.Errorf("notes: check note disappeared: %w", err)
+			}
+			checks = winner
+			checkErr = nil
+		}
+		if checkErr != nil {
+			out.Status = "checks_failed"
+			return out, fmt.Errorf("checks: %w", checkErr)
+		}
+	} else if checks.Status == "fail" {
+		// A failing head belongs to the Fixer, never the Verifier; Select does
+		// not offer it, but guard the check boundary in case the note arrived
+		// between Select and Act.
+		out.Status = "checks_failed"
+		return out, nil
 	}
 
 	// A failing check is cheap and certain; a review is expensive. Stop here and
@@ -216,7 +312,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	if !found {
 		var stats runStats
-		verdict, stats, err = verifierReview(cfg, repoDir, wtDir, it, baseSHA, runID, a)
+		verdict, stats, err = reviewRunner(cfg, repoDir, wtDir, it, s, runID, a)
 		out.TokIn, out.TokOut = stats.tokensIn, stats.tokensOut
 		if err != nil {
 			out.Status = "review_failed"
@@ -246,7 +342,25 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
-	if err := mergeVerified(cfg, repoDir, s.Branch, it); err != nil {
+	// failed is terminal and never resumed. The facts were checked at Act entry
+	// and before writeChecks, but a Fixer -- or a human -- can apply forest:failed
+	// or exhaust the attempt cap while this pass is reviewing, so re-derive the
+	// newest terminal facts at this latest Effect boundary before the merge.
+	// Without this revalidation an approved green branch could still land after
+	// its item was marked failed mid-pass.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
+		out.Status = "item_failed"
+		return out, err
+	}
+	// The merge effect is only legal when Checks and an approved Verdict both
+	// key to this exact revision. Read them from the repository -- not from the
+	// pass's own variables -- so a flow that ever skipped a required note is
+	// caught here by the machine, not silently pardoned.
+	if err := admitMerge(repoDir, baseSHA); err != nil {
+		out.Status = "merge_failed"
+		return out, fmt.Errorf("merge: %w", err)
+	}
+	if err := mergeVerified(cfg, repoDir, s.Branch, it, baseSHA); err != nil {
 		// A branch that cannot land needs a human, not another attempt. Spend one
 		// attempt so the merge selector stops offering it, and say so on the item.
 		out.Status = "merge_failed"
@@ -261,12 +375,96 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	return out, nil
 }
 
+// verifierTerminal re-reads the durable terminal facts -- the tracker's
+// forest:failed label and the attempt ref -- and refuses when the machine
+// reports the subject failed. failed is terminal and never resumed. The label
+// can land, or a Fixer can bump the attempt ref and crash before applying the
+// label, while a pass is already in flight; either way observe must report the
+// subject failed and no durable Checks, Verdict, or merge may follow. Every
+// durable effect boundary -- before writeChecks, before writeVerdict, and before
+// the merge -- calls this so the machine observes the newest terminal fact, not
+// the copy the pass started with.
+func verifierTerminal(cfg Config, repoDir string, s Subject) error {
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
+	if err != nil {
+		return fmt.Errorf("item: %w", err)
+	}
+	attempts, err := readAttempts(repoDir, s.Key)
+	if err != nil {
+		return fmt.Errorf("attempts: %w", err)
+	}
+	ffacts := subjectFacts{
+		revision: s.Head, hasBranch: true,
+		attempts: attempts, attemptsCap: cfg.Flows.Fixer.Attempts,
+		failedLabel: it.hasTag(failedLabel),
+	}
+	if observe(ffacts) == stateFailed {
+		return fmt.Errorf("subject %s is failed: terminal and never resumed", s.Key)
+	}
+	return nil
+}
+
+// admitMerge is the verifier's merge admission. It reads the Checks and Verdict
+// notes on the exact head and asks the machine whether the merge effect is
+// legal, refusing if a required note is absent or a fact forbids the move. The
+// flow calls it at the merge boundary so the FSM -- not the pass's own
+// bookkeeping -- is the authority on whether a head may land.
+func admitMerge(repoDir, head string) error {
+	checks, hasChecks, err := readChecks(repoDir, head)
+	if err != nil {
+		return err
+	}
+	verdict, hasVerdict, err := readVerdict(repoDir, head)
+	if err != nil {
+		return err
+	}
+	ffacts := subjectFacts{revision: head, hasBranch: true}
+	if hasChecks {
+		ffacts.checksStatus = checks.Status
+	}
+	if hasVerdict {
+		ffacts.verdictStatus = verdict.Verdict
+	}
+	if _, err := transit(observe(ffacts), effectMerge, ffacts, "", "verifier"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// admitCheck is the verifier's check admission. A Checks note may only be
+// recorded on a bare pushed head -- one carrying no Checks on the exact
+// revision -- so the machine is asked whether that head may take the check
+// effect. The note is read to confirm the head is bare: a head that already
+// carries a Checks note inherits or repeats a prior decision and is refused
+// here, not silently re-checked. The flow calls it at each check boundary so
+// the FSM -- not the pass's own bookkeeping -- is the authority on whether a
+// head may be checked.
+func admitCheck(repoDir, head string) error {
+	_, hasChecks, err := readChecks(repoDir, head)
+	if err != nil {
+		return err
+	}
+	if hasChecks {
+		return fmt.Errorf("illegal transition %s --%s--> ?: revision already carries a checks note", statePushed, effectCheck)
+	}
+	if _, err := transit(statePushed, effectCheck, subjectFacts{revision: head, hasBranch: true}, "", "verifier"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// reviewRunner is the host boundary for one review. Production runs the real
+// verifier; a test replaces it to complete a review without a model call,
+// mirroring projectionCommand and trackerFor.
+var reviewRunner = verifierReview
+
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
 // in tokens; a discarded count makes every review look free.
-func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
+func verifierReview(cfg Config, repoDir, wtDir string, it Item, s Subject, runID string, a *Agent) (verdictNote, runStats, error) {
 	var out verdictNote
 	var stats runStats
+	head := s.Head
 	diff, err := gitOut(wtDir, "diff", "origin/master..."+head)
 	if err != nil {
 		return out, stats, fmt.Errorf("review: diff: %w", err)
@@ -287,6 +485,25 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	out = verdictNote{
 		Verdict: rv.Verdict, Notes: rv.Notes, Reviewer: a.Name, Model: a.Model,
 		DefSHA: a.DefSHA, RunID: runID, Time: nowRFC(),
+	}
+	// The review effect writes a Verdict, so it is only legal on a head whose
+	// Checks are green on this exact revision. The Checks note is read from the
+	// repository -- never a literal -- so the machine observes the exact fact
+	// and refuses if the note is absent or not green, and a Verdict never
+	// records against a failing or unchecked head. The model phase above gave
+	// another lane time to exhaust the subject or label it, so the terminal
+	// facts are re-derived here before any durable Verdict is written.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
+		return verdictNote{}, stats, fmt.Errorf("review: %w", err)
+	}
+	ffacts := subjectFacts{revision: head, hasBranch: true}
+	if checks, found, readErr := readChecks(repoDir, head); readErr != nil {
+		return verdictNote{}, stats, fmt.Errorf("review: checks: %w", readErr)
+	} else if found {
+		ffacts.checksStatus = checks.Status
+	}
+	if _, err := transit(observe(ffacts), effectReview, ffacts, rv.Verdict, "verifier"); err != nil {
+		return verdictNote{}, stats, fmt.Errorf("review: %w", err)
 	}
 	if err := writeVerdict(repoDir, head, out); err != nil {
 		if !errors.Is(err, errNoteExists) {
@@ -341,16 +558,29 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 	return head, nil
 }
 
-// mergeVerified lands an approved branch. The host path and the git path are
-// exclusive: a protected target branch means only the host may write it, and
-// building a local commit that is then discarded would waste the work and
-// confuse the next reader.
-func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
+// mergeVerified lands an approved branch, and only the exact head that was
+// admitted. The host path and the git path are exclusive: a protected target
+// branch means only the host may write it, and building a local commit that is
+// then discarded would waste the work and confuse the next reader.
+func mergeVerified(cfg Config, repoDir, branch string, it Item, expectedHead string) error {
+	// Expected-head admission closes the window admitMerge alone leaves open:
+	// the branch must still point at the exact head that was admitted. If the
+	// branch moved between admission and merge, its Checks and Verdict may no
+	// longer describe the head about to land, so landing it would violate the
+	// exact-revision invariant. Refuse instead of landing the wrong head.
+	current, err := branchHead(repoDir, branch)
+	if err != nil {
+		return fmt.Errorf("merge: %w", err)
+	}
+	if current != expectedHead {
+		return fmt.Errorf("merge: branch %s moved from %s to %s after admission; refusing",
+			branch, short(expectedHead), short(current))
+	}
 	if cfg.Projection.MergeViaHost {
-		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
+		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, expectedHead); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
 		}
-		return finishMerge(cfg, repoDir, branch, it)
+		return finishMerge(cfg, repoDir, branch, it, expectedHead)
 	}
 	workspace := workspaceDir(repoDir)
 	mergeDir := filepath.Join(workspace, "worktrees", "merge-"+slug(branch))
@@ -366,18 +596,23 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	if err := git(repoDir, "worktree", "add", "--detach", mergeDir, "origin/master"); err != nil {
 		return fmt.Errorf("merge: worktree: %w", err)
 	}
+	// The merge consumes the admitted immutable head, never the live branch ref.
+	// The branchHead check above closed the window up to this point; merging the
+	// SHA (not the symbolic branch) guarantees that if the branch moves between
+	// that check and this merge, the exact admitted revision still lands and its
+	// Checks and Verdict still describe the tree about to land.
 	switch cfg.Flows.Verifier.Merge {
 	case "squash":
 		// One commit per subject on master is the history shape this factory
 		// has always produced; the strategy is declared, never assumed.
-		if err := git(mergeDir, "merge", "--squash", branch); err != nil {
+		if err := git(mergeDir, "merge", "--squash", expectedHead); err != nil {
 			return fmt.Errorf("merge: squash: %w", err)
 		}
 		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
 			return fmt.Errorf("merge: commit: %w", err)
 		}
 	case "ff":
-		if err := git(mergeDir, "merge", "--ff-only", branch); err != nil {
+		if err := git(mergeDir, "merge", "--ff-only", expectedHead); err != nil {
 			return fmt.Errorf("merge: ff: %w", err)
 		}
 	default:
@@ -386,13 +621,17 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	if err := git(mergeDir, "push", "origin", "HEAD:master"); err != nil {
 		return fmt.Errorf("merge: push: %w", err)
 	}
-	return finishMerge(cfg, repoDir, branch, it)
+	return finishMerge(cfg, repoDir, branch, it, expectedHead)
 }
 
 // finishMerge retires a landed subject: the branch is gone and the item is
-// closed, so no lane selects it again.
-func finishMerge(cfg Config, repoDir, branch string, it Item) error {
-	if err := git(repoDir, "push", "origin", "--delete", branch); err != nil {
+// closed, so no lane selects it again. The branch deletion is a compare-and-swap
+// against the admitted head -- --force-with-lease -- so retirement succeeds only
+// if the branch still points at the exact admitted revision. A branch that moved
+// after the merge landed is left alone for a human to inspect, never silently
+// deleted.
+func finishMerge(cfg Config, repoDir, branch string, it Item, expectedHead string) error {
+	if err := deleteRef(repoDir, "refs/heads/"+branch, expectedHead); err != nil {
 		return fmt.Errorf("merge: delete branch: %w", err)
 	}
 	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {

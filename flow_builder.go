@@ -52,13 +52,39 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it := s.Item
-	if it.ID == "" {
-		var err error
-		it, err = trackerFor(cfg.Repo).Get(s.ID)
-		if err != nil {
-			return Outcome{Status: "item_failed"}, fmt.Errorf("item: %w", err)
+	// Re-read the current item at this effect boundary instead of trusting the
+	// copy embedded in the Subject. The Subject may be stale: a label applied
+	// between Select and Act (forest:failed, or any other change) must be
+	// honored, because failed is terminal and a failed item must never be built
+	// and published. This read is what the machine's observe() below sees.
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
+	if err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("item: %w", err)
+	}
+
+	// The build effect is only legal on an eligible item: never a subject
+	// another flow has already claimed. The state is derived from git-visible
+	// facts -- whether a forest branch already covers this item and whether the
+	// item carries the failure label -- so a second builder, a leftover branch,
+	// or a concurrent claim is refused by the machine, never assumed away by a
+	// hard-coded state.
+	branches, err := forestBranches(repoDir)
+	if err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("branches: %w", err)
+	}
+	hasBranch := false
+	for _, b := range branches {
+		if itemIDFromBranch(b) == it.ID {
+			hasBranch = true
+			break
 		}
+	}
+	ffacts := subjectFacts{
+		revision: s.Revision, hasBranch: hasBranch, itemOpen: it.Open,
+		failedLabel: it.hasTag(failedLabel),
+	}
+	if _, err := transit(observe(ffacts), effectBuild, ffacts, "", "builder"); err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("build: %w", err)
 	}
 
 	a, err := loadAgent(repoDir, cfg.Flows.Builder.Agent)
@@ -95,7 +121,31 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
+	// A publish is a durable effect and may never leave a failed subject. The
+	// build run gave another lane (or a human) time to apply forest:failed, so
+	// re-derive the terminal facts right before the push: a label that lands
+	// during runPhase must not leave a new branch head on a now-terminal Subject.
+	blocked, perr := publishBlocked(cfg, repoDir, s, false)
+	if perr != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %w", perr)
+	}
+	if blocked {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %s is failed: terminal and never resumed", s.Key)
+	}
 	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	// A publish lands a bare head: the subject returns to pushed, where no
+	// Verdict or Checks note may be inherited.
+	head, err := gitOut(repoDir, "rev-parse", "refs/remotes/origin/"+branch)
+	if err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	if _, err := transit(stateBuilding, effectPublish, subjectFacts{revision: head}, "", "builder"); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}

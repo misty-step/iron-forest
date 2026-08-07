@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -110,12 +111,100 @@ func TestProjectMergeDisabledReturnsError(t *testing.T) {
 		return nil, nil
 	}
 
-	err := projectMerge(Config{Repo: "owner/repo"}, "forest/7-change", "squash")
+	err := projectMerge(Config{Repo: "owner/repo"}, "forest/7-change", "squash", "abc123")
 	if err == nil {
 		t.Fatal("disabled projectMerge returned nil")
 	}
 	if calls != 0 {
 		t.Fatalf("disabled projectMerge made %d host calls", calls)
+	}
+}
+
+// TestProjectMergeRefusesMovedProjectionHead is the host-path counterpart to
+// TestMergeVerifiedRefusesMovedBranch. The git-side expected-head check closes
+// the window up to the merge call, but when the host owns the target branch the
+// merge is issued against a pull request listed by name: a push to the forest
+// branch after admission would otherwise make the host land an unchecked commit.
+// projectMerge must match the projection's head against the admitted revision
+// before running pr merge, refusing when a push advanced it.
+func TestProjectMergeRefusesMovedProjectionHead(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	var called []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		called = append(called, args[1])
+		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"deadbeef"}]`), nil
+	}
+
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	err := projectMerge(cfg, "forest/7-change", "squash", "cafebabe")
+	if err == nil {
+		t.Fatal("projectMerge landed a projection whose head moved after admission")
+	}
+	for _, c := range called {
+		if c == "merge" {
+			t.Fatal("projectMerge issued pr merge for a moved projection head")
+		}
+	}
+}
+
+// TestProjectMergeMatchesAdmittedHeadAndCAS pins the happy path of the host
+// compare-and-swap: a projection still pointing at the exact admitted revision
+// is merged exactly once, and the merge call itself carries the provider-side
+// --match-head-commit so a push between the list and the merge cannot land an
+// unchecked head.
+func TestProjectMergeMatchesAdmittedHeadAndCAS(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	merges := 0
+	var mergeArgs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch args[1] {
+		case "list":
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"cafebabe"}]`), nil
+		case "merge":
+			merges++
+			mergeArgs = append([]string(nil), args...)
+			return nil, nil
+		default:
+			return nil, errors.New("unexpected host command")
+		}
+	}
+
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if err := projectMerge(cfg, "forest/7-change", "squash", "cafebabe"); err != nil {
+		t.Fatalf("projectMerge refused a matching admitted head: %v", err)
+	}
+	if merges != 1 {
+		t.Fatalf("projectMerge made %d merge calls, want 1", merges)
+	}
+	if !reflect.DeepEqual(mergeArgs[1:], []string{"merge", "23", "-R", "owner/repo", "--squash", "--match-head-commit", "cafebabe"}) {
+		t.Fatalf("merge call args = %q, want the host CAS --match-head-commit", mergeArgs[1:])
+	}
+}
+
+// TestProjectMergeRefusesEmptyProjectionHead pins that an empty reported head
+// is not an admission the machine can trust: without a real headRefOid there is
+// no way to compare-and-swap, so the merge is refused rather than let an
+// unreported head land.
+func TestProjectMergeRefusesEmptyProjectionHead(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	var called []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		called = append(called, args[1])
+		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23"}]`), nil
+	}
+
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	err := projectMerge(cfg, "forest/7-change", "squash", "cafebabe")
+	if err == nil {
+		t.Fatal("projectMerge accepted a projection with no reported head")
+	}
+	for _, c := range called {
+		if c == "merge" {
+			t.Fatal("projectMerge issued pr merge for a projection with no reported head")
+		}
 	}
 }
 

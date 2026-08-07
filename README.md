@@ -8,6 +8,11 @@ Three independent Flows run in one process and coordinate through git state.
 Each Flow selects a Subject, performs its Effect, and records a Run.
 Each lane uses its own interval. The process excludes duplicate work on one Subject.
 
+The delivery state machine is documented in [docs/fsm.md](docs/fsm.md): its
+states, its legal transitions, which Flow owns each transition, and the
+invariants that must never break. `fsm.go` encodes the machine as a pure
+function and the tests refuse every illegal transition.
+
 | Flow | Selector | Effects |
 | --- | --- | --- |
 | Builder | Eligible Tracker items without a forest branch and without configured exclude labels. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It may create a Projection. |
@@ -77,9 +82,11 @@ projection:
   merge_via_host: false
 ```
 
-`repo` names the Tracker repository. There is no `protected` key: `docs/adr/0003`
-removed it, so the Gate rejects nothing by path and independent review on the
-exact commit is what decides whether a change lands.
+`repo` names the Tracker repository. There is no `protected` key in
+`forest.yaml` and the Gate rejects nothing by path: `docs/adr/0003` removed the
+protected-path list, so an agent may change any path its Subject requires. See
+`docs/fsm.md` and `AGENTS.md`. Independent review on the exact commit is the
+audit surface.
 
 Attaching a second repository to a running installation is
 `docs/onboarding-managed-repo.md`.

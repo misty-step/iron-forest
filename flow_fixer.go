@@ -34,6 +34,17 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			return nil, fmt.Errorf("branch %s: %w", branch, err)
 		}
 		key := "branch-" + branch
+		// failed is terminal and never resumed, so a labeled item is not offered
+		// as fix work even when its brokenness would otherwise match. Relying on
+		// Act alone to refuse a labeled subject would pay to select and claim it
+		// first; the selector never offers it.
+		failed, err := subjectFailed(cfg.Repo, Subject{ID: itemIDFromBranch(branch)})
+		if err != nil {
+			return nil, fmt.Errorf("tracker %s: %w", branch, err)
+		}
+		if failed {
+			continue
+		}
 		v, hasVerdict, err := readVerdict(repoDir, head)
 		if err != nil {
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)
@@ -42,7 +53,8 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if err != nil {
 			return nil, fmt.Errorf("checks %s: %w", branch, err)
 		}
-		if !(hasVerdict && v.Verdict == "changes") && !(hasChecks && checks.Status == "fail") {
+		if !(hasChecks && checks.Status == "fail") &&
+			!(hasChecks && checks.Status == "pass" && hasVerdict && v.Verdict == "changes") {
 			continue
 		}
 		attempts, err := readAttempts(repoDir, key)
@@ -92,6 +104,25 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("notes: %w", err)
 	}
+	// The fix effect is only legal on a broken head: failed Checks, or a
+	// Verdict of changes. A green, approved head is the merge path, never fix
+	// work; the machine is the authority deciding which lane owns it. The facts
+	// carry the spent attempts, the configured cap, and the failure label, so
+	// observe reports failed when the cap is reached and the effect is refused
+	// here -- the FSM enforces the cap at the boundary, not just Select.
+	attempts, err := readAttempts(repoDir, s.Key)
+	if err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("attempts: %w", err)
+	}
+	ffacts := subjectFacts{
+		revision: s.Head, hasBranch: true,
+		checksStatus: checks.Status, verdictStatus: v.Verdict,
+		attempts: attempts, attemptsCap: cfg.Flows.Fixer.Attempts,
+		failedLabel: it.hasTag(failedLabel),
+	}
+	if _, err := transit(observe(ffacts), effectFix, ffacts, "", "fixer"); err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "item_failed"}, fmt.Errorf("fix: %w", err)
+	}
 	request := fixerRevision(v, checks)
 
 	workspace := workspaceDir(repoDir)
@@ -121,7 +152,31 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
+	// The same terminal re-derivation at the publish boundary: the repair run
+	// gave another lane (or a human) time to apply forest:failed or to spend the
+	// attempt cap, so a new branch head must not land on a now-failed subject
+	// even though the fix was legal when it started.
+	blocked, perr := publishBlocked(cfg, repoDir, s, true)
+	if perr != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %w", perr)
+	}
+	if blocked {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %s is failed: terminal and never resumed", s.Key)
+	}
 	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	// A repair is a publish that lands a bare head; the subject returns to
+	// pushed carrying no inherited Verdict or Checks.
+	newHead, err := gitOut(repoDir, "rev-parse", "refs/remotes/origin/"+s.Branch)
+	if err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	if _, err := transit(stateFixing, effectPublish, subjectFacts{revision: newHead}, "", "fixer"); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
@@ -131,6 +186,19 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		return out, fmt.Errorf("attempts: %w", err)
 	}
 	if count >= cfg.Flows.Fixer.Attempts {
+		// The halt is itself a transition the machine owns. Ask it before
+		// applying the durable label, with the spent attempts and the cap as
+		// facts, so a subject that somehow still has attempts left cannot be
+		// failed -- observe reports the exhausted subject as failed and the
+		// machine confirms the move rather than letting the caller hard-code it.
+		efacts := subjectFacts{
+			revision: s.Head, hasBranch: true,
+			attempts: count, attemptsCap: cfg.Flows.Fixer.Attempts,
+		}
+		if _, err := transit(observe(efacts), effectFail, efacts, "", "fixer"); err != nil {
+			out.Status = "tracker_failed"
+			return out, fmt.Errorf("fail: %w", err)
+		}
 		if err := markFixerFailed(cfg.Repo, it); err != nil {
 			out.Status = "tracker_failed"
 			return out, fmt.Errorf("tracker: %w", err)
