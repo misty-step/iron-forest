@@ -91,13 +91,15 @@ func cmdList(cfg Config) int {
 		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
 	}
-	items, err := eligibleItems(cfg, repoDir)
+	// Ask the lane, not the tracker: an operator needs to know what the Builder
+	// will take, which is narrower than what the tracker calls eligible.
+	subjects, err := builderFlow{}.Select(cfg, repoDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
 	}
-	for _, it := range items {
-		fmt.Printf("#%d\t%s\n", it.Number, it.Title)
+	for _, s := range subjects {
+		fmt.Printf("#%d\t%s\n", s.Issue, s.Item.Title)
 	}
 	return 0
 }

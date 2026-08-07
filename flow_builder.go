@@ -26,8 +26,18 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err != nil {
 		return nil, err
 	}
+	runs, _, err := loadLedger(ledgerPath(repoDir))
+	if err != nil {
+		return nil, err
+	}
 	var subjects []Subject
 	for _, it := range items {
+		// An item whose situation has not changed since it failed repeatedly is not
+		// work. The tracker revision moves when a human reshapes the card, and a
+		// reshaped card is a new situation worth paying for.
+		if stalledOn(runs, "builder", fmt.Sprintf("item-%d", it.Number), it.UpdatedAt) {
+			continue
+		}
 		subjects = append(subjects, Subject{
 			Key:      fmt.Sprintf("item-%d", it.Number),
 			Kind:     "item",
