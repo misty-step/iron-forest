@@ -169,7 +169,11 @@ func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 	if ok {
 		verdict = core.Verdict{
 			Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
-			Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time, Present: true,
+			Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
+			// A note is only present when it carries a value-a useful decision:
+			// matching the surface's old presence heuristic, a note with neither
+			// a time nor a run id is not a meaningful entry and must not render.
+			Present: v.Time != "" || v.RunID != "",
 		}
 	}
 	ch, ok2, err := readChecks(c.repoDir, sha)
@@ -182,19 +186,16 @@ func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 			Status:  ch.Status,
 			RunID:   ch.RunID,
 			Time:    ch.Time,
-			Present: true,
+			Present: ch.Time != "" || ch.RunID != "",
 		}
-		// Preserve the nil/non-nil shape of the checks note's results field so a
-		// surface can tell an explicit empty array (`[]`) apart from an absent or
-		// null one, exactly as the raw note does. Only allocate when the note
-		// carried a non-nil slice.
-		if ch.Results != nil {
-			checks.Results = make([]core.CheckResult, 0, len(ch.Results))
-			for _, r := range ch.Results {
-				checks.Results = append(checks.Results, core.CheckResult{
-					Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
-				})
-			}
+		// Always build a non-nil slice so an absent or null results field in the
+		// raw note still serializes as an empty array, exactly as the surface's
+		// old read rendered it; an explicit empty array keeps its shape too.
+		checks.Results = make([]core.CheckResult, 0, len(ch.Results))
+		for _, r := range ch.Results {
+			checks.Results = append(checks.Results, core.CheckResult{
+				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
+			})
 		}
 	}
 	return verdict, checks, nil

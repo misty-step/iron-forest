@@ -233,57 +233,58 @@ func TestCmdShowRestoresNoteErrorPrefixes(t *testing.T) {
 	}
 }
 
-// TestCmdShowPreservesPresenceAndNullResults pins the #176 show byte-for-byte
-// behavior: note presence drives what is emitted (not field heuristics), and a
-// checks note that carries no rows still renders `results: null`, never [].
-func TestCmdShowPreservesPresenceAndNullResults(t *testing.T) {
-	api, work, sha := coreFixture(t)
-
-	code := 0
-	out, _ := captureOutput(t, func() { code = cmdShow(api, sha) })
-	if code != 0 {
-		t.Fatalf("cmdShow(no notes) code = %d, want 0", code)
+// TestCmdShowBaseOutputNormalizesEmptyResultsRestoresMode pins the #176 show
+// byte-for-byte behavior against the pre-#176 surface output: a checks note
+// whose results field is absent or null (e.g. writeChecks with only a status)
+// renders `results: []` exactly as it did before, and an explicit empty array
+// keeps the same `results: []` shape. Neither renders `null`.
+func TestCmdShowBaseOutputNormalizesEmptyResultsRestoresMode(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"null", `"results": []`},
+		{"explicit-empty", `"results": []`},
 	}
-	if strings.TrimSpace(out) != "{}" {
-		t.Errorf("no-notes output = %q, want {}", strings.TrimSpace(out))
-	}
-
-	if err := writeVerdict(work, sha, verdictNote{Verdict: "approve", Reviewer: "r", Model: "m"}); err != nil {
-		t.Fatal(err)
-	}
-	out, _ = captureOutput(t, func() { code = cmdShow(api, sha) })
-	if code != 0 {
-		t.Fatalf("cmdShow(verdict) code = %d, want 0", code)
-	}
-	if !strings.Contains(out, `"verdict"`) {
-		t.Errorf("verdict-only output missing the verdict object:\n%s", out)
-	}
-	if strings.Contains(out, `"checks"`) {
-		t.Errorf("verdict-only output must not include checks:\n%s", out)
-	}
-
-	if err := writeChecks(work, sha, checksNote{Status: "pass"}); err != nil {
-		t.Fatal(err)
-	}
-	out, _ = captureOutput(t, func() { code = cmdShow(api, sha) })
-	if code != 0 {
-		t.Fatalf("cmdShow(checks) code = %d, want 0", code)
-	}
-	if !strings.Contains(out, `"results": null`) {
-		t.Errorf("empty-results checks output must render results as null:\n%s", out)
-	}
-	if strings.Contains(out, `"results": []`) {
-		t.Errorf("empty-results checks output must not render an empty array:\n%s", out)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api, work, sha := coreFixture(t)
+			if tc.name == "explicit-empty" {
+				if err := writeChecks(work, sha, checksNote{Status: "pass", Results: []checkResult{}}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// A checks note carrying only a status has a null (nil) results
+				// field once the note is written and read back, so it exercises
+				// the same path as an explicit JSON null.
+				if err := writeChecks(work, sha, checksNote{Status: "pass"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code := 0
+			out, _ := captureOutput(t, func() { code = cmdShow(api, sha) })
+			if code != 0 {
+				t.Fatalf("cmdShow code = %d, want 0", code)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output missing %s:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, `"results": null`) {
+				t.Errorf("output must not render results as null:\n%s", out)
+			}
+		})
 	}
 }
 
-// TestCmdShowPreservesExplicitEmptyResultsArray pins the #176 regression: a
-// checks note whose results field is an explicit empty array must keep that
-// shape through the core API and render `results: []`, not be collapsed to
-// `null` like an absent field is.
-func TestCmdShowPreservesExplicitEmptyResultsArray(t *testing.T) {
+// TestCmdShowOmitsNotesMissingTimeAndRunID pins the pre-#176 presence heuristic
+// that cmdShow kept when reaching state through the core API: a note that
+// carries neither a time nor a run id is not a meaningful decision and must not
+// be emitted, so the command falls back to showing nothing for that commit.
+func TestCmdShowOmitsNotesMissingTimeAndRunID(t *testing.T) {
 	api, work, sha := coreFixture(t)
-	if err := writeChecks(work, sha, checksNote{Status: "pass", Results: []checkResult{}}); err != nil {
+	// writeNote bypasses writeVerdict's time stamp, leaving both Time and RunID
+	// empty in the stored note.
+	if err := writeNote(work, verdictNotesRef, sha, verdictNote{Verdict: "approve"}); err != nil {
 		t.Fatal(err)
 	}
 	code := 0
@@ -291,10 +292,7 @@ func TestCmdShowPreservesExplicitEmptyResultsArray(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdShow code = %d, want 0", code)
 	}
-	if !strings.Contains(out, `"results": []`) {
-		t.Errorf("explicit-empty checks output must render results as an empty array:\n%s", out)
-	}
-	if strings.Contains(out, `"results": null`) {
-		t.Errorf("explicit-empty checks output must not collapse results to null:\n%s", out)
+	if strings.TrimSpace(out) != "{}" {
+		t.Errorf("output = %q, want {} for a note lacking time and run id", strings.TrimSpace(out))
 	}
 }
