@@ -30,7 +30,7 @@ flows:
     agent: verifier
     interval_seconds: 20
     merge: squash
-    auto_merge: false  # operator review gate; flip back after Manager PR
+    auto_merge: true
   fixer:
     enabled: true
     agent: builder
