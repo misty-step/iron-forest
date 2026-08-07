@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -147,19 +148,23 @@ func TestProjectMergeRefusesMovedProjectionHead(t *testing.T) {
 	}
 }
 
-// TestProjectMergeMatchesAdmittedHead pins the happy path of the host
+// TestProjectMergeMatchesAdmittedHeadAndCAS pins the happy path of the host
 // compare-and-swap: a projection still pointing at the exact admitted revision
-// is merged exactly once.
-func TestProjectMergeMatchesAdmittedHead(t *testing.T) {
+// is merged exactly once, and the merge call itself carries the provider-side
+// --expected-head so a push between the list and the merge cannot land an
+// unchecked head.
+func TestProjectMergeMatchesAdmittedHeadAndCAS(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
 	merges := 0
+	var mergeArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
 		switch args[1] {
 		case "list":
 			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"cafebabe"}]`), nil
 		case "merge":
 			merges++
+			mergeArgs = append([]string(nil), args...)
 			return nil, nil
 		default:
 			return nil, errors.New("unexpected host command")
@@ -172,6 +177,34 @@ func TestProjectMergeMatchesAdmittedHead(t *testing.T) {
 	}
 	if merges != 1 {
 		t.Fatalf("projectMerge made %d merge calls, want 1", merges)
+	}
+	if !reflect.DeepEqual(mergeArgs[1:], []string{"merge", "23", "-R", "owner/repo", "--squash", "--expected-head", "cafebabe"}) {
+		t.Fatalf("merge call args = %q, want the host CAS --expected-head", mergeArgs[1:])
+	}
+}
+
+// TestProjectMergeRefusesEmptyProjectionHead pins that an empty reported head
+// is not an admission the machine can trust: without a real headRefOid there is
+// no way to compare-and-swap, so the merge is refused rather than let an
+// unreported head land.
+func TestProjectMergeRefusesEmptyProjectionHead(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	var called []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		called = append(called, args[1])
+		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23"}]`), nil
+	}
+
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	err := projectMerge(cfg, "forest/7-change", "squash", "cafebabe")
+	if err == nil {
+		t.Fatal("projectMerge accepted a projection with no reported head")
+	}
+	for _, c := range called {
+		if c == "merge" {
+			t.Fatal("projectMerge issued pr merge for a projection with no reported head")
+		}
 	}
 }
 

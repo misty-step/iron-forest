@@ -88,9 +88,14 @@ boundary using `observe` of the exact git-visible facts it actually read:
   the Subject), so a `forest:failed` label applied after `Select` still halts the
   lane before any build Effect, and an item closed between Select and Act is no
   longer open, so `observe` places it `merged` and refuses the build.
-- `flow_verifier.go` `Select` reads Verdict/Checks notes and derives each
-  branch's state with `observe`, offering only heads the machine places in a
-  state the Verifier owns. A stranded Verdict with no green Checks is observed
+- `flow_verifier.go` `Select` reads Verdict/Checks notes **and the durable
+  attempt ref**, derives each branch's state with `observe`, and offers only
+  heads the machine places in a state the Verifier owns. Feeding the spent cap
+  through the same facts keeps a bare, checks-recorded, or rejected head
+  consistent with an approved one: a subject whose Fixer bumped the attempt ref
+  and then crashed before applying `forest:failed` is reported failed and is
+  never offered, exactly as the documented claim that a post-bump crash is
+  observed as failed. A stranded Verdict with no green Checks is observed
   `pushed` — it still needs its check transition run — so it is offered, never
   a dead end; a failing head and a rejected head are another lane's work and
   are skipped. `Act` enforces `admitCheck` (only a bare head is checked),
@@ -100,8 +105,11 @@ boundary using `observe` of the exact git-visible facts it actually read:
 - `failed` is terminal: the Verifier and Fixer Selectors both read the Tracker
   label (`subjectFailed`) and never offer a labeled item, even one whose git
   facts — a green head, an approved Verdict — would otherwise look actionable.
-  The Verifier `Act` also refuses a labeled item at its boundary before any
-  Effect, so a label applied between Select and Act still halts the lane.
+  The Verifier `Act` re-derives the terminal facts — the `forest:failed` label
+  and the durable attempt ref — at Act entry and again before **every durable
+  effect boundary** (`writeChecks`, `writeVerdict`, and the merge), so a label
+  that lands, or a Fixer that exhausts the cap, while the pass is already in
+  flight still halts the lane before any new Checks or Verdict is recorded.
 
 ## Halt and human-only states
 
@@ -122,9 +130,11 @@ boundary using `observe` of the exact git-visible facts it actually read:
    required note is refused there. `mergeVerified` then requires the branch still
    point at that exact admitted head, and merges that immutable SHA -- not the
    live branch ref -- so a branch updated between admission and merge cannot land
-   a head its Checks and Verdict no longer describe. The Verifier also re-reads
-   the terminal `forest:failed` label at this Effect boundary, so a Fixer that
-   halts a subject while the Verifier is already reviewing stops the merge.
+   a head its Checks and Verdict no longer describe. The Verifier also re-derives
+   the newest terminal facts (`forest:failed` and the attempt cap) at this Effect
+   boundary and at the earlier `writeChecks` and `writeVerdict` boundaries, so a
+   Fixer that halts or exhausts a subject while the Verifier is already checking
+   or reviewing stops any new durable decision -- no merge, no Checks, no Verdict.
 2. **Never double-claim one Subject across concurrent Flows.** `transit`
    refuses a second `build`/`fix` once the Subject is `building`/`fixing`, and
    `flow.go` `inFlight.claim` excludes the Subject within one process. The
@@ -145,7 +155,9 @@ boundary using `observe` of the exact git-visible facts it actually read:
    reaches `failed` through `fail`, and the Fixer's `fail` is refused until the
    cap is reached, so a fresh subject can never be marked failed by the machine
    and a crash after `bumpAttempts` still leaves `observe` reporting the
-   exhausted subject `failed`.
+   exhausted subject `failed`. The Verifier feeds the spent cap through its own
+   Select facts and re-derives it before each durable effect, so an exhausted
+   subject is also refused there -- never re-checked, re-reviewed, or merged.
 4. **Gate rejects a change to a protected path.** `gate.go` `gate` refuses any
    run whose change touches `.forest/`, `forest.yaml`, `agents/`, or
    `.opencode/opencode.json` — the factory's control plane — before trusting

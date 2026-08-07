@@ -662,7 +662,100 @@ func TestVerifierNeverActsOnFailedLabel(t *testing.T) {
 	}
 }
 
-// TestMergeBlockedNamesEveryReason pins the single authority for merge policy.
+// TestVerifierSelectSkipsExhaustedBareHead pins the reviewer's Note 2 on the
+// read side: the durable attempt cap is a cap fact for every branch, not only
+// the approved merge path. If the Fixer bumps the attempt ref and then crashes
+// or fails before applying forest:failed, the cap is spent but no label exists.
+// Select must feed the spent cap through observe so such a bare head is reported
+// failed and never offered for a fresh check.
+func TestVerifierSelectSkipsExhaustedBareHead(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-exhausted"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	// Spend the only attempt: a Fixer that bumped the ref and halted would leave
+	// exactly this fact -- cap spent, no forest:failed label applied.
+	if count, err := bumpAttempts(repo, "branch-"+branch); err != nil || count != 1 {
+		t.Fatalf("bumpAttempts = (%d, %v), want (1, nil)", count, err)
+	}
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Flows.Fixer.Attempts = 1
+
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	for _, s := range subjects {
+		if s.Key == "branch-"+branch {
+			t.Fatalf("Select offered an exhausted bare head %q as fresh check work", s.Key)
+		}
+	}
+}
+
+// TestVerifierActRefusesExhaustedBeforeCheckEffect pins the reviewer's Note 2
+// on the write side: even when Act is driven directly (as if Select and Act
+// raced), an exhausted bare head must be refused before any durable Checks note
+// is written. Before Note 2's cap facts reached the boundary, the Verifier would
+// check and record an exhausted subject, contradicting the claimed terminal
+// state that a post-bump crash is observed as failed.
+func TestVerifierActRefusesExhaustedBeforeCheckEffect(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-exhaustact"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	if count, err := bumpAttempts(repo, "branch-"+branch); err != nil || count != 1 {
+		t.Fatalf("bumpAttempts = (%d, %v), want (1, nil)", count, err)
+	}
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Fixer.Attempts = 1
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-1")
+	if err == nil {
+		t.Fatalf("Act checked an exhausted bare head: %#v", out)
+	}
+	if out.Status != "item_failed" {
+		t.Fatalf("Act status = %q, want item_failed", out.Status)
+	}
+	if _, ok, err := readChecks(repo, head); err != nil || ok {
+		t.Fatalf("Act wrote a Checks note on an exhausted head: (found=%v, err=%v)", ok, err)
+	}
+}
+
 // Select and Act both consult it; a precondition that lives in only one of them
 // is how the two drifted and produced the hot loop above.
 func TestMergeBlockedNamesEveryReason(t *testing.T) {
@@ -817,7 +910,7 @@ func TestActReusesGreenChecksOnReviewRetry(t *testing.T) {
 
 	reviewed := false
 	oldReview := reviewRunner
-	reviewRunner = func(cfg Config, repoDir, wtDir string, it Item, h, runID string, a *Agent) (verdictNote, runStats, error) {
+	reviewRunner = func(cfg Config, repoDir, wtDir string, it Item, s Subject, runID string, a *Agent) (verdictNote, runStats, error) {
 		reviewed = true
 		return verdictNote{Verdict: "changes", Reviewer: "verifier", Model: a.Model, DefSHA: "def", RunID: runID}, runStats{}, nil
 	}
@@ -1022,7 +1115,7 @@ func TestVerifierStopsAfterFailedLabelArrivesMidPass(t *testing.T) {
 	defer func() { ghJSON = oldGH }()
 
 	oldReview := reviewRunner
-	reviewRunner = func(cfg Config, repoDir, wtDir string, it Item, h, runID string, a *Agent) (verdictNote, runStats, error) {
+	reviewRunner = func(cfg Config, repoDir, wtDir string, it Item, s Subject, runID string, a *Agent) (verdictNote, runStats, error) {
 		if err := mem.SetTags("9", []string{failedLabel}, nil); err != nil {
 			return verdictNote{}, runStats{}, err
 		}

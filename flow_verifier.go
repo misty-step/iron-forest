@@ -64,13 +64,27 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if err != nil {
 			return nil, fmt.Errorf("checks %s: %w", branch, err)
 		}
+		// The durable attempt count is a cap fact, not just a merge-decided one.
+		// The Fixer bumps the ref and only then applies forest:failed; a crash
+		// between the two leaves the cap spent but no label. observe must see the
+		// spent cap so such a head is reported failed -- and never offered for a
+		// check, a review, or a merge -- exactly as the documented invariant
+		// claims. Feed it through this selector's facts for every branch, not
+		// only the approved merge path.
+		attempts, err := readAttempts(repoDir, s.Key)
+		if err != nil {
+			return nil, fmt.Errorf("attempts %s: %w", branch, err)
+		}
 		// Derive the durable state from the same facts observe() reads, so this
 		// selector and the machine never drift. A head the machine places in a
 		// state this lane owns is offered; every other state belongs to another
 		// lane or to a human and is skipped. In particular a stranded Verdict
 		// with no green Checks is observed as pushed and is this lane's work --
 		// it still needs its check transition run -- never a dead end.
-		ffacts := subjectFacts{revision: head, hasBranch: true}
+		ffacts := subjectFacts{
+			revision: head, hasBranch: true,
+			attempts: attempts, attemptsCap: cfg.Flows.Fixer.Attempts,
+		}
 		if hasChecks {
 			ffacts.checksStatus = checks.Status
 		}
@@ -99,10 +113,6 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			// An approved, green branch is only a subject when it can actually
 			// land. Every reason it cannot is named by mergeBlocked, so a branch
 			// waiting on an operator is a state to read, not an action to run.
-			attempts, err := readAttempts(repoDir, s.Key)
-			if err != nil {
-				return nil, fmt.Errorf("attempts %s: %w", branch, err)
-			}
 			if mergeBlocked(cfg, attempts) != "" {
 				continue
 			}
@@ -141,12 +151,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
-	// failed is terminal and never resumed. A labeled item must not be checked,
-	// reviewed, or merged even if the branch moved after Select; this boundary
-	// guard is the last place the machine can refuse an effect.
-	if it.hasTag(failedLabel) {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"},
-			fmt.Errorf("item %s carries %s: failed subjects are terminal and never resumed", s.ID, failedLabel)
+	// failed is terminal and never resumed. A labeled or exhausted item must not
+	// be checked, reviewed, or merged even if the branch moved after Select; this
+	// entry guard re-derives the durable terminal facts (the label and the way
+	// the attempt cap may already be spent) so the lane does not pay to claim or
+	// work a subject another lane already halted.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, err
 	}
 	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
 	if err != nil {
@@ -173,7 +184,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		// checks, so a conflict becomes work instead of a dead end, and this lane
 		// stops offering the head because the fact outlives the pass. A tracker
 		// label cannot do this job: the factory never reads its own labels back.
+		// But a subject the machine now reports failed is terminal, so a Checks
+		// note is never written for it.
 		out.Status = "checks_failed"
+		if err := verifierTerminal(cfg, repoDir, s); err != nil {
+			out.Status = "item_failed"
+			return out, err
+		}
 		note := checksNote{
 			Status:  "fail",
 			RunID:   runID,
@@ -214,6 +231,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// rightly refuses an effect that would write over a note that exists. So read
 	// the note first: a head that already has one takes no check transition and
 	// reuses the exact fact, while a bare head is admitted, checked, and recorded.
+	// Before any Checks note is written, re-derive the terminal facts: the rebase
+	// gave another lane time to exhaust the subject or label it, so the durable
+	// decision must not land on a now-failed head.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
+		out.Status = "item_failed"
+		return out, err
+	}
 	checks, hasChecks, err := readChecks(repoDir, baseSHA)
 	if err != nil {
 		out.Status = "checks_failed"
@@ -272,7 +296,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	if !found {
 		var stats runStats
-		verdict, stats, err = reviewRunner(cfg, repoDir, wtDir, it, baseSHA, runID, a)
+		verdict, stats, err = reviewRunner(cfg, repoDir, wtDir, it, s, runID, a)
 		out.TokIn, out.TokOut = stats.tokensIn, stats.tokensOut
 		if err != nil {
 			out.Status = "review_failed"
@@ -302,12 +326,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
-	// failed is terminal and never resumed. The label was checked at Act entry,
-	// but a Fixer -- or a human -- can apply it while this pass is checking or
-	// reviewing, so re-read the item at the latest Effect boundary before the
-	// merge. Without this revalidation an approved green branch could still land
-	// after its item was marked failed mid-pass.
-	if err := assertNotFailed(cfg, s); err != nil {
+	// failed is terminal and never resumed. The facts were checked at Act entry
+	// and before writeChecks, but a Fixer -- or a human -- can apply forest:failed
+	// or exhaust the attempt cap while this pass is reviewing, so re-derive the
+	// newest terminal facts at this latest Effect boundary before the merge.
+	// Without this revalidation an approved green branch could still land after
+	// its item was marked failed mid-pass.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
 		out.Status = "item_failed"
 		return out, err
 	}
@@ -334,19 +359,31 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	return out, nil
 }
 
-// assertNotFailed re-reads the item from the tracker and refuses when it now
-// carries the terminal forest:failed label. failed is terminal and never
-// resumed, so a label that lands while a pass is already in flight -- after the
-// Act-entry check, during checking or reviewing -- must stop the subject before
-// it can merge. Each later Effect boundary calls it so the machine observes the
-// newest terminal fact, not the copy the pass started with.
-func assertNotFailed(cfg Config, s Subject) error {
+// verifierTerminal re-reads the durable terminal facts -- the tracker's
+// forest:failed label and the attempt ref -- and refuses when the machine
+// reports the subject failed. failed is terminal and never resumed. The label
+// can land, or a Fixer can bump the attempt ref and crash before applying the
+// label, while a pass is already in flight; either way observe must report the
+// subject failed and no durable Checks, Verdict, or merge may follow. Every
+// durable effect boundary -- before writeChecks, before writeVerdict, and before
+// the merge -- calls this so the machine observes the newest terminal fact, not
+// the copy the pass started with.
+func verifierTerminal(cfg Config, repoDir string, s Subject) error {
 	it, err := trackerFor(cfg.Repo).Get(s.ID)
 	if err != nil {
 		return fmt.Errorf("item: %w", err)
 	}
-	if it.hasTag(failedLabel) {
-		return fmt.Errorf("item %s carries %s: failed subjects are terminal and never resumed", s.ID, failedLabel)
+	attempts, err := readAttempts(repoDir, s.Key)
+	if err != nil {
+		return fmt.Errorf("attempts: %w", err)
+	}
+	ffacts := subjectFacts{
+		revision: s.Head, hasBranch: true,
+		attempts: attempts, attemptsCap: cfg.Flows.Fixer.Attempts,
+		failedLabel: it.hasTag(failedLabel),
+	}
+	if observe(ffacts) == stateFailed {
+		return fmt.Errorf("subject %s is failed: terminal and never resumed", s.Key)
 	}
 	return nil
 }
@@ -408,9 +445,10 @@ var reviewRunner = verifierReview
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
 // in tokens; a discarded count makes every review look free.
-func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
+func verifierReview(cfg Config, repoDir, wtDir string, it Item, s Subject, runID string, a *Agent) (verdictNote, runStats, error) {
 	var out verdictNote
 	var stats runStats
+	head := s.Head
 	diff, err := gitOut(wtDir, "diff", "origin/master..."+head)
 	if err != nil {
 		return out, stats, fmt.Errorf("review: diff: %w", err)
@@ -436,7 +474,12 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	// Checks are green on this exact revision. The Checks note is read from the
 	// repository -- never a literal -- so the machine observes the exact fact
 	// and refuses if the note is absent or not green, and a Verdict never
-	// records against a failing or unchecked head.
+	// records against a failing or unchecked head. The model phase above gave
+	// another lane time to exhaust the subject or label it, so the terminal
+	// facts are re-derived here before any durable Verdict is written.
+	if err := verifierTerminal(cfg, repoDir, s); err != nil {
+		return verdictNote{}, stats, fmt.Errorf("review: %w", err)
+	}
 	ffacts := subjectFacts{revision: head, hasBranch: true}
 	if checks, found, readErr := readChecks(repoDir, head); readErr != nil {
 		return verdictNote{}, stats, fmt.Errorf("review: checks: %w", readErr)

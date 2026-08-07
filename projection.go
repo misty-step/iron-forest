@@ -106,9 +106,12 @@ func projectChecks(cfg Config, branch string, c checksNote) error {
 // branch. expectedHead is the exact revision the git side already admitted, and
 // the host merge is only legal when the projection still points at it: a push to
 // the branch after admission would otherwise make the host land an unchecked,
-// unreviewed commit that no local checks or Verdict describe. The PR's head is
-// therefore matched against expectedHead before the merge call, a provider-side
-// compare-and-swap that closes the window the git-only branchHead check cannot.
+// unreviewed commit that no local checks or Verdict describe. The PR's head must
+// therefore be reported and non-empty, and match expectedHead: an empty head is
+// not an admission the machine can trust, so it is refused rather than let past.
+// The merge call then carries the provider's own compare-and-swap
+// (--expected-head), so even if a push lands between the list and the merge, the
+// host refuses rather than landing a head no local Checks or Verdict describe.
 func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	if !cfg.Projection.Enabled {
 		return errors.New("projection disabled")
@@ -120,8 +123,8 @@ func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	if len(prs) == 0 || prs[0].Number == 0 {
 		return fmt.Errorf("no open pull request for branch %q", branch)
 	}
-	if prs[0].HeadSHA != "" && prs[0].HeadSHA != expectedHead {
-		return fmt.Errorf("projection head %s moved from admitted %s for branch %q; refusing",
+	if prs[0].HeadSHA == "" || prs[0].HeadSHA != expectedHead {
+		return fmt.Errorf("projection head %q does not match the admitted revision %s for branch %q; refusing",
 			short(prs[0].HeadSHA), short(expectedHead), branch)
 	}
 	method := ""
@@ -136,7 +139,7 @@ func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 		return fmt.Errorf("unsupported merge strategy %q", strategy)
 	}
 	_, err = projectionCommand("pr", "merge", strconv.Itoa(prs[0].Number),
-		"-R", cfg.Repo, method)
+		"-R", cfg.Repo, method, "--expected-head", prs[0].HeadSHA)
 	return err
 }
 
