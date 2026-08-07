@@ -32,7 +32,7 @@ func TestManagerPromotesAtMostTheOpenLevel(t *testing.T) {
 	rep := managerReport{
 		Promote: []string{"1", "2", "3"},
 	}
-	promoted, err := applyManager(managerCfg(), tk, items, nil, rep)
+	promoted, _, err := applyManager(managerCfg(), tk, items, nil, rep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestManagerPromotesNothingAtOpenLevel(t *testing.T) {
 		tk.seed(it)
 	}
 	rep := managerReport{Promote: []string{"2"}}
-	promoted, err := applyManager(managerCfg(), tk, items, nil, rep)
+	promoted, _, err := applyManager(managerCfg(), tk, items, nil, rep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 		Promote: []string{"70"},
 		Reject:  []managerReject{{ID: "70"}},
 	}
-	promoted, err := applyManager(managerCfg(), tk, items, nil, rep)
+	promoted, _, err := applyManager(managerCfg(), tk, items, nil, rep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestManagerCommentIdempotentAtUnchangedRevision(t *testing.T) {
 	tk.seed(items[0])
 	rep := managerReport{Reject: []managerReject{{ID: "9", Reason: "no definition of done"}}}
 
-	if _, err := applyManager(managerCfg(), tk, items, nil, rep); err != nil {
+	if _, _, err := applyManager(managerCfg(), tk, items, nil, rep); err != nil {
 		t.Fatal(err)
 	}
 	if len(tk.items["9"].Comments) != 1 {
@@ -132,7 +132,7 @@ func TestManagerCommentIdempotentAtUnchangedRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := applyManager(managerCfg(), tk, fresh, nil, rep); err != nil {
+	if _, _, err := applyManager(managerCfg(), tk, fresh, nil, rep); err != nil {
 		t.Fatal(err)
 	}
 	if len(tk.items["9"].Comments) != 1 {
@@ -207,7 +207,7 @@ func TestManagerPromoteBlockerWritesExplanation(t *testing.T) {
 	// The agent promotes 70 even though it is blocked; only the blocker comment
 	// should be recorded, with no promote tag applied.
 	rep := managerReport{Promote: []string{"70"}}
-	if _, err := applyManager(managerCfg(), tk, items, nil, rep); err != nil {
+	if _, _, err := applyManager(managerCfg(), tk, items, nil, rep); err != nil {
 		t.Fatal(err)
 	}
 	if tk.items["70"].hasTag("forest:ready") {
@@ -226,7 +226,7 @@ func TestManagerPromoteBlockerWritesExplanation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := applyManager(managerCfg(), tk, fresh, nil, rep); err != nil {
+	if _, _, err := applyManager(managerCfg(), tk, fresh, nil, rep); err != nil {
 		t.Fatal(err)
 	}
 	if len(tk.items["70"].Comments) != 1 {
@@ -243,7 +243,7 @@ func TestManagerNeverPromotesExcludedTag(t *testing.T) {
 	}
 	tk.seed(items[0])
 	rep := managerReport{Promote: []string{"7"}}
-	promoted, err := applyManager(managerCfg(), tk, items, nil, rep)
+	promoted, _, err := applyManager(managerCfg(), tk, items, nil, rep)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,5 +252,131 @@ func TestManagerNeverPromotesExcludedTag(t *testing.T) {
 	}
 	if tk.items["7"].hasTag("forest:ready") {
 		t.Fatal("excluded item must not carry the promote tag")
+	}
+}
+
+// TestManagerSecondPromotionAfterFirstBranch is a regression for a reviewer
+// finding: a pass that stops at the level cap used to mark every candidate seen,
+// so after the first item got a branch the deferred items were never selected
+// again. A cap-deferred item must stay eligible, so a second promotion happens
+// once the branch exists and capacity frees.
+func TestManagerSecondPromotionAfterFirstBranch(t *testing.T) {
+	tk := newMemoryTracker()
+	items := []Item{
+		{ID: "1", Title: "alpha", UpdatedAt: "r1", Body: "clear scope"},
+		{ID: "2", Title: "beta", UpdatedAt: "r2", Body: "clear scope"},
+	}
+	for _, it := range items {
+		tk.seed(it)
+	}
+	cfg := managerCfg()
+	// Pass 1: no branches yet. The level cap lets only item 1 through, and item
+	// 2 is deferred, so it must not be recorded as judged.
+	rep := managerReport{Promote: []string{"1", "2"}}
+	promoted, judged, err := applyManager(cfg, tk, items, nil, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted != 1 {
+		t.Fatalf("pass 1 promoted %d, want 1", promoted)
+	}
+	if judged["2"] {
+		t.Fatal("cap-deferred item 2 must not be marked judged")
+	}
+	// Record the verdict exactly as the Act flow does; unchanged revisions but
+	// judged only item 1.
+	repo := newRefGitRepo(t)
+	if err := recordManagerSeen(repo, items, judged); err != nil {
+		t.Fatal(err)
+	}
+	// Item 2 is still a candidate for a later pass, because it was not seen.
+	cands, err := managerCandidates(cfg, repo, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 || cands[0].ID != "2" {
+		t.Fatalf("pass 1 leaves candidates %v, want only item 2", cands)
+	}
+	// Pass 2: item 1 now has a branch, freeing the level. Item 2, at the same
+	// update stamp, is reconsidered and promoted. A real pass re-lists from the
+	// tracker, so item 1 arrives carrying the promote tag but covered by its
+	// branch, and the agent is only offered the still-eligible item 2.
+	fresh, err := tk.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	branches := []string{"forest/1-alpha"}
+	promoted2, _, err := applyManager(cfg, tk, fresh, branches, managerReport{Promote: []string{"2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted2 != 1 {
+		t.Fatalf("pass 2 promoted %d, want 1", promoted2)
+	}
+	if !tk.items["2"].hasTag("forest:ready") {
+		t.Fatal("deferred item 2 should be promoted once the level frees")
+	}
+}
+
+// TestManagerReconsidersBlockedItemWhenBlockerCloses is a regression for a
+// reviewer finding: an item refused only because an open Blocked by dependency
+// exists used to be marked seen, and closing the blocker never moved the
+// dependent item's own update stamp, so it was never reconsidered. A blocked
+// item must stay eligible, so it is promoted once the blocker closes.
+func TestManagerReconsidersBlockedItemWhenBlockerCloses(t *testing.T) {
+	repo := newRefGitRepo(t)
+	tk := newMemoryTracker()
+	items := []Item{
+		{ID: "149", Title: "still open", UpdatedAt: "r1"},
+		{ID: "70", Title: "waiting", UpdatedAt: "r2", Body: "Blocked by: #149"},
+	}
+	for _, it := range items {
+		tk.seed(it)
+	}
+	cfg := managerCfg()
+	rep := managerReport{
+		Promote: []string{"70"},
+		Reject:  []managerReject{{ID: "70", Reason: "blocked"}},
+	}
+	// Pass 1: 70 is blocked. A comment is recorded, but the item must not be
+	// marked judged, because the blocker is external to its own update stamp.
+	promoted, judged, err := applyManager(cfg, tk, items, nil, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted != 0 {
+		t.Fatalf("promoted a blocked item; want 0")
+	}
+	if judged["70"] {
+		t.Fatal("blocked item 70 must not be marked judged")
+	}
+	if err := recordManagerSeen(repo, items, judged); err != nil {
+		t.Fatal(err)
+	}
+	cands, err := managerCandidates(cfg, repo, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.ID == "70" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("blocked item 70 must remain a candidate for re-evaluation")
+	}
+	// The blocker 149 closes, leaving the open set. Item 70's own update stamp
+	// is unchanged, yet the Manager now gets a chance to promote it.
+	afterClose := []Item{{ID: "70", Title: "waiting", UpdatedAt: "r2", Body: "Blocked by: #149"}}
+	promoted2, _, err := applyManager(cfg, tk, afterClose, nil, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted2 != 1 {
+		t.Fatalf("after the blocker closed, promoted %d, want 1", promoted2)
+	}
+	if !tk.items["70"].hasTag("forest:ready") {
+		t.Fatal("item 70 should be promoted once the blocker closes")
 	}
 }

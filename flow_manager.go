@@ -109,11 +109,13 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if _, err := applyManager(cfg.Flows.Manager, trackerFor(cfg.Repo), items, branches, rep); err != nil {
+	var judged map[string]bool
+	_, judged, err = applyManager(cfg.Flows.Manager, trackerFor(cfg.Repo), items, branches, rep)
+	if err != nil {
 		out.Status = "tracker_failed"
 		return out, fmt.Errorf("tracker: %w", err)
 	}
-	if err := recordManagerSeen(repoDir, cands); err != nil {
+	if err := recordManagerSeen(repoDir, cands, judged); err != nil {
 		out.Status = "notes_failed"
 		return out, fmt.Errorf("notes: %w", err)
 	}
@@ -241,7 +243,14 @@ func gateManagerWorktree(wtDir, baseSHA string) error {
 // the tracker: promote tagged items are added with SetTags, and refused items
 // receive at most one comment naming what they lack. Every effect is a tag or a
 // comment; the lane never writes code or moves branches.
-func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []string, rep managerReport) (int, error) {
+//
+// judged names the candidates the pass actually resolved, so the caller records
+// judgement only for those. An item deferred by the level cap, or one refused
+// only because an open blocker sits on it, is not resolved: it must stay
+// eligible for a later pass, because freeing the level or closing the blocker
+// changes nothing about the item's own update stamp. Returning them in judged
+// would mark them seen and never reconsider them.
+func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []string, rep managerReport) (int, map[string]bool, error) {
 	open := make(map[string]Item, len(items))
 	for _, it := range items {
 		open[it.ID] = it
@@ -259,6 +268,10 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 		}
 	}
 	promoted := 0
+	// judged tracks the candidates this pass actually resolved. Only those are
+	// cached as seen; cap-deferred and open-blocked items are left untagged so a
+	// later pass can reconsider them when capacity frees or the blocker closes.
+	judged := make(map[string]bool)
 	// commented tracks the ids this pass has already told why it will not
 	// promote. The local tracker copy is stale on comments written during this
 	// same call, so the marker scan alone would not stop an item named in both
@@ -280,7 +293,7 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 		}
 		it, ok := open[id]
 		if !ok {
-			return promoted, fmt.Errorf("promote names unknown item %q", id)
+			return promoted, judged, fmt.Errorf("promote names unknown item %q", id)
 		}
 		if hasExcludedTag(it, cfg.ExcludeTags) {
 			continue
@@ -292,21 +305,23 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 			// for promotion but the lane tells it what it lacks.
 			reason := "blocked by " + formatBlockers(blockers) + ", which is open"
 			if err := commentIfNeeded(it, reason); err != nil {
-				return promoted, err
+				return promoted, judged, err
 			}
 			continue
 		}
 		if it.hasTag(cfg.PromoteTag) {
+			judged[id] = true
 			continue
 		}
 		if inFlight >= cfg.MaxOpenReady {
 			break
 		}
 		if err := tk.SetTags(id, []string{cfg.PromoteTag}, nil); err != nil {
-			return promoted, err
+			return promoted, judged, err
 		}
 		inFlight++
 		promoted++
+		judged[id] = true
 	}
 	for _, r := range rep.Reject {
 		if r.ID == "" {
@@ -314,20 +329,29 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 		}
 		it, ok := open[r.ID]
 		if !ok {
-			return promoted, fmt.Errorf("reject names unknown item %q", r.ID)
+			return promoted, judged, fmt.Errorf("reject names unknown item %q", r.ID)
 		}
 		reason := strings.TrimSpace(r.Reason)
 		if blockers := openBlockers(it, open); len(blockers) > 0 {
+			// A reject caused solely by an open blocker is not a final verdict:
+			// closing the blocker changes nothing about this item's own update
+			// stamp, so it must stay eligible for a later pass. The reason is
+			// still recorded, but the item is not marked judged.
 			reason = fmt.Sprintf("blocked by %s, which is open", formatBlockers(blockers))
+			if err := commentIfNeeded(it, reason); err != nil {
+				return promoted, judged, err
+			}
+			continue
 		}
 		if reason == "" {
 			reason = "not promoted"
 		}
 		if err := commentIfNeeded(it, reason); err != nil {
-			return promoted, err
+			return promoted, judged, err
 		}
+		judged[r.ID] = true
 	}
-	return promoted, nil
+	return promoted, judged, nil
 }
 
 // managerAlreadyCommented reports whether the lane has already told this item
@@ -455,14 +479,19 @@ func readManagerSeen(repoDir string) (map[string]string, error) {
 }
 
 // recordManagerSeen writes the judged revisions for a completed pass, so the
-// same static backlog is not reread on the next interval.
-func recordManagerSeen(repoDir string, cands []Item) error {
+// same static backlog is not reread on the next interval. Only the candidates
+// the pass actually resolved are recorded; an item deferred by the level cap or
+// refused only because an open blocker exists stays untracked, so it is revisited
+// when capacity frees or the blocker closes.
+func recordManagerSeen(repoDir string, cands []Item, judged map[string]bool) error {
 	seen, err := readManagerSeen(repoDir)
 	if err != nil {
 		return err
 	}
 	for _, it := range cands {
-		seen[it.ID] = it.UpdatedAt
+		if judged[it.ID] {
+			seen[it.ID] = it.UpdatedAt
+		}
 	}
 	payload, err := json.Marshal(seen)
 	if err != nil {
