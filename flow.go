@@ -160,7 +160,15 @@ func flowNames(fs []Flow) string {
 // runFlowLoop is one lane's whole life: select, act, record, sleep. Config is
 // re-read every pass so an operator edit lands without a restart, and a failing
 // pass never stops the lane.
+//
+// The immediate re-select after productive work exists so a lane can pick up
+// sibling work its own write unblocked. It is only valid for *different* work:
+// if a pass acts on the same subject it just acted on, the lane is not making
+// progress and must wait. Without that rule any action that succeeds while
+// changing nothing becomes a hot loop, which is what 217 identical verifier
+// passes on one branch were.
 func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
+	var lastKey string
 	for {
 		if atomic.LoadInt32(drain) == 1 {
 			fmt.Fprintf(os.Stderr, "forest: %s draining, no new pass\n", f.Name())
@@ -173,35 +181,39 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 			time.Sleep(f.Interval(cfg))
 			continue
 		}
-		if code := runFlowPass(f, cfg, repoDir); code == 0 {
-			// A pass that did work re-selects immediately: the state it wrote
-			// may have made another subject actionable for this same lane.
+		code, key := runFlowPass(f, cfg, repoDir)
+		if code == 0 && key != lastKey {
+			// This pass did work on a subject it did not just handle: its write
+			// may have made another subject actionable, so re-select at once.
+			lastKey = key
 			continue
 		}
+		lastKey = key
 		time.Sleep(f.Interval(cfg))
 	}
 }
 
-// runFlowPass acts on at most one subject and reports 0 when it did work.
-// One subject per pass keeps a lane's decisions small and re-reads the world
-// between them, so a lane never acts on state it has already invalidated.
-func runFlowPass(f Flow, cfg Config, repoDir string) int {
+// runFlowPass acts on at most one subject and reports 0 when it did work, plus
+// the key of the subject it acted on so the caller can tell repeated work from
+// progress. One subject per pass keeps a lane's decisions small and re-reads the
+// world between them, so a lane never acts on state it has already invalidated.
+func runFlowPass(f Flow, cfg Config, repoDir string) (int, string) {
 	subjects, err := f.Select(cfg, repoDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forest: %s select: %v\n", f.Name(), err)
-		return 1
+		return 1, ""
 	}
 	if len(subjects) == 0 {
-		return 1
+		return 1, ""
 	}
 	for _, s := range subjects {
 		code := actOnSubject(f, cfg, repoDir, s)
 		if code == codeBusy {
 			continue // another worker handles it; try the next candidate
 		}
-		return code
+		return code, s.Key
 	}
-	return 1
+	return 1, ""
 }
 
 // actOnSubject excludes one subject within this process, acts, and records.

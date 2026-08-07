@@ -80,18 +80,40 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if !found || checks.Status != "pass" {
 			continue
 		}
-		// A branch that already spent its attempts could not land and now waits
-		// for a human. Offering it again would retry one failure forever.
+		// An approved, green branch is only a subject when it can actually land.
+		// Every reason it cannot is named by mergeBlocked, so a branch waiting on
+		// an operator is a state to read, not an action to run.
 		attempts, err := readAttempts(repoDir, s.Key)
 		if err != nil {
 			return nil, fmt.Errorf("attempts %s: %w", branch, err)
 		}
-		if attempts >= cfg.Flows.Fixer.Attempts {
+		if mergeBlocked(cfg, attempts) != "" {
 			continue
 		}
 		mergeable = append(mergeable, s)
 	}
 	return append(fresh, mergeable...), nil
+}
+
+// mergeBlocked names why an approved, green branch may not land now, or returns
+// "" when it may. It is the single authority for merge policy: Select consults
+// it so a lane never offers a subject whose only possible outcome is a no-op,
+// and Act consults the same function so the two cannot drift apart.
+//
+// Splitting this decision is what produced a live hot loop: Select checked the
+// verdict, the checks and the attempts, Act checked auto_merge, and an approved
+// branch under auto_merge: false was selected, rebased, rechecked and reviewed
+// on every pass forever. 217 passes wrote 217 identical ledger rows and ran
+// build, vet and test 217 times before discovering the merge was never allowed.
+// A precondition that lives in one place cannot cause that.
+func mergeBlocked(cfg Config, attempts int) string {
+	if !cfg.Flows.Verifier.AutoMerge {
+		return "auto_merge is off; an operator merges this branch"
+	}
+	if attempts >= cfg.Flows.Fixer.Attempts {
+		return "merge attempts exhausted; a human is required"
+	}
+	return ""
 }
 
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
@@ -208,7 +230,19 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "projection_failed"
 		return out, fmt.Errorf("projection: %w", err)
 	}
-	if verdict.Verdict != "approve" || !cfg.Flows.Verifier.AutoMerge {
+	if verdict.Verdict != "approve" {
+		out.Status = "reviewed"
+		return out, nil
+	}
+	// A fresh review that lands on approve reaches here; a branch selected for
+	// merge already passed this test in Select. Consulting the same authority
+	// keeps the two from drifting, which is what caused the 217-pass hot loop.
+	attempts, err := readAttempts(repoDir, s.Key)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("attempts: %w", err)
+	}
+	if why := mergeBlocked(cfg, attempts); why != "" {
 		out.Status = "reviewed"
 		return out, nil
 	}

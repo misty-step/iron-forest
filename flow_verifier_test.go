@@ -465,3 +465,72 @@ func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
 		t.Fatalf("remote %s != local %s after a compare-and-swap push", remote, local)
 	}
 }
+
+// TestSelectOffersNoBranchItCannotMerge defines the hot loop out of existence.
+// A branch that is approved and green but cannot land is not a Verifier subject:
+// it is a state an operator reads. When Select offered it anyway, every pass
+// rebased, rechecked and reviewed the same head and changed nothing, and the
+// lane re-selected immediately because the pass had "succeeded". That produced
+// 217 identical ledger rows and 217 build/vet/test runs on one branch.
+func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	if err := writeVerdict(repo, head, verdictNote{
+		Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: "def", RunID: "seed",
+	}); err != nil {
+		t.Fatalf("seed verdict: %v", err)
+	}
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+		t.Fatalf("seed checks: %v", err)
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{}
+
+	cfg.Flows.Verifier.AutoMerge = true
+	withMerge, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatalf("Select with auto_merge on: %v", err)
+	}
+	if len(withMerge) != 1 {
+		t.Fatalf("auto_merge on: got %d subjects, want the mergeable branch", len(withMerge))
+	}
+
+	cfg.Flows.Verifier.AutoMerge = false
+	held, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatalf("Select with auto_merge off: %v", err)
+	}
+	if len(held) != 0 {
+		t.Fatalf("auto_merge off: got %d subjects, want none; a branch that cannot land is not work", len(held))
+	}
+}
+
+// TestMergeBlockedNamesEveryReason pins the single authority for merge policy.
+// Select and Act both consult it; a precondition that lives in only one of them
+// is how the two drifted and produced the hot loop above.
+func TestMergeBlockedNamesEveryReason(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Flows.Fixer.Attempts = 3
+
+	if why := mergeBlocked(cfg, 0); why != "" {
+		t.Errorf("an approved green branch under auto_merge is blocked: %q", why)
+	}
+	if why := mergeBlocked(cfg, 3); why == "" {
+		t.Error("an exhausted branch is not blocked")
+	}
+	cfg.Flows.Verifier.AutoMerge = false
+	if why := mergeBlocked(cfg, 0); why == "" {
+		t.Error("auto_merge off does not block the merge")
+	}
+}
