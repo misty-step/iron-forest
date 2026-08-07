@@ -80,10 +80,10 @@ func TestRenderMarkdownTemperatureIsOptional(t *testing.T) {
 }
 
 func TestIssueDataFeedsComments(t *testing.T) {
-	it := issue{
-		Number: 92,
-		Title:  "feed a rejection back",
-		Body:   "implement the change",
+	it := Item{
+		ID:    "92",
+		Title: "feed a rejection back",
+		Body:  "implement the change",
 		Comments: []comment{
 			{CreatedAt: "2026-08-05T10:00:00Z", Body: "review rejected: keep ordering deterministic"},
 			{CreatedAt: "2026-08-05T09:00:00Z", Body: "operator note: cap the volume"},
@@ -99,6 +99,10 @@ func TestIssueDataFeedsComments(t *testing.T) {
 	}
 	if _, ok := data["Comments"]; !ok {
 		t.Fatalf("prompt data did not expose Comments")
+	}
+	// The prompt exposes the opaque string id as "ID", not the GitHub number.
+	if id, _ := data["ID"].(string); id != "92" {
+		t.Fatalf("prompt data ID = %q, want 92", id)
 	}
 }
 

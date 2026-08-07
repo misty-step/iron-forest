@@ -16,7 +16,7 @@ func TestProjectionDisabledPerformsNoHostCall(t *testing.T) {
 	}
 
 	cfg := Config{Repo: "owner/repo"}
-	if got, err := projectBranch(cfg, issue{Number: 7, Title: "change"}, "forest/7-change", "body"); err != nil || got != "" {
+	if got, err := projectBranch(cfg, Item{ID: "7", Title: "change"}, "forest/7-change", "body"); err != nil || got != "" {
 		t.Fatalf("disabled projectBranch = (%q, %v), want (empty, nil)", got, err)
 	}
 	if err := projectVerdict(cfg, "forest/7-change", verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
@@ -37,7 +37,7 @@ func TestProjectBranchReusesExistingOpenRequest(t *testing.T) {
 	}
 
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	got, err := projectBranch(cfg, issue{Title: "change"}, "forest/7-change", "body")
+	got, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body")
 	if err != nil {
 		t.Fatalf("projectBranch: %v", err)
 	}

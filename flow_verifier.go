@@ -94,7 +94,7 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it, err := getItem(cfg.Repo, s.ID)
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
@@ -218,8 +218,8 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		if _, berr := bumpAttempts(repoDir, s.Key); berr != nil {
 			return out, fmt.Errorf("merge: %w (attempt record failed: %v)", err, berr)
 		}
-		_ = labelItem(cfg.Repo, issueID(it), []string{failedLabel}, nil)
-		_ = commentItem(cfg.Repo, issueID(it), "Merge blocked: "+err.Error())
+		trackerFor(cfg.Repo).SetTags(it.ID, []string{failedLabel}, nil)
+		_ = trackerFor(cfg.Repo).Comment(it.ID, "Merge blocked: "+err.Error())
 		return out, err
 	}
 	out.Status = "merged"
@@ -229,7 +229,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
 // in tokens; a discarded count makes every review look free.
-func verifierReview(cfg Config, repoDir, wtDir string, it issue, head, runID string, a *Agent) (verdictNote, runStats, error) {
+func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
 	var out verdictNote
 	var stats runStats
 	diff, err := gitOut(wtDir, "diff", "origin/master..."+head)
@@ -310,7 +310,7 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 // exclusive: a protected target branch means only the host may write it, and
 // building a local commit that is then discarded would waste the work and
 // confuse the next reader.
-func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
+func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	if cfg.Projection.MergeViaHost {
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
@@ -338,7 +338,7 @@ func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
 		if err := git(mergeDir, "merge", "--squash", branch); err != nil {
 			return fmt.Errorf("merge: squash: %w", err)
 		}
-		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, issueID(it))); err != nil {
+		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
 			return fmt.Errorf("merge: commit: %w", err)
 		}
 	case "ff":
@@ -356,11 +356,11 @@ func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
 
 // finishMerge retires a landed subject: the branch is gone and the item is
 // closed, so no lane selects it again.
-func finishMerge(cfg Config, repoDir, branch string, it issue) error {
+func finishMerge(cfg Config, repoDir, branch string, it Item) error {
 	if err := git(repoDir, "push", "origin", "--delete", branch); err != nil {
 		return fmt.Errorf("merge: delete branch: %w", err)
 	}
-	if err := closeItem(cfg.Repo, issueID(it)); err != nil {
+	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
 		return fmt.Errorf("merge: close item: %w", err)
 	}
 	if err := dropAttempts(repoDir, "branch-"+branch); err != nil {
@@ -369,14 +369,24 @@ func finishMerge(cfg Config, repoDir, branch string, it issue) error {
 	return nil
 }
 
-// itemIDFromBranch recovers the opaque item identity from a forest branch. The
-// branch keeps the forest/<id>-<slug> shape, and the id segment is read as an
-// opaque string: it stays a numeric GitHub id or a Habitat id without assuming
-// it is an integer.
+// branchIDEncoded renders a tracker id as a forest branch's id segment. The
+// branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as they
+// always have. The delimiter on the way back is the first '-', so an id that
+// itself contains '-' is escaped ('-' becomes %2D and the escape '%' becomes
+// %25) to stay opaque round-trippable. Numeric ids and hyphen-free Habitat ids
+// contain neither character, so their branches are unchanged.
+func encodeBranchID(id string) string {
+	return strings.NewReplacer("%", "%25", "-", "%2D").Replace(id)
+}
+
+// itemIDFromBranch recovers the opaque item identity from a forest branch,
+// undoing encodeBranchID on the id segment. It never assumes the segment is an
+// integer: it stays a numeric GitHub id or a Habitat id as written.
 func itemIDFromBranch(branch string) string {
-	name := strings.TrimPrefix(branch, "forest/")
+	name := strings.TrimPrefix(branch, BranchPrefix)
 	if i := strings.IndexByte(name, '-'); i >= 0 {
 		name = name[:i]
 	}
-	return name
+	name = strings.ReplaceAll(name, "%25", "%")
+	return strings.ReplaceAll(name, "%2D", "-")
 }

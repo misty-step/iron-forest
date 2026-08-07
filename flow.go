@@ -21,7 +21,7 @@ type Subject struct {
 	Revision string // item updatedAt, or branch head sha
 	Label    string // one line for the operator
 	ID       string // tracker item identity, opaque to the controller
-	Item     issue  // Kind == "item"
+	Item     Item   // Kind == "item"
 	Branch   string // Kind == "branch"
 	Head     string // Kind == "branch": head commit sha
 }

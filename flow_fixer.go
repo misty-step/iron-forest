@@ -76,7 +76,7 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it, err := getItem(cfg.Repo, s.ID)
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
@@ -159,8 +159,9 @@ func fixerRevision(v verdictNote, c checksNote) string {
 	return strings.TrimSpace(b.String())
 }
 
-func markFixerFailed(repo string, it issue) error {
-	if err := labelItem(repo, issueID(it), []string{failedLabel}, nil); err != nil {
+func markFixerFailed(repo string, it Item) error {
+	tk := trackerFor(repo)
+	if err := tk.SetTags(it.ID, []string{failedLabel}, nil); err != nil {
 		return err
 	}
 	for _, c := range it.Comments {
@@ -168,5 +169,5 @@ func markFixerFailed(repo string, it issue) error {
 			return nil
 		}
 	}
-	return commentItem(repo, issueID(it), "forest:failed: attempts ceiling reached; human review is required.")
+	return tk.Comment(it.ID, "forest:failed: attempts ceiling reached; human review is required.")
 }
