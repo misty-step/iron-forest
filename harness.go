@@ -101,6 +101,10 @@ const childSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 // its cache directories into the published branch.
 // It preserves only the pinned toolchain and caches the factory checks need, and
 // excludes gh, whose credential would reach far beyond the given worktree.
+// Non-Go tools the managed repo declares reach the child through one of two
+// ways: mise-managed tools with working shims (already on the child PATH), or
+// host toolchain directories the operator names in FOREST_CHECK_PATH (see
+// checkHostBins).
 func childEnvironment() ([]string, func(), error) {
 	mise, err := exec.LookPath("mise")
 	if err != nil {
@@ -124,7 +128,7 @@ func childEnvironment() ([]string, func(), error) {
 	miseDataDir, miseShims := miseLocations(mise)
 	env := []string{
 		"HOME=" + home,
-		"PATH=" + strings.Join([]string{binDir, miseShims, childSystemPath}, string(os.PathListSeparator)),
+		"PATH=" + childPath(binDir, miseShims, checkHostBins()),
 		"MISE_CONFIG_DIR=" + filepath.Join(binDir, "config"),
 		"MISE_DATA_DIR=" + miseDataDir,
 		"GOMODCACHE=" + goModuleCache(),
@@ -134,6 +138,35 @@ func childEnvironment() ([]string, func(), error) {
 		"GOCACHE=" + goBuildCache(),
 	}
 	return env, cleanup, nil
+}
+
+// checkHostBins reads the operator-declared host toolchain directories from
+// FOREST_CHECK_PATH, a platform path-list. These are directories whose drivers
+// live outside the scrubbed child PATH (for example rustup's ~/.cargo/bin).
+// They are inserted ahead of the mise shims so a working host binary resolves
+// before a dead shim. Blank entries are ignored.
+func checkHostBins() []string {
+	var dirs []string
+	for _, entry := range filepath.SplitList(os.Getenv("FOREST_CHECK_PATH")) {
+		if entry == "" {
+			continue
+		}
+		dirs = append(dirs, filepath.Clean(entry))
+	}
+	return dirs
+}
+
+// childPath assembles the PATH for a child environment. Order is load-bearing:
+// the private bin directory (the mise symlink) comes first so the harness is
+// authoritative, then the declared host toolchain directories, then the mise
+// shims, then the fixed system path. Host toolchains precede the shims so a
+// working host binary wins over a dead mise shim.
+func childPath(binDir, miseShims string, hostBins []string) string {
+	dirs := make([]string, 0, 2+len(hostBins))
+	dirs = append(dirs, binDir)
+	dirs = append(dirs, hostBins...)
+	dirs = append(dirs, miseShims, childSystemPath)
+	return strings.Join(dirs, string(os.PathListSeparator))
 }
 
 func goModuleCache() string {

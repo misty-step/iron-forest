@@ -84,6 +84,21 @@ Iron Forest runs each command in `checks:` and writes one Checks note.
 It never reads a Host check or review.
 Labels such as `exclude_labels` are Tracker inputs, not factory state.
 
+Each check runs in a child environment with a private `HOME` and a scrubbed
+`PATH`. Its tools resolve one of two ways, both stack-agnostic:
+
+- **mise-managed tools** with working shims are already reachable on the child
+  `PATH`.
+- **host toolchain directories** outside that `PATH` (for example rustup's
+  `~/.cargo/bin`) are reachable when the operator names them with the
+  `FOREST_CHECK_PATH` environment variable on the host running the Factory, a
+  platform path-list of directories to prepend to the child `PATH`. They sit
+  before the mise shims, so a working host binary wins over a dead shim.
+
+Building the wrong thing is worse than not building: Iron Forest does not guess a
+stack. If a `checks:` command's tool is missing, the check fails and the note
+names the command that could not start.
+
 `flows.builder` selects items; declaring `require_labels` (for example
 `require_labels: [forest:ready]`) turns selection from opt-out into opt-in, so
 an open item is eligible only when it carries every declared label. `flows.verifier.merge` is `squash` or `ff`.
