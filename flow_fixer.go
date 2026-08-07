@@ -23,10 +23,6 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err := fetchNotes(repoDir); err != nil {
 		return nil, fmt.Errorf("notes: %w", err)
 	}
-	runs, _, err := loadLedger(ledgerPath(repoDir))
-	if err != nil {
-		return nil, err
-	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return nil, err
@@ -59,7 +55,11 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		// The attempt ceiling bounds published repairs; this bounds the repairs
 		// that never reached a commit, so a lane that cannot even publish stops
 		// paying an agent to retry one unchanged situation.
-		if stalledOn(runs, "fixer", key, head) {
+		stalled, err := stalledOn(repoDir, "fixer", key, head)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", key, err)
+		}
+		if stalled {
 			continue
 		}
 		subjects = append(subjects, Subject{

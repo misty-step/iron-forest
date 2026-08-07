@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -12,13 +11,12 @@ import (
 	"time"
 )
 
-// A Subject is the one thing a flow acts on in a pass. Key is the lease name
-// and stays stable across revisions of the same work, so two flows and two
-// hosts contend for the same ref. Revision is what the flow actually saw: an
-// item's update stamp, or a branch's head commit. A flow that recorded a
-// decision against a revision must not decide again until the revision moves.
+// A Subject is the one thing a flow acts on in a pass. Key stays stable across
+// revisions of the same work. Revision is what the flow actually saw: an item's
+// update stamp, or a branch's head commit. A flow that recorded a decision
+// against a revision must not decide again until the revision moves.
 type Subject struct {
-	Key      string // lease key: "item-41", "branch-forest/41-add-notes"
+	Key      string // "item-41", "branch-forest/41-add-notes"
 	Kind     string // item | branch
 	Revision string // item updatedAt, or branch head sha
 	Label    string // one line for the operator
@@ -47,16 +45,16 @@ type Outcome struct {
 	Err     error
 }
 
-// A Flow is one autonomous lane. It reads observable state, leases one subject,
-// acts, and records. Flows never call each other: the repository is the only
-// interface between them, so one flow's effect is another flow's selector match.
+// A Flow is one autonomous lane. It reads observable state, acts, and records.
+// Flows never call each other: the repository is the only interface between
+// them, so one flow's effect is another flow's selector match.
 type Flow interface {
 	// Name is the flow's word in the glossary and in the ledger.
 	Name() string
 	// Select returns the subjects this flow would act on right now, most
-	// deserving first. It must be a pure read: no leases, no writes.
+	// deserving first. It must be a pure read with no writes.
 	Select(cfg Config, repoDir string) ([]Subject, error)
-	// Act performs the flow's declared effects on one leased subject.
+	// Act performs the flow's declared effects on one subject.
 	Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error)
 	// Interval is how long the flow sleeps between passes.
 	Interval(cfg Config) time.Duration
@@ -65,18 +63,17 @@ type Flow interface {
 }
 
 // flowsFor builds the declared flows. Adding a lane is adding one entry here
-// plus one file: the supervisor, the lease, and the ledger need no change.
+// plus one file: the supervisor and the ledger need no change.
 func flowsFor() []Flow {
 	return []Flow{builderFlow{}, verifierFlow{}, fixerFlow{}}
 }
 
-// codeLeased is a pass's answer when another worker already holds the subject.
+// codeBusy is a pass's answer when another worker already handles the subject.
 // It is not a failure: nothing was built or decided, so the flow moves on.
-const codeLeased = 2
+const codeBusy = 2
 
-// serve runs every enabled flow, each in its own goroutine on its own clock, so
-// concurrency needs no scheduler: the lease is the only coordination. names
-// filters to a subset of flows; empty means every enabled flow.
+// serve runs every enabled flow, each in its own goroutine on its own clock.
+// names filters to a subset of flows; empty means every enabled flow.
 func serve(cfg Config, repoDir string, names []string) int {
 	lock, err := acquireSingletonLock(repoDir)
 	if err != nil {
@@ -88,7 +85,6 @@ func serve(cfg Config, repoDir string, names []string) int {
 	// A worktree leaked by an abnormal exit is reaped once, before any flow
 	// starts, so a stale run directory never survives a restart.
 	reapOrphanWorktrees(repoDir)
-	migrateLegacyClaims(repoDir, cfg)
 
 	var drain int32
 	sig := make(chan os.Signal, 2)
@@ -135,7 +131,7 @@ func serve(cfg Config, repoDir string, names []string) int {
 
 	fmt.Printf("forest v%s: %s on %s\n", version, flowNames(live), cfg.Repo)
 	// The self-updater is not a lane: it owns no subject. It swaps the binary
-	// only when no lane holds a lease, so a rebuild never kills a live agent.
+	// only when no subject is in flight, so a rebuild never kills a live agent.
 	go selfUpdateLoop(cfg, repoDir, &drain)
 
 	var wg sync.WaitGroup
@@ -161,9 +157,9 @@ func flowNames(fs []Flow) string {
 	return out
 }
 
-// runFlowLoop is one lane's whole life: select, lease one subject, act, record,
-// sleep. Config is re-read every pass so an operator edit lands without a
-// restart, and a failing pass never stops the lane.
+// runFlowLoop is one lane's whole life: select, act, record, sleep. Config is
+// re-read every pass so an operator edit lands without a restart, and a failing
+// pass never stops the lane.
 func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 	for {
 		if atomic.LoadInt32(drain) == 1 {
@@ -200,41 +196,27 @@ func runFlowPass(f Flow, cfg Config, repoDir string) int {
 	}
 	for _, s := range subjects {
 		code := actOnSubject(f, cfg, repoDir, s)
-		if code == codeLeased {
-			continue // another worker owns it; try the next candidate
+		if code == codeBusy {
+			continue // another worker handles it; try the next candidate
 		}
 		return code
 	}
 	return 1
 }
 
-// actOnSubject leases one subject, acts, records the run, and always releases
-// the lease. The lease is the only thing that makes overlapping flows and
-// overlapping hosts safe, so it is acquired here and nowhere else.
-//
-// The update gate is held read-side across the whole lease, not inside Act. A
-// binary swap between the updater's idle check and the lease would abandon a
-// held lease to a dead process, which stalls that subject until its lease
-// expires. Act must never take this lock again: a second read lock behind a
-// waiting writer deadlocks.
+// actOnSubject excludes one subject within this process, acts, and records.
+// The read-side update gate spans Act so a binary swap cannot interrupt it.
+// Act must never take this lock again: a second read lock behind a waiting
+// writer deadlocks.
 func actOnSubject(f Flow, cfg Config, repoDir string, s Subject) int {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
-	if !processLeases.acquire(s.Key) {
-		return codeLeased
+	if !inFlight.claim(s.Key) {
+		return codeBusy
 	}
-	defer processLeases.release(s.Key)
+	defer inFlight.release(s.Key)
 
 	runID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), s.Key)
-	lease, err := acquireLease(repoDir, cfg, s.Key, f.Name(), runID)
-	if err != nil {
-		if errors.Is(err, errLeaseHeld) {
-			return codeLeased
-		}
-		fmt.Fprintf(os.Stderr, "forest: %s lease %s: %v\n", f.Name(), s.Key, err)
-		return 1
-	}
-	defer releaseLease(repoDir, lease)
 
 	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
 	out, err := f.Act(cfg, repoDir, s, runID)
@@ -246,7 +228,10 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject) int {
 		BaseSHA: out.BaseSHA, ReviewVerdict: out.Verdict,
 	}
 	if err != nil {
-		if rec.Status == "" {
+		if brakeErr := recordStalled(repoDir, f.Name(), s.Key, s.Revision); brakeErr != nil {
+			err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)
+		}
+		if rec.Status == "" || rec.Status == "done" {
 			rec.Status = failStatus(err)
 		}
 		rec.Error = err.Error()
@@ -259,9 +244,9 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject) int {
 	return 0
 }
 
-// runOnce acts on one named subject with one flow, outside the daemon. It takes
-// no singleton lock: the lease already makes a manual dispatch safe beside a
-// running daemon, which is the point of holding ownership in the repository.
+// runOnce acts on one named subject with one flow, outside the daemon. It does
+// not take the singleton lock, so the in-process subject exclusion remains the
+// only guard for a manual dispatch beside a running daemon.
 func runOnce(cfg Config, repoDir, flowName, subject string) int {
 	for _, f := range flowsFor() {
 		if f.Name() != flowName {
@@ -294,7 +279,7 @@ func failStatus(err error) string {
 		return "done"
 	}
 	for _, stage := range []string{"agent", "gate", "review", "prompt", "checks",
-		"lease", "worktree", "publish", "merge", "notes"} {
+		"worktree", "publish", "merge", "notes"} {
 		if strings.HasPrefix(err.Error(), stage+":") {
 			return stage + "_failed"
 		}

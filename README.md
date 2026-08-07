@@ -5,8 +5,8 @@ Three independent Flows run in one process and coordinate through git state.
 
 ## Flows
 
-Each Flow selects a Subject, takes a Lease, performs its Effect, and records a Run.
-Each lane uses its own interval. No scheduler coordinates the lanes.
+Each Flow selects a Subject, performs its Effect, and records a Run.
+Each lane uses its own interval. The process excludes duplicate work on one Subject.
 
 | Flow | Selector | Effects |
 | --- | --- | --- |
@@ -16,9 +16,8 @@ Each lane uses its own interval. No scheduler coordinates the lanes.
 
 ## State in git
 
-Git is the coordination surface. A Host can run any Flow because state stays in the repository.
-
-- **Lease:** `refs/forest/lease/<subject>` stores ownership. Iron Forest creates it with a create-if-absent compare-and-set. Labels are not state.
+Git stores durable decisions. One installation can run any Flow, and each
+checkout has one daemon process.
 - **Verdict:** `refs/notes/forest/verdict` stores a Verdict on the exact Revision reviewed.
 - **Checks:** `refs/notes/forest/checks` stores the result of Iron Forest's own `checks:` commands on that exact Revision.
 - **Ledger:** `.forest/runs.jsonl` is an append-only record of each Run, Subject, Revision, Status, Verdict, and token count.
@@ -36,7 +35,7 @@ Run the binary from the repository root. The command surface is:
 | `forest list` | Print eligible Tracker items. |
 | `forest agents` | List declarations under `agents/` and their digests. |
 | `forest stats [--json]` | Aggregate `.forest/runs.jsonl`; use `--json` for machine output. |
-| `forest serve [--flow <name>]...` | Run all enabled Flows, or only the named Flows. |
+| `forest serve [--factory-dir <path>] [--flow <name>]...` | Run all enabled Flows, or only the named Flows. |
 | `forest run <flow> <subject>` | Run one selected Subject by key, branch, or issue number in one Flow. |
 | `forest show <sha>` | Print the Verdict and Checks notes for a commit. |
 | `forest version` | Print the binary Revision. |
@@ -45,13 +44,11 @@ Run the binary from the repository root. The command surface is:
 
 ## Configuration
 
-`forest.yaml` uses these keys. The values below are the defaults from `config.go`.
+`forest.yaml` uses these keys. This is an example composition.
 
 ```yaml
 repo: owner/name                 # required; no default
 protected: [.forest/, forest.yaml, agents/, .opencode/opencode.json]
-lease:
-  ttl_seconds: 7200
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -81,7 +78,7 @@ projection:
   merge_via_host: false
 ```
 
-`repo` names the Tracker repository. `protected` lists paths the Gate rejects. `lease.ttl_seconds` permits recovery of an old Lease; zero disables expiry.
+`repo` names the Tracker repository. `protected` lists paths the Gate rejects.
 
 Iron Forest runs each command in `checks:` and writes one Checks note.
 It never reads a Host check or review.
@@ -104,14 +101,16 @@ Build and run with the pinned toolchain:
 
 ```sh
 mise exec -- go build -o forest .
-./forest serve
+./forest serve --factory-dir /path/to/iron-forest
 ```
+
+Omit `--factory-dir` to disable self-update.
 
 ## Ledger and board
 
 `forest stats` reads `.forest/runs.jsonl` and prints totals and breakdowns. `forest stats --json` emits machine-readable ledger data.
 
-`forest watch` reads Runs, lease refs, git HEAD, and daemon state.
+`forest watch` reads Runs, tracked worktrees, git HEAD, and daemon state.
 It shows each Flow and recent Effects.
 
 ## License

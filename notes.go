@@ -45,6 +45,8 @@ const (
 	checksNotesRef  = "forest/checks"
 )
 
+var errNoteExists = errors.New("note already exists")
+
 func notesRef(ref string) string {
 	return "refs/notes/" + ref
 }
@@ -135,7 +137,10 @@ func writeNote(repoDir, ref, sha string, value any) error {
 	}
 	var pushErr error
 	for attempt := range 3 {
-		if err := git(repoDir, "notes", "--ref="+ref, "add", "-f", "-m", string(body), sha); err != nil {
+		if err := git(repoDir, "notes", "--ref="+ref, "add", "-m", string(body), sha); err != nil {
+			if noteAlreadyExists(err) {
+				return fmt.Errorf("%w: %v", errNoteExists, err)
+			}
 			return fmt.Errorf("write %s note: %w", ref, err)
 		}
 		pushErr = git(repoDir, "push", "origin", notesRef(ref))
@@ -150,6 +155,15 @@ func writeNote(repoDir, ref, sha string, value any) error {
 		}
 	}
 	return fmt.Errorf("push %s note after three attempts: %w", ref, pushErr)
+}
+
+func noteAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "found existing notes for object") ||
+		strings.Contains(msg, "a note already exists for object")
 }
 
 func fetchNoteRef(repoDir, ref string) error {
@@ -198,7 +212,7 @@ func bumpAttempts(repoDir, key string) (int, error) {
 		}
 		if err := putBlobRef(repoDir, ref, string(payload), sha); err == nil {
 			return count, nil
-		} else if !errors.Is(err, errLeaseHeld) {
+		} else if !errors.Is(err, errRefMoved) {
 			return 0, err
 		} else {
 			casErr = err

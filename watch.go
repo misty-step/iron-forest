@@ -1,14 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -108,11 +106,11 @@ type watchSnapshot struct {
 	Version    string
 	HeadShort  string
 	Daemon     daemonSnap
+	Worktrees  []string
 	LiveGH     bool
 	Backlog    []issue
 	BacklogErr string
 	Flows      map[string][]runRecord
-	Leases     []watchLease
 }
 
 type daemonSnap struct {
@@ -120,16 +118,6 @@ type daemonSnap struct {
 	PID    string
 	Unit   string
 	Note   string
-}
-
-// watchLease is the metadata stored in one refs/forest/lease blob.
-type watchLease struct {
-	Key   string
-	Flow  string `json:"flow"`
-	RunID string `json:"run_id"`
-	Host  string `json:"host"`
-	PID   string `json:"pid"`
-	Time  string `json:"time"`
 }
 
 func loadWatchSnapshot(cfg Config, repoDir string) watchSnapshot {
@@ -146,7 +134,7 @@ func loadWatchSnapshot(cfg Config, repoDir string) watchSnapshot {
 	s.Daemon = probeDaemon(repoDir)
 	all, _, _ := loadLedger(filepath.Join(ws, "runs.jsonl"))
 	s.Flows = groupRuns(all, 8)
-	s.Leases = activeLeases(repoDir)
+	s.Worktrees = worktreePaths(repoDir)
 	return s
 }
 
@@ -197,29 +185,18 @@ func groupRuns(all []runRecord, n int) map[string][]runRecord {
 	return groups
 }
 
-func activeLeases(repoDir string) []watchLease {
-	refs, err := gitOut(repoDir, "for-each-ref", "--format=%(refname)", "refs/forest/lease")
-	if err != nil || refs == "" {
+func worktreePaths(repoDir string) []string {
+	out, err := gitOut(repoDir, "worktree", "list", "--porcelain")
+	if err != nil || out == "" {
 		return nil
 	}
-	var out []watchLease
-	for _, ref := range strings.Split(refs, "\n") {
-		ref = strings.TrimSpace(ref)
-		if ref == "" {
-			continue
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if path := strings.TrimPrefix(line, "worktree "); path != line && path != "" {
+			paths = append(paths, path)
 		}
-		key := strings.TrimPrefix(ref, "refs/forest/lease/")
-		lease := watchLease{Key: key}
-		if blob, err := gitOut(repoDir, "cat-file", "-p", ref); err == nil {
-			_ = json.Unmarshal([]byte(blob), &lease)
-		}
-		if lease.Key == "" {
-			lease.Key = key
-		}
-		out = append(out, lease)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
-	return out
+	return paths
 }
 
 func renderWatch(w *os.File, s watchSnapshot) {
@@ -235,14 +212,12 @@ func renderWatch(w *os.File, s watchSnapshot) {
 	fmt.Fprintf(w, "DAEMON  %s  unit=%s  pid=%s  %s\n", dstate, s.Daemon.Unit, orDash(s.Daemon.PID), s.Daemon.Note)
 	fmt.Fprintln(w)
 
-	fmt.Fprintf(w, "LIVE WORK (%d lease refs)\n", len(s.Leases))
-	if len(s.Leases) == 0 {
+	fmt.Fprintf(w, "WORKTREES (%d)  source=git worktree list --porcelain\n", len(s.Worktrees))
+	if len(s.Worktrees) == 0 {
 		fmt.Fprintln(w, "  (none)")
 	} else {
-		for _, l := range s.Leases {
-			fmt.Fprintf(w, "  %-24s flow=%-8s run=%-24s host=%-16s pid=%-8s %s\n",
-				trunc(l.Key, 24), trunc(orDash(l.Flow), 8), trunc(orDash(l.RunID), 24),
-				trunc(orDash(l.Host), 16), trunc(orDash(l.PID), 8), orDash(l.Time))
+		for _, path := range s.Worktrees {
+			fmt.Fprintf(w, "  %s\n", path)
 		}
 	}
 	fmt.Fprintln(w)
@@ -292,7 +267,7 @@ func renderWatch(w *os.File, s watchSnapshot) {
 	}
 
 	fmt.Fprintln(w, strings.Repeat("─", 78))
-	fmt.Fprintln(w, "sources: .forest/runs.jsonl  refs/forest/lease/*  git HEAD  systemd --user forest.service")
+	fmt.Fprintln(w, "sources: .forest/runs.jsonl  git worktree list --porcelain  git HEAD  .forest/daemon.lock  systemd --user forest.service")
 }
 
 func orDash(s string) string {

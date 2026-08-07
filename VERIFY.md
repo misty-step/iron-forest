@@ -8,7 +8,7 @@ Run these steps from the repository root.
 4. Run `./forest selfcheck` to verify the configuration and agent declarations.
 5. Review the changed surface against the owning source files.
 6. For Flow changes, inspect `flow.go`, `flow_builder.go`, `flow_verifier.go`, and `flow_fixer.go`.
-7. For state changes, inspect `lease.go` and `notes.go`.
+7. For state changes, inspect `refs.go` and `notes.go`.
 8. For execution changes, inspect `runner.go`, `projection.go`, `worktree.go`, `daemon.go`, and `main.go`.
 9. For config changes, inspect `config.go`.
 10. Run the exact command or Flow affected by the change.

@@ -5,12 +5,11 @@ import "fmt"
 // commitAndPush makes the deterministic commit for one run and pushes the
 // branch. The agent never touches GitHub; this is the only writer.
 //
-// lease is the commit the caller observed at the remote branch tip. When it is
-// set, the push carries that lease, so a run that rewrote history — resolving a
-// conflict by rebasing is the reason this exists — can land while still losing
-// to any concurrent writer. An empty lease keeps the plain push a new branch
-// needs.
-func commitAndPush(repo, wtDir, branch, lease string, id CommitIdentity, it issue) error {
+// expectedSHA is the commit the caller observed at the remote branch tip. When
+// it is set, the push uses Git's compare-and-swap flag, so a rewritten branch
+// can land while still losing to any concurrent writer. An empty value keeps
+// the plain push a new branch needs.
+func commitAndPush(repo, wtDir, branch, expectedSHA string, id CommitIdentity, it issue) error {
 	if err := git(wtDir, "add", "-A"); err != nil {
 		return err
 	}
@@ -21,8 +20,8 @@ func commitAndPush(repo, wtDir, branch, lease string, id CommitIdentity, it issu
 		return err
 	}
 	args := []string{"push", "-u", "origin", branch}
-	if lease != "" {
-		args = []string{"push", "--force-with-lease=refs/heads/" + branch + ":" + lease, "origin", branch}
+	if expectedSHA != "" {
+		args = []string{"push", "--force-with-lease=refs/heads/" + branch + ":" + expectedSHA, "origin", branch}
 	}
 	if err := git(repo, args...); err != nil {
 		return err

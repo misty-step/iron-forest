@@ -17,11 +17,18 @@ func runChecks(cfg Config, wtDir, runID string) (checksNote, error) {
 		RunID:  runID,
 		Time:   time.Now().UTC().Format(time.RFC3339),
 	}
+	env, cleanup, err := childEnvironment()
+	if err != nil {
+		return note, err
+	}
+	defer cleanup()
+
 	var startErr error
 	for _, check := range cfg.Checks {
 		started := time.Now()
 		cmd := exec.Command("sh", "-c", check.Run)
 		cmd.Dir = wtDir
+		cmd.Env = env
 		output, err := cmd.CombinedOutput()
 		result := checkResult{
 			Name:    check.Name,

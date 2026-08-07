@@ -10,12 +10,14 @@ import (
 	"time"
 )
 
-func TestNotesRoundTripRewriteAndCommitScope(t *testing.T) {
+func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 	remote, work, sha := notesTestRepository(t)
 
 	if _, ok, err := readVerdict(work, sha); err != nil || ok {
 		t.Fatalf("absent verdict = (%v, %v), want (false, nil)", ok, err)
 	}
+	secondClone := filepath.Join(t.TempDir(), "second")
+	notesTestGit(t, "", "clone", remote, secondClone)
 	first := verdictNote{
 		Verdict:  "approve",
 		Notes:    "first decision",
@@ -45,17 +47,28 @@ func TestNotesRoundTripRewriteAndCommitScope(t *testing.T) {
 		t.Fatalf("verdict note has multiple lines: %q", raw)
 	}
 
-	secondClone := filepath.Join(t.TempDir(), "second")
-	notesTestGit(t, "", "clone", remote, secondClone)
-	if err := fetchNotes(secondClone); err != nil {
-		t.Fatalf("fetch notes with one missing namespace: %v", err)
+	replacement := first
+	replacement.Verdict = "changes"
+	replacement.Notes = "replacement decision"
+	if err := writeVerdict(secondClone, sha, replacement); !errors.Is(err, errNoteExists) {
+		t.Fatalf("second verdict write = %v, want errNoteExists", err)
 	}
 	fromSecond, ok, err := readVerdict(secondClone, sha)
 	if err != nil || !ok {
-		t.Fatalf("fresh clone verdict = (%v, %v), want (true, nil)", ok, err)
+		t.Fatalf("losing clone verdict = (%v, %v), want (true, nil)", ok, err)
 	}
 	if fromSecond.Verdict != first.Verdict || fromSecond.Time != got.Time {
-		t.Fatalf("fresh clone verdict = %#v, want %#v", fromSecond, got)
+		t.Fatalf("losing clone verdict = %#v, want %#v", fromSecond, got)
+	}
+	unchanged, ok, err := readVerdict(work, sha)
+	if err != nil || !ok {
+		t.Fatalf("verdict after refused rewrite = (%v, %v), want (true, nil)", ok, err)
+	}
+	if unchanged.Verdict != first.Verdict || unchanged.Notes != first.Notes || unchanged.RunID != first.RunID {
+		t.Fatalf("verdict after refused rewrite = %#v, want first value %#v", unchanged, first)
+	}
+	if unchanged.Time != got.Time {
+		t.Fatalf("verdict time after refused rewrite = %q, want %q", unchanged.Time, got.Time)
 	}
 
 	checks := checksNote{
@@ -71,23 +84,6 @@ func TestNotesRoundTripRewriteAndCommitScope(t *testing.T) {
 	}
 	if gotChecks, ok, err := readChecks(secondClone, sha); err != nil || !ok || gotChecks.Status != checks.Status {
 		t.Fatalf("checks = (%#v, %v, %v), want pass note", gotChecks, ok, err)
-	}
-
-	replacement := first
-	replacement.Verdict = "changes"
-	replacement.Notes = "replacement decision"
-	if err := writeVerdict(work, sha, replacement); err != nil {
-		t.Fatal(err)
-	}
-	if err := fetchNotes(secondClone); err != nil {
-		t.Fatal(err)
-	}
-	updated, ok, err := readVerdict(secondClone, sha)
-	if err != nil || !ok {
-		t.Fatalf("rewritten verdict = (%v, %v), want (true, nil)", ok, err)
-	}
-	if updated.Verdict != replacement.Verdict || updated.Notes != replacement.Notes {
-		t.Fatalf("rewritten verdict = %#v, want %#v", updated, replacement)
 	}
 
 	if err := os.WriteFile(filepath.Join(work, "second.txt"), []byte("second\n"), 0o644); err != nil {
@@ -145,8 +141,8 @@ func TestNotesAttemptsCASRetriesAreBounded(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if err == nil || !errors.Is(err, errLeaseHeld) {
-			t.Fatalf("bounded CAS result = %v, want lease-held error", err)
+		if err == nil || !errors.Is(err, errRefMoved) {
+			t.Fatalf("bounded CAS result = %v, want ref-moved error", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("bumpAttempts exceeded its retry bound")

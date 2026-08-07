@@ -382,35 +382,44 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 	})
 }
 
-// TestStalledOnCountsFailuresPerRevision pins the progress rule: a lane stops
-// retrying one unchanged situation, and a real repair clears the count because
-// it moves the revision.
-func TestStalledOnCountsFailuresPerRevision(t *testing.T) {
-	rows := []runRecord{
-		{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "publish_failed"},
-		{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "agent_failed"},
-		{Flow: "verifier", Subject: "branch-forest/9-x", Revision: "aaa", Status: "checks_failed"},
-		{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "fixed"},
+// TestStalledOnPersistsOutsideLedger pins the durable progress brake: three
+// failures on one revision stop a subject, a new revision resets it, and the
+// decision remains after the host-local ledger is removed.
+func TestStalledOnPersistsOutsideLedger(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	const subject = "branch-forest/9-x"
+	const revision = "aaa"
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "fixer", subject, revision); err != nil {
+			t.Fatalf("record stalled: %v", err)
+		}
 	}
-	if stalledOn(rows, "fixer", "branch-forest/9-x", "aaa") {
-		t.Fatal("two failures and one success must not stall a lane")
+	if err := appendRun(workspaceDir(repo), runRecord{
+		Flow: "fixer", Subject: subject, Revision: revision, Status: "gate_failed",
+	}); err != nil {
+		t.Fatalf("append ledger: %v", err)
 	}
-	rows = append(rows, runRecord{Flow: "fixer", Subject: "branch-forest/9-x", Revision: "aaa", Status: "gate_failed"})
-	if !stalledOn(rows, "fixer", "branch-forest/9-x", "aaa") {
-		t.Fatal("three failures on one revision must stall the lane")
+	if stalled, err := stalledOn(repo, "fixer", subject, revision); err != nil || !stalled {
+		t.Fatalf("same revision stalled = %v, %v; want true", stalled, err)
 	}
-	if stalledOn(rows, "fixer", "branch-forest/9-x", "bbb") {
-		t.Fatal("a new revision must start the count over")
+	if stalled, err := stalledOn(repo, "verifier", subject, revision); err != nil || stalled {
+		t.Fatalf("other flow stalled = %v, %v; want false", stalled, err)
 	}
-	if stalledOn(rows, "verifier", "branch-forest/9-x", "aaa") {
-		t.Fatal("one lane's failures must not stall another lane")
+	if stalled, err := stalledOn(repo, "fixer", subject, "bbb"); err != nil || stalled {
+		t.Fatalf("changed revision stalled = %v, %v; want false", stalled, err)
+	}
+	if err := os.Remove(ledgerPath(repo)); err != nil {
+		t.Fatalf("remove ledger: %v", err)
+	}
+	if stalled, err := stalledOn(repo, "fixer", subject, revision); err != nil || !stalled {
+		t.Fatalf("stalled after ledger deletion = %v, %v; want true", stalled, err)
 	}
 }
 
-// TestCommitAndPushLeaseLandsARewrittenBranch pins the capability the Fixer
+// TestCommitAndPushCASLandsARewrittenBranch pins the capability the Fixer
 // needs to resolve a conflict: a rebased branch must be able to land, and only
 // against the commit the run actually observed.
-func TestCommitAndPushLeaseLandsARewrittenBranch(t *testing.T) {
+func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
 	_, work, _ := notesTestRepository(t)
 	branch := "forest/9-rewrite"
 	notesTestGit(t, work, "checkout", "-q", "-b", branch)
@@ -442,17 +451,17 @@ func TestCommitAndPushLeaseLandsARewrittenBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := commitAndPush(work, work, branch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", id, it); err == nil {
-		t.Fatal("a stale lease must lose the push")
+		t.Fatal("a stale observed ref must lose the push")
 	}
 	if err := os.WriteFile(filepath.Join(work, "fix.txt"), []byte("repair\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := commitAndPush(work, work, branch, observed, id, it); err != nil {
-		t.Fatalf("rebased branch with the observed lease = %v, want nil", err)
+		t.Fatalf("rebased branch with the observed ref = %v, want nil", err)
 	}
 	remote := notesTestGitOutput(t, work, "rev-parse", "refs/remotes/origin/"+branch)
 	local := notesTestGitOutput(t, work, "rev-parse", "HEAD")
 	if remote != local {
-		t.Fatalf("remote %s != local %s after a leased push", remote, local)
+		t.Fatalf("remote %s != local %s after a compare-and-swap push", remote, local)
 	}
 }

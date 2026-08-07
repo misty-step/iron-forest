@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -79,26 +80,72 @@ func ledgerPath(repoDir string) string {
 // stops selecting it.
 const stalledRunLimit = 3
 
-// stalledOn reports whether flow already failed on this exact revision of
-// subject at least stalledRunLimit times. A healthy repair loop always produces
-// a new commit, so repeated failure on one revision means the lane is arguing
-// with itself. This bounds every failure mode, including the ones no counter
-// records, without capping a loop that is getting somewhere: a real repair moves
-// the revision and starts the count over.
-func stalledOn(runs []runRecord, flow, subject, revision string) bool {
+// stalledRecord is the durable brake for one flow's subject. A revision change
+// resets the count because it represents a new situation.
+type stalledRecord struct {
+	Revision string `json:"revision"`
+	Count    int    `json:"count"`
+}
+
+// stalledRef returns the repository ref that survives checkout and host changes.
+func stalledRef(flow, subject string) string {
+	return "refs/forest/stalled/" + flow + "/" + subject
+}
+
+// stalledOn reports whether a flow reached the failure limit on this revision.
+func stalledOn(repoDir, flow, subject, revision string) (bool, error) {
 	if revision == "" {
-		return false
+		return false, nil
 	}
-	failures := 0
-	for _, r := range runs {
-		if r.Flow != flow || r.Subject != subject || r.Revision != revision {
-			continue
+	_, body, err := getBlobRef(repoDir, stalledRef(flow, subject))
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(body) == "" {
+		return false, nil
+	}
+	var record stalledRecord
+	if err := json.Unmarshal([]byte(body), &record); err != nil {
+		return false, fmt.Errorf("decode stalled record: %w", err)
+	}
+	return record.Revision == revision && record.Count >= stalledRunLimit, nil
+}
+
+// recordStalled increments the durable failure count with compare-and-swap.
+func recordStalled(repoDir, flow, subject, revision string) error {
+	if revision == "" {
+		return errors.New("stalled: empty revision")
+	}
+	ref := stalledRef(flow, subject)
+	var casErr error
+	for range 5 {
+		sha, body, err := getBlobRef(repoDir, ref)
+		if err != nil {
+			return err
 		}
-		if runCategory(r.Status) == "failed" {
-			failures++
+		record := stalledRecord{Revision: revision, Count: 1}
+		if strings.TrimSpace(body) != "" {
+			var previous stalledRecord
+			if err := json.Unmarshal([]byte(body), &previous); err != nil {
+				return fmt.Errorf("decode stalled record: %w", err)
+			}
+			if previous.Revision == revision {
+				record.Count = previous.Count + 1
+			}
+		}
+		payload, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("encode stalled record: %w", err)
+		}
+		if err := putBlobRef(repoDir, ref, string(payload), sha); err == nil {
+			return nil
+		} else if !errors.Is(err, errRefMoved) {
+			return err
+		} else {
+			casErr = err
 		}
 	}
-	return failures >= stalledRunLimit
+	return fmt.Errorf("record stalled after five attempts: %w", casErr)
 }
 
 // runCategory groups ledger statuses for operator summaries.

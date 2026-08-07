@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,10 +25,6 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	defer updateGate.RUnlock()
 	if err := fetchNotes(repoDir); err != nil {
 		return nil, fmt.Errorf("notes: %w", err)
-	}
-	runs, _, err := loadLedger(ledgerPath(repoDir))
-	if err != nil {
-		return nil, err
 	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
@@ -63,7 +60,11 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			if hasChecks && checks.Status == "fail" {
 				continue
 			}
-			if stalledOn(runs, "verifier", s.Key, head) {
+			stalled, err := stalledOn(repoDir, "verifier", s.Key, head)
+			if err != nil {
+				return nil, fmt.Errorf("stalled %s: %w", s.Key, err)
+			}
+			if stalled {
 				continue
 			}
 			fresh = append(fresh, s)
@@ -131,7 +132,17 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			Results: []checkResult{{Name: "rebase", Code: 1, Output: rebaseErr.Error()}},
 		}
 		if err := writeChecks(repoDir, baseSHA, note); err != nil {
-			return out, fmt.Errorf("rebase: %w (notes: %v)", rebaseErr, err)
+			if !errors.Is(err, errNoteExists) {
+				return out, fmt.Errorf("rebase: %w (notes: %v)", rebaseErr, err)
+			}
+			winner, found, readErr := readChecks(repoDir, baseSHA)
+			if readErr != nil {
+				return out, fmt.Errorf("rebase: %w (notes: read winning check: %v)", rebaseErr, readErr)
+			}
+			if !found {
+				return out, fmt.Errorf("rebase: %w (notes: check note disappeared: %v)", rebaseErr, err)
+			}
+			note = winner
 		}
 		if err := projectChecks(cfg, s.Branch, note); err != nil {
 			return out, fmt.Errorf("rebase: %w (projection: %v)", rebaseErr, err)
@@ -145,13 +156,27 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 
 	checks, checkErr := runChecks(cfg, wtDir, runID)
 	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
-		out.Status = "notes_failed"
-		return out, fmt.Errorf("notes: %w", err)
+		if !errors.Is(err, errNoteExists) {
+			out.Status = "notes_failed"
+			return out, fmt.Errorf("notes: %w", err)
+		}
+		winner, found, readErr := readChecks(repoDir, baseSHA)
+		if readErr != nil {
+			out.Status = "notes_failed"
+			return out, fmt.Errorf("notes: read winning check: %w", readErr)
+		}
+		if !found {
+			out.Status = "notes_failed"
+			return out, fmt.Errorf("notes: check note disappeared: %w", err)
+		}
+		checks = winner
+		checkErr = nil
 	}
 	if checkErr != nil {
 		out.Status = "checks_failed"
 		return out, fmt.Errorf("checks: %w", checkErr)
 	}
+
 	// A failing check is cheap and certain; a review is expensive. Stop here and
 	// let the Fixer repair the head, so no reviewer is paid to read broken code.
 	if checks.Status != "pass" {
@@ -230,17 +255,27 @@ func verifierReview(cfg Config, repoDir, wtDir string, it issue, head, runID str
 		DefSHA: a.DefSHA, RunID: runID, Time: nowRFC(),
 	}
 	if err := writeVerdict(repoDir, head, out); err != nil {
-		return verdictNote{}, stats, fmt.Errorf("notes: %w", err)
+		if !errors.Is(err, errNoteExists) {
+			return verdictNote{}, stats, fmt.Errorf("notes: %w", err)
+		}
+		winner, found, readErr := readVerdict(repoDir, head)
+		if readErr != nil {
+			return verdictNote{}, stats, fmt.Errorf("notes: read winning verdict: %w", readErr)
+		}
+		if !found {
+			return verdictNote{}, stats, fmt.Errorf("notes: verdict note disappeared: %w", err)
+		}
+		return winner, stats, nil
 	}
 	return out, stats, nil
 }
 
 // rebaseOntoMaster moves the branch checked out in wtDir onto origin/master when
-// the branch is behind it, then pushes the rebased branch with --force-with-lease,
-// so every later step keys to the tree that will land. A branch that is already
-// current is left untouched and its head returned unchanged. A rebase that
-// conflicts returns an error naming the conflicting paths, never a bare exit
-// status.
+// the branch is behind it, then pushes the rebased branch with Git's
+// compare-and-swap flag, so every later step keys to the tree that will land.
+// A branch that is already current is left untouched and its head returned
+// unchanged. A rebase that conflicts returns an error naming the conflicting
+// paths, never a bare exit status.
 func rebaseOntoMaster(wtDir, branch string) (string, error) {
 	if err := git(wtDir, "fetch", "origin", "master"); err != nil {
 		return "", fmt.Errorf("rebase: fetch origin/master: %w", err)

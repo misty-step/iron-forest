@@ -33,6 +33,11 @@ func recordPendingUpdate() {
 
 var version = "dev"
 
+// factoryDir is the factory's own source checkout, declared by the operator
+// with `serve --factory-dir`. It is empty by default: a managed repository is
+// not the factory's source, and building it would swap in a foreign binary.
+var factoryDir string
+
 var updateGate sync.RWMutex
 
 type updateRecord struct {
@@ -45,58 +50,64 @@ type updateRecord struct {
 // selfUpdateLoop checks for a new binary only when all lanes are idle.
 func selfUpdateLoop(cfg Config, repoDir string, drain *int32) {
 	_ = cfg
+	if factoryDir == "" {
+		return
+	}
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		if atomic.LoadInt32(drain) != 0 {
 			return
 		}
-		if !processLeases.idle() {
+		if !inFlight.idle() {
 			continue
 		}
 		updateGate.Lock()
-		if processLeases.idle() {
+		if inFlight.idle() {
 			runUpdateCheck(repoDir)
 		}
 		updateGate.Unlock()
 	}
 }
 
-// runUpdateCheck keeps the running binary on checked-out master.
+// runUpdateCheck rebuilds this instance from the factory source. Source and
+// managed repository are separate, so the checkout being worked on is never
+// built and may be in any language.
 func runUpdateCheck(repoDir string) {
-	cfgPath := filepath.Join(repoDir, "forest.yaml")
-	if _, err := os.Stat(cfgPath); err != nil {
-		return
-	}
-	ref, err := gitOut(repoDir, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil || ref != "master" {
-		fmt.Fprintf(os.Stderr, "forest: update: not on master (%s), skipping\n", ref)
-		return
-	}
-	if err := git(repoDir, "fetch", "--quiet", "origin", "master"); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: update: fetch: %v\n", err)
-		return
-	}
-	head, err := gitOut(repoDir, "rev-parse", "HEAD")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forest: update: rev-parse HEAD: %v\n", err)
-		return
-	}
-	remote, err := gitOut(repoDir, "rev-parse", "origin/master")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forest: update: rev-parse origin/master: %v\n", err)
-		return
-	}
-	if head != remote {
-		if deferDirty(repoDir) {
+	// Only the instance that manages the factory source may move it. Every
+	// other instance rebuilds from whatever that source currently is, so one
+	// process mutates the shared checkout and all of them still converge.
+	if repoDir == factoryDir {
+		ref, err := gitOut(factoryDir, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil || ref != "master" {
+			fmt.Fprintf(os.Stderr, "forest: update: not on master (%s), skipping\n", ref)
 			return
 		}
-		if err := git(repoDir, "pull", "--ff-only", "origin", "master"); err != nil {
-			fmt.Fprintf(os.Stderr, "forest: update: pull: %v\n", err)
+		if err := git(factoryDir, "fetch", "--quiet", "origin", "master"); err != nil {
+			fmt.Fprintf(os.Stderr, "forest: update: fetch: %v\n", err)
 			return
 		}
+		head, err := gitOut(factoryDir, "rev-parse", "HEAD")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forest: update: rev-parse HEAD: %v\n", err)
+			return
+		}
+		remote, err := gitOut(factoryDir, "rev-parse", "origin/master")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forest: update: rev-parse origin/master: %v\n", err)
+			return
+		}
+		if head != remote {
+			if deferDirty(factoryDir) {
+				return
+			}
+			if err := git(factoryDir, "pull", "--ff-only", "origin", "master"); err != nil {
+				fmt.Fprintf(os.Stderr, "forest: update: pull: %v\n", err)
+				return
+			}
+		}
 	}
-	short, err := gitOut(repoDir, "rev-parse", "--short", "HEAD")
+	short, err := gitOut(factoryDir, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forest: update: rev-parse --short HEAD: %v\n", err)
 		return
@@ -104,13 +115,15 @@ func runUpdateCheck(repoDir string) {
 	if version == short {
 		return
 	}
-	if deferDirty(repoDir) {
+	if deferDirty(factoryDir) {
 		return
 	}
-	if err := buildSelf(repoDir, short); err != nil {
+	if err := buildSelf(factoryDir, repoDir, short); err != nil {
 		fmt.Fprintf(os.Stderr, "forest: update: build: %v\n", err)
 		return
 	}
+	// The smoke test runs in the managed checkout: a binary that starts but
+	// cannot read this repository's own config must not be swapped in.
 	fresh := filepath.Join(repoDir, "forest.next")
 	smoke := exec.Command(fresh, "selfcheck")
 	smoke.Dir = repoDir
@@ -118,8 +131,7 @@ func runUpdateCheck(repoDir string) {
 		fmt.Fprintf(os.Stderr, "forest: update: selfcheck failed, keeping current build:\n%s", out)
 		return
 	}
-	newHead, _ := gitOut(repoDir, "rev-parse", "HEAD")
-	swapSelf(repoDir, short, head, newHead)
+	swapSelf(repoDir, short, version, short)
 }
 
 func deferDirty(repoDir string) bool {
@@ -141,13 +153,13 @@ func deferDirty(repoDir string) bool {
 	return true
 }
 
-func buildSelf(repoDir, shortSHA string) error {
-	tmp := filepath.Join(repoDir, "forest.next.tmp")
-	target := filepath.Join(repoDir, "forest.next")
+func buildSelf(srcDir, outDir, shortSHA string) error {
+	tmp := filepath.Join(outDir, "forest.next.tmp")
+	target := filepath.Join(outDir, "forest.next")
 	ldflags := "-X main.version=" + shortSHA
 	try := func(name string, args ...string) error {
 		c := exec.Command(name, args...)
-		c.Dir = repoDir
+		c.Dir = srcDir
 		out, err := c.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))

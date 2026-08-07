@@ -43,10 +43,17 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.
 	ctx, cancel := phaseContext(budget)
 	defer cancel()
 
+	env, cleanup, err := childEnvironment()
+	if err != nil {
+		return stats, err
+	}
+	defer cleanup()
+
 	cmd := exec.CommandContext(ctx, "opencode", "run",
 		"--format", "json", "--model", a.Model, "--agent", a.Name,
 		"--auto", userPrompt)
 	cmd.Dir = wtDir
+	cmd.Env = env
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -87,6 +94,89 @@ func runPhase(wtDir string, a *Agent, userPrompt, tracePath string, budget time.
 		return stats, fmt.Errorf("agent exited %q: %s", waitErr, strings.TrimSpace(stderr.String()))
 	}
 	return stats, nil
+}
+
+const childSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// childEnvironment gives each run a private home so operator configuration and
+// credentials stay unreachable. The home sits outside the worktree: the worktree
+// is committed with `git add -A`, so a tool that writes to $HOME there would put
+// its cache directories into the published branch.
+// It preserves only the pinned toolchain and caches the factory checks need, and
+// excludes gh, whose credential would reach far beyond the given worktree.
+func childEnvironment() ([]string, func(), error) {
+	mise, err := exec.LookPath("mise")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("locate mise: %w", err)
+	}
+	home, err := os.MkdirTemp("", "forest-home-")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("create child home: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(home) }
+	binDir := filepath.Join(home, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("create child command directory: %w", err)
+	}
+	if err := os.Symlink(mise, filepath.Join(binDir, "mise")); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("stage mise for child: %w", err)
+	}
+
+	miseDataDir, miseShims := miseLocations(mise)
+	env := []string{
+		"HOME=" + home,
+		"PATH=" + strings.Join([]string{binDir, miseShims, childSystemPath}, string(os.PathListSeparator)),
+		"MISE_CONFIG_DIR=" + filepath.Join(binDir, "config"),
+		"MISE_DATA_DIR=" + miseDataDir,
+		"GOMODCACHE=" + goModuleCache(),
+		// The compiler caches hold build products, never credentials. Leaving
+		// them under the per-run HOME made every declared check compile the
+		// world: measured 22s cold against about 1s warm.
+		"GOCACHE=" + goBuildCache(),
+	}
+	return env, cleanup, nil
+}
+
+func goModuleCache() string {
+	if cache := os.Getenv("GOMODCACHE"); cache != "" {
+		return cache
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(home, "go")
+	}
+	return filepath.Join(gopath, "pkg", "mod")
+}
+
+func goBuildCache() string {
+	if cache := os.Getenv("GOCACHE"); cache != "" {
+		return cache
+	}
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return filepath.Join(os.Getenv("HOME"), ".cache", "go-build")
+	}
+	return filepath.Join(dir, "go-build")
+}
+
+func miseLocations(mise string) (string, string) {
+	if dataDir := os.Getenv("MISE_DATA_DIR"); dataDir != "" {
+		return dataDir, filepath.Join(dataDir, "shims")
+	}
+	for _, entry := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+		entry = filepath.Clean(entry)
+		if filepath.Base(entry) == "shims" && filepath.Base(filepath.Dir(entry)) == "mise" {
+			return filepath.Dir(entry), entry
+		}
+	}
+	dataDir := filepath.Clean(filepath.Join(filepath.Dir(mise), "..", "share", "mise"))
+	return dataDir, filepath.Join(dataDir, "shims")
 }
 
 // isOutOfSteps reports whether a non-zero opencode exit is the documented

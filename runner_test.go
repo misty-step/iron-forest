@@ -37,6 +37,43 @@ func TestRunChecksAllPassing(t *testing.T) {
 	}
 }
 
+func TestRunChecksCannotUseOperatorGitHubCredential(t *testing.T) {
+	t.Setenv("GH_TOKEN", "operator-token")
+	t.Setenv("GITHUB_TOKEN", "operator-token")
+	t.Setenv("FOREST_OPERATOR_SECRET", "operator-secret")
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
+	t.Setenv("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh")
+	cfg := Config{Checks: []Check{{
+		Name: "credential-isolation",
+		Run:  `printf 'gh=%s bus=%s ssh=%s\n' "$(command -v gh || true)" "$DBUS_SESSION_BUS_ADDRESS" "$SSH_AUTH_SOCK"; test -z "$GH_TOKEN" && test -z "$GITHUB_TOKEN" && test -z "$FOREST_OPERATOR_SECRET" && test -z "$DBUS_SESSION_BUS_ADDRESS" && test -z "$SSH_AUTH_SOCK" && ! command -v gh >/dev/null 2>&1`,
+	}}}
+	note, err := runChecks(cfg, t.TempDir(), "run-isolated")
+	if err != nil {
+		t.Fatalf("runChecks returned error: %v", err)
+	}
+	if note.Status != "pass" {
+		t.Fatalf("status = %q, want pass; output = %q", note.Status, note.Results[0].Output)
+	}
+	t.Logf("credential lookup output: %q", note.Results[0].Output)
+}
+
+func TestRunChecksExecutesDeclaredBuild(t *testing.T) {
+	repoDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	note, err := runChecks(Config{Checks: []Check{{
+		Name: "build",
+		Run:  "mise exec -- go build ./...",
+	}}}, repoDir, "run-build")
+	if err != nil {
+		t.Fatalf("runChecks returned error: %v", err)
+	}
+	if note.Status != "pass" || len(note.Results) != 1 || note.Results[0].Code != 0 {
+		t.Fatalf("declared build = %+v, want pass", note)
+	}
+}
+
 func TestRunChecksContinuesAfterFailure(t *testing.T) {
 	wtDir := t.TempDir()
 	later := filepath.Join(wtDir, "later.txt")

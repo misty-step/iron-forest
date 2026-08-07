@@ -19,7 +19,8 @@ func usage() {
   forest list                         print eligible tracker items
   forest agents                       list declared agents and digests
   forest stats [--json]              aggregate the run ledger
-  forest serve [--flow <name>]...    run enabled flows
+  forest serve [--flow <name>]... [--factory-dir <path>]
+                                      run enabled flows
   forest run <flow> <subject>        run one selected subject
   forest show <sha>                  print verdict and checks notes
   forest version                     print the binary revision
@@ -52,11 +53,19 @@ func run(args []string) int {
 	case "serve":
 		var names []string
 		for i := 1; i < len(args); i++ {
-			if args[i] != "--flow" || i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "forest: serve: expected --flow <name>, got %q\n", args[i])
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "forest: serve: expected a value after %q\n", args[i])
 				return 2
 			}
-			names = append(names, args[i+1])
+			switch args[i] {
+			case "--flow":
+				names = append(names, args[i+1])
+			case "--factory-dir":
+				factoryDir = args[i+1]
+			default:
+				fmt.Fprintf(os.Stderr, "forest: serve: expected --flow or --factory-dir, got %q\n", args[i])
+				return 2
+			}
 			i++
 		}
 		return serve(cfg, repoDir, names)

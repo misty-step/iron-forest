@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -36,27 +38,16 @@ func configPath(repoDir string) string { return filepath.Join(repoDir, "forest.y
 func workspaceDir(repoDir string) string { return filepath.Join(repoDir, WorkspaceDir) }
 
 // Config is forest.yaml: the work source, the paths no agent may touch, the
-// lease policy, the checks the factory runs itself, the flows that are on, and
-// the optional human-facing projection.
+// checks the factory runs itself, the flows that are on, and the optional
+// human-facing projection.
 type Config struct {
 	Repo       string         `yaml:"repo"`
 	Protected  []string       `yaml:"protected"`
-	Lease      LeasePolicy    `yaml:"lease"`
 	Commit     CommitIdentity `yaml:"commit"`
 	Checks     []Check        `yaml:"checks"`
 	Flows      Flows          `yaml:"flows"`
 	Projection Projection     `yaml:"projection"`
 }
-
-// LeasePolicy bounds how long one worker may own a subject. A lease older than
-// TTLSeconds may be broken by another worker, so a host that dies mid-run
-// cannot make its subject unworkable forever. Zero disables breaking.
-type LeasePolicy struct {
-	TTLSeconds int `yaml:"ttl_seconds"`
-}
-
-// TTL is the lease policy as a duration.
-func (l LeasePolicy) TTL() time.Duration { return time.Duration(l.TTLSeconds) * time.Second }
 
 // Check is one command the factory runs itself against a worktree. The result
 // is a fact the factory writes to a note, not a status it reads from a host.
@@ -66,7 +57,7 @@ type Check struct {
 }
 
 // Flows declares the lanes. Each lane runs independently, on its own clock,
-// coordinating only through leases and notes in the repository.
+// coordinating through repository state and notes.
 type Flows struct {
 	Builder  BuilderFlowCfg  `yaml:"builder"`
 	Verifier VerifierFlowCfg `yaml:"verifier"`
@@ -125,7 +116,6 @@ func defaultConfig() Config {
 		Protected: []string{
 			".forest/", "forest.yaml", "agents/", ".opencode/opencode.json",
 		},
-		Lease: LeasePolicy{TTLSeconds: 7200},
 		// The identity is generic on purpose. A repository that wants its own
 		// author declares it; the factory never assumes an organization.
 		Commit: CommitIdentity{Name: "forest", Email: "forest@invalid"},
@@ -156,7 +146,11 @@ func loadConfig(path string) (Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("read %s: %w", path, err)
 	}
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
+	// Unknown keys are a configuration error, not a default. A retired setting
+	// left in place would otherwise look effective while doing nothing.
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return cfg, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if cfg.Repo == "" {
@@ -174,9 +168,6 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Commit.Email == "" {
 		cfg.Commit.Email = d.Commit.Email
-	}
-	if cfg.Lease.TTLSeconds < 0 {
-		cfg.Lease.TTLSeconds = 0
 	}
 	if cfg.Flows.Builder.Agent == "" {
 		cfg.Flows.Builder.Agent = d.Flows.Builder.Agent

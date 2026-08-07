@@ -1,158 +1,26 @@
 package main
 
-import (
-	"errors"
-	"sync"
-	"testing"
-	"time"
-)
+import "testing"
 
-type memoryLeaseStore struct {
-	mu      sync.Mutex
-	refs    map[string]struct{ content, sha string }
-	creates int
-}
-
-func newMemoryLeaseStore() *memoryLeaseStore {
-	return &memoryLeaseStore{refs: make(map[string]struct{ content, sha string })}
-}
-
-func (s *memoryLeaseStore) create(ref, content, expectSHA string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if current, ok := s.refs[ref]; ok {
-		if expectSHA == "" || current.sha != expectSHA {
-			return errLeaseHeld
-		}
+func TestSubjectSetReportsContentionAndIdle(t *testing.T) {
+	set := newSubjectSet()
+	if !set.idle() {
+		t.Fatal("new subject set must be idle")
 	}
-	s.refs[ref] = struct{ content, sha string }{content: content, sha: blobSHA(content)}
-	s.creates++
-	return nil
-}
-
-func (s *memoryLeaseStore) read(ref string) (string, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.refs[ref]
-	if !ok {
-		return "", "", nil
+	if !set.claim("branch-forest/7-fix") {
+		t.Fatal("first subject claim must succeed")
 	}
-	return current.sha, current.content, nil
-}
-
-func (s *memoryLeaseStore) delete(ref, expectSHA string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.refs[ref]
-	if !ok || current.sha != expectSHA {
-		return errLeaseHeld
+	if set.idle() {
+		t.Fatal("subject set with an active key must not be idle")
 	}
-	delete(s.refs, ref)
-	return nil
-}
-
-func (s *memoryLeaseStore) list(prefix string) ([]leaseRef, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var refs []leaseRef
-	for ref, current := range s.refs {
-		if len(ref) >= len(prefix) && ref[:len(prefix)] == prefix {
-			refs = append(refs, leaseRef{Ref: ref, SHA: current.sha})
-		}
+	if set.claim("branch-forest/7-fix") {
+		t.Fatal("second subject claim must be refused")
 	}
-	return refs, nil
-}
-
-func staleHolder(t time.Time) string {
-	return `{"flow":"Builder","run_id":"old","host":"dead","pid":1,"time":"` +
-		t.UTC().Format(time.RFC3339) + `"}`
-}
-
-func TestLeaseFirstAcquirerWins(t *testing.T) {
-	store := newMemoryLeaseStore()
-	cfg := Config{}
-	first, err := acquireLeaseFrom(store, cfg, "item-7", "Builder", "run-1")
-	if err != nil {
-		t.Fatalf("first acquire: %v", err)
-	}
-	if first.SHA == "" || first.Ref != "refs/forest/lease/item-7" {
-		t.Fatalf("unexpected handle: %+v", first)
-	}
-	if _, err := acquireLeaseFrom(store, cfg, "item-7", "Fixer", "run-2"); !errors.Is(err, errLeaseHeld) {
-		t.Fatalf("second acquire = %v, want lease held", err)
-	}
-}
-
-func TestLeaseReleaseAllowsLaterAcquirer(t *testing.T) {
-	store := newMemoryLeaseStore()
-	first, err := acquireLeaseFrom(store, Config{}, "item-8", "Builder", "run-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	releaseLeaseFrom(store, first)
-	if _, err := acquireLeaseFrom(store, Config{}, "item-8", "Builder", "run-2"); err != nil {
-		t.Fatalf("acquire after release: %v", err)
-	}
-}
-
-func TestLeaseTTLBreaksStaleHolder(t *testing.T) {
-	store := newMemoryLeaseStore()
-	ref := "refs/forest/lease/item-9"
-	old := staleHolder(time.Now().Add(-2 * time.Hour))
-	store.refs[ref] = struct{ content, sha string }{content: old, sha: blobSHA(old)}
-	cfg := Config{Lease: LeasePolicy{TTLSeconds: 60}}
-	if _, err := acquireLeaseFrom(store, cfg, "item-9", "Fixer", "run-new"); err != nil {
-		t.Fatalf("stale lease must be replaceable: %v", err)
-	}
-	if store.creates != 1 {
-		t.Fatalf("stale replacement creates = %d, want 1", store.creates)
-	}
-}
-
-func TestLeaseTTLProtectsFreshHolder(t *testing.T) {
-	store := newMemoryLeaseStore()
-	ref := "refs/forest/lease/item-10"
-	fresh := staleHolder(time.Now())
-	store.refs[ref] = struct{ content, sha string }{content: fresh, sha: blobSHA(fresh)}
-	cfg := Config{Lease: LeasePolicy{TTLSeconds: 60}}
-	if _, err := acquireLeaseFrom(store, cfg, "item-10", "Fixer", "run-new"); !errors.Is(err, errLeaseHeld) {
-		t.Fatalf("fresh lease = %v, want lease held", err)
-	}
-	if store.creates != 0 {
-		t.Fatalf("fresh lease must not be replaced")
-	}
-}
-
-func TestLeaseTTLEdgeProtectsHolder(t *testing.T) {
-	store := newMemoryLeaseStore()
-	ref := "refs/forest/lease/item-10-edge"
-	nearExpiry := staleHolder(time.Now().Add(-59 * time.Second))
-	store.refs[ref] = struct{ content, sha string }{content: nearExpiry, sha: blobSHA(nearExpiry)}
-	cfg := Config{Lease: LeasePolicy{TTLSeconds: 60}}
-	if _, err := acquireLeaseFrom(store, cfg, "item-10-edge", "Fixer", "run-new"); !errors.Is(err, errLeaseHeld) {
-		t.Fatalf("near-expiry lease = %v, want lease held", err)
-	}
-}
-
-func TestLeaseBrokerReportsContentionAndIdle(t *testing.T) {
-	broker := newLeaseBroker()
-	if !broker.idle() {
-		t.Fatal("new broker must be idle")
-	}
-	if !broker.acquire("branch-forest/7-fix") {
-		t.Fatal("first broker acquire must succeed")
-	}
-	if broker.idle() {
-		t.Fatal("broker with an active key must not be idle")
-	}
-	if broker.acquire("branch-forest/7-fix") {
-		t.Fatal("second broker acquire must be refused")
-	}
-	broker.release("branch-forest/7-fix")
-	if !broker.idle() || !broker.acquire("branch-forest/7-fix") {
+	set.release("branch-forest/7-fix")
+	if !set.idle() || !set.claim("branch-forest/7-fix") {
 		t.Fatal("released key must become available")
 	}
-	broker.release("branch-forest/7-fix")
+	set.release("branch-forest/7-fix")
 }
 
 func TestEligibleItemsExcludesLabelsAndCoveredBranches(t *testing.T) {

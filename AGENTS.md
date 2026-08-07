@@ -4,7 +4,7 @@ This file is the contributor contract for Iron Forest.
 
 ## Vocabulary
 
-Use these names for system concepts: Flow, Run, Phase, Subject, Revision, Lease,
+Use these names for system concepts: Flow, Run, Phase, Subject, Revision,
 Selector, Effect, Verdict, Gate, Ledger, Tracker, Host, Runner, Projection,
 Builder, Verifier, and Fixer.
 
