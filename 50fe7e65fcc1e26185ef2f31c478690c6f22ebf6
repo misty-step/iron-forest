@@ -1,0 +1,1 @@
+{"status":"pass","results":[{"name":"build","code":0,"seconds":0.177919298,"output":""},{"name":"vet","code":0,"seconds":0.050308095,"output":""},{"name":"test","code":0,"seconds":1.9285212139999999,"output":"ok  \tgithub.com/misty-step/iron-forest\t1.426s\n"}],"run_id":"20260807T192954Z-branch-forest/171-document-and-enforce-the-deliver","time":"2026-08-07T19:29:59Z"}
