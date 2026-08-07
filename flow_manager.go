@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -99,8 +100,12 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "agent_failed"
 		return out, fmt.Errorf("agent: %w", err)
 	}
-	rep, err := gateManagerReport(wtDir, filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"), cands)
+	rep, err := gateManagerReport(wtDir, cands)
 	if err != nil {
+		out.Status = "gate_failed"
+		return out, fmt.Errorf("gate: %w", err)
+	}
+	if err := gateManagerWorktree(wtDir, baseSHA); err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
@@ -147,42 +152,89 @@ type managerReject struct {
 
 // gateManagerReport validates the Manager's report against the candidate set:
 // every item it names, promote or reject, must be one the lane actually offered
-// it. A report naming an unselected item is rejected. The manager's arrays are
-// legitimately empty (nothing to promote), so the generic gate's "required
-// array is empty" rule does not apply here; the schema file still documents the
-// contract and the semantic rule that matters is enforced below.
-func gateManagerReport(wtDir, schemaPath string, cands []Item) (managerReport, error) {
+// it, and a report naming an unselected item is rejected. The Manager's arrays
+// are legitimately empty (nothing to promote or refuse), but each array must
+// actually be an array — a null in either is a schema violation — and each
+// reject entry must carry a non-empty id and reason, so a report cannot sneak
+// an unshaped judgement past by omitting the fields the shaping rule keys on.
+// The controller applies only what survives this gate, never the agent directly.
+func gateManagerReport(wtDir string, cands []Item) (managerReport, error) {
 	var rep managerReport
 	repFile := filepath.Join(wtDir, "report.json")
 	raw, err := os.ReadFile(repFile)
 	if err != nil {
 		return rep, fmt.Errorf("report.json missing: %w", err)
 	}
-	// Validate the report against its declared schema, tolerating empty required
-	// arrays: unlike a build's changed_files, a Manager pass legitimately
-	// promotes or rejects nothing. Every other schema violation (a missing key,
-	// a mistyped field) is a gate failure.
-	if err := checkSchema(repFile, schemaPath); err != nil && !strings.Contains(err.Error(), "is empty") {
-		return rep, err
-	}
 	if err := json.Unmarshal(raw, &rep); err != nil {
 		return rep, fmt.Errorf("report.json is invalid JSON: %w", err)
+	}
+	// Inspect the raw fields so a null cannot hide as an empty judgement: Go
+	// decodes `"promote": null` into a nil slice without error, which would let
+	// a malformed report masquerade as "nothing to promote".
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return rep, fmt.Errorf("report.json is invalid JSON: %w", err)
+	}
+	for _, name := range []string{"promote", "reject"} {
+		rawField, ok := fields[name]
+		if !ok {
+			return rep, fmt.Errorf("report.json missing required field %q", name)
+		}
+		if len(bytes.TrimSpace(rawField)) == 0 || string(bytes.TrimSpace(rawField)) == "null" {
+			return rep, fmt.Errorf("report.json field %q must be an array, got null", name)
+		}
 	}
 	selected := make(map[string]bool, len(cands))
 	for _, it := range cands {
 		selected[it.ID] = true
 	}
 	for _, id := range rep.Promote {
-		if id != "" && !selected[id] {
+		if strings.TrimSpace(id) == "" {
+			return rep, fmt.Errorf("report promote entry is empty")
+		}
+		if !selected[id] {
 			return rep, fmt.Errorf("report promotes unselected item %q", id)
 		}
 	}
-	for _, r := range rep.Reject {
-		if r.ID != "" && !selected[r.ID] {
+	for i, r := range rep.Reject {
+		if strings.TrimSpace(r.ID) == "" {
+			return rep, fmt.Errorf("report reject[%d] missing required field %q", i, "id")
+		}
+		if strings.TrimSpace(r.Reason) == "" {
+			return rep, fmt.Errorf("report reject[%d] missing required field %q", i, "reason")
+		}
+		if !selected[r.ID] {
 			return rep, fmt.Errorf("report rejects unselected item %q", r.ID)
 		}
 	}
 	return rep, nil
+}
+
+// gateManagerWorktree enforces the lane's authority bounds after the agent
+// runs: the Manager owns no branch and writes no code, so the worktree must
+// still sit at the base commit with only the run artifact present. The agent
+// has edit and bash permissions, so this check — not the prompt — is what makes
+// "the Manager cannot modify or push code" hold: HEAD may not move, and no
+// repository file may change.
+func gateManagerWorktree(wtDir, baseSHA string) error {
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("cannot read manager worktree HEAD: %w", err)
+	}
+	if head != baseSHA {
+		return fmt.Errorf("manager committed: HEAD moved %s -> %s", short(baseSHA), short(head))
+	}
+	out, err := gitOutRaw(wtDir, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	for _, path := range parseChanged(out) {
+		if isRunArtifact(path) {
+			continue
+		}
+		return fmt.Errorf("manager modified repository file %q", path)
+	}
+	return nil
 }
 
 // applyManager enforces the level cap and applies the report's decisions to
@@ -207,6 +259,21 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 		}
 	}
 	promoted := 0
+	// commented tracks the ids this pass has already told why it will not
+	// promote. The local tracker copy is stale on comments written during this
+	// same call, so the marker scan alone would not stop an item named in both
+	// promote (blocked) and reject from receiving two explanations.
+	commented := make(map[string]bool)
+	commentIfNeeded := func(it Item, reason string) error {
+		if commented[it.ID] || managerAlreadyCommented(it) {
+			return nil
+		}
+		if err := tk.Comment(it.ID, managerMarker+" not promoted: "+reason); err != nil {
+			return err
+		}
+		commented[it.ID] = true
+		return nil
+	}
 	for _, id := range rep.Promote {
 		if id == "" {
 			continue
@@ -218,7 +285,15 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 		if hasExcludedTag(it, cfg.ExcludeTags) {
 			continue
 		}
-		if len(openBlockers(it, open)) > 0 {
+		if blockers := openBlockers(it, open); len(blockers) > 0 {
+			// A promote entry for a blocked item is not silently dropped: the
+			// reason must be recorded (and idempotently, so a second pass at the
+			// same revision adds no further comment). The item stays unjudged
+			// for promotion but the lane tells it what it lacks.
+			reason := "blocked by " + formatBlockers(blockers) + ", which is open"
+			if err := commentIfNeeded(it, reason); err != nil {
+				return promoted, err
+			}
 			continue
 		}
 		if it.hasTag(cfg.PromoteTag) {
@@ -241,9 +316,6 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 		if !ok {
 			return promoted, fmt.Errorf("reject names unknown item %q", r.ID)
 		}
-		if managerAlreadyCommented(it) {
-			continue
-		}
 		reason := strings.TrimSpace(r.Reason)
 		if blockers := openBlockers(it, open); len(blockers) > 0 {
 			reason = fmt.Sprintf("blocked by %s, which is open", formatBlockers(blockers))
@@ -251,7 +323,7 @@ func applyManager(cfg ManagerFlowCfg, tk Tracker, items []Item, branches []strin
 		if reason == "" {
 			reason = "not promoted"
 		}
-		if err := tk.Comment(it.ID, managerMarker+" not promoted: "+reason); err != nil {
+		if err := commentIfNeeded(it, reason); err != nil {
 			return promoted, err
 		}
 	}

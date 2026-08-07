@@ -149,8 +149,88 @@ func TestManagerRejectsUnselectedReport(t *testing.T) {
 		[]byte(`{"promote":["1"],"reject":[{"id":"42","reason":"never offered"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gateManagerReport(wtDir, "", cands); err == nil {
+	if _, err := gateManagerReport(wtDir, cands); err == nil {
 		t.Fatal("report naming an unselected item must be rejected")
+	}
+}
+
+// TestManagerRejectsNullAndShapelessReport proves the gate rejects the exact
+// schema-invalid shapes the reviewer called out: a null promote array and a
+// reject entry that omits its nested id or reason. An empty array is still
+// legitimately accepted (a pass may have nothing to promote).
+func TestManagerRejectsNullAndShapelessReport(t *testing.T) {
+	cands := []Item{{ID: "1", Title: "offered", UpdatedAt: "r1"}}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"null promote", `{"promote":null,"reject":[]}`},
+		{"null reject", `{"promote":[],"reject":null}`},
+		{"reject without id", `{"promote":[],"reject":[{"reason":"shapeless"}]}`},
+		{"reject without reason", `{"promote":[],"reject":[{"id":"1"}]}`},
+		{"reject as bare object", `{"promote":[],"reject":[{}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wtDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(wtDir, "report.json"), []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := gateManagerReport(wtDir, cands); err == nil {
+				t.Fatalf("report %s must be rejected by the gate", tc.body)
+			}
+		})
+	}
+	// An empty-array report is valid: nothing was ready and nothing refused.
+	wtDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(wtDir, "report.json"), []byte(`{"promote":[],"reject":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateManagerReport(wtDir, cands); err != nil {
+		t.Fatalf("valid empty-array report rejected: %v", err)
+	}
+}
+
+// TestManagerPromoteBlockerWritesExplanation proves a schema-valid promote entry
+// whose item has an open blocker is not only skipped: the lane records the
+// blocker in a comment and stays idempotent on a repeat pass, rather than
+// silently dropping the entry and leaving no explanation.
+func TestManagerPromoteBlockerWritesExplanation(t *testing.T) {
+	tk := newMemoryTracker()
+	items := []Item{
+		{ID: "149", Title: "still open", UpdatedAt: "r1"},
+		{ID: "70", Title: "waiting", UpdatedAt: "r2", Body: "Blocked by: #149"},
+	}
+	for _, it := range items {
+		tk.seed(it)
+	}
+	// The agent promotes 70 even though it is blocked; only the blocker comment
+	// should be recorded, with no promote tag applied.
+	rep := managerReport{Promote: []string{"70"}}
+	if _, err := applyManager(managerCfg(), tk, items, nil, rep); err != nil {
+		t.Fatal(err)
+	}
+	if tk.items["70"].hasTag("forest:ready") {
+		t.Fatal("blocked item must not carry the promote tag")
+	}
+	comments := tk.items["70"].Comments
+	if len(comments) != 1 {
+		t.Fatalf("blocked item got %d comments, want 1", len(comments))
+	}
+	if !strings.Contains(comments[0].Body, "#149") {
+		t.Fatalf("the recorded reason must name the blocker, got %q", comments[0].Body)
+	}
+	// Repeat the pass at the same revision: a real pass re-lists from the
+	// tracker, so the marker scan keeps it silent.
+	fresh, err := tk.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyManager(managerCfg(), tk, fresh, nil, rep); err != nil {
+		t.Fatal(err)
+	}
+	if len(tk.items["70"].Comments) != 1 {
+		t.Fatalf("repeat pass wrote %d comments, want still 1", len(tk.items["70"].Comments))
 	}
 }
 
