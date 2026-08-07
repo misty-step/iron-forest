@@ -72,6 +72,19 @@ func flowsFor() []Flow {
 // It is not a failure: nothing was built or decided, so the flow moves on.
 const codeBusy = 2
 
+// shutdownStatus is the ledger status for a run the operator stopped: the
+// daemon is draining, so the agent's exit is a shutdown, not a crash. It is
+// deliberately not a *_failed status so it never reaches the repeat-failure
+// brake. Tokens already spent are still recorded on the row.
+const shutdownStatus = "shutdown"
+
+// draining reports whether the daemon received the graceful signal and is
+// shutting down. A nil drain means no daemon (a manual runOnce), where there is
+// nothing to distinguish a shutdown from a crash.
+func draining(drain *int32) bool {
+	return drain != nil && atomic.LoadInt32(drain) == 1
+}
+
 // serve runs every enabled flow, each in its own goroutine on its own clock.
 // names filters to a subset of flows; empty means every enabled flow.
 func serve(cfg Config, repoDir string, names []string) int {
@@ -181,7 +194,7 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 			time.Sleep(f.Interval(cfg))
 			continue
 		}
-		code, key := runFlowPass(f, cfg, repoDir)
+		code, key := runFlowPass(f, cfg, repoDir, drain)
 		if code == 0 && key != lastKey {
 			// This pass did work on a subject it did not just handle: its write
 			// may have made another subject actionable, so re-select at once.
@@ -197,7 +210,7 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 // the key of the subject it acted on so the caller can tell repeated work from
 // progress. One subject per pass keeps a lane's decisions small and re-reads the
 // world between them, so a lane never acts on state it has already invalidated.
-func runFlowPass(f Flow, cfg Config, repoDir string) (int, string) {
+func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string) {
 	subjects, err := f.Select(cfg, repoDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forest: %s select: %v\n", f.Name(), err)
@@ -207,7 +220,7 @@ func runFlowPass(f Flow, cfg Config, repoDir string) (int, string) {
 		return 1, ""
 	}
 	for _, s := range subjects {
-		code := actOnSubject(f, cfg, repoDir, s)
+		code := actOnSubject(f, cfg, repoDir, s, drain)
 		if code == codeBusy {
 			continue // another worker handles it; try the next candidate
 		}
@@ -220,7 +233,7 @@ func runFlowPass(f Flow, cfg Config, repoDir string) (int, string) {
 // The read-side update gate spans Act so a binary swap cannot interrupt it.
 // Act must never take this lock again: a second read lock behind a waiting
 // writer deadlocks.
-func actOnSubject(f Flow, cfg Config, repoDir string, s Subject) int {
+func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) int {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
 	if !inFlight.claim(s.Key) {
@@ -240,11 +253,18 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject) int {
 		BaseSHA: out.BaseSHA, ReviewVerdict: out.Verdict,
 	}
 	if err != nil {
-		if brakeErr := recordStalled(repoDir, f.Name(), s.Key, s.Revision); brakeErr != nil {
-			err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)
-		}
-		if rec.Status == "" || rec.Status == "done" {
-			rec.Status = failStatus(err)
+		if draining(drain) {
+			// The operator stopped the daemon; the agent exited because of that,
+			// not because of its own work. Name the status so it never reads as a
+			// failure, keep the spent tokens, and leave the brake untouched.
+			rec.Status = shutdownStatus
+		} else {
+			if brakeErr := recordStalled(repoDir, f.Name(), s.Key, s.Revision); brakeErr != nil {
+				err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)
+			}
+			if rec.Status == "" || rec.Status == "done" {
+				rec.Status = failStatus(err)
+			}
 		}
 		rec.Error = err.Error()
 		_ = appendRun(workspaceDir(repoDir), rec)
@@ -272,7 +292,7 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 		for _, s := range subjects {
 			if s.Key == subject || s.Branch == subject ||
 				(s.ID != "" && s.ID == subject) {
-				return actOnSubject(f, cfg, repoDir, s)
+				return actOnSubject(f, cfg, repoDir, s, nil)
 			}
 		}
 		fmt.Fprintf(os.Stderr, "forest: %s does not select %q now\n", flowName, subject)
