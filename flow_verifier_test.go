@@ -275,6 +275,113 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	}
 }
 
+// TestVerifierMergeRequiresApproveAndPassingChecks is the falsifier for the
+// merge admission gate: a branch reaches master only when its checks pass and
+// its verdict approves, and auto_merge alone must never outweigh a rejection.
+// It drives the full Act path for a rejected verdict, a failing check, and one
+// successful merge. Flipping the operator at flow_verifier.go:186 to a logical
+// AND would let a rejected branch merge, so this test must fail on that
+// mutation: a test that survives the flip does not defend the property.
+func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
+	type result struct {
+		out          Outcome
+		repo         string
+		branch       string
+		masterBefore string
+	}
+	// runAct builds a one-branch repository, seeds an optional verdict on the
+	// branch head, and drives the Verifier's Act to the finish. The tracker is
+	// stubbed so the item read and the close after a merge never touch the host.
+	runAct := func(t *testing.T, verdict string, checks []Check, autoMerge bool) result {
+		t.Helper()
+		repo := setupTestRepo(t)
+		branch := "forest/9-change"
+		rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+		rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+		rebaseTestGit(t, repo, "add", "branch.txt")
+		rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+		rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+		head := remoteBranchHead(t, repo, branch)
+		rebaseTestGit(t, repo, "checkout", "-q", "master")
+		masterBefore := remoteBranchHead(t, repo, "master")
+
+		writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+		oldGH := ghJSON
+		ghJSON = func(args ...string) ([]byte, error) {
+			return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+		}
+		defer func() { ghJSON = oldGH }()
+
+		cfg := defaultConfig()
+		cfg.Repo = "owner/repo"
+		cfg.Checks = checks
+		cfg.Flows.Verifier.Agent = "verifier"
+		cfg.Flows.Verifier.AutoMerge = autoMerge
+		cfg.Projection = Projection{}
+
+		if verdict != "" {
+			if err := writeVerdict(repo, head, verdictNote{
+				Verdict: verdict, Reviewer: "verifier", Model: "verifier-model",
+				DefSHA: "def", RunID: "seed",
+			}); err != nil {
+				t.Fatalf("seed verdict: %v", err)
+			}
+		}
+
+		out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+			Key: "branch-" + branch, Kind: "branch", Revision: head,
+			Label: branch, Issue: 9, Branch: branch, Head: head,
+		}, "run-1")
+		if err != nil {
+			t.Fatalf("Act: %v", err)
+		}
+		return result{out: out, repo: repo, branch: branch, masterBefore: masterBefore}
+	}
+
+	passing := []Check{{Name: "true", Run: "true"}}
+
+	t.Run("rejected verdict never merges", func(t *testing.T) {
+		r := runAct(t, "changes", passing, true)
+		if r.out.Status == "merged" {
+			t.Fatalf("a changes verdict merged: %#v", r.out)
+		}
+		if r.out.Status != "reviewed" {
+			t.Fatalf("changes verdict status = %q, want reviewed", r.out.Status)
+		}
+		if got := remoteBranchHead(t, r.repo, "master"); got != r.masterBefore {
+			t.Fatalf("master advanced to %s after a rejection, want %s", got, r.masterBefore)
+		}
+	})
+
+	t.Run("failing check never merges", func(t *testing.T) {
+		failing := []Check{{Name: "false", Run: "false"}}
+		r := runAct(t, "approve", failing, true)
+		if r.out.Status == "merged" {
+			t.Fatalf("a failing check merged: %#v", r.out)
+		}
+		if r.out.Status != "checks_failed" {
+			t.Fatalf("failing check status = %q, want checks_failed", r.out.Status)
+		}
+		if got := remoteBranchHead(t, r.repo, "master"); got != r.masterBefore {
+			t.Fatalf("master advanced to %s despite a failed check, want %s", got, r.masterBefore)
+		}
+	})
+
+	t.Run("approve with passing checks merges exactly once", func(t *testing.T) {
+		r := runAct(t, "approve", passing, true)
+		if r.out.Status != "merged" {
+			t.Fatalf("approved, passing head status = %q, want merged", r.out.Status)
+		}
+		if got := remoteBranchHead(t, r.repo, "master"); got == r.masterBefore {
+			t.Fatalf("master did not advance after a verified merge (%q)", got)
+		}
+		if out := rebaseTestGitOut(t, r.repo, "ls-remote", "origin", "refs/heads/"+r.branch); out != "" {
+			t.Fatalf("merged branch %q still exists on origin: %s", r.branch, out)
+		}
+	})
+}
+
 // TestStalledOnCountsFailuresPerRevision pins the progress rule: a lane stops
 // retrying one unchanged situation, and a real repair clears the count because
 // it moves the revision.
