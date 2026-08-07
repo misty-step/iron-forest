@@ -1,0 +1,1 @@
+{"status":"pass","results":[{"name":"build","code":0,"seconds":0.165546081,"output":""},{"name":"vet","code":0,"seconds":0.045921117,"output":""},{"name":"test","code":0,"seconds":1.131539655,"output":"ok  \tgithub.com/misty-step/iron-forest\t0.995s\n"}],"run_id":"20260807T154916Z-branch-forest/149-migrate-item-identity-to-opaque","time":"2026-08-07T15:49:18Z"}
