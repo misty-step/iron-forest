@@ -14,4 +14,4 @@ Run these steps from the repository root.
 10. Run the exact command or Flow affected by the change.
 11. Confirm that the change updates its own tests and operator documentation.
 
-Keep the vocabulary and protected paths defined in [AGENTS.md](AGENTS.md).
+Keep the vocabulary defined in [AGENTS.md](AGENTS.md). No path is withheld from an agent; `docs/adr/0003` removed the protected-path list.

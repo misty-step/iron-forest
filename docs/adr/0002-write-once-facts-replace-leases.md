@@ -37,8 +37,9 @@ Delete the remote lease layer. Coordinate with facts instead of locks.
   `refs/forest/stalled/<flow>/<key>`, so selection no longer depends on one host's
   files.
 
-`budget_seconds` and check timeouts survive as cost knobs. They carry no
-correctness weight, because no lease can expire.
+Check timeouts survive as cost knobs. They carry no correctness weight,
+because no lease can expire. `budget_seconds` was later deleted with the step
+ceiling in `99b3b74`; nothing now bounds a run's length.
 
 ## Consequences
 

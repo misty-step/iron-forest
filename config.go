@@ -37,9 +37,9 @@ func configPath(repoDir string) string { return filepath.Join(repoDir, "forest.y
 // workspaceDir is where a checkout keeps its ledger, traces, and worktrees.
 func workspaceDir(repoDir string) string { return filepath.Join(repoDir, WorkspaceDir) }
 
-// Config is forest.yaml: the work source, the paths no agent may touch, the
-// checks the factory runs itself, the flows that are on, and the optional
-// human-facing projection.
+// Config is forest.yaml: the work source, the checks the factory runs itself,
+// the flows that are on, and the optional human-facing projection. It withholds
+// no path from an agent; docs/adr/0003 removed the protected-path list.
 type Config struct {
 	Repo       string           `yaml:"repo"`
 	Commit     CommitIdentity   `yaml:"commit"`
