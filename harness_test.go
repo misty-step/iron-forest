@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -315,5 +317,82 @@ func TestRunPhaseSuccessWithoutSteps(t *testing.T) {
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
 	if _, err := runPhase(t.TempDir(), wt, a, "task", trace); err != nil {
 		t.Fatalf("clean zero exit must succeed: %v", err)
+	}
+}
+
+// TestNoTokenClassDroppedBetweenTraceAndRow is the #205 regression test: a
+// measured token class must survive the whole chain from the step_finish event
+// to the serialized ledger row. The stub reports every class at distinct values;
+// the phase statistics, the flow's copy of them, and the round-tripped row must
+// all keep each one, or a class was dropped and the ledger under-states spend.
+func TestNoTokenClassDroppedBetweenTraceAndRow(t *testing.T) {
+	step := `{"type":"step_finish","part":{"tokens":{"input":11,"output":22,"reasoning":33,"cache":{"read":44,"write":55}}}}`
+	script := "#!/bin/sh\nprintf '%s\\n' '" + step + "'\nexit 0\n"
+	wt, trace := fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := runStats{tokensIn: 11, tokensOut: 22, cacheRead: 44, cacheWrite: 55, reasoning: 33}
+	if stats != want {
+		t.Fatalf("runPhase dropped a token class: stats = %+v, want %+v", stats, want)
+	}
+
+	// Copy the statistics into an outcome the way every flow's Act does, then
+	// onto a ledger record the way the supervisor's append does, and round-trip
+	// the row through JSON exactly as the ledger persists it: the row is what a
+	// person reads, so every class must survive to that shape.
+	var out Outcome
+	out.addTokens(stats)
+	var rec runRecord
+	rec.setTokens(out)
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got runRecord
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("ledger row does not round-trip: %v", err)
+	}
+	for _, c := range []struct {
+		field string
+		have  int64
+		want  int64
+	}{
+		{"tokens_in", got.TokensIn, want.tokensIn},
+		{"tokens_out", got.TokOut, want.tokensOut},
+		{"cache_read", got.CacheRead, want.cacheRead},
+		{"cache_write", got.CacheWrite, want.cacheWrite},
+		{"reasoning", got.Reasoning, want.reasoning},
+	} {
+		if c.have != c.want {
+			t.Errorf("ledger %s = %d, want %d: a token class was dropped between trace and row",
+				c.field, c.have, c.want)
+		}
+	}
+}
+
+// TestRunStatsTokenFieldsHaveLedgerConsumers pins requirement 4 of #205: every
+// field on runStats is a measured token class that must reach the ledger row,
+// and every class on the row must be fed from the phase statistics. A field
+// with no consumer — or a measurement a flow stops copying — is the silent
+// under-statement the ledger exists to prevent. Add a class to both sides of
+// this table when a new token kind is added.
+func TestRunStatsTokenFieldsHaveLedgerConsumers(t *testing.T) {
+	st := reflect.TypeOf(runStats{})
+	wantFields := map[string]bool{
+		"tokensIn": true, "tokensOut": true,
+		"cacheRead": true, "cacheWrite": true, "reasoning": true,
+	}
+	for i := 0; i < st.NumField(); i++ {
+		name := st.Field(i).Name
+		if !wantFields[name] {
+			t.Errorf("runStats field %q has no ledger consumer; add it to addTokens, runRecord, and stats", name)
+		}
+	}
+	if st.NumField() != len(wantFields) {
+		t.Errorf("runStats has %d fields, want %d; a measured class is either missing or not carried to the ledger",
+			st.NumField(), len(wantFields))
 	}
 }

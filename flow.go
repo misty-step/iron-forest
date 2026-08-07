@@ -42,7 +42,24 @@ type Outcome struct {
 	BaseSHA string
 	TokIn   int64
 	TokOut  int64
-	Err     error
+	// CacheRead and CacheWrite are cached input tokens, billed at a different
+	// rate than fresh input; Reasoning is the reasoning-class token spend. Each
+	// is a measured class the ledger must record, not sum into one figure.
+	CacheRead  int64
+	CacheWrite int64
+	Reasoning  int64
+	Err        error
+}
+
+// addTokens carries every token class a phase measured onto the outcome. A
+// class that stops being copied here is the discard defect the ledger exists to
+// prevent, so every field is copied explicitly.
+func (o *Outcome) addTokens(s runStats) {
+	o.TokIn = s.tokensIn
+	o.TokOut = s.tokensOut
+	o.CacheRead = s.cacheRead
+	o.CacheWrite = s.cacheWrite
+	o.Reasoning = s.reasoning
 }
 
 // A Flow is one autonomous lane. It reads observable state, acts, and records.
@@ -252,6 +269,7 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 		Agent: out.Agent, Model: out.Model, DefSHA: out.DefSHA,
 		BaseSHA: out.BaseSHA, ReviewVerdict: out.Verdict,
 	}
+	rec.setTokens(out)
 	if err != nil {
 		if draining(drain) {
 			// The operator stopped the daemon; the agent exited because of that,

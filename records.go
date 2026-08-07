@@ -26,12 +26,26 @@ type runRecord struct {
 	Status        string `json:"status"`
 	TokensIn      int64  `json:"tokens_in"`
 	TokOut        int64  `json:"tokens_out"`
+	CacheRead     int64  `json:"cache_read"`
+	CacheWrite    int64  `json:"cache_write"`
+	Reasoning     int64  `json:"reasoning"`
 	Agent         string `json:"agent"`
 	Model         string `json:"model"`
 	BaseSHA       string `json:"base_sha"`
 	DefSHA        string `json:"def_sha"`
 	ReviewVerdict string `json:"review,omitempty"`
 	Error         string `json:"error,omitempty"`
+}
+
+// setTokens places every token class a flow reported onto a ledger record.
+// Each measured class must reach the row shape a person reads; copying them all
+// here keeps the ledger from discarding a class the harness observed.
+func (r *runRecord) setTokens(o Outcome) {
+	r.TokensIn = o.TokIn
+	r.TokOut = o.TokOut
+	r.CacheRead = o.CacheRead
+	r.CacheWrite = o.CacheWrite
+	r.Reasoning = o.Reasoning
 }
 
 // UnmarshalJSON reads one ledger row and tolerates both the legacy integer

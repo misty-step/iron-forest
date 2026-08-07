@@ -229,7 +229,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	if !found {
 		var stats runStats
 		verdict, stats, err = verifierReview(cfg, repoDir, wtDir, it, baseSHA, runID, a)
-		out.TokIn, out.TokOut = stats.tokensIn, stats.tokensOut
+		out.addTokens(stats)
 		if err != nil {
 			out.Status = "review_failed"
 			return out, err
