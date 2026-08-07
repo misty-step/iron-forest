@@ -345,7 +345,7 @@ func TestManagerSecondPromotionAfterFirstBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Item 2 is still a candidate for a later pass, because it was not seen.
-	cands, err := managerCandidates(cfg, repo, items)
+	cands, err := managerCandidates(cfg, repo, items, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestManagerReconsidersBlockedItemWhenBlockerCloses(t *testing.T) {
 	if err := recordManagerSeen(repo, tk, items, judged); err != nil {
 		t.Fatal(err)
 	}
-	cands, err := managerCandidates(cfg, repo, items)
+	cands, err := managerCandidates(cfg, repo, items, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,5 +576,33 @@ func TestManagerGateWorktreeRejectsRefMutation(t *testing.T) {
 	rebaseTestGit(t, wtDir, "push", "-q", "origin", "HEAD:refs/heads/forest/evil")
 	if err := gateManagerWorktree(wtDir, baseSHA, before); err == nil {
 		t.Fatal("gate must reject a run that pushed a remote ref")
+	}
+}
+
+// TestManagerCandidatesSkipSettledWork pins the queue boundary. An item already
+// promoted, or already carrying a branch, is settled: the promotion decision is
+// made and the lanes downstream own it. Offering it to the agent again invites a
+// reject on work that is already moving, which puts a "not promoted" comment on
+// a ready item and tells the operator the opposite of the truth.
+func TestManagerCandidatesSkipSettledWork(t *testing.T) {
+	repo := newRefGitRepo(t)
+	cfg := managerCfg()
+	items := []Item{
+		{ID: "1", Title: "already promoted", UpdatedAt: "r1", Tags: []string{cfg.PromoteTag}},
+		{ID: "2", Title: "has a branch", UpdatedAt: "r1"},
+		{ID: "3", Title: "genuinely open", UpdatedAt: "r1"},
+	}
+	branches := []string{"forest/2-has-a-branch"}
+
+	cands, err := managerCandidates(cfg, repo, items, branches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 || cands[0].ID != "3" {
+		var got []string
+		for _, c := range cands {
+			got = append(got, c.ID)
+		}
+		t.Fatalf("candidates = %v, want only item 3", got)
 	}
 }

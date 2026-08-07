@@ -47,7 +47,11 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err != nil {
 		return nil, fmt.Errorf("items: %w", err)
 	}
-	cands, err := managerCandidates(cfg.Flows.Manager, repoDir, items)
+	branches, err := forestBranches(repoDir)
+	if err != nil {
+		return nil, fmt.Errorf("branches: %w", err)
+	}
+	cands, err := managerCandidates(cfg.Flows.Manager, repoDir, items, branches)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +74,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		return Outcome{}, fmt.Errorf("branches: %w", err)
 	}
-	cands, err := managerCandidates(cfg.Flows.Manager, repoDir, items)
+	cands, err := managerCandidates(cfg.Flows.Manager, repoDir, items, branches)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("candidates: %w", err)
 	}
@@ -577,14 +581,26 @@ func createManagerWorktree(repo, workspace string) (wtDir, baseSHA string, err e
 // managerCandidates returns the open items that need a fresh judgement now:
 // every non-excluded item whose update stamp has moved since the lane last
 // judged it. Already-judged items stay quiet until their revision moves.
-func managerCandidates(cfg ManagerFlowCfg, repoDir string, items []Item) ([]Item, error) {
+//
+// An item already promoted, or already covered by a branch, is settled: the
+// queue decision for it is made and the lanes downstream own it. Offering it
+// again invites the agent to reject work that is already moving, which would
+// put a "not promoted" comment on a ready item.
+func managerCandidates(cfg ManagerFlowCfg, repoDir string, items []Item, branches []string) ([]Item, error) {
 	seen, err := readManagerSeen(repoDir)
 	if err != nil {
 		return nil, err
 	}
+	covered := make(map[string]bool, len(branches))
+	for _, branch := range branches {
+		covered[itemIDFromBranch(branch)] = true
+	}
 	var out []Item
 	for _, it := range items {
 		if hasExcludedTag(it, cfg.ExcludeTags) {
+			continue
+		}
+		if it.hasTag(cfg.PromoteTag) || covered[it.ID] {
 			continue
 		}
 		if seen[it.ID] == it.UpdatedAt {
