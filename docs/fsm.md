@@ -89,6 +89,11 @@ boundary using `observe` of the exact git-visible facts it actually read:
   exact Checks note (review requires green Checks), `admitMerge` reads both
   notes on the exact head, and `mergeVerified` requires the branch still point
   at that admitted head.
+- `failed` is terminal: the Verifier and Fixer Selectors both read the Tracker
+  label (`subjectFailed`) and never offer a labeled item, even one whose git
+  facts — a green head, an approved Verdict — would otherwise look actionable.
+  The Verifier `Act` also refuses a labeled item at its boundary before any
+  Effect, so a label applied between Select and Act still halts the lane.
 
 ## Halt and human-only states
 

@@ -45,6 +45,17 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			Branch:   branch,
 			Head:     head,
 		}
+		// failed is terminal and never resumed, so a labeled item is not offered
+		// even when a green, approved head makes it look actionable. The label is
+		// read from the Tracker -- never from a branch head -- so a selector that
+		// derives only git facts must consult it before any effect.
+		failed, err := subjectFailed(cfg.Repo, s)
+		if err != nil {
+			return nil, fmt.Errorf("tracker %s: %w", branch, err)
+		}
+		if failed {
+			continue
+		}
 		v, found, err := readVerdict(repoDir, head)
 		if err != nil {
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)
@@ -120,6 +131,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	it, err := trackerFor(cfg.Repo).Get(s.ID)
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
+	}
+	// failed is terminal and never resumed. A labeled item must not be checked,
+	// reviewed, or merged even if the branch moved after Select; this boundary
+	// guard is the last place the machine can refuse an effect.
+	if it.hasTag(failedLabel) {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"},
+			fmt.Errorf("item %s carries %s: failed subjects are terminal and never resumed", s.ID, failedLabel)
 	}
 	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
 	if err != nil {

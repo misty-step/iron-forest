@@ -26,6 +26,20 @@ type Subject struct {
 	Head     string // Kind == "branch": head commit sha
 }
 
+// subjectFailed reports whether a subject's tracker item carries the durable
+// failure label. failed is a terminal, human-only state and is never resumed
+// automatically, so a branch selector must not offer a labeled subject even
+// when its git facts -- a green head, an approved Verdict -- look actionable.
+// The label lives on the tracker item, never on a branch head or a note, so
+// only this read sees it: git facts alone cannot make a failed subject work.
+func subjectFailed(repo string, s Subject) (bool, error) {
+	it, err := trackerFor(repo).Get(s.ID)
+	if err != nil {
+		return false, err
+	}
+	return it.hasTag(failedLabel), nil
+}
+
 // An Outcome is what one Act call did. It becomes one ledger row. There is no
 // money in it: spend is bounded by the provider key, not counted here.
 type Outcome struct {

@@ -224,6 +224,16 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Repo = "example/repo"
 
+	// Both the verifier and fixer selectors read the Tracker label, so stub the
+	// tracker to return the item without the failure label.
+	old := trackerFor
+	trackerFor = func(repo string) Tracker {
+		mem := newMemoryTracker()
+		mem.seed(Item{ID: "9"})
+		return mem
+	}
+	defer func() { trackerFor = old }()
+
 	// With no notes at all the head is fresh work for the Verifier.
 	subjects, err := verifierFlow{}.Select(cfg, work)
 	if err != nil {
@@ -492,6 +502,16 @@ func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 		t.Fatalf("seed checks: %v", err)
 	}
 
+	// The verifier selector reads the Tracker label, so stub the tracker to
+	// return the item without the failure label.
+	old := trackerFor
+	trackerFor = func(repo string) Tracker {
+		mem := newMemoryTracker()
+		mem.seed(Item{ID: "9"})
+		return mem
+	}
+	defer func() { trackerFor = old }()
+
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{}
@@ -512,6 +532,79 @@ func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 	}
 	if len(held) != 0 {
 		t.Fatalf("auto_merge off: got %d subjects, want none; a branch that cannot land is not work", len(held))
+	}
+}
+
+// TestVerifierNeverActsOnFailedLabel is the flow-level falsifier the reviewer
+// asked for: an approved, green branch whose tracker item carries forest:failed
+// is terminal and never resumed, so the Verifier must neither offer it nor act
+// on it. Before this guard, Select derived every decision from git facts alone
+// and never read the label, so such a branch could still pass mergeBlocked and
+// admitMerge and land. Select must drop it, and Act must refuse it at the
+// boundary with no merge and no effect on master.
+func TestVerifierNeverActsOnFailedLabel(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-failed"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	masterBefore := remoteBranchHead(t, repo, "master")
+
+	// An approved Verdict and green Checks on the exact head: everything the
+	// merge path normally requires, about as actionable as a failed subject gets.
+	if err := writeVerdict(repo, head, verdictNote{
+		Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: "def", RunID: "seed",
+	}); err != nil {
+		t.Fatalf("seed verdict: %v", err)
+	}
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+		t.Fatalf("seed checks: %v", err)
+	}
+
+	// The item carries the durable failure label, so the Selector and Act guard
+	// must both refuse to treat this branch as work.
+	old := trackerFor
+	trackerFor = func(repo string) Tracker {
+		mem := newMemoryTracker()
+		mem.seed(Item{ID: "9", Tags: []string{failedLabel}})
+		return mem
+	}
+	defer func() { trackerFor = old }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Projection = ProjectionConfig{}
+
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if len(subjects) != 0 {
+		t.Fatalf("Select offered a failed-labeled approved green branch: %#v", subjects)
+	}
+
+	// Drive Act anyway, as if the label arrived between Select and Act, and
+	// confirm it refuses before any effect: no merge, no master advance.
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-1")
+	if err == nil {
+		t.Fatalf("Act accepted a failed-labeled approved green branch: %#v", out)
+	}
+	if out.Status != "item_failed" {
+		t.Fatalf("Act status = %q, want item_failed", out.Status)
+	}
+	if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
+		t.Fatalf("master advanced to %s despite a failed-labeled subject, want %s", got, masterBefore)
 	}
 }
 

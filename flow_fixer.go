@@ -34,6 +34,17 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			return nil, fmt.Errorf("branch %s: %w", branch, err)
 		}
 		key := "branch-" + branch
+		// failed is terminal and never resumed, so a labeled item is not offered
+		// as fix work even when its brokenness would otherwise match. Relying on
+		// Act alone to refuse a labeled subject would pay to select and claim it
+		// first; the selector never offers it.
+		failed, err := subjectFailed(cfg.Repo, Subject{ID: itemIDFromBranch(branch)})
+		if err != nil {
+			return nil, fmt.Errorf("tracker %s: %w", branch, err)
+		}
+		if failed {
+			continue
+		}
 		v, hasVerdict, err := readVerdict(repoDir, head)
 		if err != nil {
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)

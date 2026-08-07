@@ -148,6 +148,16 @@ func TestBranchSelectRecoversOpaqueID(t *testing.T) {
 	notesTestGit(t, work, "commit", "-qam", "branch work")
 	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
 
+	// The verifier selector now reads the Tracker label, so stub the tracker to
+	// return the item without the failure label.
+	old := trackerFor
+	trackerFor = func(repo string) Tracker {
+		mem := newMemoryTracker()
+		mem.seed(Item{ID: id})
+		return mem
+	}
+	defer func() { trackerFor = old }()
+
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	subjects, err := verifierFlow{}.Select(cfg, work)
