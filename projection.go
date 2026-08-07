@@ -31,7 +31,7 @@ func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error
 }
 
 // projectBranch publishes a built branch as one idempotent pull request.
-func projectBranch(cfg Config, it issue, branch, body string) (string, error) {
+func projectBranch(cfg Config, it Item, branch, body string) (string, error) {
 	if !cfg.Projection.Enabled {
 		return "", nil
 	}

@@ -111,7 +111,7 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 
 	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
 		Key: "branch-forest/9-change", Kind: "branch", Revision: oldHead,
-		Label: "forest/9-change", Issue: 9, Branch: "forest/9-change", Head: oldHead,
+		Label: "forest/9-change", ID: "9", Branch: "forest/9-change", Head: oldHead,
 	}, "run-1")
 	if err != nil {
 		t.Fatalf("Act: %v", err)
@@ -331,7 +331,7 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 
 		out, err := (verifierFlow{}).Act(cfg, repo, Subject{
 			Key: "branch-" + branch, Kind: "branch", Revision: head,
-			Label: branch, Issue: 9, Branch: branch, Head: head,
+			Label: branch, ID: "9", Branch: branch, Head: head,
 		}, "run-1")
 		if err != nil {
 			t.Fatalf("Act: %v", err)
@@ -444,7 +444,7 @@ func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
 	notesTestGit(t, work, "rebase", "-q", "master")
 
 	id := CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
-	it := issue{Number: 9, Title: "rewrite"}
+	it := Item{ID: "9", Title: "rewrite"}
 	// Each attempt needs its own change: a failed push leaves its commit behind,
 	// and a run that has nothing to commit is a different failure.
 	if err := os.WriteFile(filepath.Join(work, "stale.txt"), []byte("stale\n"), 0o644); err != nil {

@@ -1,4 +1,4 @@
-As the Verifier, review the proposed change for item #{{.Number}} — {{.Title}}.
+As the Verifier, review the proposed change for item #{{.ID}} — {{.Title}}.
 
 ## Item body
 {{.Body}}

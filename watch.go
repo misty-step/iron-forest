@@ -51,7 +51,7 @@ func cmdWatch(cfg Config, repoDir string, args []string) int {
 
 	var (
 		mu      sync.Mutex
-		items   []issue
+		items   []Item
 		itemErr string
 	)
 	if liveGH {
@@ -108,7 +108,7 @@ type watchSnapshot struct {
 	Daemon     daemonSnap
 	Worktrees  []string
 	LiveGH     bool
-	Backlog    []issue
+	Backlog    []Item
 	BacklogErr string
 	Flows      map[string][]runRecord
 }
@@ -234,7 +234,7 @@ func renderWatch(w *os.File, s watchSnapshot) {
 				if len(title) > 56 {
 					title = title[:53] + "..."
 				}
-				fmt.Fprintf(w, "  #%-5d %s\n", it.Number, title)
+				fmt.Fprintf(w, "  %-6s %s\n", orDash(it.ID), title)
 			}
 		}
 	} else {

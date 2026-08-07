@@ -67,7 +67,7 @@ func currentWorktrees(t *testing.T, repo string) []string {
 func TestReapOrphanWorktreesRemovesStaleRun(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
-	wtDir, _, _, err := createWorktree(repo, workspace, issue{Number: 44, Title: "leak"})
+	wtDir, _, _, err := createWorktree(repo, workspace, "44", "leak")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestReapOrphanWorktreesRemovesStaleRun(t *testing.T) {
 func TestCreateWorktreeStartsAtTheRemoteTip(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
-	wtDir, branch, baseSHA, err := createWorktree(repo, workspace, issue{Number: 5, Title: "tip"})
+	wtDir, branch, baseSHA, err := createWorktree(repo, workspace, "5", "tip")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,18 +109,78 @@ func TestCreateWorktreeStartsAtTheRemoteTip(t *testing.T) {
 	}
 }
 
+// TestItemIdentityRoundTripNonNumeric proves branch derivation and the reverse
+// lookup tolerate an opaque, non-numeric tracker id: the branch keeps the
+// forest/<id>-<slug> shape for a Habitat-style id and itemIDFromBranch returns
+// that id unchanged, without assuming the segment is an integer.
+func TestItemIdentityRoundTripNonNumeric(t *testing.T) {
+	const id = "hab_01J9X"
+	branch := "forest/" + id + "-parking"
+
+	if got := itemIDFromBranch(branch); got != id {
+		t.Fatalf("itemIDFromBranch(%q) = %q, want %q", branch, got, id)
+	}
+	// A numeric GitHub id keeps its readable, unchanged shape too.
+	if got := itemIDFromBranch("forest/69-notes"); got != "69" {
+		t.Fatalf("itemIDFromBranch(numeric) = %q, want 69", got)
+	}
+
+	repo := setupTestRepo(t)
+	workspace := filepath.Join(repo, WorkspaceDir)
+	wtDir, derived, _, err := createWorktree(repo, workspace, id, "parking")
+	if err != nil {
+		t.Fatalf("createWorktree with opaque id: %v", err)
+	}
+	defer removeWorktree(repo, wtDir)
+	if derived != branch {
+		t.Fatalf("branch = %q, want %q", derived, branch)
+	}
+}
+
+// TestEncodeBranchIDBijective pins that encodeBranchID and itemIDFromBranch are
+// genuinely inverse for every opaque id, including one whose characters spell
+// out an escape sequence. An id containing the literal `%2D` encodes to `%252D`;
+// the decoder must turn that back into `%2D`, not into a stray `-`, so the
+// round-trip survives ids that collide with the escaping vocabulary.
+func TestEncodeBranchIDBijective(t *testing.T) {
+	cases := []string{
+		"69",            // numeric GitHub id, unchanged
+		"hab_01J9X",     // hyphen-free Habitat id, unchanged
+		"a-b",           // a '-' must be escaped to survive parse
+		"100%",          // a '%' must be escaped
+		"%2D",           // literal escape sequence as a real id
+		"%252D",         // a double-escaped id, keeps its percent
+		"x%2D-y%25z",    // mixed '-' and '%' escapes
+		"hab/01J9X",     // a '/' is a path separator and git-invalid, must escape
+		"a b",           // a space is git-invalid
+		"~^:?*[\\",      // git's special refname characters
+		"../evil",       // '..' segments and leading dots must not survive literally
+		"@",             // a lone '@' is not a valid refname tail
+		"id\x07ctl\x7f", // control bytes are git-invalid
+	}
+	for _, id := range cases {
+		enc := encodeBranchID(id)
+		if strings.ContainsAny(enc, "/ ~^:?*[\\\x07\x7f") {
+			t.Errorf("encodeBranchID(%q) = %q still contains a git/path-invalid byte", id, enc)
+		}
+		if got := itemIDFromBranch("forest/" + enc + "-slug"); got != id {
+			t.Errorf("round-trip(%q): encode = %q, decode = %q, want %q", id, enc, got, id)
+		}
+	}
+}
+
 // TestTrackedWorktreesIsolateLanes pins the contract the drain handler depends
 // on: every live worktree is listed, and clearing one lane's worktree never
 // hides another lane's, which would leak it on an abrupt exit.
 func TestTrackedWorktreesIsolateLanes(t *testing.T) {
 	repo := setupTestRepo(t)
 	workspace := filepath.Join(repo, WorkspaceDir)
-	first, _, _, err := createWorktree(repo, workspace, issue{Number: 7, Title: "one"})
+	first, _, _, err := createWorktree(repo, workspace, "7", "one")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer removeWorktree(repo, first)
-	second, _, _, err := createWorktree(repo, workspace, issue{Number: 8, Title: "two"})
+	second, _, _, err := createWorktree(repo, workspace, "8", "two")
 	if err != nil {
 		t.Fatal(err)
 	}

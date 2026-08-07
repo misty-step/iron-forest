@@ -41,7 +41,7 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			Kind:     "branch",
 			Revision: head,
 			Label:    branch,
-			Issue:    itemNumberFromBranch(branch),
+			ID:       itemIDFromBranch(branch),
 			Branch:   branch,
 			Head:     head,
 		}
@@ -95,7 +95,7 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it, err := getItem(cfg.Repo, s.Issue)
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
@@ -219,8 +219,8 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		if _, berr := bumpAttempts(repoDir, s.Key); berr != nil {
 			return out, fmt.Errorf("merge: %w (attempt record failed: %v)", err, berr)
 		}
-		_ = labelItem(cfg.Repo, it.Number, []string{failedLabel}, nil)
-		_ = commentItem(cfg.Repo, it.Number, "Merge blocked: "+err.Error())
+		trackerFor(cfg.Repo).SetTags(it.ID, []string{failedLabel}, nil)
+		_ = trackerFor(cfg.Repo).Comment(it.ID, "Merge blocked: "+err.Error())
 		return out, err
 	}
 	out.Status = "merged"
@@ -230,7 +230,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
 // in tokens; a discarded count makes every review look free.
-func verifierReview(cfg Config, repoDir, wtDir string, it issue, head, runID string, a *Agent) (verdictNote, runStats, error) {
+func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
 	var out verdictNote
 	var stats runStats
 	diff, err := gitOut(wtDir, "diff", "origin/master..."+head)
@@ -311,7 +311,7 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 // exclusive: a protected target branch means only the host may write it, and
 // building a local commit that is then discarded would waste the work and
 // confuse the next reader.
-func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
+func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	if cfg.Projection.MergeViaHost {
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
@@ -339,7 +339,7 @@ func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
 		if err := git(mergeDir, "merge", "--squash", branch); err != nil {
 			return fmt.Errorf("merge: squash: %w", err)
 		}
-		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%d)", it.Title, it.Number)); err != nil {
+		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
 			return fmt.Errorf("merge: commit: %w", err)
 		}
 	case "ff":
@@ -357,11 +357,11 @@ func mergeVerified(cfg Config, repoDir, branch string, it issue) error {
 
 // finishMerge retires a landed subject: the branch is gone and the item is
 // closed, so no lane selects it again.
-func finishMerge(cfg Config, repoDir, branch string, it issue) error {
+func finishMerge(cfg Config, repoDir, branch string, it Item) error {
 	if err := git(repoDir, "push", "origin", "--delete", branch); err != nil {
 		return fmt.Errorf("merge: delete branch: %w", err)
 	}
-	if err := closeItem(cfg.Repo, it.Number); err != nil {
+	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
 		return fmt.Errorf("merge: close item: %w", err)
 	}
 	if err := dropAttempts(repoDir, "branch-"+branch); err != nil {
@@ -370,11 +370,62 @@ func finishMerge(cfg Config, repoDir, branch string, it issue) error {
 	return nil
 }
 
-func itemNumberFromBranch(branch string) int {
-	name := strings.TrimPrefix(branch, "forest/")
+// encodeBranchID renders a tracker id as a forest branch's id segment. The
+// branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as they
+// always have. The segment must be valid in a git refname and in a filesystem
+// path, so every byte outside a small safe set is escaped as %XX; '%' itself is
+// always escaped so the decoder can treat any '%' as the start of an escape.
+// The delimiter on the way back is the first '-', so '-' is escaped too. Numeric
+// ids and hyphen-free alphanumeric Habitat ids contain only safe bytes, so their
+// branches are unchanged.
+func encodeBranchID(id string) string {
+	var b strings.Builder
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if isBranchIDByte(c) {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// isBranchIDByte reports whether c can appear literally in a forest branch's id
+// segment. Only bytes valid in a git refname and in a file path are kept; '/' and
+// other path separators, control bytes, whitespace, and git's special characters
+// are escaped so any opaque id derives a usable worktree and branch.
+func isBranchIDByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c == '_'
+}
+
+// decodeBranchID reverses encodeBranchID in a single left-to-right pass. '%'
+// always begins a two-hex-digit escape, so an id containing the literal escape
+// sequence `%2D` (encoded as `%252D`) reconstructs to `%2D`, never to a stray
+// '-'; the mapping is bijective and any opaque id round-trips.
+func decodeBranchID(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// itemIDFromBranch recovers the opaque item identity from a forest branch,
+// undoing encodeBranchID on the id segment. It never assumes the segment is an
+// integer: it stays a numeric GitHub id or a Habitat id as written.
+func itemIDFromBranch(branch string) string {
+	name := strings.TrimPrefix(branch, BranchPrefix)
 	if i := strings.IndexByte(name, '-'); i >= 0 {
 		name = name[:i]
 	}
-	n, _ := strconv.Atoi(name)
-	return n
+	return decodeBranchID(name)
 }

@@ -28,8 +28,10 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	}
 	var subjects []Subject
 	for _, it := range items {
-		// An unchanged situation that reached the failure limit is not work.
-		key := fmt.Sprintf("item-%d", it.Number)
+		// An unchanged situation that reached the failure limit is not work. The
+		// key keeps its numeric shape for GitHub ids so the durable brake ref and
+		// the subject key are unchanged.
+		key := "item-" + it.ID
 		stalled, err := stalledOn(repoDir, "builder", key, it.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("stalled %s: %w", key, err)
@@ -41,8 +43,8 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			Key:      key,
 			Kind:     "item",
 			Revision: it.UpdatedAt,
-			Label:    fmt.Sprintf("#%d %s", it.Number, it.Title),
-			Issue:    it.Number,
+			Label:    fmt.Sprintf("#%s %s", it.ID, it.Title),
+			ID:       it.ID,
 			Item:     it,
 		})
 	}
@@ -51,9 +53,9 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 
 func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
 	it := s.Item
-	if it.Number == 0 {
+	if it.ID == "" {
 		var err error
-		it, err = getItem(cfg.Repo, s.Issue)
+		it, err = trackerFor(cfg.Repo).Get(s.ID)
 		if err != nil {
 			return Outcome{Status: "item_failed"}, fmt.Errorf("item: %w", err)
 		}
@@ -64,7 +66,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return Outcome{Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
 	}
 	workspace := workspaceDir(repoDir)
-	wtDir, branch, baseSHA, err := createWorktree(repoDir, workspace, it)
+	wtDir, branch, baseSHA, err := createWorktree(repoDir, workspace, it.ID, it.Title)
 	if err != nil {
 		return Outcome{Status: "worktree_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("worktree: %w", err)
 	}
@@ -98,7 +100,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return out, fmt.Errorf("publish: %w", err)
 	}
 	body := builderProjectionBody(it, rep, changed)
-	if err := commentItem(cfg.Repo, it.Number, fmt.Sprintf("Built branch `%s`.", branch)); err != nil {
+	if err := trackerFor(cfg.Repo).Comment(it.ID, fmt.Sprintf("Built branch `%s`.", branch)); err != nil {
 		out.Status = "comment_failed"
 		return out, fmt.Errorf("comment: %w", err)
 	}
@@ -112,9 +114,9 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	return out, nil
 }
 
-func builderProjectionBody(it issue, rep report, changed []string) string {
+func builderProjectionBody(it Item, rep report, changed []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Generated for item #%d: %s.\n\n", it.Number, it.Title)
+	fmt.Fprintf(&b, "Generated for item #%s: %s.\n\n", it.ID, it.Title)
 	b.WriteString(rep.Summary)
 	b.WriteString("\n\nChanged files:\n")
 	for _, path := range changed {

@@ -108,7 +108,7 @@ func cmdList(cfg Config) int {
 		return 1
 	}
 	for _, s := range subjects {
-		fmt.Printf("#%d\t%s\n", s.Issue, s.Item.Title)
+		fmt.Printf("#%s\t%s\n", s.ID, s.Item.Title)
 	}
 	return 0
 }

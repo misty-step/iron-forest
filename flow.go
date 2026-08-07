@@ -20,8 +20,8 @@ type Subject struct {
 	Kind     string // item | branch
 	Revision string // item updatedAt, or branch head sha
 	Label    string // one line for the operator
-	Issue    int    // tracker item number, when known
-	Item     issue  // Kind == "item"
+	ID       string // tracker item identity, opaque to the controller
+	Item     Item   // Kind == "item"
 	Branch   string // Kind == "branch"
 	Head     string // Kind == "branch": head commit sha
 }
@@ -222,7 +222,7 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject) int {
 	out, err := f.Act(cfg, repoDir, s, runID)
 	rec := runRecord{
 		Time: nowRFC(), RunID: runID, Flow: f.Name(), Subject: s.Key,
-		Revision: s.Revision, Issue: s.Issue, Branch: out.Branch, PRURL: out.PRURL,
+		Revision: s.Revision, ID: s.ID, Branch: out.Branch, PRURL: out.PRURL,
 		Status: out.Status, TokensIn: out.TokIn, TokOut: out.TokOut,
 		Agent: out.Agent, Model: out.Model, DefSHA: out.DefSHA,
 		BaseSHA: out.BaseSHA, ReviewVerdict: out.Verdict,
@@ -259,7 +259,7 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 		}
 		for _, s := range subjects {
 			if s.Key == subject || s.Branch == subject ||
-				(s.Issue != 0 && fmt.Sprint(s.Issue) == subject) {
+				(s.ID != "" && s.ID == subject) {
 				return actOnSubject(f, cfg, repoDir, s)
 			}
 		}

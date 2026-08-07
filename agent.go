@@ -225,14 +225,15 @@ func renderUserPrompt(a *Agent, data map[string]any) (string, error) {
 
 // issueData feeds a builder or fixer run: the item plus an optional revision
 // request. Comments carry earlier feedback into the same prompt as the task.
-// The stored item body stays unchanged.
-func issueData(it issue, revision string) map[string]any {
+// The stored item body stays unchanged. The id is the opaque string the
+// controller carries, with no GitHub integer behind it.
+func issueData(it Item, revision string) map[string]any {
 	body := it.Body
 	if comments := renderComments(it.Comments); comments != "" {
 		body += "\n\n## Item comments\n" + comments
 	}
 	return map[string]any{
-		"Number":   it.Number,
+		"ID":       it.ID,
 		"Title":    it.Title,
 		"Body":     body,
 		"Comments": it.Comments,
@@ -284,10 +285,12 @@ func renderComments(cs []comment) string {
 	return strings.TrimSpace(sb.String())
 }
 
-// reviewData feeds a review run: the item plus the author report and diff.
-func reviewData(it issue, rep report, diff string) map[string]any {
+// reviewData feeds a review run: the item plus the author report and diff. The
+// id is the same opaque string issueData exposes, so one prompt template
+// renders either lane.
+func reviewData(it Item, rep report, diff string) map[string]any {
 	return map[string]any{
-		"Number": it.Number,
+		"ID":     it.ID,
 		"Title":  it.Title,
 		"Body":   it.Body,
 		"Report": rep.Summary,

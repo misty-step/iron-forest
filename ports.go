@@ -1,8 +1,9 @@
 package main
 
 // Item is one tracker item and its discussion in a host-independent shape. The
-// id is a string so a second work source can carry its own identity. It sits
-// beside the legacy issue struct; migrating over is #149.
+// id is a string so a second work source can carry its own identity. The
+// GitHub adapter feeds this type through the Tracker port; the controller never
+// sees GitHub's native issue shape.
 type Item struct {
 	ID        string
 	Title     string

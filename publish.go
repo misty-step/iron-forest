@@ -9,14 +9,14 @@ import "fmt"
 // it is set, the push uses Git's compare-and-swap flag, so a rewritten branch
 // can land while still losing to any concurrent writer. An empty value keeps
 // the plain push a new branch needs.
-func commitAndPush(repo, wtDir, branch, expectedSHA string, id CommitIdentity, it issue) error {
+func commitAndPush(repo, wtDir, branch, expectedSHA string, id CommitIdentity, it Item) error {
 	if err := git(wtDir, "add", "-A"); err != nil {
 		return err
 	}
 	// keep report.json and review.json out of the tree: they are the run's
 	// records, not the repo's change
 	_ = git(wtDir, "reset", "-q", "--", "report.json", "review.json")
-	if err := gitCommit(wtDir, id, fmt.Sprintf("forest: %s (#%d)", it.Title, it.Number)); err != nil {
+	if err := gitCommit(wtDir, id, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
 		return err
 	}
 	args := []string{"push", "-u", "origin", branch}
