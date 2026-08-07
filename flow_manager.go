@@ -59,19 +59,11 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if !plan.hasWork() {
 		return nil, nil
 	}
-	if plan.needModel {
-		// The brake: do not rejudge the same judgement on unchanged input. The
-		// stamp over the candidate set means a single failure does not brake the
-		// lane forever: the moment the backlog moves, the revision moves and the
-		// Manager becomes eligible again. Reaping is deterministic and free, so
-		// it is never gated by the model brake.
-		stalled, err := stalledOn(repoDir, "manager", managerSubject, plan.revision)
-		if err != nil {
-			return nil, err
-		}
-		if stalled {
-			return nil, nil
-		}
+	if plan.braked && len(plan.reap) == 0 {
+		// The only work left is the braked promote judgement; retrying it on
+		// unchanged input is forbidden. A deterministic reap, in contrast, is
+		// free and always surfaces the subject so Act can free the slot.
+		return nil, nil
 	}
 	return []Subject{{
 		Key:      managerSubject,
@@ -107,6 +99,17 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 			return Outcome{Status: "tracker_failed"}, fmt.Errorf("reap item %s: %w", it.ID, err)
 		}
 	}
+
+	if plan.braked {
+		// The promote judgement for this unchanged candidate set is braked, and
+		// this pass exists only to reap: Select will not hand a braked,
+		// reapless pass a subject. Do not retry the braked judgement. The reap
+		// above has already freed the slot.
+		if len(plan.reap) == 0 {
+			return Outcome{Status: "skipped"}, nil
+		}
+		return Outcome{Status: "reaped"}, nil
+	}
 	if !plan.needModel {
 		if len(plan.reap) == 0 {
 			return Outcome{Status: "skipped"}, nil
@@ -118,13 +121,19 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		return Outcome{Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
 	}
-	rep, err := managerJudge(repoDir, plan.cands, a, runID)
+	rep, stats, err := managerJudge(repoDir, plan.cands, a, runID)
+	out := Outcome{
+		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
+		TokIn: stats.tokensIn, TokOut: stats.tokensOut,
+	}
 	if err != nil {
-		return Outcome{Status: "agent_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, err
+		out.Status = "agent_failed"
+		return out, err
 	}
 	promoted, err := applyManagerPick(tk, plan.cands, rep.Pick)
 	if err != nil {
-		return Outcome{Status: "tracker_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("promote item %s: %w", rep.Pick, err)
+		out.Status = "tracker_failed"
+		return out, fmt.Errorf("promote item %s: %w", rep.Pick, err)
 	}
 	if !promoted {
 		// The model named no candidate it was offered (a hallucination, or a
@@ -133,9 +142,11 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		// sees a non-nil error, engages the repeat-failure brake: an unchanged
 		// candidate set must not be re-judged every pass, so the lane waits for
 		// the backlog to move instead of re-sending the same judgement forever.
-		return Outcome{Status: "refused", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("refused: pick %q is outside the candidate set", rep.Pick)
+		out.Status = "refused"
+		return out, fmt.Errorf("refused: pick %q is outside the candidate set", rep.Pick)
 	}
-	return Outcome{Status: "done", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, nil
+	out.Status = "done"
+	return out, nil
 }
 
 // managerPlan is the deterministic filter and slot accounting behind one Manager
@@ -146,6 +157,7 @@ type managerPlan struct {
 	revision  string
 	label     string
 	needModel bool
+	braked    bool   // the promote judgement on the current candidate set is braked
 	reap      []Item // assigned items to withdraw
 	cands     []Item // unblocked candidates the model may judge
 }
@@ -234,6 +246,17 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 	if needsModel {
 		plan.revision = itemSetStamp(cands)
 		plan.label = fmt.Sprintf("manager: %d candidate(s), slot open", len(cands))
+		// The promote judgement is braked when the same candidate set already
+		// failed enough times: do not rejudge unchanged input. The stamp over
+		// the candidate set means a single failure does not brake the lane
+		// forever — the moment the backlog moves, the revision moves and the
+		// Manager becomes eligible again. Reaping is deterministic and free, so
+		// it is never gated by this brake.
+		braked, err := stalledOn(repoDir, "manager", managerSubject, plan.revision)
+		if err != nil {
+			return managerPlan{}, err
+		}
+		plan.braked = braked
 	} else {
 		plan.revision = itemSetStamp(reap)
 		if len(reap) > 0 {
@@ -318,32 +341,35 @@ type managerReport struct {
 	Reason string `json:"reason"`
 }
 
-// managerJudge runs the one judgement pass and reads its report. It is a var
-// so the refusal and brake tests can stub the model without driving a real
-// agent, matching how trackerFor and ghJSON are injectable.
+// managerJudge runs the one judgement pass and reads its report, returning the
+// run's token accounting so Act records every Manager model invocation on the
+// ledger. It is a var so the refusal and brake tests can stub the model without
+// driving a real agent, matching how trackerFor and ghJSON are injectable.
 var managerJudge = runManagerJudge
 
 // runManagerJudge runs the model in a throwaway directory, asks it to pick one
 // candidate, and reads its report. The run directory is not a checkout, so the
 // lane has no repository to touch; the Manager's whole effect on the world is
 // the tags Act applies afterward.
-func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (managerReport, error) {
+func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (managerReport, runStats, error) {
 	workspace := workspaceDir(repoDir)
 	runDir, cleanup, err := createManagerRunDir(workspace)
 	if err != nil {
-		return managerReport{}, err
+		return managerReport{}, runStats{}, err
 	}
 	defer cleanup()
 
 	prompt, err := renderManagerPrompt(a, cands)
 	if err != nil {
-		return managerReport{}, err
+		return managerReport{}, runStats{}, err
 	}
 	trace := filepath.Join(workspace, "runs", runID+".manager.jsonl")
-	if _, err := runPhase(repoDir, runDir, a, prompt, trace); err != nil {
-		return managerReport{}, err
+	stats, err := runPhase(repoDir, runDir, a, prompt, trace)
+	if err != nil {
+		return managerReport{}, stats, err
 	}
-	return readManagerReportFile(runDir)
+	rep, err := readManagerReportFile(runDir)
+	return rep, stats, err
 }
 
 // renderManagerPrompt renders the judgement request for one candidate set. The

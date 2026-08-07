@@ -333,8 +333,8 @@ func TestManagerRefusalEngagesBrake(t *testing.T) {
 	defer func() { trackerFor = oldTracker }()
 
 	oldJudge := managerJudge
-	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, error) {
-		return managerReport{Pick: "424242", Reason: "hallucinated"}, nil
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		return managerReport{Pick: "424242", Reason: "hallucinated"}, runStats{}, nil
 	}
 	defer func() { managerJudge = oldJudge }()
 
@@ -384,5 +384,143 @@ func managerFlowConfig(repo string) Config {
 		Flows: Flows{
 			Manager: managerCfg(),
 		},
+	}
+}
+
+// TestManagerReapsDespiteModelBrake proves the deterministic reap bypasses the
+// promote-judgement brake. After the Manager's judgement on an unchanged
+// candidate set is braked (three refusals), a ready branchless item that later
+// becomes a dead assignment (stalled) must still be reaped: Select must return
+// the subject so Act frees the slot, and Act must withdraw the dead item
+// without retrying the braked judgement or calling the model again.
+func TestManagerReapsDespiteModelBrake(t *testing.T) {
+	repo := newRefGitRepo(t)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", Title: "alpha", UpdatedAt: "u1", Body: "clear scope"})
+	tk.seed(Item{ID: "7", Title: "dead build", UpdatedAt: "u7", Tags: []string{readyTag}})
+
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	oldJudge := managerJudge
+	called := false
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		called = true
+		return managerReport{Pick: "1", Reason: "pick"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	// item 7 is a dead assignment: it is stalled on the builder flow.
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "builder", "item-7", "u7"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := tk.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan0, err := buildManagerPlan(managerCfg(), repo, items, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan0.needModel || len(plan0.reap) != 1 {
+		t.Fatalf("setup plan = needModel %v, reap %v, want both a judgement and a reap",
+			plan0.needModel, plan0.reap)
+	}
+	// Brake the promote judgement on the unchanged candidate set.
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "manager", managerSubject, plan0.revision); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := managerFlowConfig(repo)
+	cfg.Flows.Manager.Agent = "manager"
+
+	subjects, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 {
+		t.Fatalf("Select returned %d subjects, want 1 so the deterministic reap runs despite the brake",
+			len(subjects))
+	}
+
+	out, err := (managerFlow{}).Act(cfg, repo, subjects[0], "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("Act must not retry the braked promote judgement")
+	}
+	if out.Status != "reaped" {
+		t.Fatalf("status = %q, want reaped", out.Status)
+	}
+	fresh, err := tk.Get("7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.hasTag(readyTag) {
+		t.Fatal("a reaped item must lose the ready tag")
+	}
+	if !fresh.hasTag(failedLabel) {
+		t.Fatal("a reaped item must gain the failed tag")
+	}
+	// The dead assignment is gone but the candidate set is unchanged, so the
+	// promote judgement stays braked and no model runs until the backlog moves.
+	if got, err := (managerFlow{}).Select(cfg, repo); err != nil {
+		t.Fatal(err)
+	} else if len(got) != 0 {
+		t.Fatalf("after reaping, Select = %d subjects, want 0 (candidate set unchanged, judgement still braked)",
+			len(got))
+	}
+	if called {
+		t.Fatal("the braked judgement must not run while the candidate set is unchanged")
+	}
+}
+
+// TestManagerRecordsTokensOnPromotion proves every Manager model invocation is
+// recorded on the ledger: runManagerJudge returns the run's token accounting and
+// Act fills Outcome.TokIn/TokOut so the ledger does not show zero tokens for a
+// judgement that actually spent tokens.
+func TestManagerRecordsTokensOnPromotion(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", Title: "alpha", UpdatedAt: "u1", Body: "clear scope"})
+
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		return managerReport{Pick: "1", Reason: "pick"}, runStats{tokensIn: 123, tokensOut: 45}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	cfg := managerFlowConfig(repo)
+	cfg.Flows.Manager.Agent = "manager"
+	subjects, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 {
+		t.Fatalf("Select returned %d subjects, want 1", len(subjects))
+	}
+	out, err := (managerFlow{}).Act(cfg, repo, subjects[0], "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "done" {
+		t.Fatalf("status = %q, want done", out.Status)
+	}
+	if out.TokIn != 123 || out.TokOut != 45 {
+		t.Fatalf("tokens = in %d / out %d, want 123 / 45", out.TokIn, out.TokOut)
+	}
+	if !tk.items["1"].hasTag(readyTag) {
+		t.Fatal("the picked item should carry the ready tag")
 	}
 }
