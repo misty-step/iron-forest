@@ -87,7 +87,17 @@ boundary using `observe` of the exact git-visible facts it actually read:
   the current Tracker item at its boundary (it never trusts the copy embedded in
   the Subject), so a `forest:failed` label applied after `Select` still halts the
   lane before any build Effect, and an item closed between Select and Act is no
-  longer open, so `observe` places it `merged` and refuses the build.
+  longer open, so `observe` places it `merged` and refuses the build. `Act`
+  re-derives the same terminal facts again **immediately before the publish**
+  (`publishBlocked`), because a label that lands during `runPhase` must not leave
+  a new branch head on a now-`failed` Subject.
+- `flow_fixer.go` `Select` offers a broken head only while its attempt ref is
+  below the configured cap and the item carries no `forest:failed` label, and
+  `Act` re-asks the machine at the fix boundary. `Act` also re-derives the
+  terminal facts at the **publish boundary** (`publishBlocked` with the attempt
+  ref), so a label that lands, or a Fixer that spends the attempt cap, while the
+  repair run is in flight is still refused before any new branch head is
+  published.
 - `flow_verifier.go` `Select` reads Verdict/Checks notes **and the durable
   attempt ref**, derives each branch's state with `observe`, and offers only
   heads the machine places in a state the Verifier owns. Feeding the spent cap
@@ -107,9 +117,13 @@ boundary using `observe` of the exact git-visible facts it actually read:
   facts — a green head, an approved Verdict — would otherwise look actionable.
   The Verifier `Act` re-derives the terminal facts — the `forest:failed` label
   and the durable attempt ref — at Act entry and again before **every durable
-  effect boundary** (`writeChecks`, `writeVerdict`, and the merge), so a label
-  that lands, or a Fixer that exhausts the cap, while the pass is already in
-  flight still halts the lane before any new Checks or Verdict is recorded.
+  effect boundary** (`writeChecks`, `writeVerdict`, and the merge). The Builder
+  and Fixer `Act`s do the same, and crucially **again immediately before the
+  publish** (`publishBlocked`), because `publish` is itself a durable effect: a
+  label that lands, or a Fixer that exhausts the cap, while a run is already in
+  flight must not leave a new branch head on a now-`failed` Subject. Every lane
+  re-reads the newest facts right before it writes a durable decision, never the
+  copy the run started with.
 
 ## Halt and human-only states
 
@@ -158,6 +172,9 @@ boundary using `observe` of the exact git-visible facts it actually read:
    exhausted subject `failed`. The Verifier feeds the spent cap through its own
    Select facts and re-derives it before each durable effect, so an exhausted
    subject is also refused there -- never re-checked, re-reviewed, or merged.
+   The Fixer re-reads the attempt ref once more (`publishBlocked`) right before
+   it pushes, so a repair that would land after the cap went to or past the
+   limit inside the run is dropped instead of becoming a fresh branch head.
 4. **The Gate refuses a run that produced nothing real.** `gate.go` `gate`
    requires no commit, a real change, and a `report.json` that satisfies the
    agent's declared schema; `gateReview` requires a valid Verdict. It rejects

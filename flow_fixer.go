@@ -152,6 +152,19 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
+	// The same terminal re-derivation at the publish boundary: the repair run
+	// gave another lane (or a human) time to apply forest:failed or to spend the
+	// attempt cap, so a new branch head must not land on a now-failed subject
+	// even though the fix was legal when it started.
+	blocked, perr := publishBlocked(cfg, repoDir, s, true)
+	if perr != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %w", perr)
+	}
+	if blocked {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %s is failed: terminal and never resumed", s.Key)
+	}
 	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)

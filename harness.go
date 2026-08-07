@@ -20,7 +20,13 @@ type runStats struct {
 	cacheWrite int64
 }
 
-// runPhase executes one named agent with opencode in a worktree and streams its
+// runPhase is the host boundary for one agent run. Production runs the real
+// harness below; a test replaces it to complete a phase and, mid-run, revise the
+// exact git facts a flow re-derives at its next durable boundary -- mirroring
+// reviewRunner and trackerFor.
+var runPhase = runPhaseCommand
+
+// runPhaseCommand executes one named agent with opencode in a worktree and streams its
 // JSON event stream into the trace file. repoDir is the factory project: the
 // provider configuration the run actually needs is read from its
 // .opencode/opencode.json and staged into the run's external config root. The
@@ -31,7 +37,7 @@ type runStats struct {
 // harness exit marks the run failed: the error carries the exit status and
 // stderr so a crash or truncation is never mistaken for work the gate can
 // publish.
-func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
+func runPhaseCommand(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
 	var stats runStats
 	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
 		return stats, err

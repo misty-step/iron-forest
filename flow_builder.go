@@ -121,6 +121,19 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
+	// A publish is a durable effect and may never leave a failed subject. The
+	// build run gave another lane (or a human) time to apply forest:failed, so
+	// re-derive the terminal facts right before the push: a label that lands
+	// during runPhase must not leave a new branch head on a now-terminal Subject.
+	blocked, perr := publishBlocked(cfg, repoDir, s, false)
+	if perr != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %w", perr)
+	}
+	if blocked {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("publish: %s is failed: terminal and never resumed", s.Key)
+	}
 	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)

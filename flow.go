@@ -40,6 +40,34 @@ func subjectFailed(repo string, s Subject) (bool, error) {
 	return it.hasTag(failedLabel), nil
 }
 
+// publishBlocked re-derives the durable terminal facts immediately before a
+// publish and reports whether the machine now places the subject in failed. The
+// build or fix run in runPhase gave another lane time to apply forest:failed or,
+// for a Fixer, to spend the attempt cap; failed is terminal and no effect leaves
+// it, so a publish that lands a new branch head is refused the moment the facts
+// say the subject already halted. The Builder re-reads only the tracker label;
+// the Fixer also re-reads the attempt ref, because a spent cap is itself the
+// terminal fact and must likewise block a fresh head.
+func publishBlocked(cfg Config, repoDir string, s Subject, withAttempts bool) (bool, error) {
+	it, err := trackerFor(cfg.Repo).Get(s.ID)
+	if err != nil {
+		return false, fmt.Errorf("item: %w", err)
+	}
+	ffacts := subjectFacts{
+		revision:    s.Revision,
+		hasBranch:   true,
+		itemOpen:    it.Open,
+		attemptsCap: cfg.Flows.Fixer.Attempts,
+		failedLabel: it.hasTag(failedLabel),
+	}
+	if withAttempts {
+		if ffacts.attempts, err = readAttempts(repoDir, s.Key); err != nil {
+			return false, fmt.Errorf("attempts: %w", err)
+		}
+	}
+	return observe(ffacts) == stateFailed, nil
+}
+
 // claimKey returns the identity under which a subject is reserved across flows.
 // The Builder reserves work by "item-<id>" and the Verifier and Fixer reserve
 // the same work by "branch-<branch>", but both describe one opaque item -- each
