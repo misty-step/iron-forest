@@ -107,7 +107,7 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	cfg.Checks = []Check{{Name: "true", Run: "true"}}
 	cfg.Flows.Verifier.Agent = "verifier"
 	cfg.Flows.Verifier.AutoMerge = false
-	cfg.Projection = Projection{}
+	cfg.Projection = ProjectionConfig{}
 
 	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
 		Key: "branch-forest/9-change", Kind: "branch", Revision: oldHead,
@@ -318,7 +318,7 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 		cfg.Checks = checks
 		cfg.Flows.Verifier.Agent = "verifier"
 		cfg.Flows.Verifier.AutoMerge = autoMerge
-		cfg.Projection = Projection{}
+		cfg.Projection = ProjectionConfig{}
 
 		if verdict != "" {
 			if err := writeVerdict(repo, head, verdictNote{

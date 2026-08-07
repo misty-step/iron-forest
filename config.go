@@ -41,12 +41,12 @@ func workspaceDir(repoDir string) string { return filepath.Join(repoDir, Workspa
 // checks the factory runs itself, the flows that are on, and the optional
 // human-facing projection.
 type Config struct {
-	Repo       string         `yaml:"repo"`
-	Protected  []string       `yaml:"protected"`
-	Commit     CommitIdentity `yaml:"commit"`
-	Checks     []Check        `yaml:"checks"`
-	Flows      Flows          `yaml:"flows"`
-	Projection Projection     `yaml:"projection"`
+	Repo       string           `yaml:"repo"`
+	Protected  []string         `yaml:"protected"`
+	Commit     CommitIdentity   `yaml:"commit"`
+	Checks     []Check          `yaml:"checks"`
+	Flows      Flows            `yaml:"flows"`
+	Projection ProjectionConfig `yaml:"projection"`
 }
 
 // Check is one command the factory runs itself against a worktree. The result
@@ -103,10 +103,11 @@ type FixerFlowCfg struct {
 	Attempts int `yaml:"attempts"`
 }
 
-// Projection is the optional, one-way human surface: publish a branch as a pull
-// request and mirror decisions as comments. The factory never reads it back.
-// MergeViaHost is for a protected target branch, where only the host may merge.
-type Projection struct {
+// ProjectionConfig is the optional, one-way human surface: publish a branch as
+// a pull request and mirror decisions as comments. The factory never reads it
+// back. MergeViaHost is for a protected target branch, where only the host may
+// merge.
+type ProjectionConfig struct {
 	Enabled      bool `yaml:"enabled"`
 	MergeViaHost bool `yaml:"merge_via_host"`
 }
@@ -136,7 +137,7 @@ func defaultConfig() Config {
 				Attempts: 10,
 			},
 		},
-		Projection: Projection{Enabled: true, MergeViaHost: false},
+		Projection: ProjectionConfig{Enabled: true, MergeViaHost: false},
 	}
 }
 

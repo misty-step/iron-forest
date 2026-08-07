@@ -36,7 +36,7 @@ func TestProjectBranchReusesExistingOpenRequest(t *testing.T) {
 		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23"}]`), nil
 	}
 
-	cfg := Config{Repo: "owner/repo", Projection: Projection{Enabled: true}}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
 	got, err := projectBranch(cfg, issue{Title: "change"}, "forest/7-change", "body")
 	if err != nil {
 		t.Fatalf("projectBranch: %v", err)
@@ -65,7 +65,7 @@ func TestProjectVerdictCommentContainsDecisionAndChecks(t *testing.T) {
 		}
 	}
 
-	cfg := Config{Repo: "owner/repo", Projection: Projection{Enabled: true}}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
 	err := projectVerdict(cfg, "forest/7-change", verdictNote{Verdict: "changes", Notes: "repair the parser"}, checksNote{
 		Status:  "fail",
 		Results: []checkResult{{Name: "test", Code: 1, Seconds: 2.5, Output: "assertion failed"}},
@@ -92,7 +92,7 @@ func TestProjectVerdictMissingRequestIsNoop(t *testing.T) {
 		return []byte(`[]`), nil
 	}
 
-	cfg := Config{Repo: "owner/repo", Projection: Projection{Enabled: true}}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
 	if err := projectVerdict(cfg, "forest/7-change", verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
 		t.Fatalf("missing pull request: %v", err)
 	}
