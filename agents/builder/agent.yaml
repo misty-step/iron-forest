@@ -7,7 +7,11 @@ harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
 temperature: 0.2
-steps: 50
+# A cross-file refactor spends most of its early steps reading. Measured
+# merged items used 10-31 steps; a port migration hit the old ceiling of 50
+# before it could write report.json, and the gate then failed on the missing
+# file rather than naming the real stop. Cost stays bounded by the provider key.
+steps: 200
 # No deadline: a long build that is still working is not a failure.
 budget_seconds: 0
 # Powers. Deny entries remain enforced by opencode with --auto.
