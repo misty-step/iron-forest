@@ -1,0 +1,1 @@
+{"status":"pass","results":[{"name":"build","code":0,"seconds":0.399628218,"output":""},{"name":"vet","code":0,"seconds":0.127404603,"output":""},{"name":"test","code":0,"seconds":2.270952962,"output":"ok  \tgithub.com/misty-step/iron-forest\t1.696s\n"}],"run_id":"20260807T175905Z-branch-forest/112-add-a-manager-lane-that-owns-the","time":"2026-08-07T17:59:09Z"}
