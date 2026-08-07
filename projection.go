@@ -110,8 +110,9 @@ func projectChecks(cfg Config, branch string, c checksNote) error {
 // therefore be reported and non-empty, and match expectedHead: an empty head is
 // not an admission the machine can trust, so it is refused rather than let past.
 // The merge call then carries the provider's own compare-and-swap
-// (--expected-head), so even if a push lands between the list and the merge, the
-// host refuses rather than landing a head no local Checks or Verdict describe.
+// (--match-head-commit), so even if a push lands between the list and the merge,
+// the host refuses rather than landing a head no local Checks or Verdict
+// describe.
 func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	if !cfg.Projection.Enabled {
 		return errors.New("projection disabled")
@@ -139,7 +140,7 @@ func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 		return fmt.Errorf("unsupported merge strategy %q", strategy)
 	}
 	_, err = projectionCommand("pr", "merge", strconv.Itoa(prs[0].Number),
-		"-R", cfg.Repo, method, "--expected-head", prs[0].HeadSHA)
+		"-R", cfg.Repo, method, "--match-head-commit", prs[0].HeadSHA)
 	return err
 }
 

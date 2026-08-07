@@ -14,8 +14,10 @@
   so a Flow that skips a required note or Gate fails its test. `transit` takes
   the effect's outcome (`review` names the Verdict), an exact Revision, and the
   acting Flow (`owns` refuses one lane another's Effect), and `observe` lets a
-  failing-Checks head read as repair work. The Gate rejects a change to the
-  factory's control plane (`.forest/`, `forest.yaml`, `agents/`,
-  `.opencode/opencode.json`). No new agent roles were added.
+  failing-Checks head read as repair work. The Gate rejects a run that produced
+  nothing real — no commit, an empty change, an invalid `report.json`, or a
+  missing Verdict — but rejects nothing by path: an agent may change any path
+  its Subject requires, including `forest.yaml` and `agents/`. No new agent
+  roles were added.
 - 2026-08-07: Item identity is now an opaque string end to end. `Subject.ID` and ledger rows carry the tracker's native id ("69" for GitHub, a Habitat id for another source); branches keep the `forest/<id>-<slug>` shape and the reverse lookup no longer assumes the id is an integer. Because the branch delimiter is the first `-`, an id that itself contains `-` is escaped (id `-` becomes `%2D`, `%` becomes `%25`) so any id round-trips; numeric and hyphen-free ids are unchanged. The ledger's `issue` field becomes a string: the loader tolerates the old integer shape so existing rows stay readable (clean cutover; old rows are accepted, new rows are written as opaque strings). Merge behavior, brake refs, and worktree naming are unchanged for numeric GitHub ids.
 - 2026-08-06: Replaced the pull-request state machine, label-as-state ownership, and cost accounting. Three independent Flows coordinate through repository state, while Verdicts and checks are stored as git notes. The Builder publishes unreviewed branches; the Verifier reviews and merges them on its own clock.

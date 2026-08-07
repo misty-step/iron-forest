@@ -127,6 +127,89 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	}
 }
 
+// TestActReviewsRebasedHead pins the reviewer's correctness fix: after Act pulls
+// a branch onto current master, every later step -- the review and the Verdict it
+// records -- must key to the rebased head, not the pre-rebase head Act was
+// handed. verifierReview writes on s.Head, so passing the untouched Subject would
+// record a Verdict on a Revision the merge never sees, stranding a branch behind
+// master and eventually marking it failed. The stubbed review records the head it
+// ran against, and the Verdict note must land on the rebased head and nowhere
+// else.
+func TestActReviewsRebasedHead(t *testing.T) {
+	repo := setupTestRepo(t)
+
+	// Build a branch from the current master, then advance master so the branch
+	// is behind it by one commit and Act must rebase it.
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", "forest/9-rebase")
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/forest/9-rebase")
+	oldHead := remoteBranchHead(t, repo, "forest/9-rebase")
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	rebaseTestWriteFile(t, filepath.Join(repo, "master.txt"), "master\n")
+	rebaseTestGit(t, repo, "add", "master.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "master work")
+	rebaseTestGit(t, repo, "push", "-q", "origin", "master")
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	var reviewedHead string
+	reviewed := false
+	oldReview := reviewRunner
+	reviewRunner = func(cfg Config, repoDir, wtDir string, it Item, s Subject, runID string, a *Agent) (verdictNote, runStats, error) {
+		reviewed = true
+		reviewedHead = s.Head
+		note := verdictNote{Verdict: "approve", Reviewer: "verifier", Model: a.Model, DefSHA: "def", RunID: runID}
+		// Persist the Verdict the way verifierReview does -- on s.Head -- so the
+		// test asserts the note lands on the exact Revision the review used, and
+		// never on the pre-rebase head.
+		if err := writeVerdict(repoDir, s.Head, note); err != nil {
+			return verdictNote{}, runStats{}, err
+		}
+		return note, runStats{}, nil
+	}
+	defer func() { reviewRunner = oldReview }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = false
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-forest/9-rebase", Kind: "branch", Revision: oldHead,
+		Label: "forest/9-rebase", ID: "9", Branch: "forest/9-rebase", Head: oldHead,
+	}, "run-1")
+	if err != nil {
+		t.Fatalf("Act: %v", err)
+	}
+	if !reviewed {
+		t.Fatal("Act never reached review; it was stopped before review instead of rebasing and reviewing")
+	}
+	if reviewedHead == oldHead {
+		t.Fatalf("review ran against the pre-rebase head %q; it must run against the post-rebase head", short(oldHead))
+	}
+	if reviewedHead != out.BaseSHA {
+		t.Fatalf("review head %q != outcome base %q", short(reviewedHead), short(out.BaseSHA))
+	}
+	// The Verdict must key to the rebased head -- the head admitMerge would admit
+	// -- and never to the pre-rebase head, or the merge boundary would refuse it.
+	if _, ok, err := readVerdict(repo, out.BaseSHA); err != nil || !ok {
+		t.Fatalf("verdict on rebased head = (found=%v, err=%v), want present", ok, err)
+	}
+	if _, ok, err := readVerdict(repo, oldHead); err != nil || ok {
+		t.Fatalf("verdict on pre-rebase head = (found=%v, err=%v), want absent", ok, err)
+	}
+}
+
 // TestRebaseOntoMasterConflictNamesPaths proves a conflicting rebase returns an
 // error naming the conflicting paths rather than a bare exit status, so a human
 // sees what a robot could not resolve.

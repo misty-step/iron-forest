@@ -220,8 +220,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	baseSHA = newHead
 	// The ledger must record the head the checks, the Verdict, and the merge all
-	// key to; the value above was the pre-rebase head.
+	// key to; the value above was the pre-rebase head. The Subject passed to every
+	// later step -- verifierReview, the terminal re-derivations -- must carry the
+	// same rebased Revision: verifierReview writes the Verdict on s.Head, so
+	// leaving it at the pre-rebase head would key the Verdict to a Revision the
+	// merge will never see, leaving a branch behind master stuck and eventually
+	// marked failed. Update the Subject too, so the notes it reads, reviews, and
+	// writes all agree with the head admitMerge will admit.
 	out.BaseSHA = newHead
+	s.Head = newHead
 
 	// The check effect is only legal on a bare pushed head -- one carrying no
 	// Checks note on the exact revision. Select deliberately offers a head that
@@ -250,6 +257,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		}
 		var checkErr error
 		checks, checkErr = runChecks(cfg, wtDir, runID)
+		// Re-derive the terminal facts immediately before any Checks note is
+		// written. verifierTerminal was checked at Act entry and again after the
+		// rebase, but the check run itself gave another lane time to apply
+		// forest:failed or exhaust the attempt cap, so a label or a spent cap
+		// arriving during checks must not land a Checks note on a terminal Subject.
+		if err := verifierTerminal(cfg, repoDir, s); err != nil {
+			out.Status = "item_failed"
+			return out, err
+		}
 		if err := writeChecks(repoDir, baseSHA, checks); err != nil {
 			if !errors.Is(err, errNoteExists) {
 				out.Status = "notes_failed"

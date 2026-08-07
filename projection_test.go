@@ -151,7 +151,7 @@ func TestProjectMergeRefusesMovedProjectionHead(t *testing.T) {
 // TestProjectMergeMatchesAdmittedHeadAndCAS pins the happy path of the host
 // compare-and-swap: a projection still pointing at the exact admitted revision
 // is merged exactly once, and the merge call itself carries the provider-side
-// --expected-head so a push between the list and the merge cannot land an
+// --match-head-commit so a push between the list and the merge cannot land an
 // unchecked head.
 func TestProjectMergeMatchesAdmittedHeadAndCAS(t *testing.T) {
 	old := projectionCommand
@@ -178,8 +178,8 @@ func TestProjectMergeMatchesAdmittedHeadAndCAS(t *testing.T) {
 	if merges != 1 {
 		t.Fatalf("projectMerge made %d merge calls, want 1", merges)
 	}
-	if !reflect.DeepEqual(mergeArgs[1:], []string{"merge", "23", "-R", "owner/repo", "--squash", "--expected-head", "cafebabe"}) {
-		t.Fatalf("merge call args = %q, want the host CAS --expected-head", mergeArgs[1:])
+	if !reflect.DeepEqual(mergeArgs[1:], []string{"merge", "23", "-R", "owner/repo", "--squash", "--match-head-commit", "cafebabe"}) {
+		t.Fatalf("merge call args = %q, want the host CAS --match-head-commit", mergeArgs[1:])
 	}
 }
 
