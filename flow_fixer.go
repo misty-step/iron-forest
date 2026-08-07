@@ -92,6 +92,16 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("notes: %w", err)
 	}
+	// The fix effect is only legal on a broken head: failed Checks, or a
+	// Verdict of changes. A green, approved head is the merge path, never fix
+	// work; the machine is the authority deciding which lane owns it.
+	ffacts := subjectFacts{
+		revision: s.Head, hasBranch: true,
+		checksStatus: checks.Status, verdictStatus: v.Verdict,
+	}
+	if _, err := transit(observe(ffacts), effectFix, ffacts, "", "fixer"); err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "item_failed"}, fmt.Errorf("fix: %w", err)
+	}
 	request := fixerRevision(v, checks)
 
 	workspace := workspaceDir(repoDir)
@@ -122,6 +132,17 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		return out, fmt.Errorf("gate: %w", err)
 	}
 	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	// A repair is a publish that lands a bare head; the subject returns to
+	// pushed carrying no inherited Verdict or Checks.
+	newHead, err := gitOut(repoDir, "rev-parse", "refs/remotes/origin/"+s.Branch)
+	if err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	if _, err := transit(stateFixing, effectPublish, subjectFacts{revision: newHead}, "", "fixer"); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}

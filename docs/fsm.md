@@ -100,25 +100,48 @@ makes the Flow's Effect legal:
 
 1. **Never merge without Checks and an approved Verdict on the exact Revision.**
    `transit` refuses `merge` from every state but `verdict_approved`, and refuses
-   it there too unless the Checks on that head are `pass`. See
-   `flow_verifier.go` `mergeBlocked` and the `gateReview` verdict rules.
+   it there too unless the Checks on that head are `pass`. The Verifier Act calls
+   `admitMerge` (`flow_verifier.go`) at the merge boundary, which reads both
+   notes on the exact head and asks the machine, so a flow that ever skips a
+   required note is refused there.
 2. **Never double-claim one Subject across concurrent Flows.** `transit`
    refuses a second `build`/`fix` once the Subject is `building`/`fixing`, and
-   `flow.go` `inFlight.claim` excludes the Subject within one process.
+   `flow.go` `inFlight.claim` excludes the Subject within one process. `transit`
+   also enforces ownership: each Effect names the Flow that owns it (`owns`),
+   and a lane that attempts another lane's Effect is refused.
 3. **Fix attempts respect the configured cap.** `flow_fixer.go` reads
    `flows.fixer.attempts`; on exhaustion `markFixerFailed` labels the item for a
    human (`failed`). `transit` only reaches `failed` through `fail`.
-4. **Gate validates the Run's output.** `gate.go` `gate` requires no commit, a
-   real change, and a `report.json` that satisfies the agent's declared schema;
-   `gateReview` requires a valid Verdict. These are the boundaries that hold.
-   (Historical note: a list of "protected paths" (`.forest/`, `forest.yaml`,
-   `agents/`, `.opencode/opencode.json`) was proposed as a Gate rejection, but
-   ADR 0003 rejected that list — it was not a security boundary and blocked the
-   factory from maintaining its own declarations. Independent review on the
-   exact commit is the boundary. The old invariant is therefore **superseded**,
-   not enforced.)
+4. **Gate rejects a change to a protected path.** `gate.go` `gate` refuses any
+   run whose change touches `.forest/`, `forest.yaml`, `agents/`, or
+   `.opencode/opencode.json` — the factory's control plane — before trusting
+   anything the report claims. It also requires no commit, a real change, and a
+   `report.json` that satisfies the agent's declared schema; `gateReview`
+   requires a valid Verdict. (See ADR 0004, which supersedes the earlier
+   ADR 0003 rejection of protected paths.)
 5. **A new commit has no inherited Verdict or Checks.** Every `publish` lands a
    bare `pushed` head, so no staleness comparison is needed and none is made.
+
+## FSM semantics
+
+`transit(from, effect, facts, outcome, actor)` is the pure authority a Flow
+calls at each Effect boundary.
+
+- `outcome` is the Effect's own recorded decision. A `review` writes the Verdict,
+  so its legality depends only on what must already be true — green Checks on the
+  exact Revision — and `outcome` (`approve`/`changes`) names the new state. It
+  never requires the Verdict to pre-exist before the Effect that writes it.
+- `facts.revision` carries the exact Revision every note keys to. A `review` or
+  `merge` without a revision cannot satisfy the exact-note invariant and is
+  refused.
+- `actor` is the Flow performing the Effect. `owns` refuses a lane that attempts
+  another lane's Effect, except the Fixer's `publish` (it runs the Builder
+  declaration) and the Fixer's `fail`.
+
+`observe(facts)` derives the durable resting state. A failing head is always
+repair work, so the Checks fact dominates the Verdict fact: a head whose Checks
+fail is observed `checks_recorded` (the Fixer's work) and is never
+`verdict_approved` or `verdict_rejected`.
 
 ## Keeping the vocabulary
 

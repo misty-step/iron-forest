@@ -246,6 +246,14 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
+	// The merge effect is only legal when Checks and an approved Verdict both
+	// key to this exact revision. Read them from the repository -- not from the
+	// pass's own variables -- so a flow that ever skipped a required note is
+	// caught here by the machine, not silently pardoned.
+	if err := admitMerge(repoDir, baseSHA); err != nil {
+		out.Status = "merge_failed"
+		return out, fmt.Errorf("merge: %w", err)
+	}
 	if err := mergeVerified(cfg, repoDir, s.Branch, it); err != nil {
 		// A branch that cannot land needs a human, not another attempt. Spend one
 		// attempt so the merge selector stops offering it, and say so on the item.
@@ -259,6 +267,33 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	out.Status = "merged"
 	return out, nil
+}
+
+// admitMerge is the verifier's merge admission. It reads the Checks and Verdict
+// notes on the exact head and asks the machine whether the merge effect is
+// legal, refusing if a required note is absent or a fact forbids the move. The
+// flow calls it at the merge boundary so the FSM -- not the pass's own
+// bookkeeping -- is the authority on whether a head may land.
+func admitMerge(repoDir, head string) error {
+	checks, hasChecks, err := readChecks(repoDir, head)
+	if err != nil {
+		return err
+	}
+	verdict, hasVerdict, err := readVerdict(repoDir, head)
+	if err != nil {
+		return err
+	}
+	ffacts := subjectFacts{revision: head, hasBranch: true}
+	if hasChecks {
+		ffacts.checksStatus = checks.Status
+	}
+	if hasVerdict {
+		ffacts.verdictStatus = verdict.Verdict
+	}
+	if _, err := transit(observe(ffacts), effectMerge, ffacts, "", "verifier"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // verifierReview reviews one head and records the verdict as a note on it. It
@@ -287,6 +322,14 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	out = verdictNote{
 		Verdict: rv.Verdict, Notes: rv.Notes, Reviewer: a.Name, Model: a.Model,
 		DefSHA: a.DefSHA, RunID: runID, Time: nowRFC(),
+	}
+	// The review effect writes a Verdict, so it is only legal on a head whose
+	// Checks are green on this exact revision. The machine refuses otherwise,
+	// so a reviewer is never paid to read broken code and a Verdict never
+	// records against a failing head.
+	if _, err := transit(stateChecksRecorded, effectReview,
+		subjectFacts{revision: head, checksStatus: "pass"}, rv.Verdict, "verifier"); err != nil {
+		return verdictNote{}, stats, fmt.Errorf("review: %w", err)
 	}
 	if err := writeVerdict(repoDir, head, out); err != nil {
 		if !errors.Is(err, errNoteExists) {

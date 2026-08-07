@@ -61,6 +61,13 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		}
 	}
 
+	// The build effect is only legal on an eligible item: never a subject
+	// another flow has already claimed. The machine is the authority, so a
+	// second builder (or a leftover branch) cannot re-claim the item.
+	if _, err := transit(stateEligible, effectBuild, subjectFacts{revision: s.Revision}, "", "builder"); err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("build: %w", err)
+	}
+
 	a, err := loadAgent(repoDir, cfg.Flows.Builder.Agent)
 	if err != nil {
 		return Outcome{Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
@@ -96,6 +103,17 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return out, fmt.Errorf("gate: %w", err)
 	}
 	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	// A publish lands a bare head: the subject returns to pushed, where no
+	// Verdict or Checks note may be inherited.
+	head, err := gitOut(repoDir, "rev-parse", "refs/remotes/origin/"+branch)
+	if err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: %w", err)
+	}
+	if _, err := transit(stateBuilding, effectPublish, subjectFacts{revision: head}, "", "builder"); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}

@@ -2,14 +2,20 @@ package main
 
 import "testing"
 
-// fsmCase is one row of the machine's transition table.
+// fsmCase is one row of the machine's transition table. outcome is the effect's
+// own recorded decision (the Verdict for a review, empty otherwise); actor is
+// the Flow performing the effect ("" when the row only pins the table).
 type fsmCase struct {
 	from    deliveryState
 	effect  effect
 	facts   subjectFacts
+	outcome string
+	actor   string
 	to      deliveryState
 	wantErr bool
 }
+
+func rev(r string) subjectFacts { return subjectFacts{revision: r} }
 
 // TestTransitLegal walks the happy paths the three flows actually take. Each row
 // must land exactly where docs/fsm.md says, or the machine has drifted from the
@@ -17,36 +23,35 @@ type fsmCase struct {
 func TestTransitLegal(t *testing.T) {
 	cases := []fsmCase{
 		// Builder: eligible item -> building -> published branch.
-		{from: stateEligible, effect: effectBuild, to: stateBuilding},
-		{from: stateBuilding, effect: effectPublish, to: statePushed},
+		{from: stateEligible, effect: effectBuild, facts: rev("i"), actor: "builder", to: stateBuilding},
+		{from: stateBuilding, effect: effectPublish, facts: rev("h"), actor: "builder", to: statePushed},
 		// Verifier: published branch -> Checks note.
-		{from: statePushed, effect: effectCheck,
-			facts: subjectFacts{checksStatus: "pass"}, to: stateChecksRecorded},
-		// Verifier: green Checks -> approving Verdict.
+		{from: statePushed, effect: effectCheck, facts: rev("h"), actor: "verifier", to: stateChecksRecorded},
+		// Verifier: green Checks -> approving Verdict. The review effect writes
+		// the Verdict; it does not need one to pre-exist.
 		{from: stateChecksRecorded, effect: effectReview,
-			facts: subjectFacts{checksStatus: "pass", verdictStatus: "approve"},
-			to:    stateVerdictApproved},
+			facts: subjectFacts{revision: "h", checksStatus: "pass"}, outcome: "approve", actor: "verifier", to: stateVerdictApproved},
 		// Verifier: green Checks -> rejecting Verdict.
 		{from: stateChecksRecorded, effect: effectReview,
-			facts: subjectFacts{checksStatus: "pass", verdictStatus: "changes"},
-			to:    stateVerdictRejected},
+			facts: subjectFacts{revision: "h", checksStatus: "pass"}, outcome: "changes", actor: "verifier", to: stateVerdictRejected},
 		// Fixer: failed Checks -> repair; a repair is a publish to a bare head.
 		{from: stateChecksRecorded, effect: effectFix,
-			facts: subjectFacts{checksStatus: "fail"}, to: stateFixing},
-		{from: stateFixing, effect: effectPublish, to: statePushed},
+			facts: subjectFacts{revision: "h", checksStatus: "fail"}, actor: "fixer", to: stateFixing},
+		{from: stateFixing, effect: effectPublish, facts: rev("h"), actor: "fixer", to: statePushed},
 		// Fixer: rejected Verdict -> repair.
-		{from: stateVerdictRejected, effect: effectFix, to: stateFixing},
+		{from: stateVerdictRejected, effect: effectFix, facts: rev("h"), actor: "fixer", to: stateFixing},
 		// Verifier: approved + green -> merge. This is the only path to merged.
 		{from: stateVerdictApproved, effect: effectMerge,
-			facts: subjectFacts{checksStatus: "pass", verdictStatus: "approve"},
-			to:    stateMerged},
+			facts: subjectFacts{revision: "h", checksStatus: "pass", verdictStatus: "approve"}, actor: "verifier", to: stateMerged},
 		// Fixer attempts exhausted -> halted for a human.
 		{from: stateVerdictRejected, effect: effectFail,
-			facts: subjectFacts{attempts: 2, attemptsCap: 2}, to: stateFailed},
+			facts: subjectFacts{revision: "h", attempts: 2, attemptsCap: 2}, actor: "fixer", to: stateFailed},
+		// The effectFail halt is also an operator decision.
+		{from: statePushed, effect: effectFail, facts: rev("h"), actor: "human", to: stateFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.from.String()+"->"+tc.effect.String(), func(t *testing.T) {
-			to, err := transit(tc.from, tc.effect, tc.facts)
+			to, err := transit(tc.from, tc.effect, tc.facts, tc.outcome, tc.actor)
 			if err != nil {
 				t.Fatalf("transit(%s, %s) = error %v, want %s", tc.from, tc.effect, err, tc.to)
 			}
@@ -64,43 +69,57 @@ func TestTransitIllegal(t *testing.T) {
 	cases := []fsmCase{
 		// Never double-build a subject another flow already claimed: once an
 		// item is building, no second build may start.
-		{from: stateBuilding, effect: effectBuild},
-		{from: stateFixing, effect: effectFix},
+		{from: stateBuilding, effect: effectBuild, actor: "builder"},
+		{from: stateFixing, effect: effectFix, actor: "fixer"},
 		// A builder only starts from an eligible item; a branch already exists
 		// here and the item was already claimed.
-		{from: statePushed, effect: effectBuild},
-		{from: stateChecksRecorded, effect: effectBuild},
+		{from: statePushed, effect: effectBuild, actor: "builder"},
+		{from: stateChecksRecorded, effect: effectBuild, actor: "builder"},
 		// Nothing checks or reviews a subject that has no branch yet.
-		{from: stateEligible, effect: effectCheck},
-		{from: stateEligible, effect: effectReview},
+		{from: stateEligible, effect: effectCheck, actor: "verifier"},
+		{from: stateEligible, effect: effectReview, facts: rev("h"), outcome: "approve", actor: "verifier"},
 		// A Verdict may not be written before the Checks note on the exact
 		// revision: review requires green Checks.
 		{from: statePushed, effect: effectReview,
-			facts: subjectFacts{verdictStatus: "approve"}},
+			facts: rev("h"), outcome: "approve", actor: "verifier"},
 		{from: stateChecksRecorded, effect: effectReview,
-			facts: subjectFacts{checksStatus: "fail"}},
+			facts: subjectFacts{revision: "h", checksStatus: "fail"}, outcome: "approve", actor: "verifier"},
+		// A review must name its Verdict; an outcome-less review is a no-op.
+		{from: stateChecksRecorded, effect: effectReview,
+			facts: subjectFacts{revision: "h", checksStatus: "pass"}, actor: "verifier"},
 		// A failing head is never reviewed and an approved head is never fixed.
 		{from: stateChecksRecorded, effect: effectFix,
-			facts: subjectFacts{checksStatus: "pass"}},
-		{from: stateVerdictApproved, effect: effectFix},
+			facts: subjectFacts{revision: "h", checksStatus: "pass"}, actor: "fixer"},
+		{from: stateVerdictApproved, effect: effectFix, actor: "fixer"},
 		// Never merge an unapproved or unverified head.
-		{from: statePushed, effect: effectMerge},
+		{from: statePushed, effect: effectMerge, facts: rev("h"), actor: "verifier"},
 		{from: stateChecksRecorded, effect: effectMerge,
-			facts: subjectFacts{checksStatus: "pass"}},
+			facts: subjectFacts{revision: "h", checksStatus: "pass"}, actor: "verifier"},
 		{from: stateVerdictRejected, effect: effectMerge,
-			facts: subjectFacts{checksStatus: "pass"}},
+			facts: subjectFacts{revision: "h", checksStatus: "pass"}, actor: "verifier"},
 		// Never merge without green Checks on the exact approved revision.
 		{from: stateVerdictApproved, effect: effectMerge,
-			facts: subjectFacts{checksStatus: "fail"}},
+			facts: subjectFacts{revision: "h", checksStatus: "fail", verdictStatus: "approve"}, actor: "verifier"},
+		// A decision that writes a Verdict or admits a merge needs the exact
+		// Revision it records; an anonymous fact set cannot satisfy that.
+		{from: stateChecksRecorded, effect: effectReview,
+			facts: subjectFacts{checksStatus: "pass"}, outcome: "approve", actor: "verifier"},
+		{from: stateVerdictApproved, effect: effectMerge,
+			facts: subjectFacts{checksStatus: "pass", verdictStatus: "approve"}, actor: "verifier"},
+		// Ownership: a lane that does not own an effect may not perform it.
+		{from: stateEligible, effect: effectBuild, actor: "verifier"},
+		{from: statePushed, effect: effectCheck, actor: "builder"},
+		{from: stateChecksRecorded, effect: effectFix, actor: "verifier"},
+		{from: stateFixing, effect: effectPublish, actor: "verifier"},
 		// Terminal states accept no further move.
-		{from: stateMerged, effect: effectPublish},
-		{from: stateMerged, effect: effectMerge},
-		{from: stateFailed, effect: effectFix},
-		{from: stateFailed, effect: effectFail},
+		{from: stateMerged, effect: effectPublish, actor: "builder"},
+		{from: stateMerged, effect: effectMerge, actor: "verifier"},
+		{from: stateFailed, effect: effectFix, actor: "fixer"},
+		{from: stateFailed, effect: effectFail, actor: "human"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.from.String()+"->"+tc.effect.String(), func(t *testing.T) {
-			if _, err := transit(tc.from, tc.effect, tc.facts); err == nil {
+			if _, err := transit(tc.from, tc.effect, tc.facts, tc.outcome, tc.actor); err == nil {
 				t.Fatalf("transit(%s, %s) = legal, want illegal transition refused",
 					tc.from, tc.effect)
 			}
@@ -123,6 +142,27 @@ func TestEffectOwners(t *testing.T) {
 	}
 }
 
+// TestOwnerPermission pins the permissive side of ownership: the Fixer may
+// publish its own repair (it runs the Builder declaration) and may halt a
+// subject at the attempt cap, while the Builder may not fix or review.
+func TestOwnerPermission(t *testing.T) {
+	if !owns(effectPublish, "builder") || !owns(effectPublish, "fixer") {
+		t.Fatal("publish must be owned by both builder and fixer")
+	}
+	if !owns(effectFix, "fixer") || owns(effectFix, "builder") {
+		t.Fatal("fix must be owned only by the fixer")
+	}
+	if !owns(effectReview, "verifier") || owns(effectReview, "builder") {
+		t.Fatal("review must be owned only by the verifier")
+	}
+	if !owns(effectFail, "human") || !owns(effectFail, "fixer") {
+		t.Fatal("fail must be owned by the fixer and the human")
+	}
+	if owns(effectMerge, "builder") {
+		t.Fatal("the builder must never merge")
+	}
+}
+
 // TestObserveDerivesStatesFromFacts pins that every durable state comes from
 // git-visible facts alone and that a new commit never inherits a Verdict or
 // Checks note.
@@ -140,6 +180,12 @@ func TestObserveDerivesStatesFromFacts(t *testing.T) {
 		{"rejected", subjectFacts{hasBranch: true, itemOpen: true, checksStatus: "pass", verdictStatus: "changes"}, stateVerdictRejected},
 		{"exhausted attempts", subjectFacts{hasBranch: true, itemOpen: true, checksStatus: "fail", attempts: 2, attemptsCap: 2}, stateFailed},
 		{"forest:failed label", subjectFacts{hasBranch: true, itemOpen: true, failedLabel: true}, stateFailed},
+		// Failing Checks dominate a Verdict: a broken head is the Fixer's work,
+		// never a reviewed outcome.
+		{"failing checks with approving verdict is fix work",
+			subjectFacts{hasBranch: true, itemOpen: true, checksStatus: "fail", verdictStatus: "approve"}, stateChecksRecorded},
+		{"failing checks with rejecting verdict is fix work",
+			subjectFacts{hasBranch: true, itemOpen: true, checksStatus: "fail", verdictStatus: "changes"}, stateChecksRecorded},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

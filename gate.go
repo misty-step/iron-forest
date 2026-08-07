@@ -27,17 +27,37 @@ type review struct {
 // gate and publish step treat them as records, not repository changes.
 var runArtifacts = []string{"report.json", "review.json"}
 
+// protectedPaths are the factory's own control plane. A build run must not
+// change them, because a run that rewrites the daemon's configuration, its
+// agent declarations, its orchestration state, or its harness wiring could
+// rewrite the very rules, prompts, permissions, and budget it runs under. These
+// are the paths that keep a delivery machine honest, so the Gate refuses any
+// run whose change touches one -- independent of anything the report claims.
+var protectedPaths = []string{
+	".forest/",
+	"forest.yaml",
+	"agents/",
+	".opencode/opencode.json",
+}
+
+// isProtectedPath reports whether a changed path sits in the factory's control
+// plane and is therefore off-limits to a run.
+func isProtectedPath(path string) bool {
+	for _, p := range protectedPaths {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // gate verifies the build agent's claims against reality after the run:
 //   - the agent did not commit (HEAD is still the base)
+//   - it did not touch a protected path
 //   - it produced a non-empty change
 //   - report.json exists and satisfies its declared schema
 //
 // It returns the changed file list that becomes the pull request body.
-//
-// There is no protected-path check. See docs/adr/0003: the list was not a
-// security boundary, because the code enforcing it was itself writable by any
-// run, and it blocked the factory from working on its own declarations. The
-// boundary that holds is independent review on the exact commit.
 func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	var rep report
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
@@ -54,8 +74,11 @@ func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	changed := parseChanged(out)
 	real := make([]string, 0, len(changed))
 	for _, path := range changed {
-		if strings.HasPrefix(path, ".forest/") || isRunArtifact(path) {
-			continue // a run record, not the repo's change
+		if isRunArtifact(path) {
+			continue // a build's own report, not the repo's change
+		}
+		if isProtectedPath(path) {
+			return nil, rep, fmt.Errorf("change touches protected path %q", path)
 		}
 		real = append(real, path)
 	}

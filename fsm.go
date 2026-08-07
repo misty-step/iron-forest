@@ -62,9 +62,10 @@ func (e effect) String() string {
 	return effectNames[e]
 }
 
-// flowName reports which Flow owns an effect, so the machine and the two agent
-// declarations agree about who may act. It is a pure mapping, never a running
-// process.
+// flowName reports one owner Flow for an effect, for the transition table and
+// for the docs. It is a pure mapping, never a running process. publish is
+// attributed to the Builder because the Fixer runs the same Builder
+// declaration; owns is the permissive permission check `transit` actually uses.
 func flowName(e effect) string {
 	switch e {
 	case effectBuild, effectPublish:
@@ -79,12 +80,37 @@ func flowName(e effect) string {
 	return "unknown"
 }
 
+// owns reports whether a named actor may perform an effect. It is the
+// ownership half of the machine: one lane can never claim another lane's
+// decision, so the Fixer's repairs (destroying a broken head and publishing a
+// fresh one) are distinct from the Builder's original claim, and the attempts-
+// exhausted halt is a Fixer action, not just a human one.
+func owns(e effect, actor string) bool {
+	switch e {
+	case effectBuild:
+		return actor == "builder"
+	case effectPublish:
+		return actor == "builder" || actor == "fixer"
+	case effectCheck, effectReview, effectMerge:
+		return actor == "verifier"
+	case effectFix:
+		return actor == "fixer"
+	case effectFail:
+		return actor == "human" || actor == "fixer"
+	}
+	return false
+}
+
 // subjectFacts are the git-visible facts that place one subject in the machine.
+// Every note in the set keys to the same exact Revision (the head commit), which
+// is what makes the exact-note invariant checkable: a decision that merges, or
+// admits a review, must carry the Revision it was recorded against.
 type subjectFacts struct {
+	revision      string // the exact Revision these facts describe (a head sha)
 	hasBranch     bool   // a forest/<id>-<slug> branch exists on origin
 	itemOpen      bool   // the tracker item is still open
-	checksStatus  string // "" | pass | fail on the head
-	verdictStatus string // "" | approve | changes on the head
+	checksStatus  string // "" | pass | fail on revision
+	verdictStatus string // "" | approve | changes on revision
 	attempts      int    // fix attempts already spent
 	attemptsCap   int    // configured fixer.attempts
 	failedLabel   bool   // tracker carries forest:failed
@@ -105,6 +131,13 @@ func observe(f subjectFacts) deliveryState {
 		}
 		return stateEligible
 	}
+	// A failing head is repair work, never a review outcome, and a Verdict is
+	// only ever *written* on a green head. The Checks fact therefore dominates
+	// the Verdict fact: a head whose Checks fail is observed as checks_recorded
+	// (the Fixer's work) even if a stray fact still names a Verdict.
+	if f.checksStatus == "fail" {
+		return stateChecksRecorded
+	}
 	switch {
 	case f.verdictStatus == "approve":
 		return stateVerdictApproved
@@ -117,12 +150,29 @@ func observe(f subjectFacts) deliveryState {
 	}
 }
 
-// transit advances a subject through one effect and returns the next state, or
-// an error naming the illegal move. It is the single authority on what a flow
-// may do: an effect a flow may not perform from the subject's state, or one a
-// fact forbids -- reviewing a head whose Checks are not green, merging without
-// Checks and an approved Verdict on the exact revision -- is refused here.
-func transit(from deliveryState, e effect, f subjectFacts) (deliveryState, error) {
+// transit advances a subject through one effect performed by actor and returns
+// the next state, or an error naming the illegal move. It is the single
+// authority on what a flow may do. outcome is the effect's own recorded
+// decision (the Verdict "approve" or "changes" for a review; empty otherwise),
+// so a review does not need the Verdict to pre-exist before the effect that
+// writes it. An effect a flow may not perform from the subject's state, one the
+// wrong actor attempts, or one a fact forbids -- reviewing a head whose Checks
+// are not green, or merging without Checks and an approved Verdict on the exact
+// revision -- is refused here.
+func transit(from deliveryState, e effect, f subjectFacts, outcome, actor string) (deliveryState, error) {
+	// Ownership: a lane may only perform an effect it owns. actor is "" when a
+	// caller asks about legality without naming a running flow, which skips the
+	// check so the transition table can be pinned in tests.
+	if actor != "" && !owns(e, actor) {
+		return stateFailed, fmt.Errorf("illegal transition: %s cannot perform %s (owned by %s)",
+			actor, e, flowName(e))
+	}
+	// Exact-revision: a decision that writes a Verdict, or admits a merge, only
+	// means something when it keys to the exact Revision it records. A fact set
+	// that carries no Revision cannot satisfy that invariant.
+	if (e == effectReview || e == effectMerge) && f.revision == "" {
+		return stateFailed, fmt.Errorf("illegal transition %s --%s--> ?: no exact revision", from, e)
+	}
 	switch e {
 	case effectBuild:
 		if from == stateEligible {
@@ -139,11 +189,14 @@ func transit(from deliveryState, e effect, f subjectFacts) (deliveryState, error
 			return stateChecksRecorded, nil
 		}
 	case effectReview:
+		// The review effect writes the Verdict; outcome names it. Legality
+		// depends only on what must already be true -- a green Checks note on
+		// the exact revision -- never on a Verdict that does not exist yet.
 		if from == stateChecksRecorded && f.checksStatus == "pass" {
-			if f.verdictStatus == "approve" {
+			switch outcome {
+			case "approve":
 				return stateVerdictApproved, nil
-			}
-			if f.verdictStatus == "changes" {
+			case "changes":
 				return stateVerdictRejected, nil
 			}
 		}

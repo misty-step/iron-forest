@@ -534,3 +534,59 @@ func TestMergeBlockedNamesEveryReason(t *testing.T) {
 		t.Error("auto_merge off does not block the merge")
 	}
 }
+
+// TestAdmitMergeReadsTheExactNotes is the flow-level illegal-transition
+// coverage the reviewer asked for: it drives the verifier's actual merge
+// admission, which reads the Checks and Verdict notes on the exact head and
+// asks the machine. A head missing either required note -- a flow that skipped
+// a required note or Gate -- is refused here, and so is a failing or rejected
+// head. A pure `transit` table cannot provide this; it would still pass if the
+// flow never called the machine.
+func TestAdmitMergeReadsTheExactNotes(t *testing.T) {
+	type seed struct {
+		checks  string // "" | pass | fail
+		verdict string // "" | approve | changes
+		wantErr bool
+		name    string
+	}
+	run := func(t *testing.T, sc seed) {
+		t.Helper()
+		_, work, _ := notesTestRepository(t)
+		branch := "forest/9-admit"
+		notesTestGit(t, work, "checkout", "-q", "-b", branch)
+		if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("branch\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		notesTestGit(t, work, "add", "branch.txt")
+		notesTestGit(t, work, "commit", "-qm", "branch work")
+		notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
+		head := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+		if sc.checks != "" {
+			if err := writeChecks(work, head, checksNote{Status: sc.checks, RunID: "seed", Time: nowRFC()}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if sc.verdict != "" {
+			if err := writeVerdict(work, head, verdictNote{Verdict: sc.verdict, Reviewer: "v", Model: "m", DefSHA: "d", RunID: "seed"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := admitMerge(work, head)
+		if sc.wantErr && err == nil {
+			t.Fatalf("admitMerge admitted a forbidden merge (checks=%q verdict=%q)", sc.checks, sc.verdict)
+		}
+		if !sc.wantErr && err != nil {
+			t.Fatalf("admitMerge refused a legal merge: %v", err)
+		}
+	}
+
+	for _, sc := range []seed{
+		{name: "approved with green checks is admitted", checks: "pass", verdict: "approve"},
+		{name: "skipped checks note is refused", checks: "", verdict: "approve", wantErr: true},
+		{name: "skipped verdict note is refused", checks: "pass", verdict: "", wantErr: true},
+		{name: "rejected verdict is refused", checks: "pass", verdict: "changes", wantErr: true},
+		{name: "failing checks are refused", checks: "fail", verdict: "approve", wantErr: true},
+	} {
+		t.Run(sc.name, func(t *testing.T) { run(t, sc) })
+	}
+}

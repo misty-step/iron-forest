@@ -8,21 +8,16 @@ import (
 	"testing"
 )
 
-// TestGateAcceptsAChangeToItsOwnDeclarations pins the decision in ADR 0003: the
-// factory may work on its own configuration and agent declarations. A run that
-// edits them reaches the gate on the strength of its change, and independent
-// review on the exact commit decides whether it lands.
-func TestGateAcceptsAChangeToItsOwnDeclarations(t *testing.T) {
+// gateProtectedRepo stages a small repository with its base committed and
+// returns the worktree dir and base SHA for a gate call.
+func gateProtectedRepo(t *testing.T, seed map[string]string) (string, string) {
+	t.Helper()
 	wtDir := t.TempDir()
 	gitT(t, wtDir, "init")
-	if err := os.MkdirAll(filepath.Join(wtDir, "agents", "builder"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for path, body := range map[string]string{
-		"forest.yaml":               "repo: o/r\n",
-		"agents/builder/agent.yaml": "model: m\n",
-		"report.json":               `{"summary":"s","changed_files":["forest.yaml"]}`,
-	} {
+	for path, body := range seed {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(wtDir, path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(wtDir, path), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -33,17 +28,50 @@ func TestGateAcceptsAChangeToItsOwnDeclarations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(wtDir, "agents", "builder", "agent.yaml"),
-		[]byte("model: m2\n"), 0o644); err != nil {
+	return wtDir, baseSHA
+}
+
+// TestGateRejectsProtectedPaths pins the delivery-machine invariant: a build
+// run may never change the factory's control plane, so a change that touches
+// .forest/, forest.yaml, agents/, or .opencode/opencode.json is refused here,
+// before anything a report claims is trusted. A run that edits its own
+// instructions, permissions, or composition has left the machine.
+func TestGateRejectsProtectedPaths(t *testing.T) {
+	for _, path := range []string{
+		"forest.yaml",
+		"agents/builder/agent.yaml",
+		".forest/runs.jsonl",
+		".opencode/opencode.json",
+	} {
+		t.Run(path, func(t *testing.T) {
+			wtDir, baseSHA := gateProtectedRepo(t, map[string]string{path: "v1\n"})
+			if err := os.WriteFile(filepath.Join(wtDir, path), []byte("v2\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := gate(wtDir, baseSHA, ""); err == nil {
+				t.Fatalf("gate accepted a change to protected path %q", path)
+			}
+		})
+	}
+}
+
+// TestGateAcceptsAChangeOutsideTheControlPlane pins the flip side of the
+// protected-path rule: ordinary source work is not rejected, so a build run can
+// still land a real change.
+func TestGateAcceptsAChangeOutsideTheControlPlane(t *testing.T) {
+	wtDir, baseSHA := gateProtectedRepo(t, map[string]string{
+		"go.mod":      "module example\n",
+		"report.json": `{"summary":"s","changed_files":["work.go"]}`,
+	})
+	if err := os.WriteFile(filepath.Join(wtDir, "work.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	changed, _, err := gate(wtDir, baseSHA, "")
 	if err != nil {
-		t.Fatalf("gate rejected a change to the factory's own declarations: %v", err)
+		t.Fatalf("gate rejected ordinary source work: %v", err)
 	}
-	if len(changed) != 1 || changed[0] != "agents/builder/agent.yaml" {
-		t.Fatalf("changed = %v, want [agents/builder/agent.yaml]", changed)
+	if len(changed) != 1 || changed[0] != "work.go" {
+		t.Fatalf("changed = %v, want [work.go]", changed)
 	}
 }
 
