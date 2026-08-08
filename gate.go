@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -168,6 +172,432 @@ func gateReview(wtDir, schemaPath string) (review, error) {
 		return rv, fmt.Errorf("review.verdict must be approve or changes, got %q", rv.Verdict)
 	}
 	return rv, nil
+}
+
+// reviewTreeSnapshot is the complete state of a review worktree at one moment:
+// the full index entry (mode, blob, stage) of every tracked path, a working-tree
+// fingerprint of each tracked leaf, a fingerprint of every parent directory node
+// (so a tracked directory swapped for a symlink, or a gitlink's index entry, is
+// visible even when the leaves still resolve to identical bytes), the
+// fingerprint of every non-ignored untracked path, and, for each gitlink, the
+// checked-out submodule's own commit and tracked-file dirtiness. Two snapshots
+// of the same revision are equal exactly when no tracked path's type, mode,
+// content, index entry or symlink target moved, no parent directory became a
+// symlink, no tracked file inside a checked-out submodule changed, and no
+// untracked path's type or content changed, so a complete comparison can prove
+// a review left the tree untouched. Recording the untracked fingerprint, not a
+// bare path set, closes the hole where an existing non-ignored fixture is
+// modified in place without changing the set of untracked paths.
+type reviewTreeSnapshot struct {
+	work      map[string]string // tracked leaf path -> working-tree fingerprint; "" when gone; a gitlink holds its submodule state
+	idx       map[string]string // tracked path -> whole "<mode> <blob> <stage>" index entry
+	dirs      map[string]string // directory node path -> fingerprint of its own type/target
+	untracked map[string]string // non-ignored untracked path -> fingerprint of its type/content
+}
+
+// assertCleanReviewTree refuses a Verdict from a review run that did not leave
+// the tracked worktree unchanged. A Verifier may write review.json — the one
+// file it is expected to produce — but any tracked-file change between the
+// before-snapshot and the run's end, any move of HEAD, any new non-review
+// untracked path, or any directory that became a symlink means the agent edited
+// the tree the run was meant to judge: the checks that back a Verdict would then
+// describe an uncommitted experiment, never the committed Review revision. before
+// must be the snapshot taken immediately before the review runs. The comparison
+// is complete and symmetric — it records the working tree's type, mode and
+// content, the full index entry, the parent-directory topology, and the untracked
+// set per path — so editing a file that was already dirty, staging it, chmodding
+// it, swapping it for an equal-content symlink, replacing a tracked directory
+// with a symlink, or restoring it to clean is refused exactly as a fresh edit is.
+// It returns an error naming every offending path when the tree drifted, and nil
+// when only the expected review record remains. review.json is the one untracked
+// file a Verifier is expected to write, so the only untracked mutation the
+// comparison admits is the fresh creation of review.json; creating any other
+// untracked path (such as report.json) or editing an existing untracked fixture
+// in place is refused too.
+func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error {
+	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("review: cannot read worktree HEAD: %w", err)
+	}
+	if cur != head {
+		return fmt.Errorf("review moved HEAD: reviewed %s -> %s", short(head), short(cur))
+	}
+	after, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		return fmt.Errorf("review: %w", err)
+	}
+	dirty := trackedDrift(before, after)
+	keys := make(map[string]bool, len(before.untracked)+len(after.untracked))
+	for path := range before.untracked {
+		keys[path] = true
+	}
+	for path := range after.untracked {
+		keys[path] = true
+	}
+	for _, path := range sortedPaths(keys) {
+		beforeFp, hadBefore := before.untracked[path]
+		afterFp, hadAfter := after.untracked[path]
+		if hadBefore == hadAfter && beforeFp == afterFp {
+			continue
+		}
+		// The one untracked mutation a review may make is to freshly create
+		// review.json — the single file the Verifier is expected to write. Any
+		// other untracked change — creating report.json or another artifact, a
+		// fresh fixture, a renamed file, editing an existing untracked fixture in
+		// place, deleting a check output — names the agent's hand in the tree, so
+		// it refuses the Verdict too.
+		if path == "review.json" && !hadBefore && hadAfter {
+			continue
+		}
+		dirty = append(dirty, path)
+	}
+	if len(dirty) > 0 {
+		sort.Strings(dirty)
+		return fmt.Errorf("review left the worktree dirty: %s", strings.Join(dirty, ", "))
+	}
+	return nil
+}
+
+// trackedDrift returns the paths whose tracked leaf, index entry or parent
+// directory node differs between two snapshots, or nil when the tracked tree is
+// identical. Untracked paths are deliberately not compared here: the callers
+// decide separately whether scratch output is admissible.
+func trackedDrift(before, after reviewTreeSnapshot) []string {
+	var dirty []string
+	keys := make(map[string]bool, len(before.work)+len(after.work))
+	for path := range before.work {
+		keys[path] = true
+	}
+	for path := range after.work {
+		keys[path] = true
+	}
+	for _, path := range sortedPaths(keys) {
+		if before.work[path] != after.work[path] || before.idx[path] != after.idx[path] {
+			dirty = append(dirty, path)
+		}
+	}
+	keys = make(map[string]bool, len(before.dirs)+len(after.dirs))
+	for path := range before.dirs {
+		keys[path] = true
+	}
+	for path := range after.dirs {
+		keys[path] = true
+	}
+	for _, dir := range sortedPaths(keys) {
+		if before.dirs[dir] != after.dirs[dir] {
+			dirty = append(dirty, dir)
+		}
+	}
+	return dirty
+}
+
+// assertChecksClean refuses a pass note from a check run that did not leave the
+// tracked tree unchanged. A check may create untracked scratch output, but
+// rewriting a tracked file, staging an edit, swapping a tracked directory for a
+// symlink, or moving HEAD means the green it reports describes an uncommitted
+// experiment rather than the Review revision it was declared to test. before
+// must be the snapshot taken immediately before the checks ran. It compares the
+// tracked leaves, their index entries, the parent-directory topology, and HEAD,
+// and ignores untracked paths, which real checks legitimately create and which
+// never change the Revision. It returns an error naming every offending tracked
+// path when the tree drifted, and nil when only untracked scratch output
+// remains.
+func assertChecksClean(wtDir, head string, before reviewTreeSnapshot) error {
+	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("checks: cannot read worktree HEAD: %w", err)
+	}
+	if cur != head {
+		return fmt.Errorf("checks moved HEAD: reviewed %s -> %s", short(head), short(cur))
+	}
+	after, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		return fmt.Errorf("checks: %w", err)
+	}
+	if dirty := trackedDrift(before, after); len(dirty) > 0 {
+		sort.Strings(dirty)
+		return fmt.Errorf("checks left the tracked tree dirty: %s", strings.Join(dirty, ", "))
+	}
+	return nil
+}
+
+// sortedPaths returns the keys of m in deterministic order so refusals name
+// paths consistently instead of in map-iteration order.
+func sortedPaths(m map[string]bool) []string {
+	paths := make([]string, 0, len(m))
+	for p := range m {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// snapshotReviewTree captures the complete state of the worktree, not just its
+// tracked leaves: the whole index entry (mode, blob, stage) and a working-tree
+// fingerprint of every tracked leaf, a fingerprint of every parent directory
+// node, and the fingerprint of every non-ignored untracked path. The leaf
+// fingerprint records the object's type, mode and, for a regular file, its bytes
+// or, for a symlink, its target, and never reads the content of a non-regular
+// object, so a path a review replaced with a FIFO, device or stream cannot make
+// the snapshot block. The directory fingerprints run through the same logic and
+// so never follow a symlinked parent; without them the leaf bytes of a tracked
+// directory swapped for a symlink would still resolve to identical content and
+// hide the change. Untracked paths are read path-safely through git's NUL-based
+// output so a fixture with spaces or escapes is captured whole, and each is
+// fingerprinted the same way as a tracked leaf so an in-place edit of an
+// existing fixture changes the comparison even though the path set does not.
+func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
+	out, err := gitOutRaw(wtDir, "ls-files", "-s", "-z")
+	if err != nil {
+		return reviewTreeSnapshot{}, fmt.Errorf("review: read index: %w", err)
+	}
+	snap := reviewTreeSnapshot{
+		work:      make(map[string]string),
+		idx:       make(map[string]string),
+		dirs:      make(map[string]string),
+		untracked: make(map[string]string),
+	}
+	// "-z" emits each entry NUL-terminated and never quotes a path, so a tracked
+	// file whose name holds a newline, tab or backslash is keyed exactly as git
+	// tracks it. Newline-delimited "-s" output quotes such paths ("a\nb.txt"),
+	// which would record the edit under a key that never matches.
+	for _, entry := range strings.Split(out, "\x00") {
+		if entry == "" {
+			continue
+		}
+		// "ls-files -s" emits "<mode> <blob> <stage>\t<path>".
+		meta, path, ok := strings.Cut(entry, "\t")
+		if !ok {
+			continue
+		}
+		// Record the whole index entry, not just the blob: git tracks the mode
+		// separately, so a staged chmod (same blob, new mode) would otherwise
+		// sail through the clean-tree comparison. The entry also carries a
+		// gitlink's blob, so a moved submodule pointer is caught here.
+		snap.idx[path] = meta
+		// A gitlink's working-tree object is the checked-out submodule directory,
+		// which workState would reduce to bare "type:dir" and so ignore. Its real
+		// state — the submodule commit and the tracked files dirtied inside it —
+		// must be fingerprinted instead, or a verifier edits a tracked file within
+		// the submodule, leaves the gitlink entry and every other fingerprint
+		// unchanged, and still obtains a Verdict for a merged tree that never held
+		// that edit.
+		if isGitlink(meta) {
+			snap.work[path] = submoduleState(wtDir, path)
+		} else {
+			fp, err := workState(wtDir, path)
+			if err != nil {
+				return reviewTreeSnapshot{}, err
+			}
+			snap.work[path] = fp
+		}
+		for _, dir := range parentDirs(path) {
+			if _, seen := snap.dirs[dir]; !seen {
+				fp, err := workState(wtDir, dir)
+				if err != nil {
+					return reviewTreeSnapshot{}, err
+				}
+				snap.dirs[dir] = fp
+			}
+		}
+	}
+	unt, err := gitOutRaw(wtDir, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return reviewTreeSnapshot{}, fmt.Errorf("review: read untracked: %w", err)
+	}
+	for _, path := range strings.Split(unt, "\x00") {
+		if path != "" {
+			// Fingerprint each untracked path, not just record its name, so an
+			// existing non-ignored fixture edited in place still drifts even
+			// though the path set is unchanged.
+			fp, err := workState(wtDir, path)
+			if err != nil {
+				return reviewTreeSnapshot{}, err
+			}
+			snap.untracked[path] = fp
+		}
+	}
+	return snap, nil
+}
+
+// parentDirs returns the parent-directory paths of path, from the nearest
+// directory up to the worktree root. It lets the snapshot fingerprint each
+// directory node a tracked leaf sits under, so swapping such a directory for a
+// symlink is visible even though the leaf bytes resolve to identical content.
+func parentDirs(path string) []string {
+	var dirs []string
+	dir := filepath.Dir(path)
+	for dir != "." && dir != "" && dir != string(filepath.Separator) {
+		dirs = append(dirs, dir)
+		dir = filepath.Dir(dir)
+	}
+	return dirs
+}
+
+// snapshotFileHashLimit bounds the number of content bytes workState reads from
+// any one regular file, so a verifier cannot give a file a huge (possibly sparse)
+// apparent length and make the snapshot stream all of it. Reading stops after
+// snapshotFileHashLimit bytes, but a file whose content runs past that bound can
+// no longer be fully verified, so workState fails closed rather than emit a
+// fingerprint that hides a same-size mutation in the unread tail.
+const snapshotFileHashLimit = 1 << 20 // 1 MiB of content per path
+
+// workState fingerprints a tracked path's working-tree object. It captures
+// everything git tracks — type, mode and, for a regular file its bytes or, for a
+// symlink its target — so a chmod, a regular-file-for-symlink swap, or a symlink
+// retarget all change the fingerprint even when the read bytes would not. It
+// stats with Lstat, never the following stat, and reads content only from a real
+// regular file, streamed through a buffer capped at snapshotFileHashLimit bytes,
+// or from a symlink's target, so a path replaced by a FIFO, socket, device, an
+// endless stream, or a huge sparse file is fingerprinted without blocking or
+// exhausting the factory. A regular leaf under a symlinked parent is fingerprinted
+// by its own type and mode without following the link, so a verifier cannot point
+// a tracked directory at a huge external file and stall the refusal. It never
+// emits a fingerprint for content it could not read in full: a regular file larger
+// than snapshotFileHashLimit returns an error, because no bounded fingerprint can
+// prove such a file unchanged (a same-size mutation beyond the read prefix would
+// share every recorded field). "" means the tracked path is absent, i.e. it was
+// deleted, which is as much a change as a rewrite is.
+func workState(wtDir, path string) (string, error) {
+	full := filepath.Join(wtDir, path)
+	fi, err := os.Lstat(full)
+	if err != nil {
+		return "", nil
+	}
+	mode := fi.Mode()
+	h := sha1.New()
+	fmt.Fprintf(h, "%04o", mode.Perm()) // the mode bits, so chmod changes the hash
+	switch {
+	case mode&os.ModeSymlink != 0:
+		target, err := os.Readlink(full)
+		if err != nil {
+			target = "\x00unreadable"
+		}
+		fmt.Fprintf(h, "link:%s", target)
+	case mode&os.ModeNamedPipe != 0:
+		h.Write([]byte("type:fifo"))
+	case mode&os.ModeSocket != 0:
+		h.Write([]byte("type:socket"))
+	case mode&os.ModeDevice != 0:
+		h.Write([]byte("type:device"))
+	case mode.IsDir():
+		h.Write([]byte("type:dir"))
+	case mode.IsRegular():
+		if symlinkedAncestor(wtDir, path) {
+			// Reading the leaf would resolve through a symlinked parent into its
+			// target, a huge external file a verifier could plant to stall or
+			// exhaust the factory before the refusal is emitted. Refuse to follow
+			// it: fingerprint the leaf's own type and mode, which still changes
+			// when the topology above it does.
+			fmt.Fprintf(h, "type:file;via:symlinked-parent;perm:%04o", mode.Perm())
+			break
+		}
+		f, err := os.Open(full)
+		if err != nil {
+			fmt.Fprintf(h, "type:file;unreadable")
+			break
+		}
+		fmt.Fprintf(h, "type:file;perm:%04o;data:", mode.Perm())
+		// Read one byte past the limit so a file whose content runs on beyond the
+		// bounded prefix is detected without ever streaming the whole tail. For a
+		// file up to the limit this hashes its complete content, so an edit
+		// anywhere in an ordinary source file changes the digest.
+		n, copyErr := io.Copy(h, io.LimitReader(f, snapshotFileHashLimit+1))
+		f.Close()
+		if copyErr != nil {
+			fmt.Fprintf(h, ";read-error")
+			break
+		}
+		if n > snapshotFileHashLimit {
+			// Content extends beyond the bytes we hashed; a tracked edit confined
+			// to that tail would share this identical prefix, so the fingerprint
+			// cannot prove the file unchanged. Fail closed instead of silently
+			// accepting the escape: refuse the Verdict because this path cannot be
+			// fully verified. The read stopped at the limit, so a hostile huge
+			// sparse file cannot stall the snapshot.
+			return "", fmt.Errorf("path %q cannot be fully fingerprinted: %d bytes exceed the %d-byte content limit", path, fi.Size(), snapshotFileHashLimit)
+		}
+		fmt.Fprintf(h, ";size:%d", fi.Size())
+	default:
+		fmt.Fprintf(h, "type:%d", mode)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// isGitlink reports whether an `ls-files -s` index entry is a submodule (gitlink)
+// reference. Git records a gitlink with index mode 160000, whose working-tree
+// object is the checked-out submodule directory rather than a normal file.
+func isGitlink(meta string) bool {
+	return strings.HasPrefix(meta, "160000")
+}
+
+// submoduleState fingerprints a checked-out submodule's real state, the part of
+// the worktree a gitlink index entry alone cannot see. The parent repository
+// records only the submodule commit; the tracked files dirtied inside the
+// checked-out submodule — the ones a check or review actually reads and runs —
+// are invisible to the parent's index and to workState, which would flatten the
+// submodule path to bare "type:dir". Its own checked-out commit is captured so a
+// commit inside the submodule drifts even when the parent gitlink entry is
+// unchanged, and its `status --porcelain` is captured so editing, staging, or
+// deleting a tracked file inside the submodule changes the fingerprint and the
+// clean-tree assertion refuses the Verdict. Untracked scratch inside the
+// submodule is ignored because real checks may create it, mirroring how
+// assertChecksClean treats untracked paths in the parent. "" means the submodule
+// directory is absent, i.e. it was deleted, which is as much a change as any
+// edit in it is.
+func submoduleState(wtDir, path string) string {
+	sub := filepath.Join(wtDir, path)
+	h := sha1.New()
+	head, err := gitOut(sub, "rev-parse", "HEAD")
+	if err != nil {
+		// The submodule is not a working git repo (missing or uninitialised); its
+		// absence from git's view is itself a state that must compare stably.
+		fmt.Fprintf(h, "no-git-repo")
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	fmt.Fprintf(h, "head:%s;", head)
+	status, err := gitOutRaw(sub, "status", "--porcelain")
+	if err != nil {
+		fmt.Fprintf(h, "status-error:%v", err)
+		return hex.EncodeToString(h.Sum(nil))
+	}
+	for _, line := range strings.Split(status, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 2 {
+			continue
+		}
+		// The first two columns are the index/working-tree status (" M " for a
+		// modified tracked file); "??" marks untracked scratch, which real checks
+		// may legitimately leave behind and which never changes the merged tree.
+		if strings.HasPrefix(line[:2], "??") {
+			continue
+		}
+		fmt.Fprintf(h, "%s;", line)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// symlinkedAncestor reports whether any parent directory of rel, walking from
+// the worktree root down, is a symlink. os.Lstat only avoids following the final
+// component of a path, so a leaf beneath a symlinked parent would otherwise be
+// resolved through it into the link target. Refusing to follow keeps a verifier
+// from pointing a tracked directory at a huge external file and stalling or
+// exhausting the factory before the clean-tree refusal is emitted. It returns
+// false when a parent no longer exists, because the leaf that names it then
+// fingerprints as absent on its own.
+func symlinkedAncestor(wtDir, rel string) bool {
+	dir := filepath.Dir(rel)
+	for dir != "." && dir != "" && dir != string(filepath.Separator) {
+		fi, err := os.Lstat(filepath.Join(wtDir, dir))
+		if err != nil {
+			return false
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		dir = filepath.Dir(dir)
+	}
+	return false
 }
 
 // checkSchema validates a JSON run artifact against its declared JSON Schema:

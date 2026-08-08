@@ -533,6 +533,156 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 	}
 }
 
+// TestVerifierRefusesPassNoteWhenCheckMutatesTree is the end-to-end regression
+// for item #191's check-phase guard. A declared check that rewrites or stages a
+// tracked file taints the very tree the check was meant to judge; even a
+// reviewer that would only write review.json must yield no Verdict and no pass
+// Checks note, because the green belongs to an uncommitted edit, never the
+// Review revision.
+func TestVerifierRefusesPassNoteWhenCheckMutatesTree(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  string
+	}{
+		{"rewrites a tracked file", `printf 'tainted\n' > file.txt`},
+		{"stages a tracked file", `printf 'tainted\n' > file.txt && git add file.txt`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := setupTestRepo(t)
+			branch := "forest/9-change"
+			rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+			rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+			rebaseTestGit(t, repo, "add", "branch.txt")
+			rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+			rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+			head := remoteBranchHead(t, repo, branch)
+			masterBefore := remoteBranchHead(t, repo, "master")
+			rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+			writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+			oldGH := ghJSON
+			ghJSON = func(args ...string) ([]byte, error) {
+				return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+			}
+			defer func() { ghJSON = oldGH }()
+
+			// The reviewer is blameless: it would write only review.json and approve.
+			reviewRan := false
+			oldRun := runPhase
+			runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string) (runStats, error) {
+				reviewRan = true
+				if err := os.WriteFile(filepath.Join(wtDir, "review.json"), []byte(`{"verdict":"approve","summary":"looks fine","notes":""}`), 0o644); err != nil {
+					return runStats{}, err
+				}
+				return runStats{}, nil
+			}
+			defer func() { runPhase = oldRun }()
+
+			cfg := defaultConfig()
+			cfg.Repo = "owner/repo"
+			cfg.Checks = []Check{{Name: "tainted", Run: tc.run}}
+			cfg.Flows.Verifier.Agent = "verifier"
+			cfg.Flows.Verifier.AutoMerge = true
+			cfg.Projection = ProjectionConfig{}
+
+			out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+				Key: "branch-" + branch, Kind: "branch", Revision: head,
+				Label: branch, ID: "9", Branch: branch, Head: head,
+			}, "run-1")
+			if err == nil {
+				t.Fatalf("a check that tainted the tree returned no error: %#v", out)
+			}
+			if !strings.Contains(err.Error(), "file.txt") {
+				t.Fatalf("refusal %q does not name the tainted tracked path", err)
+			}
+			if out.Status != "checks_refused" {
+				t.Fatalf("status = %q, want checks_refused", out.Status)
+			}
+
+			// No pass Checks note and no Verdict, and the reviewer never ran: the
+			// tainted green is refused before anything records it or acts on it.
+			if _, ok, err := readChecks(repo, head); err != nil || ok {
+				t.Fatalf("checks note on head = (found=%v, err=%v), want no note when a check tainted the tree", ok, err)
+			}
+			if _, ok, err := readVerdict(repo, head); err != nil || ok {
+				t.Fatalf("verdict note on head = (found=%v, err=%v), want no Verdict when a check tainted the tree", ok, err)
+			}
+			if reviewRan {
+				t.Fatalf("reviewer ran for a head whose checks tainted the tree")
+			}
+			if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
+				t.Fatalf("master advanced to %s, want %s, when a check tainted the tree", got, masterBefore)
+			}
+		})
+	}
+}
+
+// TestVerifierReviewNamesMutationWhenPhaseErrors pins #191's verifier-review
+// fix: the post-run clean-tree assertion must run even when the phase reports an
+// error. A verifier that edits a tracked file and then crashes or times out would
+// otherwise return only the harness error, never the required named clean-tree
+// refusal, and the mutation would go unreported. The refusal must name the
+// edited path even though the phase itself failed.
+func TestVerifierReviewNamesMutationWhenPhaseErrors(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	// The verifier edits a tracked file and then crashes, so the harness error
+	// and the mutation arrive together.
+	phaseErr := errors.New("verifier crashed")
+	mutated := false
+	oldRun := runPhase
+	runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string) (runStats, error) {
+		mutated = true
+		if err := os.WriteFile(filepath.Join(wtDir, "file.txt"), []byte("tainted\n"), 0o644); err != nil {
+			return runStats{}, err
+		}
+		return runStats{}, phaseErr
+	}
+	defer func() { runPhase = oldRun }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "ok", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Projection = ProjectionConfig{}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}, "run-1")
+	if err == nil {
+		t.Fatalf("a review that mutated the tree and crashed returned no error: %#v", out)
+	}
+	// The required named clean-tree refusal, not the bare harness error alone.
+	if !strings.Contains(err.Error(), "file.txt") {
+		t.Fatalf("refusal %q does not name the mutated tracked path; the phase error swallowed the tree check", err)
+	}
+	if !mutated {
+		t.Fatal("the verifier did not run")
+	}
+	// No Verdict may rest on a tree the review itself changed.
+	if _, ok, rerr := readVerdict(repo, head); rerr != nil || ok {
+		t.Fatalf("verdict note on head = (found=%v, err=%v), want none when the review mutated the tree", ok, rerr)
+	}
+}
+
 // TestFenceMergeOnReviewedRevision pins item #188: a merge may land only the
 // Revision that carried the approving Verdict. An unchanged remote branch passes
 // the fence; a branch that advanced after the Verdict is refused with both

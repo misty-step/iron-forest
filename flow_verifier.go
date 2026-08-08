@@ -176,6 +176,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// key to; the value above was the pre-rebase head.
 	out.BaseSHA = newHead
 
+	// Snapshot the pristine reviewed tree before any agent code runs, so a check
+	// that rewrites or stages a tracked file is visible afterwards: its green
+	// would then judge an uncommitted edit, never the Review revision it was
+	// declared to test.
+	beforeChecks, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		out.Status = "checks_environment_failed"
+		return out, fmt.Errorf("review snapshot: %w", err)
+	}
 	checks, checkErr := runChecks(cfg, wtDir, runID)
 	// A preflight failure means no declared check ran: the child environment
 	// could not be built, the toolchain was missing, or FOREST_CHECK_PATH did
@@ -186,6 +195,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	if checkErr != nil && checks.Status == "" {
 		out.Status = "checks_environment_failed"
 		return out, fmt.Errorf("checks: %w", checkErr)
+	}
+	// A check that rewrote or staged a tracked file — or moved HEAD — is refused:
+	// the green it reports is an artifact of its own uncommitted edit, not of the
+	// Review revision. No Checks note is written, so the head is neither offered
+	// to a reviewer (no Verdict may rest on the untrustworthy result) nor to the
+	// Fixer (there is nothing to repair in the committed tree).
+	if cleanErr := assertChecksClean(wtDir, baseSHA, beforeChecks); cleanErr != nil {
+		out.Status = "checks_refused"
+		return out, fmt.Errorf("checks: %w", cleanErr)
 	}
 	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
 		if !errors.Is(err, errNoteExists) {
@@ -298,10 +316,27 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	if err != nil {
 		return out, stats, fmt.Errorf("review: prompt: %w", err)
 	}
-	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
-	stats, err = runPhase(repoDir, wtDir, a, prompt, trace)
+	// Snapshot the tracked worktree before the agent runs so a review that edits
+	// any tracked file, stages a change, or moves HEAD can be refused on full
+	// comparison with this state. The snapshot records content and index state,
+	// so an edit to a file a check already dirtied is caught too.
+	before, err := snapshotReviewTree(wtDir)
 	if err != nil {
-		return out, stats, fmt.Errorf("review: %w", err)
+		return out, stats, fmt.Errorf("review: pre-run snapshot: %w", err)
+	}
+	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
+	stats, phaseErr := runPhase(repoDir, wtDir, a, prompt, trace)
+	// The worktree started at the Review revision; refuse a Verdict if the review
+	// edited a tracked file or moved HEAD since the snapshot, naming what changed.
+	// This assertion runs even when the phase crashed or timed out, so a verifier
+	// that edits a tracked file and then fails is refused for the edit — the
+	// required named clean-tree refusal — rather than reported only with the
+	// harness error, which would let the mutation slip through unexamined.
+	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
+		return out, stats, err
+	}
+	if phaseErr != nil {
+		return out, stats, fmt.Errorf("review: %w", phaseErr)
 	}
 	rv, err := gateReview(wtDir, filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"))
 	if err != nil {
