@@ -185,15 +185,41 @@ func TestLoadAgentAndDigestChanges(t *testing.T) {
 	}
 }
 
+// TestDeclaredAgentsLoad pins that every lane in flowsFor has the agent its
+// config names declared on disk. The flow list comes from flowsFor(), not a
+// hardcoded pair, so a lane registered in code with no agents/<name>/ directory
+// would compile, pass the suite, and then break every instance at runtime — the
+// exact defect selfcheck was added to catch in aff3d41.
 func TestDeclaredAgentsLoad(t *testing.T) {
 	repoDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"builder", "verifier"} {
+	cfg, err := loadConfig(filepath.Join(repoDir, "forest.yaml"))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	agentFor := func(f Flow) string {
+		switch f.(type) {
+		case builderFlow:
+			return cfg.Flows.Builder.Agent
+		case verifierFlow:
+			return cfg.Flows.Verifier.Agent
+		case fixerFlow:
+			return cfg.Flows.Fixer.Agent
+		case managerFlow:
+			return cfg.Flows.Manager.Agent
+		}
+		return ""
+	}
+	for _, f := range flowsFor() {
+		name := agentFor(f)
+		if name == "" {
+			t.Fatalf("flow %s has no agent declared in config", f.Name())
+		}
 		a, err := loadAgent(repoDir, name)
 		if err != nil {
-			t.Fatalf("loadAgent(%q): %v", name, err)
+			t.Fatalf("loadAgent(%q) for flow %s: %v", name, f.Name(), err)
 		}
 		if a.Name != name || a.Model == "" || a.DefSHA == "" {
 			t.Fatalf("incomplete %s declaration: %#v", name, a)
