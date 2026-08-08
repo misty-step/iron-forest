@@ -16,7 +16,8 @@ type Item struct {
 // Tracker is the work source. A flow lists open items, reads one item, and
 // records comments, closure, and tag changes against it.
 type Tracker interface {
-	// ListOpen returns every open item.
+	// ListOpen returns every open item. A closed item leaves this list, so it
+	// needs no reap: the slot frees and nothing can build it.
 	ListOpen() ([]Item, error)
 	// Get returns one item by its id.
 	Get(id string) (Item, error)

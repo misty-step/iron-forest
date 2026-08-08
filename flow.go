@@ -82,7 +82,7 @@ type Flow interface {
 // flowsFor builds the declared flows. Adding a lane is adding one entry here
 // plus one file: the supervisor and the ledger need no change.
 func flowsFor() []Flow {
-	return []Flow{builderFlow{}, verifierFlow{}, fixerFlow{}}
+	return []Flow{builderFlow{}, verifierFlow{}, fixerFlow{}, managerFlow{}}
 }
 
 // codeBusy is a pass's answer when another worker already handles the subject.

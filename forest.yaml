@@ -41,6 +41,11 @@ flows:
     agent: builder
     interval_seconds: 40
     attempts: 10
+  manager:
+    enabled: true
+    agent: manager
+    interval_seconds: 60
+    ready_depth: 1
 
 # The human-facing surface. One way out: Iron Forest never reads it back.
 projection:

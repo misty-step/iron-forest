@@ -31,12 +31,13 @@ type Check struct {
 	Run  string
 }
 
-// Flows declares the lanes: builder, verifier, and fixer. Each lane carries the
-// settings that only that lane reads.
+// Flows declares the lanes: builder, verifier, fixer, and manager. Each lane
+// carries the settings that only that lane reads.
 type Flows struct {
 	Builder  BuilderFlowConfig
 	Verifier VerifierFlowConfig
 	Fixer    FixerFlowConfig
+	Manager  ManagerFlowConfig
 }
 
 // FlowConfig is what every lane declares: whether it is on, which agent it
@@ -68,6 +69,14 @@ type VerifierFlowConfig struct {
 type FixerFlowConfig struct {
 	FlowConfig
 	Attempts int
+}
+
+// ManagerFlowConfig is the manager lane: the shared lane settings plus the
+// ready depth that bounds how many unstarted assignments it keeps in flight.
+type ManagerFlowConfig struct {
+	FlowConfig
+	ReadyDepth  int
+	ExcludeTags []string
 }
 
 // ProjectionConfig is the optional, one-way human surface: publish a branch as
