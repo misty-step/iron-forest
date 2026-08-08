@@ -62,7 +62,9 @@ func verdictBody(v verdictNote, c checksNote) string {
 			fmt.Fprintf(&b, "  %s\n", result.Output)
 		}
 	}
-	return b.String()
+	// The comment mirrors verdict notes and check output, agent-authored text
+	// that lands verbatim; redact it so no credential crosses to the host.
+	return redactSecretShaped(b.String())
 }
 
 // projectVerdict mirrors a git verdict and its checks as one pull-request comment.
