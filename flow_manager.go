@@ -124,8 +124,13 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	rep, stats, err := managerJudge(repoDir, plan.cands, a, runID)
 	out := Outcome{
 		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
-		TokIn: stats.tokensIn, TokOut: stats.tokensOut,
 	}
+	// The common accounting path copies every measured token class a phase
+	// returns — input, output, cache read, cache write, and reasoning — so the
+	// Manager records all spend, not just the fresh input and output. Copying
+	// only two fields here would be the discard defect the ledger exists to
+	// prevent.
+	out.addTokens(stats)
 	if err != nil {
 		out.Status = "agent_failed"
 		return out, err

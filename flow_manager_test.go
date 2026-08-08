@@ -482,9 +482,11 @@ func TestManagerReapsDespiteModelBrake(t *testing.T) {
 }
 
 // TestManagerRecordsTokensOnPromotion proves every Manager model invocation is
-// recorded on the ledger: runManagerJudge returns the run's token accounting and
-// Act fills Outcome.TokIn/TokOut so the ledger does not show zero tokens for a
-// judgement that actually spent tokens.
+// recorded on the ledger with every measured token class: output, cache read,
+// cache write, and reasoning as well as the fresh input and output. Act routes
+// the run's token accounting through Outcome.addTokens (the same path the other
+// lanes use) so the ledger does not show zeros for a judgement that actually
+// spent tokens.
 func TestManagerRecordsTokensOnPromotion(t *testing.T) {
 	repo := newRefGitRepo(t)
 	writeAgentFixture(t, repo, "manager", "manager-model")
@@ -497,7 +499,10 @@ func TestManagerRecordsTokensOnPromotion(t *testing.T) {
 
 	oldJudge := managerJudge
 	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
-		return managerReport{Pick: "1", Reason: "pick"}, runStats{tokensIn: 123, tokensOut: 45}, nil
+		return managerReport{Pick: "1", Reason: "pick"}, runStats{
+			tokensIn: 123, tokensOut: 45,
+			cacheRead: 67, cacheWrite: 89, reasoning: 34,
+		}, nil
 	}
 	defer func() { managerJudge = oldJudge }()
 
@@ -519,6 +524,10 @@ func TestManagerRecordsTokensOnPromotion(t *testing.T) {
 	}
 	if out.TokIn != 123 || out.TokOut != 45 {
 		t.Fatalf("tokens = in %d / out %d, want 123 / 45", out.TokIn, out.TokOut)
+	}
+	if out.CacheRead != 67 || out.CacheWrite != 89 || out.Reasoning != 34 {
+		t.Fatalf("cached tokens = read %d / write %d / reasoning %d, want 67 / 89 / 34",
+			out.CacheRead, out.CacheWrite, out.Reasoning)
 	}
 	if !tk.items["1"].hasTag(readyTag) {
 		t.Fatal("the picked item should carry the ready tag")
