@@ -272,7 +272,11 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 		if err != nil {
 			return managerPlan{}, err
 		}
-		plan.braked = braked
+		parked, err := parkedOn(repoDir, "manager", managerSubject, plan.revision)
+		if err != nil {
+			return managerPlan{}, err
+		}
+		plan.braked = braked || parked
 	} else {
 		plan.revision = itemSetStamp(reap)
 		if len(reap) > 0 {

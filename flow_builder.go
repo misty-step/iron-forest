@@ -39,6 +39,16 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if stalled {
 			continue
 		}
+		// A parking hold is a mechanical brake, not a content one: the item needs
+		// an operator, not another build that would fail identically. Its
+		// revision moves with the same touch that clears the stalled brake.
+		parked, err := parkedOn(repoDir, "builder", key, it.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("parked %s: %w", key, err)
+		}
+		if parked {
+			continue
+		}
 		subjects = append(subjects, Subject{
 			Key:      key,
 			Kind:     "item",

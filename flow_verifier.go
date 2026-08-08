@@ -67,6 +67,17 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			if stalled {
 				continue
 			}
+			// A mechanical failure (a rebase conflict, a preflight, a worktree
+			// error) parked the head for an operator; rechecking the same head
+			// would fail identically, so do not offer it again until the head
+			// moves. A head the operator repairs is a new head and returns here.
+			parked, err := parkedOn(repoDir, "verifier", s.Key, head)
+			if err != nil {
+				return nil, fmt.Errorf("parked %s: %w", s.Key, err)
+			}
+			if parked {
+				continue
+			}
 			fresh = append(fresh, s)
 			continue
 		}
@@ -83,11 +94,21 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		// An approved, green branch is only a subject when it can actually land.
 		// Every reason it cannot is named by mergeBlocked, so a branch waiting on
 		// an operator is a state to read, not an action to run.
-		attempts, err := readAttempts(repoDir, s.Key)
+		attempts, err := readAttempts(repoDir, s.Key, head)
 		if err != nil {
 			return nil, fmt.Errorf("attempts %s: %w", branch, err)
 		}
 		if mergeBlocked(cfg, attempts) != "" {
+			continue
+		}
+		// A branch whose head is parked (repeated failed merges, a preflight, a
+		// worktree error) is not work while it cannot land; a changed head or an
+		// operator's repair releases it.
+		parked, err := parkedOn(repoDir, "verifier", s.Key, head)
+		if err != nil {
+			return nil, fmt.Errorf("parked %s: %w", s.Key, err)
+		}
+		if parked {
 			continue
 		}
 		mergeable = append(mergeable, s)
@@ -141,34 +162,14 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// tree built from an ancient master. Every later step uses the returned head.
 	newHead, rebaseErr := rebaseOntoMaster(wtDir, s.Branch)
 	if rebaseErr != nil {
-		// A conflict is a fact about this head, so record it where every lane
-		// already looks: a failing check on the commit. The Fixer selects failing
-		// checks, so a conflict becomes work instead of a dead end, and this lane
-		// stops offering the head because the fact outlives the pass. A tracker
-		// label cannot do this job: the factory never reads its own labels back.
-		out.Status = "checks_failed"
-		note := checksNote{
-			Status:  "fail",
-			RunID:   runID,
-			Time:    nowRFC(),
-			Results: []checkResult{{Name: "rebase", Code: 1, Output: rebaseErr.Error()}},
-		}
-		if err := writeChecks(repoDir, baseSHA, note); err != nil {
-			if !errors.Is(err, errNoteExists) {
-				return out, fmt.Errorf("rebase: %w (notes: %v)", rebaseErr, err)
-			}
-			winner, found, readErr := readChecks(repoDir, baseSHA)
-			if readErr != nil {
-				return out, fmt.Errorf("rebase: %w (notes: read winning check: %v)", rebaseErr, readErr)
-			}
-			if !found {
-				return out, fmt.Errorf("rebase: %w (notes: check note disappeared: %v)", rebaseErr, err)
-			}
-			note = winner
-		}
-		if err := projectChecks(cfg, s.Branch, note); err != nil {
-			return out, fmt.Errorf("rebase: %w (projection: %v)", rebaseErr, err)
-		}
+		// A failed rebase — a conflict, a fetch failure, a publish race — is a
+		// mechanical failure of the rebuild, not a failing check on the change.
+		// The same head keeps failing identically, so it must park for an
+		// operator instead of being written as a failing Checks note that routes
+		// the head to the Fixer, who would spend a repair attempt on a conflict
+		// no change in code can resolve. A head the operator repairs is a new
+		// head, and the park (and any later review) releases with it.
+		out.Status = "rebase_failed"
 		return out, fmt.Errorf("rebase: %w", rebaseErr)
 	}
 	baseSHA = newHead
@@ -278,7 +279,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// A fresh review that lands on approve reaches here; a branch selected for
 	// merge already passed this test in Select. Consulting the same authority
 	// keeps the two from drifting, which is what caused the 217-pass hot loop.
-	attempts, err := readAttempts(repoDir, s.Key)
+	attempts, err := readAttempts(repoDir, s.Key, baseSHA)
 	if err != nil {
 		out.Status = "notes_failed"
 		return out, fmt.Errorf("attempts: %w", err)
@@ -288,12 +289,12 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		return out, nil
 	}
 	if err := mergeVerified(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
-		// A branch that cannot land needs a human, not another attempt. Spend one
-		// attempt so the merge selector stops offering it, and say so on the item.
+		// A branch that cannot land needs a human, not again and again. A failed
+		// merge is mechanical — a publish race, a host refusal — so it must not
+		// spend the Fixer's content budget; actOnSubject parks the head, and say
+		// so on the item so the operator sees why the lane stopped offering it.
+		// A branch an operator then repairs is a new head, and the park releases.
 		out.Status = "merge_failed"
-		if _, berr := bumpAttempts(repoDir, s.Key); berr != nil {
-			return out, fmt.Errorf("merge: %w (attempt record failed: %v)", err, berr)
-		}
 		trackerFor(cfg.Repo).SetTags(it.ID, []string{failedLabel}, nil)
 		_ = trackerFor(cfg.Repo).Comment(it.ID, "Merge blocked: "+redactSecretShaped(err.Error()))
 		return out, err

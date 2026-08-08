@@ -197,6 +197,86 @@ func recordStalled(repoDir, flow, subject, revision string) error {
 	return fmt.Errorf("record stalled after five attempts: %w", casErr)
 }
 
+// parkedRecord is the durable hold for a subject whose flow failed
+// mechanically. Like the stalled brake it keys to one revision; unlike it, a
+// park never spends the content budget that exists for failures the agent could
+// plausibly fix. The Cause is the scrubbed error text of the last park, so the
+// hold an operator reads stays visible.
+type parkedRecord struct {
+	Revision string `json:"revision"`
+	Count    int    `json:"count"`
+	Cause    string `json:"cause,omitempty"`
+}
+
+// parkedRef returns the repository ref that records a mechanical park.
+func parkedRef(flow, subject string) string {
+	return "refs/forest/parked/" + flow + "/" + subject
+}
+
+// parkedOn reports whether a flow reached the mechanical park limit on this
+// revision. A park is keyed to the revision, so any movement — an item touching,
+// a branch head advancing after a manual repair — releases the hold without
+// deleting a ref or clearing a budget.
+func parkedOn(repoDir, flow, subject, revision string) (bool, error) {
+	if revision == "" {
+		return false, nil
+	}
+	_, body, err := getBlobRef(repoDir, parkedRef(flow, subject))
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(body) == "" {
+		return false, nil
+	}
+	var record parkedRecord
+	if err := json.Unmarshal([]byte(body), &record); err != nil {
+		return false, fmt.Errorf("decode parked record: %w", err)
+	}
+	return record.Revision == revision && record.Count >= stalledRunLimit, nil
+}
+
+// parkFailure records one mechanical failure with its cause, compare-and-swap.
+// The count is deliberately separate from the stalled brake: a mechanical
+// failure — a host or provider outage, a worktree error, a rebase conflict, a
+// publish race, a preflight — is retried on later passes but must never spend
+// the budget reserved for content the agent could fix. A revision change resets
+// the count because it represents a new situation.
+func parkFailure(repoDir, flow, subject, revision string, cause error) error {
+	if revision == "" {
+		return errors.New("park: empty revision")
+	}
+	ref := parkedRef(flow, subject)
+	var casErr error
+	for range 5 {
+		sha, body, err := getBlobRef(repoDir, ref)
+		if err != nil {
+			return err
+		}
+		record := parkedRecord{Revision: revision, Count: 1, Cause: redactSecretShaped(cause.Error())}
+		if strings.TrimSpace(body) != "" {
+			var previous parkedRecord
+			if err := json.Unmarshal([]byte(body), &previous); err != nil {
+				return fmt.Errorf("decode parked record: %w", err)
+			}
+			if previous.Revision == revision {
+				record.Count = previous.Count + 1
+			}
+		}
+		payload, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("encode parked record: %w", err)
+		}
+		if err := putBlobRef(repoDir, ref, string(payload), sha); err == nil {
+			return nil
+		} else if !errors.Is(err, errRefMoved) {
+			return err
+		} else {
+			casErr = err
+		}
+	}
+	return fmt.Errorf("park failure after five attempts: %w", casErr)
+}
+
 // runCategory groups ledger statuses for operator summaries.
 func runCategory(status string) string {
 	switch status {

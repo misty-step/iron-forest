@@ -214,8 +214,15 @@ Expect these on a first run:
   outlives it is cancelled and recorded as `timeout_failed` (mechanical), and
   its lane reopens on the next pass.
 - **Three failures on one revision park the item.** The repeat-failure brake is
-  a ref under `refs/forest/stalled/`. Fix the cause, then move the item's
-  revision — a comment is enough — and it becomes selectable again.
+  a ref under `refs/forest/stalled/` and counts only content failures — a
+  failing check, a rejected verdict. Mechanical failures (a provider outage, a
+  worktree error, a rebase conflict, a publish race, a preflight) park in a
+  separate `refs/forest/parked/` ref with their cause, so they never spend the
+  budget meant for wrong code and a transient outage does not brake the subject.
+  Either way: fix the cause, then move the item's revision — a comment is
+  enough — and it becomes selectable again. Repairing a branch by hand moves its
+  head, which clears the attempt count that otherwise would keep an
+  operator-fixed branch blocked.
 - **A daemon restart kills an in-flight agent** and records `agent_failed`
   against it. That counts toward the brake.
 

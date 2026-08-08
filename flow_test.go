@@ -24,6 +24,85 @@ var errAgentCrash = errors.New("agent: agent exited \"signal: terminated\"")
 // aSubject is the sole subject a failingFlow selects.
 var aSubject = []Subject{{Key: "item-1", Revision: "rev-1", ID: "1"}}
 
+// mechanicalFlow is a Flow stub whose Act always fails like a provider outage.
+// Its failure is mechanical, so actOnSubject must park it instead of spending
+// the repeat-failure brake.
+type mechanicalFlow struct{}
+
+func (mechanicalFlow) Name() string                             { return "builder" }
+func (mechanicalFlow) Select(Config, string) ([]Subject, error) { return aSubject, nil }
+func (mechanicalFlow) Interval(Config) time.Duration            { return 0 }
+func (mechanicalFlow) Enabled(Config) bool                      { return true }
+func (mechanicalFlow) Act(Config, string, Subject, string) (Outcome, error) {
+	return Outcome{Status: "item_failed"}, errors.New("item: tracker unreachable")
+}
+
+// TestMechanicalFailureParksNotStalls pins the carve-out that separates a
+// mechanical failure from a content failure (#195): a provider or host outage
+// must park with its cause instead of spending the repeat-failure brake, so a
+// transient outage never burns the budget reserved for content the agent could
+// fix. Four passes — more than the stall limit — must leave the content brake
+// untouched while the parked hold engages and the ledger names the cause.
+func TestMechanicalFailureParksNotStalls(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	for range stalledRunLimit + 1 {
+		if code := actOnSubject(mechanicalFlow{}, Config{}, repo, aSubject[0], nil); code != 1 {
+			t.Fatalf("mechanical run code = %d, want 1", code)
+		}
+	}
+	rows, _, err := loadLedger(ledgerPath(repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rows[len(rows)-1].Status; got != "item_failed" {
+		t.Errorf("mechanical run status = %q, want item_failed", got)
+	}
+	if stalled, err := stalledOn(repo, "builder", aSubject[0].Key, aSubject[0].Revision); err != nil || stalled {
+		t.Fatalf("mechanical failure engaged the content brake = %v, %v; an outage must not brake the subject", stalled, err)
+	}
+	if parked, err := parkedOn(repo, "builder", aSubject[0].Key, aSubject[0].Revision); err != nil || !parked {
+		t.Fatalf("repeated mechanical failure did not park = %v, %v; it must become visible", parked, err)
+	}
+}
+
+// TestBuilderSkipsParkedItemUntilRevisionMoves pins the selector side of a
+// mechanical park (#195): a builder item that parked on a mechanical failure is
+// not offered again while its revision is unchanged, and it releases the moment
+// the item moves, exactly as the stalled brake does.
+func TestBuilderSkipsParkedItemUntilRevisionMoves(t *testing.T) {
+	repo := newRefGitRepo(t)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "9", Title: "opaque", UpdatedAt: "u1"})
+	old := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = old }()
+	cfg := defaultConfig()
+	cfg.Repo = "example/repo"
+
+	for range stalledRunLimit {
+		if err := parkFailure(repo, "builder", "item-9", "u1", errors.New("provider outage")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	subjects, err := (builderFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 0 {
+		t.Fatalf("a parked item was still selected: %#v", subjects)
+	}
+
+	// Moving the item (a comment, an edit) releases the park.
+	tk.seed(Item{ID: "9", Title: "opaque", UpdatedAt: "u2"})
+	subjects, err = (builderFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 || subjects[0].Key != "item-9" {
+		t.Fatalf("after the revision moves, Select = %#v, want the item", subjects)
+	}
+}
+
 // TestShutdownIsNotAnAgentFailure pins the operator-shutdown card: a run that
 // ends while the daemon is draining records a distinct shutdown status, keeps
 // the tokens spent, and never increments the repeat-failure brake.
@@ -132,7 +211,7 @@ func TestBuilderPromptDeliveryFailureParksNotFixes(t *testing.T) {
 	if len(subjects) != 0 {
 		t.Fatalf("a prompt-delivery failure was offered to the Fixer: %#v", subjects)
 	}
-	if n, err := readAttempts(repo, "branch-forest/9-wide-change"); err != nil || n != 0 {
+	if n, err := readAttempts(repo, "branch-forest/9-wide-change", ""); err != nil || n != 0 {
 		t.Fatalf("fixer attempts = (%d, %v), want 0; a mechanical failure must not spend a repair attempt", n, err)
 	}
 }
@@ -192,7 +271,7 @@ func TestBuilderTimeoutFailureParksNotFixes(t *testing.T) {
 	if len(subjects) != 0 {
 		t.Fatalf("a timeout failure was offered to the Fixer: %#v", subjects)
 	}
-	if n, err := readAttempts(repo, "branch-forest/9-wide-change"); err != nil || n != 0 {
+	if n, err := readAttempts(repo, "branch-forest/9-wide-change", ""); err != nil || n != 0 {
 		t.Fatalf("fixer attempts = (%d, %v), want 0; a timeout must not spend a repair attempt", n, err)
 	}
 }
