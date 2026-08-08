@@ -110,12 +110,59 @@ func TestProjectMergeDisabledReturnsError(t *testing.T) {
 		return nil, nil
 	}
 
-	err := projectMerge(Config{Repo: "owner/repo"}, "forest/7-change", "squash")
+	err := projectMerge(Config{Repo: "owner/repo"}, "forest/7-change", "squash", "")
 	if err == nil {
 		t.Fatal("disabled projectMerge returned nil")
 	}
 	if calls != 0 {
 		t.Fatalf("disabled projectMerge made %d host calls", calls)
+	}
+}
+
+// TestProjectMergePinsExpectedHead pins item #188's host path: the reviewed
+// Revision is passed to the host's expected-head facility so a host merge never
+// acts on a head that advanced past the Verdict, while an empty expected head
+// leaves the merge unpinned.
+func TestProjectMergePinsExpectedHead(t *testing.T) {
+	run := func(t *testing.T, expectedHead string) []string {
+		t.Helper()
+		old := projectionCommand
+		defer func() { projectionCommand = old }()
+		var mergeArgs []string
+		projectionCommand = func(args ...string) ([]byte, error) {
+			switch args[1] {
+			case "list":
+				return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23"}]`), nil
+			case "merge":
+				mergeArgs = append([]string(nil), args...)
+				return nil, nil
+			default:
+				return nil, errors.New("unexpected host command")
+			}
+		}
+		cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+		if err := projectMerge(cfg, "forest/7-change", "squash", expectedHead); err != nil {
+			t.Fatalf("projectMerge: %v", err)
+		}
+		return mergeArgs
+	}
+
+	const reviewed = "0123456789abcdef0123456789abcdef01234567"
+	args := run(t, reviewed)
+	found := false
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--match-head-commit" && args[i+1] == reviewed {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("projectMerge args %v do not pin the reviewed head %s", args, reviewed)
+	}
+
+	for _, a := range run(t, "") {
+		if a == "--match-head-commit" {
+			t.Fatalf("projectMerge pinned a merge with an empty expected head: %v", args)
+		}
 	}
 }
 
