@@ -133,7 +133,7 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
+	if err := commitAndPush(cfg, repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
