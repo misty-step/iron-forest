@@ -84,7 +84,10 @@ type openCodeProviderOptions struct {
 	BaseURL string `json:"baseURL"`
 }
 
-// openCodeModel is one model entry under a provider's models map.
+// openCodeModel is one model entry under a provider's models map. Its Name is
+// the model id opencode sends to the provider's API for a request, so an alias
+// provider can map a local model key to the fully-qualified reference the
+// backing endpoint understands (see openRouterDirectModelRef).
 type openCodeModel struct {
 	Name string `json:"name,omitempty"`
 }
@@ -116,10 +119,17 @@ const (
 	// openRouterMintProviderID is the provider key the Builder and Manager's
 	// declarations name; the env config defines it as a direct-key alias.
 	openRouterMintProviderID = "openrouter-mint"
-	// openRouterMintModelID is the model id the Builder and Manager run on.
+	// openRouterMintModelID is the model id the Builder and Manager reference as
+	// openrouter-mint/deepseek-v4-flash-0731; it is the local key opencode resolves
+	// through the alias provider's models map.
 	openRouterMintModelID = "deepseek-v4-flash-0731"
-	// openRouterMintModelName is the human-facing name for that model.
-	openRouterMintModelName = "DeepSeek V4 Flash 0731"
+	// openRouterDirectModelRef is the model id sent to the direct OpenRouter
+	// endpoint for that alias model. The alias key above is a local name; the
+	// OpenRouter API expects the fully-qualified deepseek/deepseek-v4-flash-0731
+	// reference, a translation the Mint broker used to hide. Naming the alias
+	// model's openCodeModel.Name with this reference makes the request reach the
+	// direct API with the model id it actually understands.
+	openRouterDirectModelRef = "deepseek/deepseek-v4-flash-0731"
 	// openAICompatibleNPM is the npm package that implements an OpenAI-compatible
 	// provider in opencode, matching the shipped Mint declaration.
 	openAICompatibleNPM = "@ai-sdk/openai-compatible"
@@ -177,7 +187,7 @@ func envProviderConfig() []byte {
 			Name:    openRouterMintDisplayName,
 			Options: openCodeProviderOptions{APIKey: keyRef, BaseURL: base},
 			Models: map[string]openCodeModel{
-				openRouterMintModelID: {Name: openRouterMintModelName},
+				openRouterMintModelID: {Name: openRouterDirectModelRef},
 			},
 		},
 	}}
@@ -223,19 +233,41 @@ func hasMintMarker(b []byte) bool {
 	return false
 }
 
+// apiKeyResolves reports whether one provider apiKey is a usable credential.
+// A Mint broker marker or a literal key value resolves by itself. An {env:NAME}
+// reference resolves only when the named environment variable is actually set in
+// the current process: opencode reads that reference through the child
+// environment, so a reference to an unset variable cannot authenticate a run
+// even though the string is non-empty. Anything else (an empty value, a
+// malformed {env:...} reference) resolves nothing.
+func apiKeyResolves(key string) bool {
+	if key == "" {
+		return false
+	}
+	if strings.HasPrefix(key, mintMarkerPrefix) {
+		return true
+	}
+	if strings.HasPrefix(key, "{env:") && strings.HasSuffix(key, "}") {
+		name := key[len("{env:") : len(key)-1]
+		return name != "" && os.Getenv(name) != ""
+	}
+	return true
+}
+
 // providerConfigValid reports whether an opencode.json resolves a usable
-// credential: at least one provider entry whose options list a non-empty
-// apiKey, whether that is a Mint broker marker, an {env:...} reference, or a
-// literal key. A document that does not parse, or one whose providers all lack
-// an apiKey, authenticates nothing: it is rejected so selfcheck cannot report a
-// config mechanism that would fail the first real run.
+// credential: at least one provider entry whose options list a usable apiKey,
+// whether that is a Mint broker marker, a literal key, or an {env:...} reference
+// to a variable that is set. A document that does not parse, one whose providers
+// all lack an apiKey, or one that only references an unset variable authenticates
+// nothing: it is rejected so selfcheck cannot report a config mechanism that
+// would fail the first real run.
 func providerConfigValid(b []byte) bool {
 	var cfg openCodeConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return false
 	}
 	for _, p := range cfg.Provider {
-		if p.Options.APIKey != "" {
+		if apiKeyResolves(p.Options.APIKey) {
 			return true
 		}
 	}

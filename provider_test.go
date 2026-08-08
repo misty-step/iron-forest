@@ -128,17 +128,23 @@ func TestResolveProviderRejectsCredentiallessConfig(t *testing.T) {
 	}
 }
 
-// TestResolveProviderValidConfigPins that an operator-declared config with a
+// TestResolveProviderValidConfig pins that an operator-declared config with a
 // literal apiKey resolves as the config mechanism, preserved verbatim, and that
-// an {env:...} reference (not a Mint marker) is likewise reported as config.
+// an {env:...} reference (not a Mint marker) whose variable is set is likewise
+// reported as config. The env reference is tested against a variable other than
+// openRouterKeyVar so it exercises the config route rather than tripping the env
+// mechanism that wins for OPENROUTER_API_KEY.
 func TestResolveProviderValidConfig(t *testing.T) {
 	t.Setenv(openRouterKeyVar, "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	for _, body := range []string{
 		`{"provider":{"openrouter":{"options":{"apiKey":"sk-real-key"}}}}`,
-		`{"provider":{"openrouter":{"options":{"apiKey":"{env:OPENROUTER_API_KEY}"}}}}`,
+		`{"provider":{"openrouter":{"options":{"apiKey":"{env:CUSTOM_PROVIDER_KEY}"}}}}`,
 	} {
+		if strings.Contains(body, "{env:") {
+			t.Setenv("CUSTOM_PROVIDER_KEY", "sk-custom")
+		}
 		factory := t.TempDir()
 		oc := filepath.Join(factory, ".opencode")
 		if err := os.MkdirAll(oc, 0o755); err != nil {
@@ -154,6 +160,38 @@ func TestResolveProviderValidConfig(t *testing.T) {
 		if string(cfg) != body {
 			t.Fatalf("config must be preserved verbatim, got %s", cfg)
 		}
+	}
+}
+
+// TestResolveProviderRejectsUnsetEnvRef pins the second review fix: a config
+// that carries only an {env:...} reference to a variable that is not set must
+// not resolve. The reference string is non-empty, but opencode reads it through
+// the child environment, so with the variable unset the scrubbed child cannot
+// authenticate; selfcheck must fail loudly rather than report a config mechanism
+// that would fail the first real run.
+func TestResolveProviderRejectsUnsetEnvRef(t *testing.T) {
+	t.Setenv(openRouterKeyVar, "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CUSTOM_PROVIDER_KEY", "")
+	factory := t.TempDir()
+	oc := filepath.Join(factory, ".opencode")
+	if err := os.MkdirAll(oc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"provider":{"openrouter":{"options":{"apiKey":"{env:CUSTOM_PROVIDER_KEY}"}}}}`
+	if err := os.WriteFile(filepath.Join(oc, "opencode.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mech, _, ok := resolveProvider(factory)
+	if ok {
+		t.Fatalf("config referencing an unset env var must not resolve, got %v", mech)
+	}
+	if mech != mechNone {
+		t.Fatalf("mech = %v, want none", mech)
+	}
+	if _, err := providerMechanismReport(factory); err == nil {
+		t.Fatal("providerMechanismReport must error when the referenced variable is unset")
 	}
 }
 
@@ -249,6 +287,24 @@ func TestEnvProviderConfigResolvesDeclaredModels(t *testing.T) {
 	// The key value still never lands in the rendered config.
 	if strings.Contains(string(cfg), "sk-aaaa") {
 		t.Fatalf("env config leaked the key value: %s", cfg)
+	}
+	// The direct OpenRouter endpoint expects the fully-qualified model reference
+	// deepseek/deepseek-v4-flash-0731, not the local alias key; the Mint broker
+	// used to hide that translation, so the env config must carry it explicitly
+	// for the direct route to reach the right model.
+	for _, id := range []string{openRouterMintProviderID} {
+		p, ok := oc.Provider[id]
+		if !ok {
+			t.Fatalf("env config does not define provider %q", id)
+		}
+		m, ok := p.Models[openRouterMintModelID]
+		if !ok {
+			t.Fatalf("env config provider %q lacks model %q", id, openRouterMintModelID)
+		}
+		if m.Name != openRouterDirectModelRef {
+			t.Fatalf("env config provider %q model %q Name = %q, want direct OpenRouter ref %q",
+				id, openRouterMintModelID, m.Name, openRouterDirectModelRef)
+		}
 	}
 }
 
