@@ -70,9 +70,10 @@ type ManagerFlowConfig struct {
 	ExcludeLabels []string
 }
 
-// ProjectionConfig is the optional, one-way human surface: publish a branch as
-// a pull request and mirror decisions as comments. The factory never reads it
-// back.
+// ProjectionConfig is the optional human surface: publish a branch as a pull
+// request and mirror decisions as comments. With MergeViaHost, Verifier may
+// read a merged request for the exact Revision during recovery; Host state is
+// never factory authority.
 type ProjectionConfig struct {
 	Enabled      bool
 	MergeViaHost bool

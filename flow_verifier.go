@@ -147,6 +147,27 @@ func mergeBlocked(cfg Config, attempts int) string {
 	return ""
 }
 
+func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent, out Outcome) (Outcome, error) {
+	verdict, hasVerdict, verr := readVerdict(repoDir, reviewed)
+	checks, hasChecks, cerr := readChecks(repoDir, reviewed)
+	if verr != nil || cerr != nil || !hasVerdict || !hasChecks ||
+		verdict.Verdict != "approve" || checks.Status != "pass" {
+		out.Status = "merge_failed"
+		return out, fmt.Errorf("Host merged Revision %s without durable factory approval and passing Checks", reviewed)
+	}
+	out.Verdict = verdict.Verdict
+	if err := mergeVerified(cfg, repoDir, branch, reviewed, it, a); err != nil {
+		if errors.Is(err, errHostMergePending) {
+			out.Status = "merge_pending"
+			return out, nil
+		}
+		out.Status = "merge_failed"
+		return out, err
+	}
+	out.Status = "merged"
+	return out, nil
+}
+
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
 	if s.Kind == subjectRetirement {
 		fact, found, err := readRetirement(repoDir, s.Branch, s.Revision)
@@ -189,6 +210,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
 	if err != nil {
+		if cfg.Projection.MergeViaHost && s.Head != "" {
+			merged, pr, inspectErr := inspectProjectMerge(cfg, s.Branch, cfg.Flows.Verifier.Merge, s.Head)
+			if inspectErr == nil && merged && pr.HeadRefOID == s.Head {
+				out := Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, PRURL: pr.URL}
+				return recoverHostMergedProjection(cfg, repoDir, s.Branch, s.Head, it, a, out)
+			}
+		}
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
 	}
 	defer cleanupWorktree(repoDir, wtDir)
@@ -201,24 +229,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	out.PRURL = url
 	if hostMerged {
-		verdict, hasVerdict, verr := readVerdict(repoDir, baseSHA)
-		checks, hasChecks, cerr := readChecks(repoDir, baseSHA)
-		if verr != nil || cerr != nil || !hasVerdict || !hasChecks ||
-			verdict.Verdict != "approve" || checks.Status != "pass" {
-			out.Status = "merge_failed"
-			return out, fmt.Errorf("Host merged Revision %s without durable factory approval and passing Checks", baseSHA)
-		}
-		out.Verdict = verdict.Verdict
-		if err := mergeVerified(cfg, repoDir, s.Branch, baseSHA, it, a); err != nil {
-			if errors.Is(err, errHostMergePending) {
-				out.Status = "merge_pending"
-				return out, nil
-			}
-			out.Status = "merge_failed"
-			return out, err
-		}
-		out.Status = "merged"
-		return out, nil
+		return recoverHostMergedProjection(cfg, repoDir, s.Branch, baseSHA, it, a, out)
 	}
 	// Rebase the branch onto current master before checking or reviewing it: a
 	// Verdict and its checks must key to the exact tree that will land, not to a

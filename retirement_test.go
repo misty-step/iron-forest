@@ -403,6 +403,8 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	runGitTest(t, repo, "checkout", "-q", "master")
 	runGitTest(t, repo, "branch", "-D", branch)
+	runGitTest(t, repo, "push", "-q", "origin", "--delete", branch)
+	runGitTest(t, repo, "fetch", "-q", "--prune", "origin")
 	writeAgentFixture(t, repo, "verifier", "verifier-model")
 	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}); err != nil {
 		t.Fatal(err)

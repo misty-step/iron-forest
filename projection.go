@@ -180,17 +180,6 @@ func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	return nil
 }
 
-func observeProjectMerge(cfg Config, branch, strategy, expectedHead string) error {
-	merged, _, err := inspectProjectMerge(cfg, branch, strategy, expectedHead)
-	if err != nil {
-		return err
-	}
-	if !merged {
-		return errHostMergePending
-	}
-	return nil
-}
-
 func inspectProjectMerge(cfg Config, branch, strategy, expectedHead string) (bool, projectionPullRequest, error) {
 	if !cfg.Projection.Enabled {
 		return false, projectionPullRequest{}, errors.New("projection disabled")
@@ -204,7 +193,7 @@ func inspectProjectMerge(cfg Config, branch, strategy, expectedHead string) (boo
 	}
 	for _, pr := range merged {
 		if expectedHead == "" || pr.HeadRefOID == expectedHead {
-			return true, projectionPullRequest{}, nil
+			return true, pr, nil
 		}
 	}
 	prs, err := openProjectionPR(cfg, branch)
