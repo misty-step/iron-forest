@@ -269,7 +269,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
-	if err := mergeVerified(cfg, repoDir, s.Branch, it); err != nil {
+	if err := mergeVerified(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
 		// A branch that cannot land needs a human, not another attempt. Spend one
 		// attempt so the merge selector stops offering it, and say so on the item.
 		out.Status = "merge_failed"
@@ -364,11 +364,19 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 	return head, nil
 }
 
-// mergeVerified lands an approved branch. The host path and the git path are
-// exclusive: a protected target branch means only the host may write it, and
-// building a local commit that is then discarded would waste the work and
-// confuse the next reader.
-func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
+// mergeVerified lands an approved branch, but only the Revision that carried
+// the approving Verdict. reviewed is that exact Revision: the head the checks
+// and the Verdict key to and that rebaseOntoMaster pushed to the remote. Before
+// any merge action, fenceMergeOnRevision confirms the remote branch still points
+// at it, so newer, unreviewed work pushed in the interval is never silently
+// discarded or deleted. The host path and the git path are exclusive: a
+// protected target branch means only the host may write it, and building a local
+// commit that is then discarded would waste the work and confuse the next
+// reader.
+func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item) error {
+	if err := fenceMergeOnRevision(repoDir, branch, reviewed); err != nil {
+		return err
+	}
 	if cfg.Projection.MergeViaHost {
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
@@ -385,6 +393,16 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	_ = os.RemoveAll(mergeDir)
 	if err := git(repoDir, "worktree", "prune"); err != nil {
 		return fmt.Errorf("merge: prune: %w", err)
+	}
+	// Refresh master so the merge builds on the current tree, and capture its tip
+	// as the lease for the compare-and-set push below, closing the window between
+	// reading origin/master here and writing the merge commit to it.
+	if err := git(repoDir, "fetch", "origin", "master"); err != nil {
+		return fmt.Errorf("merge: fetch master: %w", err)
+	}
+	masterTip, err := gitOut(repoDir, "rev-parse", "origin/master")
+	if err != nil {
+		return fmt.Errorf("merge: origin/master: %w", err)
 	}
 	if err := git(repoDir, "worktree", "add", "--detach", mergeDir, "origin/master"); err != nil {
 		return fmt.Errorf("merge: worktree: %w", err)
@@ -406,10 +424,31 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	default:
 		return fmt.Errorf("merge: unsupported strategy %q", cfg.Flows.Verifier.Merge)
 	}
-	if err := git(mergeDir, "push", "origin", "HEAD:master"); err != nil {
+	if err := git(mergeDir, "push", "--force-with-lease=refs/heads/master:"+masterTip, "origin", "HEAD:master"); err != nil {
 		return fmt.Errorf("merge: push: %w", err)
 	}
 	return finishMerge(cfg, repoDir, branch, it)
+}
+
+// fenceMergeOnRevision refuses a merge the moment the remote branch no longer
+// points at the Revision that carried the approving Verdict. It fetches the
+// branch and compares its observed tip to the reviewed Revision, so a second
+// checkout, a manual run, or an operator pushing a new head in the review-to-merge
+// interval is never silently discarded. On a mismatch it returns an error naming
+// both Revisions and leaves the branch untouched for a fresh review; it never
+// deletes the branch or merges the stale tree.
+func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
+	if err := git(repoDir, "fetch", "origin", branch); err != nil {
+		return fmt.Errorf("merge: fetch %s: %w", branch, err)
+	}
+	observed, err := gitOut(repoDir, "rev-parse", "origin/"+branch)
+	if err != nil {
+		return fmt.Errorf("merge: observed tip of %s: %w", branch, err)
+	}
+	if observed != reviewed {
+		return fmt.Errorf("merge refused: branch %s advanced to %s after its approving Verdict on reviewed Revision %s; re-review the new head", branch, observed, reviewed)
+	}
+	return nil
 }
 
 // finishMerge retires a landed subject: the branch is gone and the item is
