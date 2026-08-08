@@ -345,6 +345,22 @@ func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
 	if hostToolchain {
 		env = append(env, checkHostEnv()...)
 	}
+	// The environment-key credential (see openRouterKeyVar) reaches an agent run
+	// so opencode can resolve the {env:...} reference in the staged provider
+	// config. It is carried only on agent runs, never a check run: a check runs
+	// arbitrary declared commands, and handing them the provider key would leak
+	// a credential beyond the worktree. Instead a check run carries only the
+	// non-secret providerEnvActiveVar marker when the env route is active, so a
+	// declared selfcheck reports the same mechanism the agents resolve without
+	// ever seeing the key value. The value rides in the child environment and is
+	// never written to disk or logged.
+	if !hostToolchain {
+		if v := os.Getenv(openRouterKeyVar); v != "" {
+			env = append(env, openRouterKeyVar+"="+v)
+		}
+	} else if os.Getenv(openRouterKeyVar) != "" {
+		env = append(env, providerEnvActiveVar+"=1")
+	}
 	return env, cleanup, nil
 }
 

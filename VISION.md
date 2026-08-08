@@ -55,9 +55,13 @@ state. Projection is optional; when enabled it publishes a branch and mirrors
 each decision as a comment, and it reads the open pull-request list so it does
 not create a second one.
 
-Agents run through opencode. Credentials are Mint markers in the opencode
-configuration. No `.env` adapter ships. An agent run carries no credential of
-its own: the controller is the only caller of the Tracker and the only writer.
+Agents run through opencode. Credentials resolve from an OpenRouter key in the
+environment (`OPENROUTER_API_KEY`) by default; a Mint broker marker in the
+opencode configuration is the operator's alternative base-URL route, not a
+requirement. `forest selfcheck` reports which mechanism is active and fails
+loudly when none resolves. The key value is never written to disk or logged. An
+agent run carries no credential of its own: the controller is the only caller of
+the Tracker and the only writer.
 
 The factory's own source is separate from the repositories it manages, so a
 managed repository may be in any language. Only the instance that manages that

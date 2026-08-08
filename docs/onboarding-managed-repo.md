@@ -14,7 +14,9 @@ was needed; none is decoration.
 - `gh` authenticated for the target repository, with `repo` scope. The controller
   is the only caller of the Tracker; an agent run never receives this credential.
 - An opencode provider route the agents can reach. On this machine that is Mint
-  markers in the opencode configuration.
+  markers in the opencode configuration. An operator without a Mint route
+  instead supplies an OpenRouter key in `OPENROUTER_API_KEY`, which is the
+  first-install path; `forest selfcheck` reports which mechanism is active.
 - The repository's own tools installed on the **host**. See step 5: a check child
   has a scrubbed `PATH`, so "the host has cargo" is not sufficient by itself.
 - The checkout is a sibling of the factory source:

@@ -276,7 +276,12 @@ func cmdSelfcheck(repoDir string) int {
 		fmt.Fprintln(os.Stderr, "forest selfcheck: no agents under agents/")
 		return 1
 	}
-	fmt.Printf("forest %s selfcheck: ok\n", version)
+	report, err := providerMechanismReport(repoDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
+		return 1
+	}
+	fmt.Printf("forest %s selfcheck: ok (%s)\n", version, report)
 	return 0
 }
 

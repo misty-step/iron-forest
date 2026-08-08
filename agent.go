@@ -255,30 +255,21 @@ func newRunConfigDir(repoDir string, a *Agent) (string, error) {
 	return cfgDir, nil
 }
 
-// preserveProviderConfig copies the provider configuration a real run actually
+// preserveProviderConfig stages the provider configuration a real run actually
 // uses into cfgDir as opencode.json, so the per-run config root keeps the
-// provider route the run needs under XDG_CONFIG_HOME. The first source is the
-// factory project's own .opencode/opencode.json (the one this program ships and
-// where the operator declares the provider route and key alias); if the factory
-// ships none, the operator's global opencode config is the fallback. Every
-// source is outside every worktree, so a managed repository never has to carry
-// it. A configuration the run can supply from elsewhere (for example the managed
-// repository's own project config) does not require one here: a missing file is
-// tolerated, not an error.
+// provider route the run needs under XDG_CONFIG_HOME. The active credential
+// mechanism is resolved by resolveProvider: the environment-key mechanism takes
+// precedence (an operator with no Mint route supplies OPENROUTER_API_KEY and the
+// staged config references it without embedding the value), then the factory
+// project's own .opencode/opencode.json with its Mint broker marker, then the
+// operator's global opencode config. Every file source is outside every
+// worktree, so a managed repository never has to carry it. A configuration the
+// run cannot resolve is tolerated here, not an error: selfcheck is where a
+// missing credential fails loudly.
 func preserveProviderConfig(cfgDir, repoDir string) error {
-	src := projectProviderConfigPath(repoDir)
-	if src == "" {
-		src = openCodeProviderConfigPath()
-	}
-	if src == "" {
+	_, b, ok := resolveProvider(repoDir)
+	if !ok {
 		return nil
-	}
-	b, err := os.ReadFile(src)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read provider config %s: %w", src, err)
 	}
 	if err := os.WriteFile(filepath.Join(cfgDir, "opencode.json"), b, 0o600); err != nil {
 		return fmt.Errorf("stage opencode provider config into run config: %w", err)
