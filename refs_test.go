@@ -2,53 +2,8 @@ package main
 
 import (
 	"errors"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 )
-
-func runGitTest(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmdArgs := args
-	if dir != "" {
-		cmdArgs = append([]string{"-C", dir}, args...)
-	}
-	cmd := exec.Command("git", cmdArgs...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v: %s", cmdArgs, err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func startTestProcess(t *testing.T, cmd *exec.Cmd) (<-chan error, func()) {
-	t.Helper()
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	waited := false
-	t.Cleanup(func() {
-		if !waited {
-			_ = cmd.Process.Kill()
-			<-done
-		}
-	})
-	return done, func() { waited = true }
-}
-
-func newRefGitRepo(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote.git")
-	repo := filepath.Join(root, "repo")
-	runGitTest(t, root, "init", "--bare", remote)
-	runGitTest(t, root, "init", repo)
-	runGitTest(t, repo, "remote", "add", "origin", remote)
-	return repo
-}
 
 func TestBlobRefCreateReadAndCompareAndSet(t *testing.T) {
 	repo := newRefGitRepo(t)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -80,6 +81,7 @@ func gitOutRaw(repo string, args ...string) (string, error) {
 }
 
 func gitCommit(wtDir string, id CommitIdentity, msg string) error {
+	msg = redactSecretShaped(msg)
 	cmd := exec.Command("git",
 		"-c", "user.name="+id.Name,
 		"-c", "user.email="+id.Email,
@@ -128,13 +130,73 @@ func gitAsCommitter(repo string, id CommitIdentity, args ...string) error {
 	return nil
 }
 
+// encodeBranchID renders a tracker id as a forest branch's id segment. The
+// branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as they
+// always have. The segment must be valid in a git refname and in a filesystem
+// path, so every byte outside a small safe set is escaped as %XX; '%' itself is
+// always escaped so the decoder can treat any '%' as the start of an escape.
+// The delimiter on the way back is the first '-', so '-' is escaped too. Numeric
+// ids and hyphen-free alphanumeric Habitat ids contain only safe bytes, so their
+// branches are unchanged.
+func encodeBranchID(id string) string {
+	var b strings.Builder
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if isBranchIDByte(c) {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// isBranchIDByte reports whether c can appear literally in a forest branch's id
+// segment. Only bytes valid in a git refname and in a file path are kept; '/' and
+// other path separators, control bytes, whitespace, and git's special characters
+// are escaped so any opaque id derives a usable worktree and branch.
+func isBranchIDByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c == '_'
+}
+
+// decodeBranchID reverses encodeBranchID in a single left-to-right pass. '%'
+// always begins a two-hex-digit escape, so an id containing the literal escape
+// sequence `%2D` (encoded as `%252D`) reconstructs to `%2D`, never to a stray
+// '-'; the mapping is bijective and any opaque id round-trips.
+func decodeBranchID(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// itemIDFromBranch recovers the opaque item identity from a forest branch,
+// undoing encodeBranchID on the id segment. It never assumes the segment is an
+// integer: it stays a numeric GitHub id or a Habitat id as written.
+func itemIDFromBranch(branch string) string {
+	name := strings.TrimPrefix(branch, BranchPrefix)
+	if i := strings.IndexByte(name, '-'); i >= 0 {
+		name = name[:i]
+	}
+	return decodeBranchID(name)
+}
+
 // createWorktree makes a fresh linked worktree for one item at the remote tip.
 // The branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as
 // they always have; the id segment is opaque and escaped (encodeBranchID), so a
 // non-numeric tracker id — even one containing the '-' delimiter — derives an
 // equally valid, reverse-lookup-able branch.
 func createWorktree(repo, workspace, id, title string) (wtDir, branch, baseSHA string, err error) {
-	branch = fmt.Sprintf("%s%s-%s", BranchPrefix, encodeBranchID(id), slug(title))
+	branch = fmt.Sprintf("%s%s-%s", BranchPrefix, encodeBranchID(id), slug(redactSecretShaped(title)))
 	wtDir = filepath.Join(workspace, "worktrees", branch)
 	if err = trackWorktree(wtDir); err != nil {
 		return "", "", "", err

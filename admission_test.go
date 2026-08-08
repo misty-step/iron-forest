@@ -17,18 +17,6 @@ import (
 
 const admissionTestRepo = "test/admission"
 
-func newAdmissionRepositories(t *testing.T) (repoA, repoB string) {
-	t.Helper()
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote.git")
-	repoA = filepath.Join(root, "a")
-	repoB = filepath.Join(root, "b")
-	runGitTest(t, root, "init", "--bare", "--initial-branch=master", remote)
-	runGitTest(t, root, "clone", remote, repoA)
-	runGitTest(t, root, "clone", remote, repoB)
-	return repoA, repoB
-}
-
 func putTestAdmissionClaim(t *testing.T, repo, key, host string) {
 	t.Helper()
 	body, err := json.Marshal(admissionClaim{

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,20 @@ func TestLedgerReadsLegacyIntegerAndOpaqueStringIssue(t *testing.T) {
 	}
 	if runs[1].ID != "hab_01J9X" {
 		t.Errorf("opaque string row id = %q, want hab_01J9X", runs[1].ID)
+	}
+}
+func TestAppendRunRedactsError(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	dir := t.TempDir()
+	if err := appendRun(dir, runRecord{Flow: "builder", Status: "failed", Error: "provider rejected " + secret}); err != nil {
+		t.Fatal(err)
+	}
+	rows, invalid, err := loadLedger(filepath.Join(dir, "runs.jsonl"))
+	if err != nil || invalid != 0 || len(rows) != 1 {
+		t.Fatalf("load redacted Ledger = (%#v, %d, %v)", rows, invalid, err)
+	}
+	if strings.Contains(rows[0].Error, secret) || !strings.Contains(rows[0].Error, secretRedacted) {
+		t.Fatalf("Ledger error = %q, want marker without original", rows[0].Error)
 	}
 }
 

@@ -66,6 +66,9 @@ func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (stri
 		return "", false, err
 	}
 	if len(prs) > 0 {
+		if expectedHead != "" && prs[0].HeadRefOID != "" && prs[0].HeadRefOID != expectedHead {
+			return "", false, fmt.Errorf("%w: open pull request for branch %q moved to %s after reviewed Revision %s", errHostMergeUnavailable, branch, prs[0].HeadRefOID, expectedHead)
+		}
 		return prs[0].URL, false, nil
 	}
 	if expectedHead != "" {
@@ -136,8 +139,9 @@ func projectChecks(cfg Config, branch string, c checksNote) error {
 	if len(prs) == 0 {
 		return nil
 	}
+	body := redactSecretShaped(checksSummary(c) + "\n\n" + verdictBody(verdictNote{Verdict: "pending"}, c))
 	_, err = projectionCommand("pr", "comment", strconv.Itoa(prs[0].Number),
-		"-R", cfg.Repo, "--body", checksSummary(c)+"\n\n"+verdictBody(verdictNote{Verdict: "pending"}, c))
+		"-R", cfg.Repo, "--body", body)
 	return err
 }
 

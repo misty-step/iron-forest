@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
+
+var errRetirementStale = errors.New("retirement intent is stale")
 
 const retirementRefPrefix = "refs/forest/retirement/"
 
@@ -82,6 +86,7 @@ func validateRetirementRecord(ref string, record retirementRecord) error {
 }
 
 func prepareRetirement(repoDir string, record retirementRecord) (retirementFact, error) {
+	record.Title = redactSecretShaped(record.Title)
 	ref := retirementRef(record.Branch, record.Revision)
 	if err := validateRetirementRecord(ref, record); err != nil {
 		return retirementFact{}, err
@@ -116,6 +121,7 @@ func readRetirement(repoDir, branch, revision string) (retirementFact, bool, err
 }
 
 func recordRetirement(repoDir string, record retirementRecord) (retirementFact, error) {
+	record.Title = redactSecretShaped(record.Title)
 	ref := retirementRef(record.Branch, record.Revision)
 	if err := validateRetirementRecord(ref, record); err != nil {
 		return retirementFact{}, err
@@ -221,6 +227,196 @@ func retirementItemIDs(repoDir string) ([]string, error) {
 func dropRetirement(repoDir string, fact retirementFact) error {
 	if err := deleteRef(repoDir, fact.Ref, fact.SHA); err != nil {
 		return fmt.Errorf("drop retirement: %w", err)
+	}
+	return nil
+}
+
+// mergeVerified lands only the Revision that carried the approving Verdict.
+// A retirement fact makes the multi-system effect resumable. Git writes its
+// landed fact atomically with master. The host path writes pending intent first,
+// then promotes it after the host reports the exact reviewed head as merged.
+func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
+	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
+		return err
+	} else if found {
+		return recoverRetirementFact(cfg, repoDir, fact, it)
+	}
+	if cfg.Projection.MergeViaHost {
+		// The Host request's exact head is the revision fence. This path also
+		// recovers after the Host merged and deleted the source branch.
+		return mergeHostPath(cfg, repoDir, branch, reviewed, it, a)
+	}
+	if err := fenceMergeOnRevision(repoDir, branch, reviewed); err != nil {
+		return err
+	}
+	return mergeGitPath(cfg, repoDir, branch, reviewed, it, a)
+}
+
+func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
+	fact, err := recordRetirement(repoDir, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
+		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "pending",
+		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
+	})
+	if err != nil {
+		return err
+	}
+	_, hostMerged, err := projectBranch(cfg, it, branch,
+		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), reviewed)
+	if err != nil {
+		if errors.Is(err, errHostMergeUnavailable) {
+			if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
+				return fmt.Errorf("merge: projection stale: %v; drop pending retirement: %w", err, dropErr)
+			}
+			return fmt.Errorf("%w: %v", errRetirementStale, err)
+		}
+		return fmt.Errorf("%w: %v", errHostMergePending, err)
+	}
+	if !hostMerged {
+		err = projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed)
+	}
+	if err != nil {
+		if errors.Is(err, errHostMergeUnavailable) {
+			if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
+				return fmt.Errorf("merge: projection stale: %v; drop pending retirement: %w", err, dropErr)
+			}
+			return fmt.Errorf("%w: %v", errRetirementStale, err)
+		}
+		return fmt.Errorf("%w: %v", errHostMergePending, err)
+	}
+	fact, err = landRetirement(repoDir, fact)
+	if err != nil {
+		return err
+	}
+	return finishRetirement(cfg, repoDir, fact, it)
+}
+
+// mergeGitPath commits the retirement fact in the same atomic push that
+// advances master. A retry therefore skips merge construction and resumes at
+// Tracker retirement, including squash merges whose tree is already on master.
+func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
+	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
+		return err
+	} else if found {
+		return recoverRetirementFact(cfg, repoDir, fact, it)
+	}
+	workspace := workspaceDir(repoDir)
+	mergeDir := filepath.Join(workspace, "worktrees", "merge-"+slug(branch))
+	if err := trackWorktree(mergeDir); err != nil {
+		return fmt.Errorf("merge: %w", err)
+	}
+	defer cleanupWorktree(repoDir, mergeDir)
+	_ = os.RemoveAll(mergeDir)
+	if err := git(repoDir, "worktree", "prune"); err != nil {
+		return fmt.Errorf("merge: prune: %w", err)
+	}
+	if err := git(repoDir, "fetch", "origin", "master"); err != nil {
+		return fmt.Errorf("merge: fetch master: %w", err)
+	}
+	masterTip, err := gitOut(repoDir, "rev-parse", "origin/master")
+	if err != nil {
+		return fmt.Errorf("merge: origin/master: %w", err)
+	}
+	if err := git(repoDir, "worktree", "add", "--detach", mergeDir, "origin/master"); err != nil {
+		return fmt.Errorf("merge: worktree: %w", err)
+	}
+	switch cfg.Flows.Verifier.Merge {
+	case "squash":
+		if err := git(mergeDir, "merge", "--squash", reviewed); err != nil {
+			return fmt.Errorf("merge: squash: %w", err)
+		}
+		if err := gitCommit(mergeDir, a.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
+			return fmt.Errorf("merge: commit: %w", err)
+		}
+	case "ff":
+		if err := git(mergeDir, "merge", "--ff-only", reviewed); err != nil {
+			return fmt.Errorf("merge: ff: %w", err)
+		}
+	default:
+		return fmt.Errorf("merge: unsupported strategy %q", cfg.Flows.Verifier.Merge)
+	}
+	fact, err := prepareRetirement(repoDir, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "git",
+		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "landed",
+		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
+	})
+	if err != nil {
+		return err
+	}
+	if err := git(mergeDir, "push", "--atomic",
+		"--force-with-lease=refs/heads/master:"+masterTip,
+		"--force-with-lease=refs/heads/"+branch+":"+reviewed,
+		"--force-with-lease="+fact.Ref+":",
+		"origin", "HEAD:master", reviewed+":refs/heads/"+branch, fact.SHA+":"+fact.Ref); err != nil {
+		return fmt.Errorf("merge: push: %w", err)
+	}
+	return finishRetirement(cfg, repoDir, fact, it)
+}
+func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it Item) error {
+	record := fact.Record
+	if record.ItemID != it.ID || record.Branch == "" || record.Revision == "" {
+		return fmt.Errorf("retirement %s does not match item %q", fact.Ref, it.ID)
+	}
+	if record.State == "pending" {
+		if record.Transport != "host" {
+			return fmt.Errorf("retirement %s is pending without Host transport", fact.Ref)
+		}
+		_, hostMerged, err := projectBranch(cfg, it, record.Branch,
+			fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), record.Revision)
+		if err == nil && !hostMerged {
+			err = projectMerge(cfg, record.Branch, record.Strategy, record.Revision)
+		}
+		if err != nil {
+			if errors.Is(err, errHostMergeUnavailable) {
+				if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
+					return fmt.Errorf("merge: stale Host retirement: %v; drop intent: %w", err, dropErr)
+				}
+				return fmt.Errorf("%w: %v", errRetirementStale, err)
+			}
+			return fmt.Errorf("%w: %v", errHostMergePending, err)
+		}
+		var landErr error
+		fact, landErr = landRetirement(repoDir, fact)
+		if landErr != nil {
+			return landErr
+		}
+	}
+	return finishRetirement(cfg, repoDir, fact, it)
+}
+
+func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) error {
+	record := fact.Record
+	// The durable retirement fact replaces the source branch as recovery
+	// evidence. Delete the exact reviewed branch first, so an advanced branch is
+	// refused before the Tracker item closes and a failed Close stays resumable.
+	if err := deleteReviewedBranch(repoDir, record.Branch, record.Revision); err != nil {
+		return err
+	}
+	// The marker excludes the item from Builder selection until both Tracker
+	// retirement and its attempt cleanup finish.
+	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
+		return fmt.Errorf("merge: close item: %w", err)
+	}
+	if err := dropAttempts(repoDir, "branch-"+record.Branch); err != nil {
+		return fmt.Errorf("merge: drop attempt record: %w", err)
+	}
+	return dropRetirement(repoDir, fact)
+}
+
+func deleteReviewedBranch(repoDir, branch, reviewed string) error {
+	out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return fmt.Errorf("merge: inspect branch %s: %w", branch, err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return nil
+	}
+	if fields[0] != reviewed {
+		return fmt.Errorf("%w: merge: branch %s advanced to %s before retirement of %s", errRetirementStale, branch, fields[0], reviewed)
+	}
+	if err := deleteRef(repoDir, "refs/heads/"+branch, reviewed); err != nil {
+		return fmt.Errorf("merge: delete branch %s (wanted %s): %w", branch, reviewed, err)
 	}
 	return nil
 }

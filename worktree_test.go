@@ -12,34 +12,6 @@ import (
 	"testing"
 )
 
-// setupTestRepo builds a throwaway repository with a real origin, because
-// createWorktree resolves its base from the remote tip and a fixture without a
-// remote would prove nothing about the path the flows actually take.
-func setupTestRepo(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	origin := filepath.Join(root, "origin.git")
-	repo := filepath.Join(root, "work")
-	if err := os.MkdirAll(origin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, origin, "init", "--bare", "-b", "master")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, repo, "init", "-b", "master")
-	runGitTest(t, repo, "config", "user.email", "test@example.com")
-	runGitTest(t, repo, "config", "user.name", "test")
-	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, repo, "add", "file.txt")
-	runGitTest(t, repo, "commit", "-m", "init")
-	runGitTest(t, repo, "remote", "add", "origin", origin)
-	runGitTest(t, repo, "push", "-q", "-u", "origin", "master")
-	return repo
-}
-
 // currentWorktrees lists the worktree paths git has registered for a repo.
 func currentWorktrees(t *testing.T, repo string) []string {
 	t.Helper()
@@ -154,6 +126,21 @@ func TestCreateWorktreeStartsAtTheRemoteTip(t *testing.T) {
 	}
 	if want := "forest/5-tip"; branch != want {
 		t.Fatalf("branch = %q, want %q", branch, want)
+	}
+}
+func TestCreateWorktreeRedactsTitleBeforeBranchSlug(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	repo := setupTestRepo(t)
+	wtDir, branch, _, err := createWorktree(repo, filepath.Join(repo, WorkspaceDir), "6", "change "+secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeWorktree(repo, wtDir)
+	if strings.Contains(branch, secret) {
+		t.Fatalf("branch %q retained the title secret", branch)
+	}
+	if branch != "forest/6-change-redacted" {
+		t.Fatalf("branch = %q, want redacted slug forest/6-change-redacted", branch)
 	}
 }
 
@@ -291,5 +278,21 @@ func TestGitCommitIgnoresAmbientIdentity(t *testing.T) {
 	want := "declared agent <declared@example.invalid>|declared agent <declared@example.invalid>"
 	if got != want {
 		t.Fatalf("commit identities = %q, want %q", got, want)
+	}
+}
+func TestGitCommitRedactsMessage(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	repo := setupTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "secret-message.txt"), []byte("change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "add", "secret-message.txt")
+	id := CommitIdentity{Name: "declared agent", Email: "declared@example.invalid"}
+	if err := gitCommit(repo, id, "publish "+secret); err != nil {
+		t.Fatal(err)
+	}
+	got := runGitTest(t, repo, "show", "-s", "--format=%s", "HEAD")
+	if strings.Contains(got, secret) || !strings.Contains(got, secretRedacted) {
+		t.Fatalf("commit message = %q, want marker without original", got)
 	}
 }

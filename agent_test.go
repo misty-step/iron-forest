@@ -30,27 +30,6 @@ func renderCfg(t *testing.T, prefix string) string {
 	return dir
 }
 
-func writeAgentFixture(t *testing.T, repoDir, name, model string) {
-	t.Helper()
-	dir := filepath.Join(repoDir, DefaultAgentsDir, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	yaml := "description: " + name + "\ncommit:\n  name: " + name + "\n  email: " + name + "@example.invalid\nmodel: " + model + "\ndeadline_seconds: 3600\n"
-	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "instructions.md"), []byte("do the work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte("{{.Task}}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "report.schema.json"), []byte("{\"type\":\"object\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestRenderMarkdownCarriesVariant(t *testing.T) {
 	cfgDir := renderCfg(t, "forest-opencode-config-")
 	wtDir := t.TempDir()

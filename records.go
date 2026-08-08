@@ -186,6 +186,16 @@ func stalledOn(repoDir, flow, subject, revision string) (bool, error) {
 
 // recordStalled increments the durable failure count with compare-and-swap.
 func recordStalled(repoDir, flow, subject, revision string) error {
+	return writeStalled(repoDir, flow, subject, revision, false)
+}
+
+// recordTerminalStall sets the brake immediately for a failure that cannot
+// succeed again on the same Revision.
+func recordTerminalStall(repoDir, flow, subject, revision string) error {
+	return writeStalled(repoDir, flow, subject, revision, true)
+}
+
+func writeStalled(repoDir, flow, subject, revision string, terminal bool) error {
 	if revision == "" {
 		return errors.New("stalled: empty revision")
 	}
@@ -197,13 +207,22 @@ func recordStalled(repoDir, flow, subject, revision string) error {
 			return err
 		}
 		record := stalledRecord{Revision: revision, Count: 1}
+		if terminal {
+			record.Count = stalledRunLimit
+		}
 		if strings.TrimSpace(body) != "" {
 			var previous stalledRecord
 			if err := json.Unmarshal([]byte(body), &previous); err != nil {
 				return fmt.Errorf("decode stalled record: %w", err)
 			}
 			if previous.Revision == revision {
-				record.Count = previous.Count + 1
+				if terminal {
+					if previous.Count > record.Count {
+						record.Count = previous.Count
+					}
+				} else {
+					record.Count = previous.Count + 1
+				}
 			}
 		}
 		payload, err := json.Marshal(record)
@@ -246,6 +265,21 @@ func appendRun(workspace string, r runRecord) error {
 		return err
 	}
 	defer f.Close()
+	r.Time = redactSecretShaped(r.Time)
+	r.RunID = redactSecretShaped(r.RunID)
+	r.Flow = redactSecretShaped(r.Flow)
+	r.Subject = redactSecretShaped(r.Subject)
+	r.Revision = redactSecretShaped(r.Revision)
+	r.ID = redactSecretShaped(r.ID)
+	r.Branch = redactSecretShaped(r.Branch)
+	r.PRURL = redactSecretShaped(r.PRURL)
+	r.Status = redactSecretShaped(r.Status)
+	r.Agent = redactSecretShaped(r.Agent)
+	r.Model = redactSecretShaped(r.Model)
+	r.BaseSHA = redactSecretShaped(r.BaseSHA)
+	r.DefSHA = redactSecretShaped(r.DefSHA)
+	r.ReviewVerdict = redactSecretShaped(r.ReviewVerdict)
+	r.Error = redactSecretShaped(r.Error)
 	enc := json.NewEncoder(f)
 	return enc.Encode(r)
 }

@@ -8,6 +8,17 @@ import (
 	"testing"
 )
 
+func newVerifierBranch(t *testing.T, branch string) (repo, namedBranch, reviewed, masterBefore string) {
+	t.Helper()
+	repo = setupTestRepo(t)
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), branch+"\n")
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	return repo, branch, remoteBranchHead(t, repo, branch), remoteBranchHead(t, repo, "master")
+}
+
 func testRetirementRecord(branch, revision, itemID string) retirementRecord {
 	return retirementRecord{
 		Branch: branch, Revision: revision, ItemID: itemID,
@@ -109,6 +120,31 @@ func TestRetirementRecordAllowsEmptyTitleSlug(t *testing.T) {
 	record := testRetirementRecord("forest/9-", strings.Repeat("b", 40), "9")
 	if _, err := recordRetirement(repo, record); err != nil {
 		t.Fatalf("empty title slug record: %v", err)
+	}
+}
+
+func TestRetirementWritersRedactMutableTitle(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	for name, writeFact := range map[string]func(string, retirementRecord) (retirementFact, error){
+		"prepared": prepareRetirement,
+		"recorded": recordRetirement,
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newRefGitRepo(t)
+			record := testRetirementRecord("forest/9-change", strings.Repeat("b", 40), "9")
+			record.Title = "change " + secret
+			fact, err := writeFact(repo, record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := runGitTest(t, repo, "cat-file", "-p", fact.SHA)
+			if strings.Contains(body, secret) || !strings.Contains(body, secretRedacted) {
+				t.Fatalf("retirement fact retained mutable credential-shaped title: %s", body)
+			}
+			if fact.Record.Title != "change "+secretRedacted {
+				t.Fatalf("retirement record title = %q, want redacted title", fact.Record.Title)
+			}
+		})
 	}
 }
 
@@ -254,6 +290,57 @@ func TestMergeGitPathPinsReviewedRevision(t *testing.T) {
 			t.Fatalf("branch tip = %s, want the newer commits %s intact", got, observed)
 		}
 	})
+}
+
+// TestFenceMergeOnReviewedRevision pins item #188: a merge may land only the
+// Revision that carried the approving Verdict. An unchanged remote branch passes
+// the fence; a branch that advanced after the Verdict is refused with both
+// Revisions named, and mergeVerified leaves the branch with its newer commits
+// intact rather than deleting it.
+func TestFenceMergeOnReviewedRevision(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	reviewed := remoteBranchHead(t, repo, branch)
+
+	// An unchanged remote branch is exactly the reviewed Revision: it passes.
+	if err := fenceMergeOnRevision(repo, branch, reviewed); err != nil {
+		t.Fatalf("unchanged branch refused by the fence: %v", err)
+	}
+
+	// The operator pushes newer, unreviewed work after the Verdict was written.
+	runGitTest(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "later.txt"), "later\n")
+	runGitTest(t, repo, "add", "later.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "newer unreviewed work")
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+	observed := remoteBranchHead(t, repo, branch)
+	if observed == reviewed {
+		t.Fatalf("branch did not advance, cannot probe the fence")
+	}
+
+	if err := fenceMergeOnRevision(repo, branch, reviewed); err == nil {
+		t.Fatalf("advanced branch passed the fence")
+	} else if !strings.Contains(err.Error(), reviewed[:8]) || !strings.Contains(err.Error(), observed[:8]) {
+		t.Fatalf("refusal %q does not name both the reviewed (%s) and observed (%s) Revisions", err, reviewed[:8], observed[:8])
+	}
+
+	// mergeVerified must refuse without deleting the branch, so the newer,
+	// unreviewed commits survive for the next pass to review.
+	if err := mergeVerified(defaultConfig(), repo, branch, reviewed,
+		Item{ID: "9", Title: "change"}, testVerifierAgent()); err == nil {
+		t.Fatal("mergeVerified merged a branch that advanced past its reviewed Revision")
+	}
+	if out := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out == "" {
+		t.Fatal("mergeVerified deleted the branch despite refusing the merge")
+	}
+	if got := remoteBranchHead(t, repo, branch); got != observed {
+		t.Fatalf("branch tip = %s, want the newer commits %s intact", got, observed)
+	}
 }
 
 // TestMergeViaHostPinsReviewedHead pins the host path of item #188: a host merge
@@ -537,8 +624,8 @@ func TestPendingHostRetirementRecoversAfterBranchAutoDelete(t *testing.T) {
 	}
 }
 
-// TestPendingHostRetirementObservesRecordedStrategy proves recovery observes
-// the recorded merge effect without asking an open request to merge again.
+// TestPendingHostRetirementObservesRecordedStrategy proves recovery uses the
+// recorded merge strategy and exact reviewed head on a retry.
 func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	branch := "forest/11-strategy"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
@@ -554,10 +641,12 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	mergeCalls, listCalls := 0, 0
+	var mergeArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[1] == "merge" {
 			mergeCalls++
-			return nil, errors.New("recovery attempted a duplicate Host merge")
+			mergeArgs = append([]string(nil), args...)
+			return nil, errors.New("Host merge queued")
 		}
 		if len(args) >= 2 && args[1] == "list" {
 			listCalls++
@@ -576,10 +665,13 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	cfg.Flows.Verifier.Merge = "ff"
 	err = recoverRetirementFact(cfg, repo, fact, Item{ID: "11", Title: "strategy"})
 	if !errors.Is(err, errHostMergePending) {
-		t.Fatalf("pending retirement observation = %v, want merge pending", err)
+		t.Fatalf("pending retirement retry = %v, want merge pending", err)
 	}
-	if mergeCalls != 0 || listCalls == 0 {
-		t.Fatalf("recovery effects: merge=%d list=%d, want no merge and an observation", mergeCalls, listCalls)
+	if mergeCalls != 1 || listCalls == 0 {
+		t.Fatalf("recovery effects: merge=%d list=%d, want one merge and observation", mergeCalls, listCalls)
+	}
+	if !hasArgumentPair(mergeArgs, "--match-head-commit", reviewed) {
+		t.Fatalf("queued Host merge args %v do not pin reviewed Revision %s", mergeArgs, reviewed)
 	}
 }
 
@@ -675,5 +767,176 @@ func TestRetirementRecoveryRejectsMismatchedItem(t *testing.T) {
 	}
 	if facts, err := listRetirements(repo); err != nil || len(facts) != 1 {
 		t.Fatalf("retirement facts after refusal = (%#v, %v), want one", facts, err)
+	}
+}
+
+func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T) {
+	branch := "forest/13-queued"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	fact, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "13", Transport: "host",
+		Strategy: "squash", Title: "queued", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "13", Title: "queued"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	created, merged := false, false
+	createCalls, mergeCalls := 0, 0
+	var mergeHeads []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) < 2 {
+			return nil, errors.New("unexpected Host command")
+		}
+		switch args[1] {
+		case "create":
+			createCalls++
+			created = true
+			return []byte("https://github.com/owner/repo/pull/13"), nil
+		case "merge":
+			mergeCalls++
+			if hasArgumentPair(args, "--match-head-commit", reviewed) {
+				mergeHeads = append(mergeHeads, reviewed)
+			}
+			return nil, nil
+		case "list":
+			state := ""
+			for i := range args[:len(args)-1] {
+				if args[i] == "--state" {
+					state = args[i+1]
+				}
+			}
+			pr := `[{"number":13,"url":"https://github.com/owner/repo/pull/13","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`
+			if state == "merged" && merged {
+				return []byte(pr), nil
+			}
+			if state == "open" && created {
+				return []byte(pr), nil
+			}
+			return []byte(`[]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Merge = "squash"
+	item := Item{ID: "13", Title: "queued"}
+
+	for pass := range 2 {
+		err = recoverRetirementFact(cfg, repo, fact, item)
+		if !errors.Is(err, errHostMergePending) {
+			t.Fatalf("queued recovery pass %d = %v, want pending", pass+1, err)
+		}
+	}
+	if createCalls != 1 || mergeCalls != 2 {
+		t.Fatalf("queued recovery effects = create %d, merge %d; want one request and one exact merge per pass", createCalls, mergeCalls)
+	}
+	if len(mergeHeads) != mergeCalls {
+		t.Fatalf("queued merge heads = %v, want reviewed head on every attempt", mergeHeads)
+	}
+
+	merged = true
+	if err := recoverRetirementFact(cfg, repo, fact, item); err != nil {
+		t.Fatalf("observed queued merge recovery: %v", err)
+	}
+	if createCalls != 1 || mergeCalls != 2 {
+		t.Fatalf("observed recovery repeated effects = create %d, merge %d", createCalls, mergeCalls)
+	}
+	if _, err := tk.Get(item.ID); err == nil {
+		t.Fatal("observed recovery did not close the Tracker Item")
+	}
+	if facts, err := listRetirements(repo); err != nil || len(facts) != 0 {
+		t.Fatalf("queued retirement facts after observation = (%#v, %v), want none", facts, err)
+	}
+}
+
+type retirementTransientTracker struct{ item Item }
+
+func (t retirementTransientTracker) ListOpen() ([]Item, error)    { return []Item{t.item}, nil }
+func (t retirementTransientTracker) Get(string) (Item, error)     { return t.item, nil }
+func (t retirementTransientTracker) Comment(string, string) error { return nil }
+func (t retirementTransientTracker) Close(string) error {
+	return errors.New("Tracker transient failure")
+}
+func (t retirementTransientTracker) SetTags(string, []string, []string) error { return nil }
+
+func TestRetirementTransientFailuresRemainSelectable(t *testing.T) {
+	branch := "forest/14-transient"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "14", Transport: "git",
+		Strategy: "squash", Title: "transient", State: "landed",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker {
+		return retirementTransientTracker{item: Item{ID: "14", Title: "transient"}}
+	}
+	defer func() { trackerFor = oldTracker }()
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	subject := Subject{Key: "branch-" + branch, Kind: subjectRetirement,
+		Revision: reviewed, ID: "14", Branch: branch, Head: reviewed,
+		Item: Item{ID: "14", Title: "transient"}}
+	for pass := range stalledRunLimit + 2 {
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+			t.Fatalf("transient retirement pass %d code = %d, want failure", pass+1, code)
+		}
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || stalled {
+		t.Fatalf("transient retirement brake = %v, %v; want no terminal brake", stalled, err)
+	}
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) == 0 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("transient retirement subjects = %#v, want selectable recovery", subjects)
+	}
+}
+
+func TestRetirementStaleAdvancedBranchRecordsTerminalBrake(t *testing.T) {
+	branch := "forest/15-advanced"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "15", Transport: "git",
+		Strategy: "squash", Title: "advanced", State: "landed",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rebaseTestWriteFile(t, filepath.Join(repo, "later.txt"), "later\n")
+	runGitTest(t, repo, "add", "later.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "later")
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return newMemoryTracker() }
+	defer func() { trackerFor = oldTracker }()
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	subject := Subject{Key: "branch-" + branch, Kind: subjectRetirement,
+		Revision: reviewed, ID: "15", Branch: branch, Head: reviewed,
+		Item: Item{ID: "15", Title: "advanced"}}
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+		t.Fatalf("advanced retirement code = %d, want failure", code)
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || !stalled {
+		t.Fatalf("advanced retirement brake = %v, %v; want terminal brake", stalled, err)
 	}
 }

@@ -224,7 +224,7 @@ const maxTraceEventLabel = 200
 // traceEventLabel renders one trace line for an error message, truncated so a
 // huge event cannot bloat a ledger row. An empty trace reports "(none)".
 func traceEventLabel(line string) string {
-	line = strings.TrimSpace(line)
+	line = redactSecretShaped(strings.TrimSpace(line))
 	if line == "" {
 		return "(none)"
 	}
@@ -376,11 +376,12 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	lastTrace := ""
 	for sc.Scan() {
 		line := sc.Bytes()
-		if _, err := trace.Write(append(line, '\n')); err != nil {
+		traceLine := redactSecretShaped(string(line))
+		if _, err := trace.WriteString(traceLine + "\n"); err != nil {
 			return stats, err
 		}
 		if len(line) > 0 {
-			lastTrace = string(line)
+			lastTrace = traceLine
 		}
 		if st, ok := parseStepFinish(line); ok {
 			stats.tokensIn += st.tokensIn
@@ -408,7 +409,7 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	if waitErr != nil {
 		// A non-zero exit is a crash or a truncation. Record the status and
 		// stderr so the failure is auditable.
-		return stats, fmt.Errorf("agent exited %q: %s", waitErr, strings.TrimSpace(stderr.String()))
+		return stats, fmt.Errorf("agent exited %q: %s", waitErr, redactSecretShaped(strings.TrimSpace(stderr.String())))
 	}
 	return stats, nil
 }

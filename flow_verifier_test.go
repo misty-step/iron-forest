@@ -8,31 +8,6 @@ import (
 	"testing"
 )
 
-func rebaseTestWriteFile(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func testVerifierAgent() *Agent {
-	return &Agent{
-		Name: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("a", 16),
-		Commit: CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"},
-	}
-}
-
-func newVerifierBranch(t *testing.T, branch string) (repo, namedBranch, reviewed, masterBefore string) {
-	t.Helper()
-	repo = setupTestRepo(t)
-	runGitTest(t, repo, "checkout", "-q", "-b", branch)
-	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), branch+"\n")
-	runGitTest(t, repo, "add", "branch.txt")
-	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
-	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
-	return repo, branch, remoteBranchHead(t, repo, branch), remoteBranchHead(t, repo, "master")
-}
-
 // TestRebaseOntoMasterRebasesBehindBranch proves a branch behind master by a
 // non-conflicting commit is rebased onto origin/master and its new head pushed
 // with force, and that Act writes the checks note at the post-rebase head and
@@ -198,17 +173,6 @@ func TestRebaseOntoMasterLeavesCurrentBranchUntouched(t *testing.T) {
 	if remoteHead := remoteBranchHead(t, repo, "forest/9-current"); remoteHead != oldHead {
 		t.Fatalf("origin branch changed to %q, want unchanged %q", remoteHead, oldHead)
 	}
-}
-
-// remoteBranchHead reads the head of one branch advertised by origin.
-func remoteBranchHead(t *testing.T, repo, branch string) string {
-	t.Helper()
-	out := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/"+branch)
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		t.Fatalf("origin branch %q not found", branch)
-	}
-	return fields[0]
 }
 
 // TestVerifierSkipsHeadOwnedByTheFixer pins the spin this factory already paid
@@ -715,57 +679,6 @@ func TestVerifierReviewNamesMutationWhenPhaseErrors(t *testing.T) {
 	// No Verdict may rest on a tree the review itself changed.
 	if _, ok, rerr := readVerdict(repo, head); rerr != nil || ok {
 		t.Fatalf("verdict note on head = (found=%v, err=%v), want none when the review mutated the tree", ok, rerr)
-	}
-}
-
-// TestFenceMergeOnReviewedRevision pins item #188: a merge may land only the
-// Revision that carried the approving Verdict. An unchanged remote branch passes
-// the fence; a branch that advanced after the Verdict is refused with both
-// Revisions named, and mergeVerified leaves the branch with its newer commits
-// intact rather than deleting it.
-func TestFenceMergeOnReviewedRevision(t *testing.T) {
-	repo := setupTestRepo(t)
-	branch := "forest/9-change"
-	runGitTest(t, repo, "checkout", "-q", "-b", branch)
-	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	runGitTest(t, repo, "add", "branch.txt")
-	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
-	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
-	reviewed := remoteBranchHead(t, repo, branch)
-
-	// An unchanged remote branch is exactly the reviewed Revision: it passes.
-	if err := fenceMergeOnRevision(repo, branch, reviewed); err != nil {
-		t.Fatalf("unchanged branch refused by the fence: %v", err)
-	}
-
-	// The operator pushes newer, unreviewed work after the Verdict was written.
-	runGitTest(t, repo, "checkout", "-q", branch)
-	rebaseTestWriteFile(t, filepath.Join(repo, "later.txt"), "later\n")
-	runGitTest(t, repo, "add", "later.txt")
-	runGitTest(t, repo, "commit", "-q", "-m", "newer unreviewed work")
-	runGitTest(t, repo, "push", "-q", "origin", branch)
-	observed := remoteBranchHead(t, repo, branch)
-	if observed == reviewed {
-		t.Fatalf("branch did not advance, cannot probe the fence")
-	}
-
-	if err := fenceMergeOnRevision(repo, branch, reviewed); err == nil {
-		t.Fatalf("advanced branch passed the fence")
-	} else if !strings.Contains(err.Error(), reviewed[:8]) || !strings.Contains(err.Error(), observed[:8]) {
-		t.Fatalf("refusal %q does not name both the reviewed (%s) and observed (%s) Revisions", err, reviewed[:8], observed[:8])
-	}
-
-	// mergeVerified must refuse without deleting the branch, so the newer,
-	// unreviewed commits survive for the next pass to review.
-	if err := mergeVerified(defaultConfig(), repo, branch, reviewed,
-		Item{ID: "9", Title: "change"}, testVerifierAgent()); err == nil {
-		t.Fatal("mergeVerified merged a branch that advanced past its reviewed Revision")
-	}
-	if out := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out == "" {
-		t.Fatal("mergeVerified deleted the branch despite refusing the merge")
-	}
-	if got := remoteBranchHead(t, repo, branch); got != observed {
-		t.Fatalf("branch tip = %s, want the newer commits %s intact", got, observed)
 	}
 }
 

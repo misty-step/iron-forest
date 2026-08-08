@@ -11,7 +11,7 @@ Each lane uses its own interval. The process excludes duplicate work on one Subj
 | Flow | Selector | Effects |
 | --- | --- | --- |
 | Builder | Eligible Tracker items without a forest branch and without configured exclude labels. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It may create a Projection. |
-| Verifier | Forest branches with no Verdict, or approved branches with passing Checks. | Runs the configured Checks, writes the Checks note, obtains an independent Verdict, and can merge an approved branch. |
+| Verifier | Pending retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and attempts remain. | Runs the configured Checks, writes the Checks note, obtains an independent Verdict, recovers pending merge effects, and can merge an approved branch. |
 | Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit. | Runs the Builder on the branch, passes the Gate, pushes the repair, and records the attempt. An exhausted branch gets `forest:failed` for a human. |
 | Manager | Filtered unstarted Tracker items. | Picks one candidate and applies the ready label for the Builder. |
 
@@ -143,7 +143,7 @@ Building the wrong thing is worse than not building: Iron Forest does not guess 
 stack. If a `checks:` command's tool is missing, the check fails and the note
 names the command that could not start.
 
-`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` controls the merge Effect. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
+`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` makes an approved, passing branch eligible for Verifier merge when attempts remain; when false, that branch remains for an operator, while fresh branches still run Checks and review. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
 
 ## Requirements
 

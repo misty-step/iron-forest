@@ -613,6 +613,63 @@ func TestManagerRecordsTokensOnPromotion(t *testing.T) {
 	}
 }
 
+// TestManagerWithdrawsReadyForNewExclusion proves a policy label added after
+// promotion withdraws only the Manager ready label, while another assignment
+// without that label keeps its ready slot.
+func TestManagerWithdrawsReadyForNewExclusion(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", Title: "alpha", UpdatedAt: "u1", Body: "clear scope"})
+
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		return managerReport{Pick: "1"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	cfg := managerFlowConfig(repo)
+	cfg.Flows.Manager.Agent = "manager"
+	first, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first Select = (%v, %v), want one subject", first, err)
+	}
+	if out, err := (managerFlow{}).Act(cfg, repo, first[0], "r1"); err != nil || out.Status != "done" {
+		t.Fatalf("first Act = (%q, %v), want done", out.Status, err)
+	}
+	if !tk.items["1"].hasTag(readyTag) {
+		t.Fatal("first Manager pass did not promote item 1")
+	}
+	if err := tk.SetTags("1", []string{"parked"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	tk.seed(Item{ID: "2", Title: "beta", UpdatedAt: "u2", Tags: []string{readyTag}})
+
+	second, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second Select = (%v, %v), want one withdrawal subject", second, err)
+	}
+	out, err := (managerFlow{}).Act(cfg, repo, second[0], "r2")
+	if err != nil || out.Status != "reaped" {
+		t.Fatalf("second Act = (%q, %v), want reaped", out.Status, err)
+	}
+	if tk.items["1"].hasTag(readyTag) {
+		t.Fatal("Manager kept ready on an item with a configured exclusion")
+	}
+	if !tk.items["1"].hasTag("parked") {
+		t.Fatal("Manager removed the configured exclusion label")
+	}
+	if tk.items["1"].hasTag(failedLabel) {
+		t.Fatal("Manager marked a policy withdrawal as failed")
+	}
+	if !tk.items["2"].hasTag(readyTag) {
+		t.Fatal("Manager withdrew ready from a non-excluded item")
+	}
+}
+
 func TestManagerDoesNotPromoteItemChangedDuringJudgement(t *testing.T) {
 	repo := newRefGitRepo(t)
 	writeAgentFixture(t, repo, "manager", "manager-model")
@@ -680,8 +737,11 @@ func TestManagerDoesNotPromoteItemRetiredDuringJudgement(t *testing.T) {
 	defer func() { trackerFor = oldTracker }()
 	oldJudge := managerJudge
 	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
-		_, err := recordRetirement(repo, testRetirementRecord(
-			"forest/1-change", strings.Repeat("b", 40), "1"))
+		_, err := recordRetirement(repo, retirementRecord{
+			Branch: "forest/1-change", Revision: strings.Repeat("b", 40), ItemID: "1",
+			Transport: "git", Strategy: "squash", Title: "change", State: "landed",
+			Agent: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("a", 16),
+		})
 		return managerReport{Pick: "1"}, runStats{}, err
 	}
 	defer func() { managerJudge = oldJudge }()

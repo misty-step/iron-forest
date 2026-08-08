@@ -256,6 +256,27 @@ func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
 		t.Errorf("durable prompt audit mode = %o, want 600", got)
 	}
 }
+func TestRunPhaseRedactsTraceButParsesOriginalEvent(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	event := `{"type":"step_finish","note":"` + secret + `","part":{"tokens":{"input":11,"output":7}}}`
+	script := "#!/bin/sh\nprintf '%s\\n' '" + event + "'\nexit 0\n"
+	wt, trace := fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	if err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	if stats.tokensIn != 11 || stats.tokensOut != 7 {
+		t.Fatalf("raw event token accounting = %+v, want input 11 and output 7", stats)
+	}
+	raw, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), secret) || !strings.Contains(string(raw), secretRedacted) {
+		t.Fatalf("trace redaction = %q, want marker without original", raw)
+	}
+}
 
 // TestPromptDeliveryErrorNamesSizeAndLimit pins requirement 3 of #204: a prompt
 // that cannot be delivered whole fails with a named error stating the prompt
@@ -289,6 +310,7 @@ func fakeOpencode(t *testing.T, script string) (string, string) {
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	trace := filepath.Join(t.TempDir(), "run", "agent.jsonl")
 	return wt, trace
 }
@@ -308,6 +330,18 @@ func TestRunPhaseFailsOnHarnessCrash(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exit status 1") {
 		t.Errorf("error %q did not record the exit status", err)
+	}
+}
+func TestRunPhaseRedactsHarnessError(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'provider rejected `"+secret+"`\\n' >&2\nexit 1\n")
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	if err == nil {
+		t.Fatal("runPhase returned nil error on a crashed harness")
+	}
+	if strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), secretRedacted) {
+		t.Fatalf("harness error redaction = %q, want marker without original", err)
 	}
 }
 

@@ -119,7 +119,7 @@ func serve(cfg Config, repoDir string, names []string) int {
 func serveSelected(cfg Config, repoDir string, names []string, selected []Flow) int {
 	lock, err := acquireSingletonLock(repoDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
+		fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
 		return 1
 	}
 	defer lock.Close()
@@ -127,7 +127,7 @@ func serveSelected(cfg Config, repoDir string, names []string, selected []Flow) 
 	// A worktree leaked by an abnormal exit is reaped once, before any flow
 	// starts, so a stale run directory never survives a restart.
 	if err := removeInterruptedUpdateArtifacts(repoDir); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: remove interrupted update artifacts: %v\n", err)
+		fmt.Fprintf(os.Stderr, "forest: remove interrupted update artifacts: %s\n", redactSecretShaped(err.Error()))
 	}
 	reapOrphanWorktrees(repoDir)
 
@@ -157,7 +157,7 @@ func serveSelected(cfg Config, repoDir string, names []string, selected []Flow) 
 		}
 		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
 		for _, err := range hardStopRunCommands() {
-			fmt.Fprintln(os.Stderr, "forest:", err)
+			fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
 		}
 		// A forced stop does not wait for blocked repository I/O. The next
 		// startup reaps every linked worktree before it starts a Flow.
@@ -175,7 +175,7 @@ func serveSelected(cfg Config, repoDir string, names []string, selected []Flow) 
 		}
 		selected = keep
 		if len(selected) == 0 {
-			fmt.Fprintf(os.Stderr, "forest: no such flow: %v\n", names)
+			fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", redactSecretShaped(fmt.Sprint(names)))
 			return 2
 		}
 	}
@@ -266,7 +266,7 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32, drainNow <-ch
 		}
 		nc, err := loadConfig(configPath(repoDir))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "forest: %s config: %v\n", f.Name(), err)
+			fmt.Fprintf(os.Stderr, "forest: %s config: %s\n", f.Name(), redactSecretShaped(err.Error()))
 			if !waitFlowInterval(f.Interval(cfg), drainNow) {
 				return
 			}
@@ -284,7 +284,7 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32, drainNow <-ch
 			// working-tree write in forest.yaml, which would change what the next
 			// pass's checks execute on the host. Refuse to act this pass, name the
 			// file, and retry on the next interval so an operator sees it.
-			fmt.Fprintf(os.Stderr, "forest: %s: %v\n", f.Name(), err)
+			fmt.Fprintf(os.Stderr, "forest: %s: %s\n", f.Name(), redactSecretShaped(err.Error()))
 			if !waitFlowInterval(f.Interval(cfg), drainNow) {
 				return
 			}
@@ -326,7 +326,7 @@ func waitFlowInterval(interval time.Duration, drainNow <-chan struct{}) bool {
 func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string) {
 	subjects, err := f.Select(cfg, repoDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forest: %s select: %v\n", f.Name(), err)
+		fmt.Fprintf(os.Stderr, "forest: %s select: %s\n", f.Name(), redactSecretShaped(err.Error()))
 		return 1, ""
 	}
 	if len(subjects) == 0 {
@@ -365,7 +365,7 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 	runID := newRunID()
 	release, err := claimAdmission(repoDir, cfg.Repo, f.Name(), s)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(err.Error()))
 		if errors.Is(err, errAdmissionHeld) {
 			return codeBusy
 		}
@@ -373,7 +373,7 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 	}
 	defer release()
 
-	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
+	fmt.Printf("forest: %s %s\n", f.Name(), redactSecretShaped(s.Label))
 	out, err := f.Act(cfg, repoDir, s, runID)
 	rec := runRecord{
 		Time: nowRFC(), RunID: runID, Flow: f.Name(), Subject: s.Key,
@@ -390,26 +390,33 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 			// failure, keep the spent tokens, and leave the brake untouched.
 			rec.Status = shutdownStatus
 		} else {
-			if brakeErr := recordStalled(repoDir, f.Name(), s.Key, s.Revision); brakeErr != nil {
+			var brakeErr error
+			switch {
+			case s.Kind != subjectRetirement:
+				brakeErr = recordStalled(repoDir, f.Name(), s.Key, s.Revision)
+			case errors.Is(err, errRetirementStale):
+				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			}
+			if brakeErr != nil {
 				err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)
 			}
 			if rec.Status == "" || rec.Status == "done" {
 				rec.Status = failStatus(err)
 			}
 		}
-		rec.Error = err.Error()
+		rec.Error = redactSecretShaped(err.Error())
 		if ledgerErr := appendRun(workspaceDir(repoDir), rec); ledgerErr != nil {
-			fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %v\n", f.Name(), s.Key, ledgerErr)
+			fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(ledgerErr.Error()))
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(err.Error()))
 		return 1
 	}
 	if err := appendRun(workspaceDir(repoDir), rec); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %v\n", f.Name(), s.Key, err)
+		fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(err.Error()))
 		return 1
 	}
-	fmt.Printf("forest: %s %s %s\n", f.Name(), s.Key, rec.Status)
+	fmt.Printf("forest: %s %s %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(rec.Status))
 	return 0
 }
 
@@ -418,7 +425,7 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 // work held by serve or another checkout.
 func runOnce(cfg Config, repoDir, flowName, subject string) int {
 	if err := verifyHostConfig(repoDir); err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
+		fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
 		return 1
 	}
 	for _, f := range flowsFor() {
@@ -427,24 +434,24 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 		}
 		subjects, err := f.Select(cfg, repoDir)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "forest:", err)
+			fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
 			return 1
 		}
 		match, found, err := resolveSelectedSubject(subjects, subject)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "forest: %s: %v\n", flowName, err)
+			fmt.Fprintf(os.Stderr, "forest: %s: %s\n", redactSecretShaped(flowName), redactSecretShaped(err.Error()))
 			return 1
 		}
 		if found {
 			return actOnSubject(f, cfg, repoDir, match, nil)
 		}
-		fmt.Fprintf(os.Stderr, "forest: %s does not select %q now\n", flowName, subject)
+		fmt.Fprintf(os.Stderr, "forest: %s does not select %q now\n", redactSecretShaped(flowName), redactSecretShaped(subject))
 		for _, s := range subjects {
-			fmt.Fprintf(os.Stderr, "  candidate: %s\n", s.Key)
+			fmt.Fprintf(os.Stderr, "  candidate: %s\n", redactSecretShaped(s.Key))
 		}
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", flowName)
+	fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", redactSecretShaped(flowName))
 	return 2
 }
 

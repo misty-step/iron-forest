@@ -105,12 +105,21 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return Outcome{Status: "stale"}, nil
 	}
 
-	// Reap first. Each Tracker write shares the Item admission key with the
-	// Builder and Verifier, then rechecks durable coverage after taking it.
+	// Withdraw assigned items first. Each Tracker write shares the Item admission
+	// key with the Builder and Verifier, then rechecks durable coverage after
+	// taking it.
+	failed := make(map[string]bool, len(plan.failed))
+	for _, it := range plan.failed {
+		failed[it.ID] = true
+	}
 	reaped := 0
 	for _, it := range plan.reap {
+		var add []string
+		if failed[it.ID] {
+			add = []string{failedLabel}
+		}
 		changed, err := mutateManagerItem(cfg, repoDir, tk, it,
-			[]string{failedLabel}, []string{readyTag})
+			add, []string{readyTag})
 		if err != nil {
 			return Outcome{Status: "tracker_failed"}, fmt.Errorf("reap item %s: %w", it.ID, err)
 		}
@@ -118,6 +127,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 			reaped++
 		}
 	}
+
 	if reaped != len(plan.reap) {
 		// The snapshot expected these assignments to leave the slot. Admission
 		// or state changed before the Effect, so replan before judging a pick.
@@ -252,6 +262,7 @@ type managerPlan struct {
 	needModel bool
 	braked    bool   // the promote judgement on the current candidate set is braked
 	reap      []Item // assigned items to withdraw
+	failed    []Item // withdrawn items that also receive forest:failed
 	cands     []Item // unblocked candidates the model may judge
 }
 
@@ -261,12 +272,12 @@ func (p managerPlan) hasWork() bool {
 }
 
 // buildManagerPlan builds the plan for one pass. An assigned item (open, ready
-// and unbranched) is reaped on any durable failure: it is stalled on the builder
-// flow, it carries forest:failed, or a blocker reopened. A closed item needs no
-// reap: it leaves ListOpen, so the slot frees and nothing can build it. Everything
-// else that is open, unbranched, unexcluded, unstalled, and unblocked is a
-// candidate. The slot holds readyDepth healthy assigned items; only an empty slot
-// calls the model.
+// and unbranched) is withdrawn for a configured exclusion or a durable failure:
+// it is stalled on the builder flow, it carries forest:failed, or a blocker
+// reopened. A closed item needs no reap: it leaves ListOpen, so the slot frees
+// and nothing can build it. Everything else that is open, unbranched, unexcluded,
+// unstalled, and unblocked is a candidate. The slot holds readyDepth healthy
+// assigned items; only an empty slot calls the model.
 func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches, retiring []string) (managerPlan, error) {
 	covered := make(map[string]bool, len(branches)+len(retiring))
 	for _, branch := range branches {
@@ -281,11 +292,13 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 	}
 	plan := managerPlan{}
 	var reap []Item
+	var failed []Item
 	healthyAssigned := 0
 	// Slot accounting and reaping run across the open, ready, branchless
 	// assignments. A branch owns a ready item's slot and queue position
 	// downstream, so a covered item is left alone; an open one is counted healthy
-	// or withdrawn on a durable fact. Closed items never appear here.
+	// or withdrawn on a durable fact or a configured exclusion. Closed items never
+	// appear here.
 	for _, it := range items {
 		if !it.hasTag(readyTag) {
 			continue
@@ -293,16 +306,25 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 		if covered[it.ID] {
 			continue
 		}
-		withdraw, err := managerWithdraw(repoDir, it, open)
-		if err != nil {
-			return managerPlan{}, err
+		excluded := hasExcludedLabel(it, cfg.ExcludeLabels)
+		withdraw := excluded
+		if !excluded {
+			var err error
+			withdraw, err = managerWithdraw(repoDir, it, open)
+			if err != nil {
+				return managerPlan{}, err
+			}
 		}
 		if withdraw {
 			reap = append(reap, it)
+			if !excluded {
+				failed = append(failed, it)
+			}
 		} else {
 			healthyAssigned++
 		}
 	}
+
 	var cands []Item
 	// The model only ever judges the deterministic candidate set: open, not
 	// assigned or branch-owned, unexcluded, unstalled, and unblocked.
@@ -341,6 +363,7 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 	plan.needModel = needsModel
 	plan.reap = reap
 	plan.cands = cands
+	plan.failed = failed
 	if needsModel {
 		plan.revision = itemSetStamp(cands)
 		plan.label = fmt.Sprintf("manager: %d candidate(s), slot open", len(cands))

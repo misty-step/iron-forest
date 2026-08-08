@@ -3,9 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -149,8 +147,6 @@ func mergeBlocked(cfg Config, attempts int) string {
 	return ""
 }
 
-var errRetirementStale = errors.New("retirement intent is stale")
-
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
 	if s.Kind == subjectRetirement {
 		fact, found, err := readRetirement(repoDir, s.Branch, s.Revision)
@@ -173,7 +169,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 				return out, nil
 			case errors.Is(err, errRetirementStale):
 				out.Status = "stale"
-				return out, nil
+				return out, err
 			default:
 				out.Status = "merge_failed"
 				return out, err
@@ -382,7 +378,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		}
 		if errors.Is(err, errRetirementStale) {
 			out.Status = "stale"
-			return out, nil
+			return out, err
 		}
 		// A branch that cannot land needs a human, not another attempt. Spend one
 		// attempt so the merge selector stops offering it, and say so on the item.
@@ -495,114 +491,6 @@ func rebaseOntoMaster(wtDir, branch string, id CommitIdentity) (string, error) {
 	return head, nil
 }
 
-// mergeVerified lands only the Revision that carried the approving Verdict.
-// A retirement fact makes the multi-system effect resumable. Git writes its
-// landed fact atomically with master. The host path writes pending intent first,
-// then promotes it after the host reports the exact reviewed head as merged.
-func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
-	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
-		return err
-	} else if found {
-		return recoverRetirementFact(cfg, repoDir, fact, it)
-	}
-	if cfg.Projection.MergeViaHost {
-		// The Host request's exact head is the revision fence. This path also
-		// recovers after the Host merged and deleted the source branch.
-		return mergeHostPath(cfg, repoDir, branch, reviewed, it, a)
-	}
-	if err := fenceMergeOnRevision(repoDir, branch, reviewed); err != nil {
-		return err
-	}
-	return mergeGitPath(cfg, repoDir, branch, reviewed, it, a)
-}
-
-func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
-	fact, err := recordRetirement(repoDir, retirementRecord{
-		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
-		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "pending",
-		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
-	})
-	if err != nil {
-		return err
-	}
-	if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
-		if errors.Is(err, errHostMergeUnavailable) {
-			if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
-				return fmt.Errorf("merge: projection stale: %v; drop pending retirement: %w", err, dropErr)
-			}
-			return fmt.Errorf("%w: %v", errRetirementStale, err)
-		}
-		return fmt.Errorf("%w: %v", errHostMergePending, err)
-	}
-	fact, err = landRetirement(repoDir, fact)
-	if err != nil {
-		return err
-	}
-	return finishRetirement(cfg, repoDir, fact, it)
-}
-
-// mergeGitPath commits the retirement fact in the same atomic push that
-// advances master. A retry therefore skips merge construction and resumes at
-// Tracker retirement, including squash merges whose tree is already on master.
-func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
-	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
-		return err
-	} else if found {
-		return recoverRetirementFact(cfg, repoDir, fact, it)
-	}
-	workspace := workspaceDir(repoDir)
-	mergeDir := filepath.Join(workspace, "worktrees", "merge-"+slug(branch))
-	if err := trackWorktree(mergeDir); err != nil {
-		return fmt.Errorf("merge: %w", err)
-	}
-	defer cleanupWorktree(repoDir, mergeDir)
-	_ = os.RemoveAll(mergeDir)
-	if err := git(repoDir, "worktree", "prune"); err != nil {
-		return fmt.Errorf("merge: prune: %w", err)
-	}
-	if err := git(repoDir, "fetch", "origin", "master"); err != nil {
-		return fmt.Errorf("merge: fetch master: %w", err)
-	}
-	masterTip, err := gitOut(repoDir, "rev-parse", "origin/master")
-	if err != nil {
-		return fmt.Errorf("merge: origin/master: %w", err)
-	}
-	if err := git(repoDir, "worktree", "add", "--detach", mergeDir, "origin/master"); err != nil {
-		return fmt.Errorf("merge: worktree: %w", err)
-	}
-	switch cfg.Flows.Verifier.Merge {
-	case "squash":
-		if err := git(mergeDir, "merge", "--squash", reviewed); err != nil {
-			return fmt.Errorf("merge: squash: %w", err)
-		}
-		if err := gitCommit(mergeDir, a.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
-			return fmt.Errorf("merge: commit: %w", err)
-		}
-	case "ff":
-		if err := git(mergeDir, "merge", "--ff-only", reviewed); err != nil {
-			return fmt.Errorf("merge: ff: %w", err)
-		}
-	default:
-		return fmt.Errorf("merge: unsupported strategy %q", cfg.Flows.Verifier.Merge)
-	}
-	fact, err := prepareRetirement(repoDir, retirementRecord{
-		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "git",
-		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "landed",
-		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
-	})
-	if err != nil {
-		return err
-	}
-	if err := git(mergeDir, "push", "--atomic",
-		"--force-with-lease=refs/heads/master:"+masterTip,
-		"--force-with-lease=refs/heads/"+branch+":"+reviewed,
-		"--force-with-lease="+fact.Ref+":",
-		"origin", "HEAD:master", reviewed+":refs/heads/"+branch, fact.SHA+":"+fact.Ref); err != nil {
-		return fmt.Errorf("merge: push: %w", err)
-	}
-	return finishRetirement(cfg, repoDir, fact, it)
-}
-
 // fenceMergeOnRevision refuses a merge when the remote branch no longer points
 // at the Revision that carried the approving Verdict.
 func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
@@ -617,129 +505,4 @@ func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
 		return fmt.Errorf("merge refused: branch %s advanced to %s after its approving Verdict on reviewed Revision %s; re-review the new head", branch, observed, reviewed)
 	}
 	return nil
-}
-
-func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it Item) error {
-	record := fact.Record
-	if record.ItemID != it.ID || record.Branch == "" || record.Revision == "" {
-		return fmt.Errorf("retirement %s does not match item %q", fact.Ref, it.ID)
-	}
-	if record.State == "pending" {
-		if record.Transport != "host" {
-			return fmt.Errorf("retirement %s is pending without Host transport", fact.Ref)
-		}
-		err := observeProjectMerge(cfg, record.Branch, record.Strategy, record.Revision)
-		if err != nil {
-			if errors.Is(err, errHostMergeUnavailable) {
-				if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
-					return fmt.Errorf("merge: stale Host retirement: %v; drop intent: %w", err, dropErr)
-				}
-				return fmt.Errorf("%w: %v", errRetirementStale, err)
-			}
-			return fmt.Errorf("%w: %v", errHostMergePending, err)
-		}
-		var landErr error
-		fact, landErr = landRetirement(repoDir, fact)
-		if landErr != nil {
-			return landErr
-		}
-	}
-	return finishRetirement(cfg, repoDir, fact, it)
-}
-
-func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) error {
-	record := fact.Record
-	// The durable retirement fact replaces the source branch as recovery
-	// evidence. Delete the exact reviewed branch first, so an advanced branch is
-	// refused before the Tracker item closes and a failed Close stays resumable.
-	if err := deleteReviewedBranch(repoDir, record.Branch, record.Revision); err != nil {
-		return err
-	}
-	// The marker excludes the item from Builder selection until both Tracker
-	// retirement and its attempt cleanup finish.
-	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
-		return fmt.Errorf("merge: close item: %w", err)
-	}
-	if err := dropAttempts(repoDir, "branch-"+record.Branch); err != nil {
-		return fmt.Errorf("merge: drop attempt record: %w", err)
-	}
-	return dropRetirement(repoDir, fact)
-}
-
-func deleteReviewedBranch(repoDir, branch, reviewed string) error {
-	out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/"+branch)
-	if err != nil {
-		return fmt.Errorf("merge: inspect branch %s: %w", branch, err)
-	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return nil
-	}
-	if fields[0] != reviewed {
-		return fmt.Errorf("merge: branch %s advanced to %s before retirement of %s", branch, fields[0], reviewed)
-	}
-	if err := deleteRef(repoDir, "refs/heads/"+branch, reviewed); err != nil {
-		return fmt.Errorf("merge: delete branch %s (wanted %s): %w", branch, reviewed, err)
-	}
-	return nil
-}
-
-// encodeBranchID renders a tracker id as a forest branch's id segment. The
-// branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as they
-// always have. The segment must be valid in a git refname and in a filesystem
-// path, so every byte outside a small safe set is escaped as %XX; '%' itself is
-// always escaped so the decoder can treat any '%' as the start of an escape.
-// The delimiter on the way back is the first '-', so '-' is escaped too. Numeric
-// ids and hyphen-free alphanumeric Habitat ids contain only safe bytes, so their
-// branches are unchanged.
-func encodeBranchID(id string) string {
-	var b strings.Builder
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		if isBranchIDByte(c) {
-			b.WriteByte(c)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
-}
-
-// isBranchIDByte reports whether c can appear literally in a forest branch's id
-// segment. Only bytes valid in a git refname and in a file path are kept; '/' and
-// other path separators, control bytes, whitespace, and git's special characters
-// are escaped so any opaque id derives a usable worktree and branch.
-func isBranchIDByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
-		c >= '0' && c <= '9' || c == '_'
-}
-
-// decodeBranchID reverses encodeBranchID in a single left-to-right pass. '%'
-// always begins a two-hex-digit escape, so an id containing the literal escape
-// sequence `%2D` (encoded as `%252D`) reconstructs to `%2D`, never to a stray
-// '-'; the mapping is bijective and any opaque id round-trips.
-func decodeBranchID(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '%' && i+2 < len(s) {
-			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
-				b.WriteByte(byte(v))
-				i += 2
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
-}
-
-// itemIDFromBranch recovers the opaque item identity from a forest branch,
-// undoing encodeBranchID on the id segment. It never assumes the segment is an
-// integer: it stays a numeric GitHub id or a Habitat id as written.
-func itemIDFromBranch(branch string) string {
-	name := strings.TrimPrefix(branch, BranchPrefix)
-	if i := strings.IndexByte(name, '-'); i >= 0 {
-		name = name[:i]
-	}
-	return decodeBranchID(name)
 }

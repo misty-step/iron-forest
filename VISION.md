@@ -38,10 +38,12 @@ what decides whether that work lands.
 Coordination is facts, not locks. A Verdict or Checks note is keyed to the exact
 reviewed commit and written once; git refuses the second writer. Attempts and the
 repeat-failure brake are compare-and-set refs. Branch publication carries the
-observed remote tip, so a lost race fails cleanly. Exclusion inside one process
-is an in-process subject set, and one lock file keeps one daemon per checkout.
-That lock covers `serve` only: `forest run` dispatches outside it, and nothing
-today excludes two checkouts of the same repository.
+observed remote tip, so a lost race fails cleanly.
+Admission uses a durable claim ref for each canonical Subject and a per-owner
+lock keyed by repository and item. It excludes concurrent actions across
+checkouts on one host and refuses claims held by another Host. The daemon lock
+keeps one `serve` process per checkout; `forest run` bypasses that lock but uses
+Subject admission.
 
 Run history lives in `.forest/runs.jsonl` on the host and is not in git. It is
 telemetry. No selection decision depends on it.

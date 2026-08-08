@@ -335,25 +335,6 @@ func TestNotesAttemptsCASRetriesAreBounded(t *testing.T) {
 	}
 }
 
-func notesTestRepository(t *testing.T) (remote, work, sha string) {
-	t.Helper()
-	root := t.TempDir()
-	remote = filepath.Join(root, "remote.git")
-	work = filepath.Join(root, "work")
-	runGitTest(t, "", "init", "--bare", "--initial-branch=master", remote)
-	runGitTest(t, "", "clone", remote, work)
-	runGitTest(t, work, "config", "user.name", "notes-test")
-	runGitTest(t, work, "config", "user.email", "notes-test@example.com")
-	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("first\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, work, "add", "file.txt")
-	runGitTest(t, work, "commit", "-m", "first")
-	runGitTest(t, work, "push", "-u", "origin", "HEAD:master")
-	sha = runGitTest(t, work, "rev-parse", "HEAD")
-	return remote, work, sha
-}
-
 // TestNotesRejectedPushIsNotDurable pins the #189 fix: a note that never
 // reached the remote is not a fact. The server rejects the notes push, so the
 // write fails and the abandoned local note must not be read as the winner on a

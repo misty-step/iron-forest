@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,6 +22,16 @@ func (failingFlow) Interval(Config) time.Duration            { return 0 }
 func (failingFlow) Enabled(Config) bool                      { return true }
 func (failingFlow) Act(Config, string, Subject, string) (Outcome, error) {
 	return Outcome{TokIn: 7}, errAgentCrash
+}
+
+type operatorRedactionFlow struct{ secret string }
+
+func (operatorRedactionFlow) Name() string                             { return "builder" }
+func (operatorRedactionFlow) Select(Config, string) ([]Subject, error) { return nil, nil }
+func (operatorRedactionFlow) Interval(Config) time.Duration            { return 0 }
+func (operatorRedactionFlow) Enabled(Config) bool                      { return true }
+func (f operatorRedactionFlow) Act(Config, string, Subject, string) (Outcome, error) {
+	return Outcome{}, errors.New("agent failed with " + f.secret)
 }
 
 type shutdownFlow struct{ drain *int32 }
@@ -198,6 +209,42 @@ func TestAgentFailureStillCounts(t *testing.T) {
 	}
 	if !stalled {
 		t.Fatalf("real failures did not reach the brake; they must count")
+	}
+}
+func TestActOnSubjectRedactsOperatorText(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	_, repo, _ := notesTestRepository(t)
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	code := actOnSubject(operatorRedactionFlow{secret: secret}, Config{}, repo,
+		Subject{Key: "item-1", Revision: "rev-1", Label: "#1 title " + secret}, nil)
+	_ = outW.Close()
+	_ = errW.Close()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	out, _ := io.ReadAll(outR)
+	stderr, _ := io.ReadAll(errR)
+	if code != 1 {
+		t.Fatalf("actOnSubject code = %d, want 1", code)
+	}
+	for name, body := range map[string][]byte{"stdout": out, "stderr": stderr} {
+		if strings.Contains(string(body), secret) || !strings.Contains(string(body), secretRedacted) {
+			t.Fatalf("%s operator text = %q, want marker without original", name, body)
+		}
+	}
+	rows, _, err := loadLedger(ledgerPath(repo))
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("Ledger rows = (%#v, %v), want one row", rows, err)
+	}
+	if strings.Contains(rows[0].Error, secret) || !strings.Contains(rows[0].Error, secretRedacted) {
+		t.Fatalf("Ledger error = %q, want marker without original", rows[0].Error)
 	}
 }
 

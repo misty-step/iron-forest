@@ -168,6 +168,36 @@ func TestProjectVerdictCommentContainsDecisionAndChecks(t *testing.T) {
 		}
 	}
 }
+func TestProjectChecksRedactsSecretShapedCheckName(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	var commentArgs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch args[1] {
+		case "list":
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		case "comment":
+			commentArgs = append([]string(nil), args...)
+			return nil, nil
+		default:
+			return nil, errors.New("unexpected host command")
+		}
+	}
+
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	err := projectChecks(cfg, "forest/7-change", checksNote{
+		Status:  "fail",
+		Results: []checkResult{{Name: "lint-" + secret, Code: 1, Output: "failed"}},
+	})
+	if err != nil {
+		t.Fatalf("projectChecks: %v", err)
+	}
+	body := strings.Join(commentArgs, "\n")
+	if strings.Contains(body, secret) || !strings.Contains(body, secretRedacted) {
+		t.Fatalf("Host check comment redaction = %q, want marker without original", body)
+	}
+}
 
 func TestProjectVerdictMissingRequestIsNoop(t *testing.T) {
 	old := projectionCommand
