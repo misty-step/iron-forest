@@ -385,10 +385,11 @@ func TestAssertCleanReviewTreeRefusesSymlinkedDirectory(t *testing.T) {
 	}
 }
 
-// TestAssertCleanReviewTreeRefusesUntrackedArtifact pins that only the review
-// record may appear as a new untracked path: a reviewer cannot smuggle a fixture
-// or artifact into the worktree it later claims to have judged. review.json stays
-// the one untracked file a review may add.
+// TestAssertCleanReviewTreeRefusesUntrackedArtifact pins that only review.json
+// may appear as a new untracked path: a reviewer cannot smuggle a fixture or an
+// artifact into the worktree it later claims to have judged. Creating report.json
+// alongside a valid review.json is refused too, because the Verifier contract
+// names review.json as the one file to write.
 func TestAssertCleanReviewTreeRefusesUntrackedArtifact(t *testing.T) {
 	wtDir := t.TempDir()
 	gitT(t, wtDir, "init")
@@ -414,6 +415,20 @@ func TestAssertCleanReviewTreeRefusesUntrackedArtifact(t *testing.T) {
 		t.Fatalf("writing only review.json was refused: %v", err)
 	}
 
+	// report.json is not a run artifact a review may write: adding it alongside a
+	// valid review.json must be refused and name the path even though the review
+	// itself is well-formed.
+	if err := os.WriteFile(filepath.Join(wtDir, "report.json"), []byte(`{"summary":"s","changed_files":["x"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("writing report.json was not refused")
+	}
+	if !strings.Contains(err.Error(), "report.json") {
+		t.Fatalf("refusal %q does not name report.json", err)
+	}
+
 	// A non-review untracked file is a refusal naming it.
 	if err := os.WriteFile(filepath.Join(wtDir, "fixture.txt"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -424,6 +439,45 @@ func TestAssertCleanReviewTreeRefusesUntrackedArtifact(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "fixture.txt") {
 		t.Fatalf("refusal %q does not name the untracked file", err)
+	}
+}
+
+// TestAssertCleanReviewTreeRefusesEditedUntrackedFixture pins the untracked blind
+// spot the path-set alone leaves open: editing an existing non-ignored fixture in
+// place changes no path, so a review that alters what a check reads can slip past
+// a membership-only comparison. The snapshot records each untracked path's type
+// and content, so the in-place edit must be refused naming it.
+func TestAssertCleanReviewTreeRefusesEditedUntrackedFixture(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "fixture.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "source.go")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The fixture is untracked and present before the review; the review edits it
+	// in place. The path set is unchanged, yet the content drift must refuse.
+	if err := os.WriteFile(filepath.Join(wtDir, "fixture.txt"), []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("editing an existing untracked fixture in place was not refused")
+	}
+	if !strings.Contains(err.Error(), "fixture.txt") {
+		t.Fatalf("refusal %q does not name the edited fixture", err)
 	}
 }
 
