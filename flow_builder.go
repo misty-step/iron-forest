@@ -109,6 +109,14 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
+	// Publication must depend on a clean secret scan: the builder runs the full
+	// scan on its worktree immediately before git add -A and push, so a rendered
+	// declaration that carries a Mint marker or the proxy host — untracked files
+	// included — fails the gate closed and can never be committed.
+	if err := scanSecretsBeforePublish(wtDir); err != nil {
+		out.Status = "secrets_failed"
+		return out, fmt.Errorf("secrets: %w", err)
+	}
 	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)

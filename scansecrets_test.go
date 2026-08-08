@@ -81,7 +81,7 @@ func TestScanGenericFailsClosedWhenScannerMissing(t *testing.T) {
 	}
 	defer func() { scanEnv.lookPath = orig }()
 
-	_, err := scanGeneric(t.TempDir())
+	_, err := scanGeneric(t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("expected a failure when the generic scanner is missing")
 	}
@@ -96,7 +96,9 @@ func TestScanGenericFailsClosedWhenScannerMissing(t *testing.T) {
 func TestCmdScanSecretsEndToEnd(t *testing.T) {
 	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
 	scanEnv.lookPath = func(string) (string, error) { return "stub", nil }
-	scanEnv.runGeneric = func(bin, dir string) ([]secretFinding, error) { return nil, nil }
+	scanEnv.runGeneric = func(bin, dir string, excludes []string) ([]secretFinding, error) {
+		return nil, nil
+	}
 	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
 
 	dir := t.TempDir()
@@ -107,5 +109,49 @@ func TestCmdScanSecretsEndToEnd(t *testing.T) {
 	writeTree(t, dir, "leak.md", "token __mint.openrouter.ironforest__ here")
 	if code := cmdScanSecrets([]string{dir}); code == 0 {
 		t.Fatal("worktree with a Mint marker should fail the gate")
+	}
+}
+
+// TestScanSecretsBeforePublishGatesPublication makes publication depend on a
+// clean scan: the gate passes a clean tree, fails on a leaked marker, and fails
+// closed when the generic scanner is absent. The generic scanner is stubbed so
+// the test does not need the binary.
+func TestScanSecretsBeforePublishGatesPublication(t *testing.T) {
+	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
+	scanEnv.lookPath = func(string) (string, error) { return "stub", nil }
+	scanEnv.runGeneric = func(bin, dir string, excludes []string) ([]secretFinding, error) {
+		return nil, nil
+	}
+	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
+
+	dir := t.TempDir()
+	if err := scanSecretsBeforePublish(dir); err != nil {
+		t.Fatalf("clean tree should pass the publication gate, got %v", err)
+	}
+
+	writeTree(t, dir, ".opencode/agents/builder.md", "header: __mint.exa.default__\n")
+	if err := scanSecretsBeforePublish(dir); err == nil {
+		t.Fatal("a worktree carrying a Mint marker must fail the publication gate")
+	}
+}
+
+// TestRunTrufflehogExclusionFile confirms the generic scanner is handed the
+// exclusions through a file trufflehog reads, so a legitimate fixture cannot
+// fail the generic pass.
+func TestWriteExcludePaths(t *testing.T) {
+	path, err := writeExcludePaths([]string{".opencode/opencode.json", "agents/", ".git"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{".opencode/opencode.json", "agents/", ".git"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("exclusion file should contain %q, got %q", want, s)
+		}
 	}
 }

@@ -24,11 +24,13 @@ checks:
     run: mise exec -- go run . selfcheck
   # No published branch may carry credential material. The factory writes Mint
   # markers and a proxy URL into rendered declarations as normal operation, so
-  # the gate scans the whole working tree — untracked files included — before
-  # publication. The content rules catch the factory's own marker shapes and the
-  # Mint proxy host; the generic high-entropy scan requires trufflehog and fails
-  # closed when it is absent rather than silently narrowing. Legitimate fixtures
-  # are excluded in forest.secrets.yaml.
+  # the builder and fixer run the full scan on their worktree immediately before
+  # git add -A and push, making publication depend on a clean tree (untracked
+  # files included). This check re-runs the same scan on the merged tree. The
+  # content rules catch the factory's own marker shapes and the Mint proxy host;
+  # the generic high-entropy scan requires trufflehog and fails closed when it
+  # is absent rather than silently narrowing. Legitimate fixtures are excluded
+  # in forest.secrets.yaml.
   - name: secrets
     run: mise exec -- go run . scan-secrets .
 

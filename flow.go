@@ -369,7 +369,7 @@ func failStatus(err error) string {
 		return "done"
 	}
 	for _, stage := range []string{"agent", "gate", "review", "prompt", "checks",
-		"worktree", "publish", "merge", "notes"} {
+		"worktree", "publish", "secrets", "merge", "notes"} {
 		if strings.HasPrefix(err.Error(), stage+":") {
 			return stage + "_failed"
 		}

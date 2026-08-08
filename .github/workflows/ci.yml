@@ -24,8 +24,14 @@ jobs:
       - run: go test ./...
       # A merged branch must never carry the factory's Mint markers or proxy host
       # anywhere but the operator-owned files excluded in forest.secrets.yaml.
-      # The daemon's own `secrets` check (see forest.yaml) runs the full scan and
-      # fails closed when the generic scanner is absent; CI runs the built-in
-      # content rules so the gate is green without an external binary.
+      # CI provisions the same generic scanner the daemon's `secrets` check uses
+      # and runs the full scan, so the merged gate is green only when the whole
+      # scanner (content rules plus generic detection) passes, never a
+      # --no-generic subset.
+      - name: Install the generic secret scanner
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+            | sh -s -- -b /usr/local/bin
+          trufflehog --version
       - name: Scan for leaked credentials
-        run: go run . scan-secrets --no-generic .
+        run: go run . scan-secrets .

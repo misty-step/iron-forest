@@ -133,6 +133,14 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
+	// Publication must depend on a clean secret scan, so the fixer runs the same
+	// full scan the builder does on its worktree immediately before git add -A
+	// and push. A rendered declaration that carries a Mint marker or the proxy
+	// host fails the gate closed here.
+	if err := scanSecretsBeforePublish(wtDir); err != nil {
+		out.Status = "secrets_failed"
+		return out, fmt.Errorf("secrets: %w", err)
+	}
 	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
