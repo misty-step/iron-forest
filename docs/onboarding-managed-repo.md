@@ -67,6 +67,15 @@ flows:
     agent: builder
     interval_seconds: 45
     attempts: 3
+  manager:
+    enabled: true
+    agent: manager
+    interval_seconds: 60
+    ready_depth: 1
+    # The Manager offers only dispatchable Subjects to its agent. Declare every
+    # label that is not one implementable item, or the Manager can promote it:
+    # Cantrip's "epic" groups Subjects, so it stays excluded here.
+    exclude_labels: ["forest:failed", "parked", "epic"]
 
 projection:
   enabled: true
@@ -75,6 +84,13 @@ projection:
 
 `checks:` is the whole stack declaration. Iron Forest never guesses a language.
 If a command's tool cannot start, the check fails and the note names the command.
+
+The exclusion is **repository-specific**: each repository passes its own
+non-dispatchable labels to the Manager through `flows.manager.exclude_labels`
+(for example Cantrip's `epic`, which groups Subjects instead of being one). The
+core filters by whatever labels a repository declares and never assumes one
+Tracker's hierarchy vocabulary. `epic` above is Cantrip's own; declare the labels
+your repository actually uses.
 
 ## 3. Declare the agents
 
