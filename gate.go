@@ -173,31 +173,38 @@ func gateReview(wtDir, schemaPath string) (review, error) {
 	return rv, nil
 }
 
-// reviewTreeSnapshot is the complete tracked state of a review worktree at one
-// moment: for every path the index tracks, the full index entry (mode, blob,
-// stage) and a working-tree fingerprint of its type, mode and content. Two
-// snapshots of the same revision are equal exactly when no tracked path's type,
-// mode, content, index entry or symlink target moved in between, so a full
-// comparison can prove a review left the tree untouched.
+// reviewTreeSnapshot is the complete state of a review worktree at one moment:
+// the full index entry (mode, blob, stage) of every tracked path, a working-tree
+// fingerprint of each tracked leaf, a fingerprint of every parent directory node
+// (so a tracked directory swapped for a symlink, or a gitlink's index entry, is
+// visible even when the leaves still resolve to identical bytes), and the set of
+// non-ignored untracked paths. Two snapshots of the same revision are equal
+// exactly when no tracked path's type, mode, content, index entry or symlink
+// target moved, no parent directory became a symlink, and no untracked path
+// appeared, so a complete comparison can prove a review left the tree untouched.
 type reviewTreeSnapshot struct {
-	work map[string]string // path -> fingerprint of the working-tree object; "" when gone
-	idx  map[string]string // path -> whole "<mode> <blob> <stage>" index entry
+	work      map[string]string // tracked leaf path -> fingerprint of the working-tree object; "" when gone
+	idx       map[string]string // tracked path -> whole "<mode> <blob> <stage>" index entry
+	dirs      map[string]string // directory node path -> fingerprint of its own type/target
+	untracked map[string]bool   // non-ignored untracked path -> true
 }
 
 // assertCleanReviewTree refuses a Verdict from a review run that did not leave
 // the tracked worktree unchanged. A Verifier may write review.json — the one
 // file it is expected to produce — but any tracked-file change between the
-// before-snapshot and the run's end, or any move of HEAD, means the agent edited
+// before-snapshot and the run's end, any move of HEAD, any new non-review
+// untracked path, or any directory that became a symlink means the agent edited
 // the tree the run was meant to judge: the checks that back a Verdict would then
 // describe an uncommitted experiment, never the committed Review revision. before
 // must be the snapshot taken immediately before the review runs. The comparison
 // is complete and symmetric — it records the working tree's type, mode and
-// content, and the full index entry, per tracked path — so editing a file that
-// was already dirty, staging it, chmodding it, swapping it for an equal-content
-// symlink, or restoring it to clean is refused exactly as a fresh edit is. It
-// returns an error naming every offending path when the tree drifted, and nil
-// when only the expected review record remains. review.json is untracked, so it
-// never enters a snapshot and needs no special case here.
+// content, the full index entry, the parent-directory topology, and the untracked
+// set per path — so editing a file that was already dirty, staging it, chmodding
+// it, swapping it for an equal-content symlink, replacing a tracked directory
+// with a symlink, or restoring it to clean is refused exactly as a fresh edit is.
+// It returns an error naming every offending path when the tree drifted, and nil
+// when only the expected review record remains. review.json is untracked, so the
+// sole untracked path the comparison admits is a run artifact such as review.json.
 func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error {
 	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
@@ -210,6 +217,7 @@ func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error 
 	if err != nil {
 		return fmt.Errorf("review: %w", err)
 	}
+	var dirty []string
 	keys := make(map[string]bool, len(before.work)+len(after.work))
 	for path := range before.work {
 		keys[path] = true
@@ -217,13 +225,45 @@ func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error 
 	for path := range after.work {
 		keys[path] = true
 	}
-	var dirty []string
 	for _, path := range sortedPaths(keys) {
 		if before.work[path] != after.work[path] || before.idx[path] != after.idx[path] {
 			dirty = append(dirty, path)
 		}
 	}
+	keys = make(map[string]bool, len(before.dirs)+len(after.dirs))
+	for path := range before.dirs {
+		keys[path] = true
+	}
+	for path := range after.dirs {
+		keys[path] = true
+	}
+	for _, dir := range sortedPaths(keys) {
+		if before.dirs[dir] != after.dirs[dir] {
+			dirty = append(dirty, dir)
+		}
+	}
+	keys = make(map[string]bool, len(before.untracked)+len(after.untracked))
+	for path := range before.untracked {
+		keys[path] = true
+	}
+	for path := range after.untracked {
+		keys[path] = true
+	}
+	for _, path := range sortedPaths(keys) {
+		if before.untracked[path] == after.untracked[path] {
+			continue
+		}
+		// The one untracked path a review may newly add is a run artifact such
+		// as review.json; any other untracked change — a fresh fixture, an
+		// artifact, a renamed file, a deleted check output — names the agent's
+		// hand in the tree, so it refuses the Verdict too.
+		if after.untracked[path] && isRunArtifact(path) {
+			continue
+		}
+		dirty = append(dirty, path)
+	}
 	if len(dirty) > 0 {
+		sort.Strings(dirty)
 		return fmt.Errorf("review left the worktree dirty: %s", strings.Join(dirty, ", "))
 	}
 	return nil
@@ -240,20 +280,28 @@ func sortedPaths(m map[string]bool) []string {
 	return paths
 }
 
-// snapshotReviewTree captures the complete state of every tracked path: the
-// whole index entry (mode, blob, stage) and a working-tree fingerprint that
+// snapshotReviewTree captures the complete state of the worktree, not just its
+// tracked leaves: the whole index entry (mode, blob, stage) and a working-tree
+// fingerprint of every tracked leaf, a fingerprint of every parent directory
+// node, and the set of non-ignored untracked paths. The leaf fingerprint
 // records the object's type, mode and, for a regular file, its bytes or, for a
-// symlink, its target. The fingerprint never reads the content of a non-regular
-// object, so a path a review replaced with a FIFO, device or stream cannot make
-// the snapshot block.
+// symlink, its target, and never reads the content of a non-regular object, so
+// a path a review replaced with a FIFO, device or stream cannot make the
+// snapshot block. The directory fingerprints run through the same logic and so
+// never follow a symlinked parent; without them the leaf bytes of a tracked
+// directory swapped for a symlink would still resolve to identical content and
+// hide the change. Untracked paths are read path-safely through git's NUL-based
+// output so a fixture with spaces or escapes is captured whole.
 func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
 	out, err := gitOutRaw(wtDir, "ls-files", "-s")
 	if err != nil {
 		return reviewTreeSnapshot{}, fmt.Errorf("review: read index: %w", err)
 	}
 	snap := reviewTreeSnapshot{
-		work: make(map[string]string),
-		idx:  make(map[string]string),
+		work:      make(map[string]string),
+		idx:       make(map[string]string),
+		dirs:      make(map[string]string),
+		untracked: make(map[string]bool),
 	}
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
@@ -266,11 +314,40 @@ func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
 		}
 		// Record the whole index entry, not just the blob: git tracks the mode
 		// separately, so a staged chmod (same blob, new mode) would otherwise
-		// sail through the clean-tree comparison.
+		// sail through the clean-tree comparison. The entry also carries a
+		// gitlink's blob, so a moved submodule pointer is caught here.
 		snap.idx[path] = meta
 		snap.work[path] = workState(wtDir, path)
+		for _, dir := range parentDirs(path) {
+			if _, seen := snap.dirs[dir]; !seen {
+				snap.dirs[dir] = workState(wtDir, dir)
+			}
+		}
+	}
+	unt, err := gitOutRaw(wtDir, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return reviewTreeSnapshot{}, fmt.Errorf("review: read untracked: %w", err)
+	}
+	for _, path := range strings.Split(unt, "\x00") {
+		if path != "" {
+			snap.untracked[path] = true
+		}
 	}
 	return snap, nil
+}
+
+// parentDirs returns the parent-directory paths of path, from the nearest
+// directory up to the worktree root. It lets the snapshot fingerprint each
+// directory node a tracked leaf sits under, so swapping such a directory for a
+// symlink is visible even though the leaf bytes resolve to identical content.
+func parentDirs(path string) []string {
+	var dirs []string
+	dir := filepath.Dir(path)
+	for dir != "." && dir != "" && dir != string(filepath.Separator) {
+		dirs = append(dirs, dir)
+		dir = filepath.Dir(dir)
+	}
+	return dirs
 }
 
 // workState fingerprints a tracked path's working-tree object. It captures

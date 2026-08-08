@@ -328,6 +328,105 @@ func TestAssertCleanReviewTreeRefusesModeTypeChanges(t *testing.T) {
 	})
 }
 
+// TestAssertCleanReviewTreeRefusesSymlinkedDirectory is the regression test for
+// the directory-topology blind spot: a reviewer can move a tracked directory and
+// put a symlink to an identical copy in its place, leaving the index and every
+// tracked leaf resolving to the same bytes. The leaf fingerprints follow the
+// symlinked parent and cannot see the swap, so the snapshot must also fingerprint
+// each parent directory node; without it the run would be accepted. Git reports
+// the tracked files deleted, but the gate must name the directory on its own.
+func TestAssertCleanReviewTreeRefusesSymlinkedDirectory(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.MkdirAll(filepath.Join(wtDir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "src", "a.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "src", "b.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", ".")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Replace src with a symlink to a byte-identical copy so every tracked leaf
+	// still resolves to the same content.
+	if err := os.MkdirAll(filepath.Join(wtDir, "copy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "copy", "a.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "copy", "b.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(wtDir, "src")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("copy", filepath.Join(wtDir, "src")); err != nil {
+		t.Fatal(err)
+	}
+
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("a tracked directory swapped for a symlink was not refused")
+	}
+	if !strings.Contains(err.Error(), "src") {
+		t.Fatalf("refusal %q does not name the symlinked directory", err)
+	}
+}
+
+// TestAssertCleanReviewTreeRefusesUntrackedArtifact pins that only the review
+// record may appear as a new untracked path: a reviewer cannot smuggle a fixture
+// or artifact into the worktree it later claims to have judged. review.json stays
+// the one untracked file a review may add.
+func TestAssertCleanReviewTreeRefusesUntrackedArtifact(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "source.go")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Only review.json may be added untracked.
+	if err := os.WriteFile(filepath.Join(wtDir, "review.json"), []byte(`{"verdict":"approve"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
+		t.Fatalf("writing only review.json was refused: %v", err)
+	}
+
+	// A non-review untracked file is a refusal naming it.
+	if err := os.WriteFile(filepath.Join(wtDir, "fixture.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("a non-review untracked file was not refused")
+	}
+	if !strings.Contains(err.Error(), "fixture.txt") {
+		t.Fatalf("refusal %q does not name the untracked file", err)
+	}
+}
+
 // TestParseChangedKeepsRenameDestination pins that a rename reports the path
 // that now exists, so the pull request body names real files.
 func TestParseChangedKeepsRenameDestination(t *testing.T) {
