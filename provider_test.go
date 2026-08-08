@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,83 @@ func TestEnvProviderConfigBaseURLOverride(t *testing.T) {
 	if strings.Contains(string(cfg), openRouterKeyVar) == false {
 		t.Fatalf("env config lost the key reference: %s", cfg)
 	}
+}
+
+// TestEnvProviderConfigResolvesDeclaredModels pins the fix for the direct-key
+// path: the Builder and Manager declarations name model
+// openrouter-mint/deepseek-v4-flash-0731 and the Verifier names
+// openrouter/openai/gpt-5.6-luna. With only OPENROUTER_API_KEY set, opencode has
+// no externally-defined openrouter-mint provider, so the env config must define
+// that provider and model itself or every Builder/Manager run fails before it
+// can make a single call. The test loads the real agent declarations and proves
+// the generated config resolves each declared model.
+func TestEnvProviderConfigResolvesDeclaredModels(t *testing.T) {
+	t.Setenv(openRouterKeyVar, "sk-aaaa")
+	cfg := envProviderConfig()
+
+	var oc openCodeConfig
+	if err := json.Unmarshal(cfg, &oc); err != nil {
+		t.Fatalf("env config is not parseable opencode config: %v", err)
+	}
+	if len(oc.Provider) == 0 {
+		t.Fatal("env config defines no provider")
+	}
+
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, DefaultAgentsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Copy the real agent directories so loadAgent reads the true declarations.
+	for _, name := range []string{"builder", "manager", "verifier"} {
+		src := filepath.Join(DefaultAgentsDir, name)
+		dst := filepath.Join(repo, DefaultAgentsDir, name)
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range []string{"agent.yaml", "instructions.md"} {
+			b, err := os.ReadFile(filepath.Join(src, f))
+			if err != nil {
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(dst, f), b, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, name := range []string{"builder", "manager", "verifier"} {
+		a, err := loadAgent(repo, name)
+		if err != nil {
+			t.Fatalf("loadAgent %s: %v", name, err)
+		}
+		id, model := splitModelRef(a.Model)
+		p, defined := oc.Provider[id]
+		if !defined {
+			t.Fatalf("env config does not define provider %q for %s (%s)", id, name, a.Model)
+		}
+		// A provider that carries an explicit models map must list the declared
+		// model: opencode cannot invent it. The openrouter-mint alias needs this
+		// for the Builder and Manager. A provider with no models map (openrouter)
+		// resolves its models from opencode's native catalog, so none is required.
+		if len(p.Models) > 0 && model != "" {
+			if _, ok := p.Models[model]; !ok {
+				t.Fatalf("env config provider %q lacks declared model %q for %s (%s)", id, model, name, a.Model)
+			}
+		}
+	}
+	// The key value still never lands in the rendered config.
+	if strings.Contains(string(cfg), "sk-aaaa") {
+		t.Fatalf("env config leaked the key value: %s", cfg)
+	}
+}
+
+// splitModelRef splits an opencode model reference of the form
+// "provider/model" into its provider id and model id. A reference without "/"
+// names a whole provider and yields an empty model id.
+func splitModelRef(ref string) (provider, model string) {
+	if i := strings.Index(ref, "/"); i >= 0 {
+		return ref[:i], ref[i+1:]
+	}
+	return ref, ""
 }
 
 // TestHasMintMarker exercises the detector across marker and non-marker configs.

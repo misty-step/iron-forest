@@ -68,12 +68,25 @@ const (
 // it to the broker's proxy address, and the broker resolves the real key.
 const mintMarkerPrefix = "__mint."
 
+// openCodeProviderOptions is the options block shared by every provider entry.
+// It is split out so envProviderConfig can build a provider with the same
+// credential and base-URL shape the shipped real config carries.
+type openCodeProviderOptions struct {
+	APIKey  string `json:"apiKey"`
+	BaseURL string `json:"baseURL"`
+}
+
+// openCodeModel is one model entry under a provider's models map.
+type openCodeModel struct {
+	Name string `json:"name,omitempty"`
+}
+
 // openCodeProvider describes one provider block of the opencode configuration.
 type openCodeProvider struct {
-	Options struct {
-		APIKey  string `json:"apiKey"`
-		BaseURL string `json:"baseURL"`
-	} `json:"options"`
+	NPMLib  string                   `json:"npm,omitempty"`
+	Name    string                   `json:"name,omitempty"`
+	Options openCodeProviderOptions  `json:"options"`
+	Models  map[string]openCodeModel `json:"models,omitempty"`
 }
 
 // openCodeConfig is the shape of opencode.json that this program reads and
@@ -82,6 +95,29 @@ type openCodeProvider struct {
 type openCodeConfig struct {
 	Provider map[string]openCodeProvider `json:"provider"`
 }
+
+// The openrouter-mint alias provider and the model it serves are the exact
+// provider key, model id, npm package, and display name the Builder and Manager
+// declarations request (model: openrouter-mint/deepseek-v4-flash-0731). The env
+// mechanism regenerates them so those lanes resolve with a direct key when no
+// Mint route is reachable, instead of failing because the provider is absent.
+const (
+	// openRouterProviderID is the provider key the Verifier's declaration names.
+	openRouterProviderID = "openrouter"
+
+	// openRouterMintProviderID is the provider key the Builder and Manager's
+	// declarations name; the env config defines it as a direct-key alias.
+	openRouterMintProviderID = "openrouter-mint"
+	// openRouterMintModelID is the model id the Builder and Manager run on.
+	openRouterMintModelID = "deepseek-v4-flash-0731"
+	// openRouterMintModelName is the human-facing name for that model.
+	openRouterMintModelName = "DeepSeek V4 Flash 0731"
+	// openAICompatibleNPM is the npm package that implements an OpenAI-compatible
+	// provider in opencode, matching the shipped Mint declaration.
+	openAICompatibleNPM = "@ai-sdk/openai-compatible"
+	// openRouterMintDisplayName is the human-facing name of the alias provider.
+	openRouterMintDisplayName = "OpenRouter (direct key)"
+)
 
 // resolveProvider returns the active credential mechanism for a run and the
 // opencode.json bytes to stage under the run config root. The environment-key
@@ -107,17 +143,28 @@ func resolveProvider(repoDir string) (mech providerMechanism, cfg []byte, ok boo
 
 // envProviderConfig builds the env-mechanism opencode.json. The apiKey is the
 // {env:...} reference, never the key value, and the baseURL is the optional
-// broker override when set, else the direct OpenRouter endpoint.
+// broker override when set, else the direct OpenRouter endpoint. It emits the
+// openrouter provider (the Verifier's declaration) and an openrouter-mint alias
+// (the Builder's and Manager's declaration) pointing at the same direct route,
+// so every lane an operator runs resolves before opencode starts.
 func envProviderConfig() []byte {
 	base := os.Getenv(providerBaseURLOverride)
 	if base == "" {
 		base = defaultOpenRouterBaseURL
 	}
+	keyRef := "{env:" + openRouterKeyVar + "}"
 	cfg := openCodeConfig{Provider: map[string]openCodeProvider{
-		"openrouter": {Options: struct {
-			APIKey  string `json:"apiKey"`
-			BaseURL string `json:"baseURL"`
-		}{APIKey: "{env:" + openRouterKeyVar + "}", BaseURL: base}},
+		openRouterProviderID: {
+			Options: openCodeProviderOptions{APIKey: keyRef, BaseURL: base},
+		},
+		openRouterMintProviderID: {
+			NPMLib:  openAICompatibleNPM,
+			Name:    openRouterMintDisplayName,
+			Options: openCodeProviderOptions{APIKey: keyRef, BaseURL: base},
+			Models: map[string]openCodeModel{
+				openRouterMintModelID: {Name: openRouterMintModelName},
+			},
+		},
 	}}
 	b, err := json.Marshal(cfg)
 	if err != nil {
