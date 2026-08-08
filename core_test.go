@@ -142,6 +142,25 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	}
 }
 
+// TestCoreRunRecordCopiesEveryTokenClass guards the #176 regression where the
+// stats aggregator's adapter dropped CacheRead, CacheWrite, and Reasoning. The
+// ledger carries all five classes, and stats text/JSON must total and break
+// them down byte-identically, so every class must survive the core->runRecord
+// mapping unchanged, not silently zero.
+func TestCoreRunRecordCopiesEveryTokenClass(t *testing.T) {
+	got := coreRunRecord(core.RunRecord{
+		Time: "2026-01-01T00:00:00Z", RunID: "r1", Flow: "builder",
+		Status: "built", TokensIn: 10, TokensOut: 2,
+		CacheRead: 30, CacheWrite: 4, Reasoning: 5,
+	})
+	if got.TokensIn != 10 || got.TokOut != 2 {
+		t.Fatalf("input/output mismapped: got %+v", got)
+	}
+	if got.CacheRead != 30 || got.CacheWrite != 4 || got.Reasoning != 5 {
+		t.Fatalf("cached/reasoning classes dropped to zero: got %+v", got)
+	}
+}
+
 func TestCoreTraceReturnsTheBytesTheHarnessWrote(t *testing.T) {
 	api, work, _ := coreFixture(t)
 	runsDir := filepath.Join(work, WorkspaceDir, "runs")
