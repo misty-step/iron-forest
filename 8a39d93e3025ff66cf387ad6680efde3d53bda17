@@ -1,0 +1,1 @@
+{"status":"fail","results":[{"name":"rebase","code":1,"seconds":0,"output":"rebase onto origin/master conflicts in CHANGELOG.md"}],"run_id":"20260808T101827Z-branch-forest/190-make-merge-finalisation-reconcil","time":"2026-08-08T10:18:29Z"}
