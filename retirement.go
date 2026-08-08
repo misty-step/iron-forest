@@ -288,28 +288,7 @@ func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Age
 	if err != nil {
 		return err
 	}
-	_, hostMerged, err := projectBranch(cfg, it, branch,
-		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), reviewed)
-	if err != nil {
-		if errors.Is(err, errHostMergeUnavailable) {
-			return dropStaleRetirement(repoDir, fact, err)
-		}
-		return fmt.Errorf("%w: %v", errHostMergePending, err)
-	}
-	if !hostMerged {
-		err = projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed)
-	}
-	if err != nil {
-		if errors.Is(err, errHostMergeUnavailable) {
-			return dropStaleRetirement(repoDir, fact, err)
-		}
-		return fmt.Errorf("%w: %v", errHostMergePending, err)
-	}
-	fact, err = landRetirement(repoDir, fact)
-	if err != nil {
-		return err
-	}
-	return finishRetirement(cfg, repoDir, fact, it)
+	return recoverRetirementFact(cfg, repoDir, fact, it)
 }
 
 // mergeGitPath commits the retirement fact in the same atomic push that
