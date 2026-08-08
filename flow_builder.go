@@ -70,10 +70,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		return Outcome{Status: "worktree_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("worktree: %w", err)
 	}
-	defer func() {
-		removeWorktree(repoDir, wtDir)
-		untrackWorktree(wtDir)
-	}()
+	defer cleanupWorktree(repoDir, wtDir)
 
 	prompt, err := renderUserPrompt(a, issueData(it, ""))
 	if err != nil {
@@ -119,7 +116,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.BaseSHA = baseSHA
 		return out, fmt.Errorf("blocked: report carries credential-shaped prose; no branch or pull request published")
 	}
-	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
+	if err := commitAndPush(repoDir, wtDir, branch, "", a.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
@@ -128,7 +125,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "comment_failed"
 		return out, fmt.Errorf("comment: %w", err)
 	}
-	url, err := projectBranch(cfg, it, branch, body)
+	url, _, err := projectBranch(cfg, it, branch, body, "")
 	if err != nil {
 		out.Status = "projection_failed"
 		return out, fmt.Errorf("projection: %w", err)

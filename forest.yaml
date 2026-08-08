@@ -2,12 +2,6 @@
 # Flows are independent lanes. They coordinate through repository state and
 # notes in this repository, so concurrency needs no scheduler.
 repo: misty-step/iron-forest
-# The author every flow's commits carry. Declared, never inherited from whatever
-# account happens to run the daemon.
-commit:
-  name: forest
-  email: forest@mistystep.io
-
 # The checks Iron Forest runs itself. The result is a note on the commit, not a
 # status read back from a host.
 checks:
@@ -29,7 +23,7 @@ flows:
     agent: builder
     interval_seconds: 30
     require_labels: ["forest:ready"]
-    exclude_labels: ["forest:failed"]
+    exclude_labels: ["parked", "forest:failed"]
   verifier:
     enabled: true
     agent: verifier
@@ -55,7 +49,7 @@ flows:
     ready_depth: 1
     exclude_labels: ["parked", "forest:failed", "epic"]
 
-# The human-facing surface. One way out: Iron Forest never reads it back.
+# The human surface. Iron Forest reads PR identity only for idempotent publication and exact Host-merge recovery.
 projection:
   enabled: true
   merge_via_host: false

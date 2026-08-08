@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+	"strings"
 )
 
 const (
@@ -28,13 +29,6 @@ const (
 	readyTag = "forest:ready"
 )
 
-// CommitIdentity is the author every flow's commits carry. It is declared, not
-// derived from a host account, so a run is attributable in any repository.
-type CommitIdentity struct {
-	Name  string `yaml:"name"`
-	Email string `yaml:"email"`
-}
-
 // configPath is the composition file for a checkout.
 func configPath(repoDir string) string { return filepath.Join(repoDir, "forest.yaml") }
 
@@ -46,7 +40,6 @@ func workspaceDir(repoDir string) string { return filepath.Join(repoDir, Workspa
 // no path from an agent; docs/adr/0003 removed the protected-path list.
 type Config struct {
 	Repo       string           `yaml:"repo"`
-	Commit     CommitIdentity   `yaml:"commit"`
 	Checks     []Check          `yaml:"checks"`
 	Flows      Flows            `yaml:"flows"`
 	Projection ProjectionConfig `yaml:"projection"`
@@ -107,22 +100,21 @@ type FixerFlowCfg struct {
 	Attempts int `yaml:"attempts"`
 }
 
-// ManagerFlowCfg keeps exactly one unstarted assignment in the ready queue. It
-// judges (via an agent) only the candidate set that deterministic code has
-// already filtered and lays one readyTag on one pick per pass. ReadyDepth is
-// the number of unbranched, ready-tagged items the lane keeps in flight; it is
-// a knob, not a promise. ExcludeTags are tracker signals that make an item
-// ineligible, as for the Builder lane.
+// ManagerFlowCfg keeps unstarted assignments in the ready queue. It judges
+// only the candidate set that deterministic code has filtered and applies one
+// ready label to one pick per pass. ReadyDepth is the number of unbranched,
+// ready-labeled items the lane keeps in flight. ExcludeLabels are Tracker
+// signals that make an item ineligible, as for the Builder Flow.
 type ManagerFlowCfg struct {
-	FlowCfg     `yaml:",inline"`
-	ReadyDepth  int      `yaml:"ready_depth"`
-	ExcludeTags []string `yaml:"exclude_labels"`
+	FlowCfg       `yaml:",inline"`
+	ReadyDepth    int      `yaml:"ready_depth"`
+	ExcludeLabels []string `yaml:"exclude_labels"`
 }
 
-// ProjectionConfig is the optional, one-way human surface: publish a branch as
-// a pull request and mirror decisions as comments. The factory never reads it
-// back. MergeViaHost is for a protected target branch, where only the host may
-// merge.
+// ProjectionConfig is the optional human surface. Iron Forest reads pull-request
+// identity for idempotent publication and exact Host-merge recovery. It never
+// treats Host reviews or checks as factory state. MergeViaHost supports a
+// protected target branch where only the Host may merge.
 type ProjectionConfig struct {
 	Enabled      bool `yaml:"enabled"`
 	MergeViaHost bool `yaml:"merge_via_host"`
@@ -130,9 +122,6 @@ type ProjectionConfig struct {
 
 func defaultConfig() Config {
 	return Config{
-		// The identity is generic on purpose. A repository that wants its own
-		// author declares it; the factory never assumes an organization.
-		Commit: CommitIdentity{Name: "forest", Email: "forest@invalid"},
 		Flows: Flows{
 			Builder: BuilderFlowCfg{
 				FlowCfg:       FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 30},
@@ -154,9 +143,9 @@ func defaultConfig() Config {
 			// omitted agent defaults to the manager declaration, never the builder
 			// whose one-file report that lane cannot read.
 			Manager: ManagerFlowCfg{
-				FlowCfg:     FlowCfg{Enabled: false, Agent: "manager", IntervalSec: 60},
-				ReadyDepth:  1,
-				ExcludeTags: []string{"parked", failedLabel},
+				FlowCfg:       FlowCfg{Enabled: false, Agent: "manager", IntervalSec: 60},
+				ReadyDepth:    1,
+				ExcludeLabels: []string{"parked", failedLabel},
 			},
 		},
 		Projection: ProjectionConfig{Enabled: true, MergeViaHost: false},
@@ -176,8 +165,21 @@ func loadConfig(path string) (Config, error) {
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return cfg, fmt.Errorf("parse %s: %w", path, err)
 	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return cfg, fmt.Errorf("parse %s: %w", path, err)
+		}
+		return cfg, fmt.Errorf("parse %s: multiple YAML documents are not allowed", path)
+	}
 	if cfg.Repo == "" {
 		return cfg, fmt.Errorf("%s: repo is required", path)
+	}
+	parts := strings.Split(cfg.Repo, "/")
+	if strings.TrimSpace(cfg.Repo) != cfg.Repo || strings.ContainsAny(cfg.Repo, " \t\r\n") ||
+		strings.HasSuffix(strings.ToLower(cfg.Repo), ".git") ||
+		len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return cfg, fmt.Errorf("%s: repo must have canonical owner/name form", path)
 	}
 	d := defaultConfig()
 	// The checks are the gate, and only this repository knows how to build and
@@ -185,12 +187,6 @@ func loadConfig(path string) (Config, error) {
 	// thing, so an undeclared gate is a configuration error.
 	if len(cfg.Checks) == 0 {
 		return cfg, fmt.Errorf("%s: at least one check is required", path)
-	}
-	if cfg.Commit.Name == "" {
-		cfg.Commit.Name = d.Commit.Name
-	}
-	if cfg.Commit.Email == "" {
-		cfg.Commit.Email = d.Commit.Email
 	}
 	if cfg.Flows.Builder.Agent == "" {
 		cfg.Flows.Builder.Agent = d.Flows.Builder.Agent
@@ -220,6 +216,12 @@ func loadConfig(path string) (Config, error) {
 	default:
 		return cfg, fmt.Errorf("%s: merge must be squash or ff, got %q", path, cfg.Flows.Verifier.Merge)
 	}
+	if cfg.Projection.MergeViaHost && cfg.Flows.Verifier.Merge != "squash" {
+		return cfg, fmt.Errorf("%s: merge_via_host supports only squash merge", path)
+	}
+	if cfg.Projection.MergeViaHost && !cfg.Projection.Enabled {
+		return cfg, fmt.Errorf("%s: merge_via_host requires projection.enabled", path)
+	}
 	if cfg.Flows.Fixer.Attempts <= 0 {
 		cfg.Flows.Fixer.Attempts = d.Flows.Fixer.Attempts
 	}
@@ -229,12 +231,22 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Flows.Manager.ReadyDepth <= 0 {
 		cfg.Flows.Manager.ReadyDepth = d.Flows.Manager.ReadyDepth
 	}
-	if len(cfg.Flows.Manager.ExcludeTags) == 0 {
-		cfg.Flows.Manager.ExcludeTags = d.Flows.Manager.ExcludeTags
+	if len(cfg.Flows.Manager.ExcludeLabels) == 0 {
+		cfg.Flows.Manager.ExcludeLabels = d.Flows.Manager.ExcludeLabels
+	}
+	if cfg.Flows.Manager.Enabled {
+		if len(cfg.Flows.Builder.RequireLabels) != 1 || cfg.Flows.Builder.RequireLabels[0] != readyTag {
+			return cfg, fmt.Errorf("%s: enabled Manager requires Builder require_labels [%s]", path, readyTag)
+		}
+		for _, label := range cfg.Flows.Builder.ExcludeLabels {
+			if label == readyTag {
+				return cfg, fmt.Errorf("%s: enabled Manager requires %s to remain eligible for Builder", path, readyTag)
+			}
+		}
 	}
 	for i, c := range cfg.Checks {
-		if c.Name == "" || c.Run == "" {
-			return cfg, fmt.Errorf("%s: checks[%d] needs a name and a run", path, i)
+		if strings.TrimSpace(c.Name) == "" || strings.TrimSpace(c.Run) == "" {
+			return cfg, fmt.Errorf("%s: checks[%d] needs a non-empty name and run", path, i)
 		}
 	}
 	return cfg, nil

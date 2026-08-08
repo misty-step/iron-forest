@@ -10,12 +10,33 @@ import (
 
 func runGitTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmdArgs := args
+	if dir != "" {
+		cmdArgs = append([]string{"-C", dir}, args...)
+	}
+	cmd := exec.Command("git", cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
+		t.Fatalf("git %v: %v: %s", cmdArgs, err, strings.TrimSpace(string(out)))
 	}
-	return string(out)
+	return strings.TrimSpace(string(out))
+}
+
+func startTestProcess(t *testing.T, cmd *exec.Cmd) (<-chan error, func()) {
+	t.Helper()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	})
+	return done, func() { waited = true }
 }
 
 func newRefGitRepo(t *testing.T) string {
@@ -54,6 +75,34 @@ func TestBlobRefCreateReadAndCompareAndSet(t *testing.T) {
 	}
 }
 
+func TestBlobRefReadsDoNotCreateSharedLocalRef(t *testing.T) {
+	repo := newRefGitRepo(t)
+	ref := "refs/forest/retirement/branch/revision"
+	if err := putBlobRef(repo, ref, "fact", ""); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		sha, body string
+		err       error
+	}
+	results := make(chan result, 16)
+	for range 16 {
+		go func() {
+			sha, body, err := getBlobRef(repo, ref)
+			results <- result{sha: sha, body: body, err: err}
+		}()
+	}
+	for range 16 {
+		got := <-results
+		if got.err != nil || got.sha != blobSHA("fact") || got.body != "fact" {
+			t.Fatalf("concurrent ref read = %#v", got)
+		}
+	}
+	if _, err := gitOut(repo, "show-ref", "--verify", ref); err == nil {
+		t.Fatalf("ref read created shared local ref %s", ref)
+	}
+}
+
 func TestBlobRefMissingAndDeleteCompareAndSet(t *testing.T) {
 	repo := newRefGitRepo(t)
 	ref := "refs/forest/attempt/missing"
@@ -80,18 +129,106 @@ func TestBlobRefMissingAndDeleteCompareAndSet(t *testing.T) {
 	}
 }
 
-func TestListRefsEnumeratesPrefix(t *testing.T) {
+func testRetirementRecord(branch, revision, itemID string) retirementRecord {
+	return retirementRecord{
+		Branch: branch, Revision: revision, ItemID: itemID,
+		Transport: "git", Strategy: "squash", Title: "change", State: "landed",
+		Agent: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("a", 16),
+	}
+}
+
+func TestRetirementRecordRejectsUnsafeIdentity(t *testing.T) {
+	revision := strings.Repeat("b", 40)
+	tests := map[string]func(*retirementRecord){
+		"non-forest branch": func(r *retirementRecord) { r.Branch = "master" },
+		"wrong item":        func(r *retirementRecord) { r.ItemID = "10" },
+		"symbolic revision": func(r *retirementRecord) { r.Revision = "HEAD" },
+		"short revision":    func(r *retirementRecord) { r.Revision = strings.Repeat("b", 39) },
+		"non-hex revision":  func(r *retirementRecord) { r.Revision = strings.Repeat("z", 40) },
+		"null revision":     func(r *retirementRecord) { r.Revision = strings.Repeat("0", 40) },
+		"missing agent":     func(r *retirementRecord) { r.Agent = "" },
+		"missing model":     func(r *retirementRecord) { r.Model = "" },
+		"bad definition":    func(r *retirementRecord) { r.DefSHA = "not-hex" },
+		"bad transport":     func(r *retirementRecord) { r.Transport = "carrier" },
+		"bad strategy":      func(r *retirementRecord) { r.Strategy = "merge" },
+		"bad state":         func(r *retirementRecord) { r.State = "started" },
+		"pending native":    func(r *retirementRecord) { r.State = "pending" },
+		"fast-forward Host": func(r *retirementRecord) { r.Transport, r.Strategy = "host", "ff" },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			record := testRetirementRecord("forest/9-change", revision, "9")
+			mutate(&record)
+			if _, err := recordRetirement(newRefGitRepo(t), record); err == nil {
+				t.Fatal("unsafe retirement record was accepted")
+			}
+		})
+	}
+}
+
+func TestRetirementFactRejectsNullRevision(t *testing.T) {
 	repo := newRefGitRepo(t)
-	for _, ref := range []string{"refs/forest/attempt/a", "refs/forest/attempt/b", "refs/forest/stalled/a"} {
-		if err := putBlobRef(repo, ref, ref, ""); err != nil {
-			t.Fatalf("put %s: %v", ref, err)
+	record := testRetirementRecord("forest/9-change", strings.Repeat("0", 40), "9")
+	body, err := retirementPayload(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := putBlobRef(repo, retirementRef(record.Branch, record.Revision), body, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listRetirements(repo); err == nil || !strings.Contains(err.Error(), "invalid Revision") {
+		t.Fatalf("null retirement fact = %v, want named refusal", err)
+	}
+}
+
+func TestRetirementFactRejectsRefContentMismatch(t *testing.T) {
+	repo := newRefGitRepo(t)
+	record := testRetirementRecord("forest/9-change", strings.Repeat("b", 40), "9")
+	body, err := retirementPayload(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongRef := retirementRef(record.Branch, strings.Repeat("c", 40))
+	if err := putBlobRef(repo, wrongRef, body, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listRetirements(repo); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched retirement fact = %v, want named refusal", err)
+	}
+}
+
+func TestRetirementFactsRejectConflictingBranchRevisions(t *testing.T) {
+	repo := newRefGitRepo(t)
+	for _, revision := range []string{strings.Repeat("b", 40), strings.Repeat("c", 40)} {
+		if _, err := recordRetirement(repo, testRetirementRecord("forest/9-change", revision, "9")); err != nil {
+			t.Fatal(err)
 		}
 	}
-	refs, err := listRefs(repo, "refs/forest/attempt/")
-	if err != nil {
-		t.Fatalf("list refs: %v", err)
+	if _, err := listRetirements(repo); err == nil || !strings.Contains(err.Error(), "conflicting facts") {
+		t.Fatalf("conflicting retirement list = %v, want named refusal", err)
 	}
-	if len(refs) != 2 {
-		t.Fatalf("listed %d refs, want 2", len(refs))
+}
+
+func TestRetirementFactsRejectConflictingItemBranches(t *testing.T) {
+	repo := newRefGitRepo(t)
+	records := []retirementRecord{
+		testRetirementRecord("forest/9-first", strings.Repeat("b", 40), "9"),
+		testRetirementRecord("forest/9-second", strings.Repeat("c", 40), "9"),
+	}
+	for _, record := range records {
+		if _, err := recordRetirement(repo, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := listRetirements(repo); err == nil || !strings.Contains(err.Error(), "retirement item 9 has conflicting facts") {
+		t.Fatalf("conflicting retirement item list = %v, want named refusal", err)
+	}
+}
+
+func TestRetirementRecordAllowsEmptyTitleSlug(t *testing.T) {
+	repo := newRefGitRepo(t)
+	record := testRetirementRecord("forest/9-", strings.Repeat("b", 40), "9")
+	if _, err := recordRetirement(repo, record); err != nil {
+		t.Fatalf("empty title slug record: %v", err)
 	}
 }

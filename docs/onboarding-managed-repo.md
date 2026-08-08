@@ -37,10 +37,6 @@ repository's own checks and lanes; there is no central policy.
 
 ```yaml
 repo: owner/name
-commit:
-  name: forest
-  email: forest@example.invalid
-
 checks:                      # the repository's own commands, in its own language
   - name: fmt
     run: cargo fmt --check
@@ -81,6 +77,7 @@ projection:
 
 `checks:` is the whole stack declaration. Iron Forest never guesses a language.
 If a command's tool cannot start, the check fails and the note names the command.
+The Host merge path supports only `merge: squash`. Native git merges also support `merge: ff`.
 
 `exclude_labels` is repository policy. Add every label that marks a
 non-dispatchable item. For example, exclude an `epic` that groups leaf items.
@@ -93,7 +90,7 @@ declaration is data that belongs to the repository it works on.
 ```
 agents/
   builder/
-    agent.yaml            # harness, model, permissions, mcp
+    agent.yaml            # harness, model, commit identity, permissions, mcp
     instructions.md       # system prompt
     prompt.md             # user-prompt template
     report.schema.json    # the output contract the Gate enforces
@@ -110,10 +107,14 @@ agents/
     report.schema.json
 ```
 
-Copy this repository's `agents/` as a starting point and change the model,
-permissions, and language-specific skill. Declare a positive
-`deadline_seconds`. Do not declare `steps` or `budget_seconds`; both fixed
-ceilings were deleted because they stop real work partway (`99b3b74`).
+Copy this repository's `agents/` as a starting point. Change the model,
+permissions, commit identity, and language-specific skill. `commit.name` and
+`commit.email` author commits made by that agent. They do not change the Host
+account that pushes a branch or authors a pull request.
+
+Declare a positive `deadline_seconds`. Do not declare `steps` or
+`budget_seconds`; both fixed ceilings were deleted because they stop real work
+partway (`99b3b74`).
 
 ## 4. Keep the factory out of the repository's gates
 
@@ -230,8 +231,10 @@ Expect these on a first run:
 - **Three failures on one revision park the item.** The repeat-failure brake is
   a ref under `refs/forest/stalled/`. Fix the cause, then move the item's
   revision — a comment is enough — and it becomes selectable again.
-- **A daemon restart kills an in-flight agent** and records `agent_failed`
-  against it. That counts toward the brake.
+- **The first termination signal drains the daemon.** It starts no new action and lets every active action finish.
+- **A second signal forces shutdown.** It kills managed process groups and exits without waiting for repository I/O. The next startup reaps linked worktrees.
+- **A shutdown is not an agent failure.** It keeps measured tokens but never advances the repeat-failure brake.
+- **A committed `forest.yaml` edit needs no restart.** Each Flow reads the file again before its next pass.
 
 ## 9. Fleet commands
 
@@ -243,3 +246,4 @@ systemctl --user disable --now forest@<name>    # detach one repository
 
 Each instance has its own checkout, its own `forest.yaml`, its own lanes, and its
 own lock. One repository's stuck agent cannot stall another.
+Instances serialize builds from their shared factory source checkout.

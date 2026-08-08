@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -52,7 +54,11 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches)
+	retiring, err := retirementItemIDs(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches, retiring)
 	if err != nil {
 		return nil, err
 	}
@@ -87,31 +93,45 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		return Outcome{Status: "branch_failed"}, fmt.Errorf("branches: %w", err)
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches)
+	retiring, err := retirementItemIDs(repoDir)
+	if err != nil {
+		return Outcome{Status: "branch_failed"}, fmt.Errorf("retirements: %w", err)
+	}
+	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches, retiring)
 	if err != nil {
 		return Outcome{Status: "flow_failed"}, err
 	}
+	if s.Revision == "" || s.Revision != plan.revision {
+		return Outcome{Status: "stale"}, nil
+	}
 
-	// Reap first: a dead assignment holds the slot only until its durable
-	// failure is withdrawn, so one failed build never starves the Builder.
+	// Reap first. Each Tracker write shares the Item admission key with the
+	// Builder and Verifier, then rechecks durable coverage after taking it.
+	reaped := 0
 	for _, it := range plan.reap {
-		if err := reapManagerItem(tk, it); err != nil {
+		changed, err := mutateManagerItem(cfg, repoDir, tk, it,
+			[]string{failedLabel}, []string{readyTag})
+		if err != nil {
 			return Outcome{Status: "tracker_failed"}, fmt.Errorf("reap item %s: %w", it.ID, err)
 		}
+		if changed {
+			reaped++
+		}
+	}
+	if reaped != len(plan.reap) {
+		// The snapshot expected these assignments to leave the slot. Admission
+		// or state changed before the Effect, so replan before judging a pick.
+		return Outcome{Status: "stale"}, nil
 	}
 
 	if plan.braked {
-		// The promote judgement for this unchanged candidate set is braked, and
-		// this pass exists only to reap: Select will not hand a braked,
-		// reapless pass a subject. Do not retry the braked judgement. The reap
-		// above has already freed the slot.
-		if len(plan.reap) == 0 {
+		if reaped == 0 {
 			return Outcome{Status: "skipped"}, nil
 		}
 		return Outcome{Status: "reaped"}, nil
 	}
 	if !plan.needModel {
-		if len(plan.reap) == 0 {
+		if reaped == 0 {
 			return Outcome{Status: "skipped"}, nil
 		}
 		return Outcome{Status: "reaped"}, nil
@@ -146,30 +166,87 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		}
 		return out, err
 	}
-	promoted, err := applyManagerPick(tk, plan.cands, rep.Pick)
+	var picked Item
+	for _, it := range plan.cands {
+		if it.ID == rep.Pick {
+			picked = it
+			break
+		}
+	}
+	if picked.ID == "" {
+		out.Status = "refused"
+		return out, fmt.Errorf("refused: pick %q is outside the candidate set", rep.Pick)
+	}
+	promoted, err := mutateManagerItem(cfg, repoDir, tk, picked, []string{readyTag}, nil)
 	if err != nil {
 		out.Status = "tracker_failed"
 		return out, fmt.Errorf("promote item %s: %w", rep.Pick, err)
 	}
 	if !promoted {
-		// The model named no candidate it was offered (a hallucination, or a
-		// blocked item the hard filter already removed). Promotes nothing. It
-		// records a "refused" status on the ledger and, because actOnSubject
-		// sees a non-nil error, engages the repeat-failure brake: an unchanged
-		// candidate set must not be re-judged every pass, so the lane waits for
-		// the backlog to move instead of re-sending the same judgement forever.
-		out.Status = "refused"
-		return out, fmt.Errorf("refused: pick %q is outside the candidate set", rep.Pick)
+		out.Status = "stale"
+		return out, nil
 	}
 	out.Status = "done"
 	return out, nil
+}
+
+// mutateManagerItem shares the canonical Item claim with code-producing Flows.
+// It rechecks durable coverage and the current Tracker Revision under that
+// admission immediately before the tag Effect.
+func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, remove []string) (bool, error) {
+	release, err := claimAdmission(repoDir, cfg.Repo, "manager", Subject{
+		Key: "item-" + it.ID, Kind: "item", ID: it.ID, Revision: it.UpdatedAt,
+	})
+	if errors.Is(err, errAdmissionHeld) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer release()
+
+	branches, err := forestBranches(repoDir)
+	if err != nil {
+		return false, err
+	}
+	retiring, err := retirementItemIDs(repoDir)
+	if err != nil {
+		return false, err
+	}
+	for _, branch := range branches {
+		if itemIDFromBranch(branch) == it.ID {
+			return false, nil
+		}
+	}
+	for _, id := range retiring {
+		if id == it.ID {
+			return false, nil
+		}
+	}
+	items, err := tk.ListOpen()
+	if err != nil {
+		return false, err
+	}
+	current := false
+	for _, candidate := range items {
+		if candidate.ID == it.ID && candidate.UpdatedAt == it.UpdatedAt {
+			current = true
+			break
+		}
+	}
+	if !current {
+		return false, nil
+	}
+	if err := tk.SetTags(it.ID, add, remove); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // managerPlan is the deterministic filter and slot accounting behind one Manager
 // pass. It is a pure computation over the open items and branches; the only lane
 // judgement it leaves to the model is ranking the returned candidates.
 type managerPlan struct {
-	key       string
 	revision  string
 	label     string
 	needModel bool
@@ -190,16 +267,19 @@ func (p managerPlan) hasWork() bool {
 // else that is open, unbranched, unexcluded, unstalled, and unblocked is a
 // candidate. The slot holds readyDepth healthy assigned items; only an empty slot
 // calls the model.
-func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches []string) (managerPlan, error) {
-	covered := make(map[string]bool, len(branches))
+func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches, retiring []string) (managerPlan, error) {
+	covered := make(map[string]bool, len(branches)+len(retiring))
 	for _, branch := range branches {
 		covered[itemIDFromBranch(branch)] = true
+	}
+	for _, id := range retiring {
+		covered[id] = true
 	}
 	open := make(map[string]Item, len(items))
 	for _, it := range items {
 		open[it.ID] = it
 	}
-	plan := managerPlan{key: managerSubject}
+	plan := managerPlan{}
 	var reap []Item
 	healthyAssigned := 0
 	// Slot accounting and reaping run across the open, ready, branchless
@@ -234,7 +314,7 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 			// Already assigned; accounted above, never offered as a candidate.
 			continue
 		}
-		if hasExcludedTag(it, cfg.ExcludeTags) {
+		if hasExcludedLabel(it, cfg.ExcludeLabels) {
 			continue
 		}
 		stalled, err := stalledOn(repoDir, "builder", "item-"+it.ID, it.UpdatedAt)
@@ -244,13 +324,15 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 		if stalled {
 			continue
 		}
-		if len(openBlockers(it, open)) > 0 {
+		if hasOpenBlocker(it, open) {
 			// Blockers closed is a hard filter, never a suggestion: an item whose
 			// Blocked by references an open item is not offered to the model at all.
 			continue
 		}
 		cands = append(cands, it)
 	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].ID < cands[j].ID })
+	sort.Slice(reap, func(i, j int) bool { return reap[i].ID < reap[j].ID })
 	depth := cfg.ReadyDepth
 	if depth < 1 {
 		depth = 1
@@ -294,7 +376,7 @@ func managerWithdraw(repoDir string, it Item, open map[string]Item) (bool, error
 	if it.hasTag(failedLabel) {
 		return true, nil
 	}
-	if len(openBlockers(it, open)) > 0 {
+	if hasOpenBlocker(it, open) {
 		return true, nil
 	}
 	stalled, err := stalledOn(repoDir, "builder", "item-"+it.ID, it.UpdatedAt)
@@ -304,57 +386,21 @@ func managerWithdraw(repoDir string, it Item, open map[string]Item) (bool, error
 	return stalled, nil
 }
 
-// itemSetStamp is a deterministic revision over a set of items: the count plus
-// the newest update stamp. A constant or empty stamp would break the brake, so
-// the Manager's Revision is always this stamp, and the brake releases the moment
-// the set it judged changes.
+// itemSetStamp is a deterministic Revision over every candidate identity and
+// update stamp. It changes whenever the judged set changes.
 func itemSetStamp(items []Item) string {
-	newest := ""
-	for _, it := range items {
-		if it.UpdatedAt > newest {
-			newest = it.UpdatedAt
-		}
+	parts := make([]string, len(items))
+	for i, it := range items {
+		parts[i] = fmt.Sprintf("%d:%s:%d:%s", len(it.ID), it.ID, len(it.UpdatedAt), it.UpdatedAt)
 	}
-	return fmt.Sprintf("%d/%s", len(items), newest)
+	sort.Strings(parts)
+	return blobSHA(strings.Join(parts, "\n"))
 }
 
-// inCandidateSet reports whether id is one of the offered candidates.
-func inCandidateSet(cands []Item, id string) bool {
-	for _, c := range cands {
-		if c.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-// applyManagerPick lays readyTag on exactly one validated candidate pick. It
-// returns false, with no effect, when the pick is not one of the offered
-// candidates, so a hallucinated or blocked id promotes nothing and records a
-// refusal instead of failing the pass.
-func applyManagerPick(tk Tracker, cands []Item, pick string) (bool, error) {
-	if !inCandidateSet(cands, pick) {
-		return false, nil
-	}
-	if err := tk.SetTags(pick, []string{readyTag}, nil); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// reapManagerItem withdraws one dead assignment: it removes readyTag and adds
-// forest:failed. Without this a single failed build occupies the slot forever
-// and the Builder starves.
-func reapManagerItem(tk Tracker, it Item) error {
-	return tk.SetTags(it.ID, []string{failedLabel}, []string{readyTag})
-}
-
-// managerReport is the one file the Manager's agent writes. It names a single
-// pick from the candidate set plus a short reason. The controller applies the
-// tag; the agent only proposes.
+// managerReport is the one file the Manager's agent writes. It names one pick
+// from the candidate set; the controller applies the tag.
 type managerReport struct {
-	Pick   string `json:"pick"`
-	Reason string `json:"reason"`
+	Pick string `json:"pick"`
 }
 
 // managerJudge runs the one judgement pass and reads its report, returning the
@@ -383,6 +429,10 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 	if err != nil {
 		return managerReport{}, stats, err
 	}
+	if err := checkSchema(filepath.Join(runDir, "report.json"),
+		filepath.Join(a.Dir, "report.schema.json")); err != nil {
+		return managerReport{}, stats, err
+	}
 	rep, err := readManagerReportFile(runDir)
 	return rep, stats, err
 }
@@ -394,14 +444,16 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 // id and title.
 func renderManagerPrompt(a *Agent, cands []Item) (string, error) {
 	var b strings.Builder
-	b.WriteString("Choose exactly one item to promote next. Return it in report.json as {\"pick\": \"<id>\", \"reason\": \"<short reason>\"}.\n\n")
+	b.WriteString("Choose exactly one item to promote next. Return it in report.json as {\"pick\": \"<id>\"}.\n\n")
 	b.WriteString("Candidates:\n")
 	for _, it := range cands {
 		content := it.Body
 		if comments := renderComments(it.Comments); comments != "" {
 			content += "\n\n## Item comments\n" + comments
 		}
-		tags := strings.Join(it.Tags, ", ")
+		tagList := append([]string(nil), it.Tags...)
+		sort.Strings(tagList)
+		tags := strings.Join(tagList, ", ")
 		if tags == "" {
 			tags = "(none)"
 		}
@@ -413,11 +465,8 @@ func renderManagerPrompt(a *Agent, cands []Item) (string, error) {
 	})
 }
 
-// readManagerReportFile reads the agent's report and enforces its structure: the
-// file must exist, parse as JSON, and name a non-empty pick with a reason. It
-// deliberately does not check membership in the candidate set: an out-of-set pick
-// is a refusal that records on the ledger, not a pass failure that would drive the
-// brake.
+// readManagerReportFile requires valid JSON with one non-empty pick. Candidate
+// membership is a controller refusal, not a report parse failure.
 func readManagerReportFile(wtDir string) (managerReport, error) {
 	var rep managerReport
 	raw, err := os.ReadFile(filepath.Join(wtDir, "report.json"))
@@ -427,12 +476,8 @@ func readManagerReportFile(wtDir string) (managerReport, error) {
 	if err := json.Unmarshal(raw, &rep); err != nil {
 		return rep, fmt.Errorf("report.json is invalid JSON: %w", err)
 	}
-	rep.Pick = strings.TrimSpace(rep.Pick)
 	if rep.Pick == "" {
 		return rep, fmt.Errorf("report.json must name one candidate (field \"pick\")")
-	}
-	if strings.TrimSpace(rep.Reason) == "" {
-		return rep, fmt.Errorf("report.json must give a reason for the pick (field \"reason\")")
 	}
 	return rep, nil
 }
@@ -451,18 +496,15 @@ func createManagerRunDir() (string, func(), error) {
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-// openBlockers returns the Blocked by references of an item that name items
-// still open on the tracker. A promoted item's blockers must be closed: ordering
-// emerges from declared dependencies, so the Manager never lifts an item ahead
-// of one of its open dependencies.
-func openBlockers(it Item, open map[string]Item) []string {
-	var blockers []string
+// hasOpenBlocker reports whether an item's Blocked by references name an open
+// item. A promoted item's blockers must be closed before the Manager advances it.
+func hasOpenBlocker(it Item, open map[string]Item) bool {
 	for _, ref := range blockedRefs(it.Body) {
 		if _, ok := open[ref]; ok {
-			blockers = append(blockers, ref)
+			return true
 		}
 	}
-	return blockers
+	return false
 }
 
 // blockedRefs extracts the issue references a `Blocked by:` prose line lists.

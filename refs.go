@@ -9,43 +9,21 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 var errRefMoved = errors.New("ref moved")
 
-type refRecord struct {
-	Ref string
-	SHA string
+func encodeRefComponent(value string) string {
+	return hex.EncodeToString([]byte(value))
 }
 
 func gitCommand(repoDir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runCombinedOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
-}
-
-func gitBlob(repoDir, content string) (string, error) {
-	cmd := exec.Command("git", "-C", repoDir, "hash-object", "-w", "--stdin")
-	cmd.Stdin = strings.NewReader(content)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	sha := strings.TrimSpace(string(out))
-	if sha == "" {
-		return "", errors.New("git hash-object returned no object id")
-	}
-	return sha, nil
-}
-
-func putRef(repoDir, ref, objectSHA, expectSHA string) error {
-	cas := fmt.Sprintf("--force-with-lease=%s:%s", ref, expectSHA)
-	_, err := gitCommand(repoDir, "push", cas, "origin", objectSHA+":"+ref)
-	return refWriteError(err)
 }
 
 func refWriteError(err error) error {
@@ -63,12 +41,28 @@ func refWriteError(err error) error {
 	return err
 }
 
+func writeBlob(repoDir, content string) (string, error) {
+	cmd := exec.Command("git", "-C", repoDir, "hash-object", "-w", "--stdin")
+	cmd.Stdin = strings.NewReader(content)
+	out, err := runCombinedOutput(cmd)
+	if err != nil {
+		return "", fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	objectSHA := strings.TrimSpace(string(out))
+	if objectSHA == "" {
+		return "", errors.New("git hash-object returned no object id")
+	}
+	return objectSHA, nil
+}
+
 func putBlobRef(repoDir, ref, content, expectSHA string) error {
-	objectSHA, err := gitBlob(repoDir, content)
+	objectSHA, err := writeBlob(repoDir, content)
 	if err != nil {
 		return err
 	}
-	return putRef(repoDir, ref, objectSHA, expectSHA)
+	cas := fmt.Sprintf("--force-with-lease=%s:%s", ref, expectSHA)
+	_, err = gitCommand(repoDir, "push", cas, "origin", objectSHA+":"+ref)
+	return refWriteError(err)
 }
 
 func deleteRef(repoDir, ref, expectSHA string) error {
@@ -78,41 +72,36 @@ func deleteRef(repoDir, ref, expectSHA string) error {
 }
 
 func getBlobRef(repoDir, ref string) (sha, content string, err error) {
-	out, err := gitCommand(repoDir, "ls-remote", "origin", ref)
-	if err != nil {
-		return "", "", err
-	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return "", "", nil
-	}
-	sha = fields[0]
-	if _, err := gitCommand(repoDir, "fetch", "origin", "+"+ref+":"+ref); err != nil {
-		return "", "", err
-	}
-	content, err = gitCommand(repoDir, "cat-file", "-p", ref)
-	if err != nil {
-		return "", "", err
-	}
-	return sha, content, nil
-}
-
-func listRefs(repoDir, prefix string) ([]refRecord, error) {
-	if !strings.Contains(prefix, "*") {
-		prefix += "*"
-	}
-	out, err := gitCommand(repoDir, "ls-remote", "origin", prefix)
-	if err != nil {
-		return nil, err
-	}
-	var refs []refRecord
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			refs = append(refs, refRecord{Ref: fields[1], SHA: fields[0]})
+	for range 3 {
+		out, err := gitCommand(repoDir, "ls-remote", "origin", ref)
+		if err != nil {
+			return "", "", err
 		}
+		fields := strings.Fields(out)
+		if len(fields) == 0 {
+			return "", "", nil
+		}
+		sha = fields[0]
+		// Fetch the named object without writing FETCH_HEAD or a shared local
+		// ref. Concurrent Flow readers therefore cannot contend on one ref lock.
+		if _, err := gitCommand(repoDir, "fetch", "--no-write-fetch-head", "origin", ref); err != nil {
+			return "", "", err
+		}
+		current, err := gitCommand(repoDir, "ls-remote", "origin", ref)
+		if err != nil {
+			return "", "", err
+		}
+		currentFields := strings.Fields(current)
+		if len(currentFields) == 0 || currentFields[0] != sha {
+			continue
+		}
+		content, err = gitCommand(repoDir, "cat-file", "-p", sha)
+		if err != nil {
+			return "", "", err
+		}
+		return sha, content, nil
 	}
-	return refs, nil
+	return "", "", fmt.Errorf("read ref %s: remote changed during three attempts", ref)
 }
 
 func blobSHA(content string) string {
@@ -121,36 +110,3 @@ func blobSHA(content string) string {
 	_, _ = io.WriteString(h, content)
 	return hex.EncodeToString(h.Sum(nil))
 }
-
-type subjectSet struct {
-	mu   sync.Mutex
-	keys map[string]struct{}
-}
-
-func newSubjectSet() *subjectSet {
-	return &subjectSet{keys: make(map[string]struct{})}
-}
-
-func (b *subjectSet) claim(key string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.keys[key]; ok {
-		return false
-	}
-	b.keys[key] = struct{}{}
-	return true
-}
-
-func (b *subjectSet) release(key string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.keys, key)
-}
-
-func (b *subjectSet) idle() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.keys) == 0
-}
-
-var inFlight = newSubjectSet()

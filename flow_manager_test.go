@@ -1,20 +1,22 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func managerCfg() ManagerFlowCfg {
 	return ManagerFlowCfg{
-		FlowCfg:     FlowCfg{Enabled: true, Agent: "manager", IntervalSec: 120},
-		ReadyDepth:  1,
-		ExcludeTags: []string{failedLabel, "parked"},
+		FlowCfg:       FlowCfg{Enabled: true, Agent: "manager", IntervalSec: 120},
+		ReadyDepth:    1,
+		ExcludeLabels: []string{failedLabel, "parked"},
 	}
 }
 
-// TestManagerPromotesExactlyOneWhenSlotEmpty proves that with the slot empty and
-// several unblocked candidates, one pass plans a single model-driven promotion
-// and applying its single pick promotes exactly one item.
+// TestManagerPromotesExactlyOneWhenSlotEmpty proves that an empty slot yields
+// one model judgement over the complete candidate set.
 func TestManagerPromotesExactlyOneWhenSlotEmpty(t *testing.T) {
 	repo := newRefGitRepo(t)
 	items := []Item{
@@ -22,7 +24,7 @@ func TestManagerPromotesExactlyOneWhenSlotEmpty(t *testing.T) {
 		{ID: "2", Title: "beta", UpdatedAt: "u2", Body: "clear scope"},
 		{ID: "3", Title: "gamma", UpdatedAt: "u3", Body: "clear scope"},
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, items, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,27 +41,84 @@ func TestManagerPromotesExactlyOneWhenSlotEmpty(t *testing.T) {
 		t.Fatal("plan revision must be a non-empty stamp over the candidate set")
 	}
 
-	tk := newMemoryTracker()
-	for _, it := range items {
-		tk.seed(it)
+}
+
+func TestManagerPlanOrderDoesNotDependOnTrackerOrder(t *testing.T) {
+	repo := newRefGitRepo(t)
+	items := []Item{
+		{ID: "9", UpdatedAt: "u9", Tags: []string{readyTag, failedLabel}},
+		{ID: "3", UpdatedAt: "u3"},
+		{ID: "7", UpdatedAt: "u7", Tags: []string{readyTag, failedLabel}},
+		{ID: "1", UpdatedAt: "u1"},
 	}
-	promoted, err := applyManagerPick(tk, plan.cands, "2")
+	reversed := []Item{items[3], items[2], items[1], items[0]}
+	first, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !promoted {
-		t.Fatal("a valid pick among the candidates must promote")
+	second, err := buildManagerPlan(managerCfg(), repo, reversed, nil, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !tk.items["2"].hasTag(readyTag) {
-		t.Fatal("the picked item should carry the ready tag")
-	}
-	for _, id := range []string{"1", "3"} {
-		if tk.items[id].hasTag(readyTag) {
-			t.Fatalf("item %s promoted beyond the one pick", id)
+	for name, plan := range map[string]managerPlan{"first": first, "second": second} {
+		if len(plan.cands) != 2 || plan.cands[0].ID != "1" || plan.cands[1].ID != "3" {
+			t.Fatalf("%s candidate order = %#v, want [1 3]", name, plan.cands)
 		}
+		if len(plan.reap) != 2 || plan.reap[0].ID != "7" || plan.reap[1].ID != "9" {
+			t.Fatalf("%s reap order = %#v, want [7 9]", name, plan.reap)
+		}
+	}
+	if first.revision != second.revision {
+		t.Fatalf("candidate-set revision changed with Tracker order: %q != %q", first.revision, second.revision)
 	}
 }
 
+func TestManagerPromptOrderDoesNotDependOnTrackerLabelOrder(t *testing.T) {
+	a := &Agent{PromptTmpl: "{{.Items}}"}
+	first, err := renderManagerPrompt(a, []Item{{ID: "1", UpdatedAt: "u1", Tags: []string{"z", "a"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := renderManagerPrompt(a, []Item{{ID: "1", UpdatedAt: "u1", Tags: []string{"a", "z"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("Manager prompt changed with Tracker label order:\n%s\n---\n%s", first, second)
+	}
+}
+
+func TestManagerJudgeEnforcesDeclaredReportSchema(t *testing.T) {
+	repo := t.TempDir()
+	agentDir := t.TempDir()
+	schema := `{"type":"object","required":["pick","reason"],"properties":{"pick":{"type":"string"},"reason":{"type":"string"}}}`
+	if err := os.WriteFile(filepath.Join(agentDir, "report.schema.json"), []byte(schema), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{Dir: agentDir, Name: "manager", PromptTmpl: "{{.Task}}"}
+	oldRun := runPhase
+	runPhase = func(_ string, runDir string, _ *Agent, _, _ string) (runStats, error) {
+		return runStats{}, os.WriteFile(filepath.Join(runDir, "report.json"), []byte(`{"pick":"1"}`), 0o644)
+	}
+	defer func() { runPhase = oldRun }()
+	if _, _, err := runManagerJudge(repo, []Item{{ID: "1", Title: "one"}}, a, "r1"); err == nil ||
+		!strings.Contains(err.Error(), `missing required field "reason"`) {
+		t.Fatalf("Manager judge without schema field = %v, want refusal", err)
+	}
+}
+
+func TestManagerPlanExcludesRetiringItems(t *testing.T) {
+	repo := newRefGitRepo(t)
+	retiring := Item{ID: "9", Title: "retiring", UpdatedAt: "u9", Tags: []string{readyTag}}
+	candidate := Item{ID: "10", Title: "candidate", UpdatedAt: "u10"}
+	plan, err := buildManagerPlan(managerCfg(), repo, []Item{retiring, candidate}, nil, []string{"9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.reap) != 0 || len(plan.cands) != 1 || plan.cands[0].ID != "10" {
+		t.Fatalf("retirement-covered Manager plan = %#v, want only item 10 candidate", plan)
+	}
+}
 
 // TestManagerSlotOccupiedPromotesNothing proves a Manager pass that finds the
 // slot occupied (one healthy ready, unbranched assignment in flight) plans no
@@ -70,7 +129,7 @@ func TestManagerSlotOccupiedPromotesNothing(t *testing.T) {
 		{ID: "1", Title: "in flight build", UpdatedAt: "u1", Tags: []string{readyTag}},
 		{ID: "2", Title: "next", UpdatedAt: "u2", Body: "clear scope"},
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, items, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +153,22 @@ func TestManagerSlotOccupiedPromotesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(subjects) != 0 {
+
 		t.Fatalf("Select returned %d subjects, want 0 (no model)", len(subjects))
+	}
+}
+
+func TestManagerReportPreservesOpaquePick(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "report.json"), []byte(`{"pick":" item-1 "}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := readManagerReportFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Pick != " item-1 " {
+		t.Fatalf("Manager pick = %q, want opaque identity unchanged", rep.Pick)
 	}
 }
 
@@ -113,7 +187,7 @@ func TestManagerInProgressBuildKeepsSlotOccupied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, freshItems, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, freshItems, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,16 +200,15 @@ func TestManagerInProgressBuildKeepsSlotOccupied(t *testing.T) {
 	}
 }
 
-// TestManagerNeverPromotesOpenBlocker proves a hard filter: an item whose
-// Blocked by references an open item is not a candidate and is never promoted,
-// including when the report names it. The Controller refuses it as out of set.
+// TestManagerNeverPromotesOpenBlocker proves that an item blocked by another
+// open item never reaches the candidate set.
 func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 	repo := newRefGitRepo(t)
 	items := []Item{
 		{ID: "149", Title: "still open", UpdatedAt: "u1"},
 		{ID: "70", Title: "waiting", UpdatedAt: "u2", Body: "Blocked by: #149"},
 	}
-	plan, err := buildManagerPlan(managerCfg(), repo, items, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,21 +218,6 @@ func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 		}
 	}
 
-	tk := newMemoryTracker()
-	for _, it := range items {
-		tk.seed(it)
-	}
-	// The model names the blocked item anyway; the Controller refuses it.
-	promoted, err := applyManagerPick(tk, plan.cands, "70")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if promoted {
-		t.Fatal("a blocked item must never be promoted")
-	}
-	if tk.items["70"].hasTag(readyTag) {
-		t.Fatal("a blocked item must not carry the ready tag")
-	}
 }
 
 // TestManagerNeverOffersRepositoryExcludedLabel proves the deployed YAML
@@ -190,37 +248,8 @@ func TestManagerNeverOffersRepositoryExcludedLabel(t *testing.T) {
 	}
 }
 
-
-// TestManagerReportOutsideSetRefuses proves a report naming an id outside the
-// candidate set promotes nothing (a refusal), rather than throwing an error that
-// would drive the repeat-failure brake.
-func TestManagerReportOutsideSetRefuses(t *testing.T) {
-	tk := newMemoryTracker()
-	items := []Item{
-		{ID: "1", Title: "alpha", UpdatedAt: "u1"},
-		{ID: "2", Title: "beta", UpdatedAt: "u2"},
-	}
-	for _, it := range items {
-		tk.seed(it)
-	}
-	cands := []Item{items[0], items[1]}
-	promoted, err := applyManagerPick(tk, cands, "424242")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if promoted {
-		t.Fatal("an out-of-set pick must promote nothing")
-	}
-	for _, id := range []string{"1", "2"} {
-		if tk.items[id].hasTag(readyTag) {
-			t.Fatalf("item %s promoted by an out-of-set pick", id)
-		}
-	}
-}
-
-// TestManagerReapsStalledAssignment proves an assigned, unbranched item that is
-// stalled on the builder flow loses readyTag and gains forest:failed, freeing
-// the slot, and that a pass plans the reap.
+// TestManagerReapsStalledAssignment proves that a stalled, assigned item enters
+// the deterministic reap plan without another model judgement.
 func TestManagerReapsStalledAssignment(t *testing.T) {
 	repo := newRefGitRepo(t)
 	item := Item{ID: "7", Title: "stalled build", UpdatedAt: "u1", Tags: []string{readyTag}}
@@ -231,7 +260,7 @@ func TestManagerReapsStalledAssignment(t *testing.T) {
 		}
 	}
 
-	plan, err := buildManagerPlan(managerCfg(), repo, []Item{item}, nil)
+	plan, err := buildManagerPlan(managerCfg(), repo, []Item{item}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,30 +271,6 @@ func TestManagerReapsStalledAssignment(t *testing.T) {
 		t.Fatalf("plan reaps %v, want item 7", plan.reap)
 	}
 
-	tk := newMemoryTracker()
-	tk.seed(item)
-	if err := reapManagerItem(tk, item); err != nil {
-		t.Fatal(err)
-	}
-	fresh, err := tk.Get("7")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh.hasTag(readyTag) {
-		t.Fatal("a reaped item must lose the ready tag")
-	}
-	if !fresh.hasTag(failedLabel) {
-		t.Fatal("a reaped item must gain the failed tag")
-	}
-
-	// After reaping, the item is excluded and the tray is free.
-	plan2, err := buildManagerPlan(managerCfg(), repo, []Item{fresh}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan2.cands) != 0 || plan2.needModel {
-		t.Fatalf("after reaping, plan = %+v, want no candidates", plan2)
-	}
 }
 
 // TestManagerFlowsForKeepsAllLanes proves the Manager lane is added without
@@ -331,11 +336,11 @@ func TestManagerRewisesWhenBacklogMoves(t *testing.T) {
 		{ID: "1", Title: "a", UpdatedAt: "u1"},
 		{ID: "2", Title: "b", UpdatedAt: "u2"},
 	}
-	pa, err := buildManagerPlan(cfg, repo, a, nil)
+	pa, err := buildManagerPlan(cfg, repo, a, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pab, err := buildManagerPlan(cfg, repo, ab, nil)
+	pab, err := buildManagerPlan(cfg, repo, ab, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,6 +349,50 @@ func TestManagerRewisesWhenBacklogMoves(t *testing.T) {
 	}
 	if pa.revision == pab.revision {
 		t.Fatalf("revision did not move with the backlog: %q", pa.revision)
+	}
+}
+
+func TestManagerRevisionDistinguishesEqualTimestampSets(t *testing.T) {
+	a := itemSetStamp([]Item{{ID: "1", UpdatedAt: "same"}})
+	b := itemSetStamp([]Item{{ID: "2", UpdatedAt: "same"}})
+	if a == b {
+		t.Fatalf("different candidate sets share Revision %q", a)
+	}
+	c := itemSetStamp([]Item{{ID: "a:b", UpdatedAt: "c"}})
+	d := itemSetStamp([]Item{{ID: "a", UpdatedAt: "b:c"}})
+	if c == d {
+		t.Fatalf("delimiter-bearing candidate sets share Revision %q", c)
+	}
+}
+
+func TestManagerActRefusesChangedSelection(t *testing.T) {
+	repo := newRefGitRepo(t)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", Title: "alpha", UpdatedAt: "u1"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	cfg := managerFlowConfig(repo)
+	subjects, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 {
+		t.Fatalf("Select = (%v, %v), want one Subject", subjects, err)
+	}
+	tk.seed(Item{ID: "1", Title: "changed", UpdatedAt: "u2"})
+	called := false
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		called = true
+		return managerReport{Pick: "1"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	out, err := (managerFlow{}).Act(cfg, repo, subjects[0], "r1")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("Act changed selection = (%q, %v), want stale", out.Status, err)
+	}
+	if called || tk.items["1"].hasTag(readyTag) {
+		t.Fatal("stale Manager selection ran the model or wrote a tag")
 	}
 }
 
@@ -364,7 +413,7 @@ func TestManagerRefusalEngagesBrake(t *testing.T) {
 
 	oldJudge := managerJudge
 	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
-		return managerReport{Pick: "424242", Reason: "hallucinated"}, runStats{}, nil
+		return managerReport{Pick: "424242"}, runStats{}, nil
 	}
 	defer func() { managerJudge = oldJudge }()
 
@@ -437,7 +486,7 @@ func TestManagerReapsDespiteModelBrake(t *testing.T) {
 	called := false
 	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
 		called = true
-		return managerReport{Pick: "1", Reason: "pick"}, runStats{}, nil
+		return managerReport{Pick: "1"}, runStats{}, nil
 	}
 	defer func() { managerJudge = oldJudge }()
 
@@ -451,7 +500,7 @@ func TestManagerReapsDespiteModelBrake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan0, err := buildManagerPlan(managerCfg(), repo, items, nil)
+	plan0, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +578,7 @@ func TestManagerRecordsTokensOnPromotion(t *testing.T) {
 
 	oldJudge := managerJudge
 	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
-		return managerReport{Pick: "1", Reason: "pick"}, runStats{
+		return managerReport{Pick: "1"}, runStats{
 			tokensIn: 123, tokensOut: 45,
 			cacheRead: 67, cacheWrite: 89, reasoning: 34,
 		}, nil
@@ -561,5 +610,207 @@ func TestManagerRecordsTokensOnPromotion(t *testing.T) {
 	}
 	if !tk.items["1"].hasTag(readyTag) {
 		t.Fatal("the picked item should carry the ready tag")
+	}
+}
+
+func TestManagerDoesNotPromoteItemChangedDuringJudgement(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	original := Item{ID: "1", Title: "alpha", UpdatedAt: "u1"}
+	tk.seed(original)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		tk.seed(Item{ID: "1", Title: "changed", UpdatedAt: "u2"})
+		return managerReport{Pick: "1"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	cfg := managerFlowConfig(repo)
+	out, err := (managerFlow{}).Act(cfg, repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{original}),
+	}, "r1")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("changed item promotion = (%q, %v), want stale", out.Status, err)
+	}
+	if tk.items["1"].hasTag(readyTag) {
+		t.Fatal("Manager promoted an Item changed during judgement")
+	}
+}
+
+func TestManagerDoesNotPromoteItemBranchedDuringJudgement(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	item := Item{ID: "1", Title: "alpha", UpdatedAt: "u1"}
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		runGitTest(t, repo, "commit", "--allow-empty", "-m", "branch base")
+		runGitTest(t, repo, "push", "-q", "origin", "HEAD:refs/heads/forest/1-change")
+		return managerReport{Pick: "1"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	cfg := managerFlowConfig(repo)
+	out, err := (managerFlow{}).Act(cfg, repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{item}),
+	}, "r1")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("branched item promotion = (%q, %v), want stale", out.Status, err)
+	}
+	if tk.items["1"].hasTag(readyTag) {
+		t.Fatal("Manager promoted an Item branched during judgement")
+	}
+}
+
+func TestManagerDoesNotPromoteItemRetiredDuringJudgement(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", Title: "alpha", UpdatedAt: "u1", Body: "clear scope"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		_, err := recordRetirement(repo, testRetirementRecord(
+			"forest/1-change", strings.Repeat("b", 40), "1"))
+		return managerReport{Pick: "1"}, runStats{}, err
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	cfg := managerFlowConfig(repo)
+	cfg.Flows.Manager.Agent = "manager"
+	out, err := (managerFlow{}).Act(cfg, repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{tk.items["1"]}),
+	}, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "stale" {
+		t.Fatalf("status = %q, want stale", out.Status)
+	}
+	if tk.items["1"].hasTag(readyTag) {
+		t.Fatal("Manager promoted an Item retired while its judgement ran")
+	}
+}
+
+func TestManagerDoesNotPromoteItemClaimedByBuilder(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", Title: "alpha", UpdatedAt: "u1", Body: "clear scope"})
+
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		return managerReport{Pick: "1"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	release, err := claimAdmission(repo, repo, "builder", Subject{Key: "item-1", Kind: "item", ID: "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	cfg := managerFlowConfig(repo)
+	cfg.Flows.Manager.Agent = "manager"
+	out, err := (managerFlow{}).Act(cfg, repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{tk.items["1"]}),
+	}, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "stale" {
+		t.Fatalf("status = %q, want stale", out.Status)
+	}
+	if tk.items["1"].hasTag(readyTag) {
+		t.Fatal("Manager promoted an Item while the Builder held its admission")
+	}
+}
+
+func TestManagerDoesNotReapItemClaimedByBuilder(t *testing.T) {
+	repo := newRefGitRepo(t)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "7", Title: "active build", UpdatedAt: "u7", Tags: []string{readyTag}})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "builder", "item-7", "u7"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release, err := claimAdmission(repo, repo, "builder", Subject{Key: "item-7", Kind: "item", ID: "7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	out, err := (managerFlow{}).Act(managerFlowConfig(repo), repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{tk.items["7"]}),
+	}, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "stale" {
+		t.Fatalf("status = %q, want stale", out.Status)
+	}
+	if !tk.items["7"].hasTag(readyTag) || tk.items["7"].hasTag(failedLabel) {
+		t.Fatalf("Manager changed an Item while the Builder held its admission: %v", tk.items["7"].Tags)
+	}
+}
+
+func TestManagerDoesNotPromoteWhenDeadAssignmentRemainsClaimed(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "7", Title: "active build", UpdatedAt: "u7", Tags: []string{readyTag}})
+	tk.seed(Item{ID: "8", Title: "next build", UpdatedAt: "u8", Body: "clear scope"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "builder", "item-7", "u7"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release, err := claimAdmission(repo, repo, "builder", Subject{Key: "item-7", Kind: "item", ID: "7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	judged := false
+	oldJudge := managerJudge
+	managerJudge = func(string, []Item, *Agent, string) (managerReport, runStats, error) {
+		judged = true
+		return managerReport{Pick: "8"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+	out, err := (managerFlow{}).Act(managerFlowConfig(repo), repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{tk.items["8"]}),
+	}, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "stale" {
+		t.Fatalf("status = %q, want stale", out.Status)
+	}
+	if judged {
+		t.Fatal("Manager judged a replacement while the dead assignment still owned the slot")
+	}
+	if !tk.items["7"].hasTag(readyTag) || tk.items["8"].hasTag(readyTag) {
+		t.Fatalf("Manager overfilled the ready slot: item 7 %v, item 8 %v", tk.items["7"].Tags, tk.items["8"].Tags)
 	}
 }

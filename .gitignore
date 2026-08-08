@@ -1,6 +1,7 @@
 # Go build output
 /forest
 /forest.next
+# Prior binaries created this file. New daemons remove it during startup.
 /forest.prev
 /dist/
 *.test
@@ -11,7 +12,6 @@
 
 # editor
 .DS_Store
-.opencode/agents/
 /iron-forest
 
 # one-off published snapshots, not repository artifacts

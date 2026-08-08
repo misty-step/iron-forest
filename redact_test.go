@@ -96,7 +96,7 @@ func TestRedactSecretShapedNotePersistence(t *testing.T) {
 	if strings.Contains(got.Notes, "sk-") {
 		t.Fatalf("durable verdict note carries a secret: %q", got.Notes)
 	}
-	raw := notesTestGitOutput(t, work, "notes", "--ref=forest/verdict", "show", sha)
+	raw := runGitTest(t, work, "notes", "--ref=forest/verdict", "show", sha)
 	if strings.Contains(raw, "sk-") {
 		t.Fatalf("raw remote note carries a secret: %q", raw)
 	}

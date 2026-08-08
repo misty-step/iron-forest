@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // hostConfigRepo is a throwaway repository whose forest.yaml is committed, the
@@ -13,15 +15,15 @@ import (
 func hostConfigRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
-	gitT(t, repo, "init", "-b", "master")
-	gitT(t, repo, "config", "user.email", "test@example.com")
-	gitT(t, repo, "config", "user.name", "test")
+	runGitTest(t, repo, "init", "-b", "master")
+	runGitTest(t, repo, "config", "user.email", "test@example.com")
+	runGitTest(t, repo, "config", "user.name", "test")
 	if err := os.WriteFile(filepath.Join(repo, hostConfigName),
 		[]byte("repo: o/r\nchecks:\n  - name: x\n    run: true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, repo, "add", hostConfigName)
-	gitT(t, repo, "commit", "-qm", "init")
+	runGitTest(t, repo, "add", hostConfigName)
+	runGitTest(t, repo, "commit", "-qm", "init")
 	return repo
 }
 
@@ -65,8 +67,8 @@ func TestVerifyHostConfigRejectsOutOfBandWrite(t *testing.T) {
 func TestVerifyHostConfigAllowsCommittedChange(t *testing.T) {
 	repo := hostConfigRepo(t)
 	rewriteHostConfig(t, repo, "repo: o/r\nchecks:\n  - name: y\n    run: echo hi\n")
-	gitT(t, repo, "add", hostConfigName)
-	gitT(t, repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "config change")
+	runGitTest(t, repo, "add", hostConfigName)
+	runGitTest(t, repo, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "config change")
 	if err := verifyHostConfig(repo); err != nil {
 		t.Fatalf("verifyHostConfig rejected a committed operator config change: %v", err)
 	}
@@ -80,8 +82,49 @@ func TestVerifyHostConfigAllowsCommittedChange(t *testing.T) {
 func TestVerifyHostConfigRejectsStagedWrite(t *testing.T) {
 	repo := hostConfigRepo(t)
 	rewriteHostConfig(t, repo, "repo: o/r\nchecks:\n  - name: pwn\n    run: touch /tmp/pwned\n")
-	gitT(t, repo, "add", hostConfigName)
+	runGitTest(t, repo, "add", hostConfigName)
 	if err := verifyHostConfig(repo); err == nil {
 		t.Fatal("verifyHostConfig accepted a staged-but-uncommitted host config write")
+	}
+}
+
+type hostConfigProbeFlow struct {
+	acted chan struct{}
+}
+
+func (hostConfigProbeFlow) Name() string                  { return "probe" }
+func (hostConfigProbeFlow) Interval(Config) time.Duration { return 5 * time.Millisecond }
+func (hostConfigProbeFlow) Enabled(Config) bool           { return true }
+func (hostConfigProbeFlow) Select(Config, string) ([]Subject, error) {
+	return []Subject{{Key: "probe", Revision: "revision"}}, nil
+}
+func (f hostConfigProbeFlow) Act(Config, string, Subject, string) (Outcome, error) {
+	select {
+	case f.acted <- struct{}{}:
+	default:
+	}
+	return Outcome{Status: "done"}, nil
+}
+
+func TestRunFlowLoopRefusesDirtyHostConfig(t *testing.T) {
+	repo := hostConfigRepo(t)
+	rewriteHostConfig(t, repo, "repo: o/r\nchecks:\n  - name: pwn\n    run: touch /tmp/pwned\n")
+	flow := hostConfigProbeFlow{acted: make(chan struct{}, 1)}
+	var drain int32
+	done := make(chan struct{})
+	go func() {
+		runFlowLoop(flow, defaultConfig(), repo, &drain, nil)
+		close(done)
+	}()
+	select {
+	case <-flow.acted:
+		t.Fatal("runFlowLoop acted with a dirty host config")
+	case <-time.After(100 * time.Millisecond):
+	}
+	atomic.StoreInt32(&drain, 1)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runFlowLoop did not drain")
 	}
 }

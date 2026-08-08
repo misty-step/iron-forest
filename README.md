@@ -1,7 +1,7 @@
 # Iron Forest
 
 Iron Forest is a self-hosted system that turns Tracker items into reviewed code changes.
-Three independent Flows run in one process and coordinate through git state.
+Four independent Flows run in one process and coordinate through git facts and Tracker labels.
 
 ## Flows
 
@@ -13,18 +13,20 @@ Each lane uses its own interval. The process excludes duplicate work on one Subj
 | Builder | Eligible Tracker items without a forest branch and without configured exclude labels. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It may create a Projection. |
 | Verifier | Forest branches with no Verdict, or approved branches with passing Checks. | Runs the configured Checks, writes the Checks note, obtains an independent Verdict, and can merge an approved branch. |
 | Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit. | Runs the Builder on the branch, passes the Gate, pushes the repair, and records the attempt. An exhausted branch gets `forest:failed` for a human. |
+| Manager | Filtered unstarted Tracker items. | Picks one candidate and applies the ready label for the Builder. |
 
-## State in git
+## State
 
 Git stores durable decisions. One installation can run any Flow, and each
 checkout has one daemon process.
 - **Verdict:** `refs/notes/forest/verdict` stores a Verdict on the exact Revision reviewed.
 - **Checks:** `refs/notes/forest/checks` stores the result of Iron Forest's own `checks:` commands on that exact Revision.
-- **Ledger:** `.forest/runs.jsonl` is an append-only record of each Run, Subject, Revision, Status, Verdict, and token count.
+- **Retirement:** `refs/forest/retirement/` stores resumable merge effects until the Tracker item and source branch are retired.
+- **Ledger:** `.forest/runs.jsonl` is host telemetry outside git. It records each Run, Subject, Revision, Status, Verdict, and token count.
 
 A new commit has no Verdict or Checks note, so Iron Forest needs no staleness comparison. Iron Forest never reads a Host's review or check state.
 
-A pull request is an optional one-way Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch. Iron Forest never reads the Projection back.
+A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
 
 ## Commands
 
@@ -36,7 +38,7 @@ Run the binary from the repository root. The command surface is:
 | `forest agents` | List declarations under `agents/` and their digests. |
 | `forest stats [--json]` | Aggregate `.forest/runs.jsonl`; use `--json` for machine output. |
 | `forest serve [--factory-dir <path>] [--flow <name>]...` | Run all enabled Flows, or only the named Flows. |
-| `forest run <flow> <subject>` | Run one selected Subject by key, branch, or issue number in one Flow. |
+| `forest run <flow> <subject>` | Run one Subject by exact key, branch, or item ID. Ambiguous exact matches are refused. |
 | `forest show <sha>` | Print the Verdict and Checks notes for a commit. |
 | `forest version` | Print the binary Revision. |
 | `forest selfcheck` | Verify configuration and agent declarations offline. |
@@ -60,6 +62,7 @@ flows:
     enabled: true
     agent: builder
     interval_seconds: 30
+    require_labels: [forest:ready]
     exclude_labels: [parked, forest:failed]
   verifier:
     enabled: true
@@ -72,6 +75,12 @@ flows:
     agent: builder
     interval_seconds: 40
     attempts: 2
+  manager:
+    enabled: true
+    agent: manager
+    interval_seconds: 60
+    ready_depth: 1
+    exclude_labels: [parked, forest:failed]
 projection:
   enabled: true
   merge_via_host: false
@@ -80,6 +89,14 @@ projection:
 `repo` names the Tracker repository. There is no `protected` key: `docs/adr/0003`
 removed it, so the Gate rejects nothing by path and independent review on the
 exact commit is what decides whether a change lands.
+
+Each `agents/<name>/agent.yaml` declares `commit.name` and `commit.email`.
+Builder and Fixer commits use their acting agent's identity. Verifier rebases
+preserve each original author and use the Verifier as committer. A native Git
+squash commit uses the Verifier identity. A Host-projected merge retains the
+Host platform's attribution. The authenticated Host account still pushes
+branches and authors pull requests. A distinct Host actor needs its own
+account or application credential.
 
 Attaching a second repository to a running installation is
 `docs/onboarding-managed-repo.md`.
@@ -126,10 +143,7 @@ Building the wrong thing is worse than not building: Iron Forest does not guess 
 stack. If a `checks:` command's tool is missing, the check fails and the note
 names the command that could not start.
 
-`flows.builder` selects items; declaring `require_labels` (for example
-`require_labels: [forest:ready]`) turns selection from opt-out into opt-in, so
-an open item is eligible only when it carries every declared label. `flows.verifier.merge` is `squash` or `ff`.
-`flows.verifier.auto_merge` controls the merge Effect. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
+`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` controls the merge Effect. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
 
 ## Requirements
 
@@ -147,6 +161,12 @@ mise exec -- go build -o forest .
 ```
 
 Omit `--factory-dir` to disable self-update.
+
+`forest serve` reads `forest.yaml` before each Flow pass. A committed configuration change takes effect without a process restart.
+
+The first termination signal stops new actions and lets current actions finish. A second signal kills managed process groups and exits without waiting for repository I/O. The next startup reaps linked worktrees before any Flow starts.
+
+Self-update waits until every Flow action is idle. It installs the tested binary and exits so the service supervisor can restart it. Deployed instances also serialize access to their shared factory source checkout.
 
 ## Ledger and board
 

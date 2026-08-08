@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -26,19 +28,27 @@ type McpSpec struct {
 	Enabled bool   `yaml:"enabled"`
 }
 
+// CommitIdentity is the author an agent uses for every commit it produces.
+// It is independent of the host account that pushes the branch.
+type CommitIdentity struct {
+	Name  string `yaml:"name"`
+	Email string `yaml:"email"`
+}
+
 // Agent is one declared agent under agents/<name>/. A directory is the agent,
 // not a prompt file: agent.yaml declares the runtime, instructions.md is the
 // system prompt, prompt.md is the user-prompt template, skills/*.md add
 // context, and report.schema.json is the output contract the gate enforces.
 type Agent struct {
-	Dir         string
-	Name        string
-	Description string   `yaml:"description"`
-	Harness     string   `yaml:"harness"`
-	Model       string   `yaml:"model"`
-	Variant     string   `yaml:"variant"`
-	Mode        string   `yaml:"mode"`
-	Temperature *float64 `yaml:"temperature"`
+	Dir         string         `yaml:"-"`
+	Name        string         `yaml:"-"`
+	Description string         `yaml:"description"`
+	Commit      CommitIdentity `yaml:"commit"`
+	Harness     string         `yaml:"harness"`
+	Model       string         `yaml:"model"`
+	Variant     string         `yaml:"variant"`
+	Mode        string         `yaml:"mode"`
+	Temperature *float64       `yaml:"temperature"`
 	// DeadlineSeconds is the required positive wall-clock bound on one run, in
 	// seconds, taken from the agent declaration so each lane can set its own. A
 	// run that exceeds it is cancelled and recorded as a mechanical timeout (see
@@ -61,15 +71,38 @@ type Agent struct {
 	DefSHA       string
 }
 
+func validAgentName(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		filepath.Base(name) == name && !strings.ContainsAny(name, `/\`)
+}
 func loadAgent(repoDir, name string) (*Agent, error) {
+	if !validAgentName(name) {
+		return nil, fmt.Errorf("agent name %q must be one path segment", name)
+	}
 	dir := filepath.Join(repoDir, DefaultAgentsDir, name)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("agent %s: %w", name, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("agent %s: declaration path is not a directory", name)
+	}
 	a := &Agent{Dir: dir, Name: name}
 	b, err := os.ReadFile(filepath.Join(dir, "agent.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: %w", name, err)
 	}
-	if err := yaml.Unmarshal(b, a); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(b))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(a); err != nil {
 		return nil, fmt.Errorf("agent %s agent.yaml: %w", name, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return nil, fmt.Errorf("agent %s agent.yaml: %w", name, err)
+		}
+		return nil, fmt.Errorf("agent %s agent.yaml: multiple YAML documents are not allowed", name)
 	}
 	if a.Harness == "" {
 		a.Harness = "opencode"
@@ -86,6 +119,9 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if a.DeadlineSeconds <= 0 {
 		return nil, fmt.Errorf("agent %s: deadline_seconds is required and must be a positive number of seconds", name)
 	}
+	if strings.TrimSpace(a.Commit.Name) == "" || strings.TrimSpace(a.Commit.Email) == "" {
+		return nil, fmt.Errorf("agent %s: commit.name and commit.email are required", name)
+	}
 	if a.Mode == "" {
 		a.Mode = "primary"
 	}
@@ -93,13 +129,32 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agent %s instructions.md: %w", name, err)
 	}
+	if strings.TrimSpace(string(ins)) == "" {
+		return nil, fmt.Errorf("agent %s instructions.md is empty", name)
+	}
 	a.Instructions = string(ins)
-	if t, err := os.ReadFile(filepath.Join(dir, "prompt.md")); err == nil {
-		a.PromptTmpl = string(t)
+	prompt, err := os.ReadFile(filepath.Join(dir, "prompt.md"))
+	if err != nil {
+		return nil, fmt.Errorf("agent %s prompt.md: %w", name, err)
 	}
-	if s, err := os.ReadFile(filepath.Join(dir, "report.schema.json")); err == nil {
-		a.ReportSchema = string(s)
+	if strings.TrimSpace(string(prompt)) == "" {
+		return nil, fmt.Errorf("agent %s prompt.md is empty", name)
 	}
+	if _, err := template.New("prompt").Option("missingkey=error").Parse(string(prompt)); err != nil {
+		return nil, fmt.Errorf("agent %s prompt.md: %w", name, err)
+	}
+	a.PromptTmpl = string(prompt)
+	schema, err := os.ReadFile(filepath.Join(dir, "report.schema.json"))
+	if err != nil {
+		return nil, fmt.Errorf("agent %s report.schema.json: %w", name, err)
+	}
+	var schemaDoc struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(schema, &schemaDoc); err != nil || schemaDoc.Type != "object" {
+		return nil, fmt.Errorf("agent %s report.schema.json must be a JSON object schema", name)
+	}
+	a.ReportSchema = string(schema)
 	a.DefSHA = composeDigest(repoDir, name)
 	return a, nil
 }
@@ -169,6 +224,9 @@ func composeDigest(repoDir, name string) string {
 // is generated per run and lives only in the factory-owned config space, never
 // in a repository the factory commits to.
 func renderMarkdown(cfgDir string, a *Agent) error {
+	if !validAgentName(a.Name) {
+		return fmt.Errorf("render agent name %q must be one path segment", a.Name)
+	}
 	dir := filepath.Join(cfgDir, "agents")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

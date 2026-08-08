@@ -2,12 +2,67 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRunChecksHardStopKillsDescendants(t *testing.T) {
+	defer func() {
+		runProcesses.Lock()
+		runProcesses.stopping = false
+		runProcesses.Unlock()
+	}()
+	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
+	stop := make(chan error, 1)
+	go func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if body, err := os.ReadFile(heartbeat); err == nil && len(body) > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				stop <- errors.New("check descendant did not start")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if errs := hardStopRunCommands(); len(errs) != 0 {
+			stop <- fmt.Errorf("hard stop: %v", errs)
+			return
+		}
+		stop <- nil
+	}()
+
+	note, err := runChecks(Config{Checks: []Check{{
+		Name: "blocking",
+		Run:  "(while :; do printf x >> '" + heartbeat + "'; sleep 0.05; done) & wait",
+	}}}, t.TempDir(), "run-hard-stop")
+	if err != nil {
+		t.Fatalf("runChecks: %v", err)
+	}
+	if stopErr := <-stop; stopErr != nil {
+		t.Fatal(stopErr)
+	}
+	if note.Status != "fail" {
+		t.Fatalf("hard-stopped check status = %q, want fail", note.Status)
+	}
+	before, err := os.ReadFile(heartbeat)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("check descendant produced no heartbeat: %d bytes, %v", len(before), err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	after, err := os.ReadFile(heartbeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("check descendant survived hard stop: heartbeat grew from %d to %d bytes", len(before), len(after))
+	}
+}
 
 func TestRunChecksAllPassing(t *testing.T) {
 	cfg := Config{Checks: []Check{

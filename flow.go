@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -103,8 +104,11 @@ func draining(drain *int32) bool {
 }
 
 // serve runs every enabled flow, each in its own goroutine on its own clock.
-// names filters to a subset of flows; empty means every enabled flow.
 func serve(cfg Config, repoDir string, names []string) int {
+	return serveSelected(cfg, repoDir, names, flowsFor())
+}
+
+func serveSelected(cfg Config, repoDir string, names []string, selected []Flow) int {
 	lock, err := acquireSingletonLock(repoDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
@@ -114,25 +118,44 @@ func serve(cfg Config, repoDir string, names []string) int {
 
 	// A worktree leaked by an abnormal exit is reaped once, before any flow
 	// starts, so a stale run directory never survives a restart.
+	if err := removeInterruptedUpdateArtifacts(repoDir); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: remove interrupted update artifacts: %v\n", err)
+	}
 	reapOrphanWorktrees(repoDir)
 
 	var drain int32
+	drainNow := make(chan struct{})
+	served := make(chan struct{})
+	defer close(served)
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
 	go func() {
-		<-sig // first signal: finish the in-flight agents, start no new pass
-		atomic.StoreInt32(&drain, 1)
-		fmt.Fprintln(os.Stderr, "forest: draining, waiting for in-flight agents")
-		<-sig // second signal: the operator's hard stop, which still outranks the agents' own wall-clock deadlines
-		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
-		for _, dir := range trackedWorktrees() {
-			removeWorktree(repoDir, dir)
-			fmt.Fprintf(os.Stderr, "forest: removed in-flight worktree %s\n", dir)
+		select {
+		case <-sig:
+		case <-served:
+			return
 		}
+		// Drain starts immediately, even when final update I/O is blocked. An
+		// update whose last drain check already passed may finish its install;
+		// both paths stop this process, and a second signal always stays live.
+		atomic.StoreInt32(&drain, 1)
+		close(drainNow)
+		fmt.Fprintln(os.Stderr, "forest: draining, waiting for in-flight agents")
+		select {
+		case <-sig:
+		case <-served:
+			return
+		}
+		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
+		for _, err := range hardStopRunCommands() {
+			fmt.Fprintln(os.Stderr, "forest:", err)
+		}
+		// A forced stop does not wait for blocked repository I/O. The next
+		// startup reaps every linked worktree before it starts a Flow.
 		os.Exit(1)
 	}()
 
-	selected := flowsFor()
 	if len(names) > 0 {
 		var keep []Flow
 		for _, f := range selected {
@@ -160,16 +183,18 @@ func serve(cfg Config, repoDir string, names []string) int {
 	}
 
 	fmt.Printf("forest v%s: %s on %s\n", version, flowNames(live), cfg.Repo)
-	// The self-updater is not a lane: it owns no subject. It swaps the binary
-	// only when no subject is in flight, so a rebuild never kills a live agent.
-	go selfUpdateLoop(cfg, repoDir, &drain)
-
+	// The updater takes the write gate only between Subject actions.
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		selfUpdateLoop(repoDir, &drain, drainNow)
+	}()
 	for _, f := range live {
 		wg.Add(1)
 		go func(f Flow) {
 			defer wg.Done()
-			runFlowLoop(f, cfg, repoDir, &drain)
+			runFlowLoop(f, cfg, repoDir, &drain, drainNow)
 		}(f)
 	}
 	wg.Wait()
@@ -224,18 +249,26 @@ func verifyHostConfig(repoDir string) error {
 // progress and must wait. Without that rule any action that succeeds while
 // changing nothing becomes a hot loop, which is what 217 identical verifier
 // passes on one branch were.
-func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
+func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32, drainNow <-chan struct{}) {
 	var lastKey string
 	for {
 		if atomic.LoadInt32(drain) == 1 {
 			fmt.Fprintf(os.Stderr, "forest: %s draining, no new pass\n", f.Name())
 			return
 		}
-		if nc, err := loadConfig(configPath(repoDir)); err == nil {
-			cfg = nc
+		nc, err := loadConfig(configPath(repoDir))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forest: %s config: %v\n", f.Name(), err)
+			if !waitFlowInterval(f.Interval(cfg), drainNow) {
+				return
+			}
+			continue
 		}
+		cfg = nc
 		if !f.Enabled(cfg) {
-			time.Sleep(f.Interval(cfg))
+			if !waitFlowInterval(f.Interval(cfg), drainNow) {
+				return
+			}
 			continue
 		}
 		if err := verifyHostConfig(repoDir); err != nil {
@@ -244,7 +277,9 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 			// pass's checks execute on the host. Refuse to act this pass, name the
 			// file, and retry on the next interval so an operator sees it.
 			fmt.Fprintf(os.Stderr, "forest: %s: %v\n", f.Name(), err)
-			time.Sleep(f.Interval(cfg))
+			if !waitFlowInterval(f.Interval(cfg), drainNow) {
+				return
+			}
 			continue
 		}
 		code, key := runFlowPass(f, cfg, repoDir, drain)
@@ -255,7 +290,24 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 			continue
 		}
 		lastKey = key
-		time.Sleep(f.Interval(cfg))
+		if !waitFlowInterval(f.Interval(cfg), drainNow) {
+			return
+		}
+	}
+}
+
+func waitFlowInterval(interval time.Duration, drainNow <-chan struct{}) bool {
+	if drainNow == nil {
+		time.Sleep(interval)
+		return true
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-drainNow:
+		return false
 	}
 }
 
@@ -282,19 +334,36 @@ func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string)
 	return 1, ""
 }
 
-// actOnSubject excludes one subject within this process, acts, and records.
-// The read-side update gate spans Act so a binary swap cannot interrupt it.
-// Act must never take this lock again: a second read lock behind a waiting
-// writer deadlocks.
+var (
+	runPrefix   = fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405.000000000Z"), os.Getpid())
+	runSequence uint64
+)
+
+func newRunID() string {
+	return fmt.Sprintf("%s-%016x", runPrefix, atomic.AddUint64(&runSequence, 1))
+}
+
+// actOnSubject admits one Subject across every process and checkout before it
+// spends work, then acts and records. The read-side update gate spans Act so a
+// binary swap cannot interrupt it. Act must never take this lock again: a
+// second read lock behind a waiting writer deadlocks.
 func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) int {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
-	if !inFlight.claim(s.Key) {
-		return codeBusy
+	if draining(drain) {
+		return 1
 	}
-	defer inFlight.release(s.Key)
 
-	runID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), s.Key)
+	runID := newRunID()
+	release, err := claimAdmission(repoDir, cfg.Repo, f.Name(), s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+		if errors.Is(err, errAdmissionHeld) {
+			return codeBusy
+		}
+		return 1
+	}
+	defer release()
 
 	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
 	out, err := f.Act(cfg, repoDir, s, runID)
@@ -321,18 +390,24 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 			}
 		}
 		rec.Error = err.Error()
-		_ = appendRun(workspaceDir(repoDir), rec)
+		if ledgerErr := appendRun(workspaceDir(repoDir), rec); ledgerErr != nil {
+			fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %v\n", f.Name(), s.Key, ledgerErr)
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
 		return 1
 	}
-	_ = appendRun(workspaceDir(repoDir), rec)
+	if err := appendRun(workspaceDir(repoDir), rec); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %v\n", f.Name(), s.Key, err)
+		return 1
+	}
 	fmt.Printf("forest: %s %s %s\n", f.Name(), s.Key, rec.Status)
 	return 0
 }
 
-// runOnce acts on one named subject with one flow, outside the daemon. It does
-// not take the singleton lock, so the in-process subject exclusion remains the
-// only guard for a manual dispatch beside a running daemon.
+// runOnce acts on one named Subject with one Flow outside the daemon. The
+// durable admission in actOnSubject prevents a manual run from duplicating
+// work held by serve or another checkout.
 func runOnce(cfg Config, repoDir, flowName, subject string) int {
 	if err := verifyHostConfig(repoDir); err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
@@ -347,11 +422,13 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 			fmt.Fprintln(os.Stderr, "forest:", err)
 			return 1
 		}
-		for _, s := range subjects {
-			if s.Key == subject || s.Branch == subject ||
-				(s.ID != "" && s.ID == subject) {
-				return actOnSubject(f, cfg, repoDir, s, nil)
-			}
+		match, found, err := resolveSelectedSubject(subjects, subject)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forest: %s: %v\n", flowName, err)
+			return 1
+		}
+		if found {
+			return actOnSubject(f, cfg, repoDir, match, nil)
 		}
 		fmt.Fprintf(os.Stderr, "forest: %s does not select %q now\n", flowName, subject)
 		for _, s := range subjects {
@@ -361,6 +438,26 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 	}
 	fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", flowName)
 	return 2
+}
+
+func resolveSelectedSubject(subjects []Subject, name string) (Subject, bool, error) {
+	var matches []Subject
+	for _, s := range subjects {
+		if s.Key == name || s.Branch == name || (s.ID != "" && s.ID == name) {
+			matches = append(matches, s)
+		}
+	}
+	if len(matches) == 0 {
+		return Subject{}, false, nil
+	}
+	if len(matches) > 1 {
+		keys := make([]string, len(matches))
+		for i, s := range matches {
+			keys[i] = s.Key
+		}
+		return Subject{}, false, fmt.Errorf("subject %q is ambiguous across %s", name, strings.Join(keys, ", "))
+	}
+	return matches[0], true, nil
 }
 
 // failStatus maps a stage-prefixed error to the ledger's failure vocabulary.

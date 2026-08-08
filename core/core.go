@@ -7,19 +7,10 @@
 // imports the main package.
 package core
 
-// CommitIdentity is the author every flow's commits carry. It is declared, not
-// derived from a host account, so a run is attributable in any repository.
-type CommitIdentity struct {
-	Name  string
-	Email string
-}
-
-// Config is the read view of forest.yaml a surface needs: the work source, the
-// gate checks, the flow declarations, the commit identity, and the optional
-// projection.
+// Config is the read view of forest.yaml a surface needs: the work source,
+// gate checks, flow declarations, and optional projection.
 type Config struct {
 	Repo       string
-	Commit     CommitIdentity
 	Checks     []Check
 	Flows      Flows
 	Projection ProjectionConfig
@@ -75,8 +66,8 @@ type FixerFlowConfig struct {
 // ready depth that bounds how many unstarted assignments it keeps in flight.
 type ManagerFlowConfig struct {
 	FlowConfig
-	ReadyDepth  int
-	ExcludeTags []string
+	ReadyDepth    int
+	ExcludeLabels []string
 }
 
 // ProjectionConfig is the optional, one-way human surface: publish a branch as
@@ -105,6 +96,8 @@ type McpSpec struct {
 type AgentInfo struct {
 	Name        string
 	Description string
+	CommitName  string
+	CommitEmail string
 	Model       string
 	Variant     string
 	Mode        string

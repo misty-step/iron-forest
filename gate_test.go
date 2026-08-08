@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -15,7 +14,7 @@ import (
 // review on the exact commit decides whether it lands.
 func TestGateAcceptsAChangeToItsOwnDeclarations(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.MkdirAll(filepath.Join(wtDir, "agents", "builder"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -28,8 +27,8 @@ func TestGateAcceptsAChangeToItsOwnDeclarations(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	gitT(t, wtDir, "add", ".")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", ".")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	baseSHA, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +38,7 @@ func TestGateAcceptsAChangeToItsOwnDeclarations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, _, err := gate(wtDir, baseSHA, "", "")
+	changed, _, err := gate(wtDir, baseSHA, gateTestSchema(t), "")
 	if err != nil {
 		t.Fatalf("gate rejected a change to the factory's own declarations: %v", err)
 	}
@@ -55,12 +54,12 @@ func TestGateAcceptsAChangeToItsOwnDeclarations(t *testing.T) {
 // uncommitted experiment.
 func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "source.go")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -105,12 +104,12 @@ func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
 // directions catches every one.
 func TestAssertCleanReviewTreeComparesFullStateBothWays(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "source.go")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +138,7 @@ func TestAssertCleanReviewTreeComparesFullStateBothWays(t *testing.T) {
 	}
 
 	// The review stages the dirty file: index state changed.
-	gitT(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "add", "source.go")
 	err = assertCleanReviewTree(wtDir, head, before)
 	if err == nil {
 		t.Fatal("staging an already-dirty tracked file was not refused")
@@ -150,7 +149,7 @@ func TestAssertCleanReviewTreeComparesFullStateBothWays(t *testing.T) {
 
 	// The review restores the dirty file to clean: it vanishes from the dirt set,
 	// which a forward-only path diff would never notice.
-	gitT(t, wtDir, "checkout", "--", "source.go")
+	runGitTest(t, wtDir, "checkout", "--", "source.go")
 	err = assertCleanReviewTree(wtDir, head, before)
 	if err == nil {
 		t.Fatal("restoring an already-dirty tracked file to clean was not refused")
@@ -166,12 +165,12 @@ func TestAssertCleanReviewTreeComparesFullStateBothWays(t *testing.T) {
 // source, never accepted as if the run only wrote the record.
 func TestAssertCleanReviewTreeRefusesRenameIntoReview(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "source.go")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +180,7 @@ func TestAssertCleanReviewTreeRefusesRenameIntoReview(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gitT(t, wtDir, "mv", "source.go", "review.json")
+	runGitTest(t, wtDir, "mv", "source.go", "review.json")
 	err = assertCleanReviewTree(wtDir, head, before)
 	if err == nil {
 		t.Fatal("a rename into review.json was not refused")
@@ -196,12 +195,12 @@ func TestAssertCleanReviewTreeRefusesRenameIntoReview(t *testing.T) {
 // that back it ran against the pre-move tree.
 func TestAssertCleanReviewTreeRefusesMovedHead(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.WriteFile(filepath.Join(wtDir, "a.txt"), []byte("a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "a.txt")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "a.txt")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -210,8 +209,8 @@ func TestAssertCleanReviewTreeRefusesMovedHead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "b.txt"), []byte("b\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "b.txt")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "review commit")
+	runGitTest(t, wtDir, "add", "b.txt")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "review commit")
 
 	before, err := snapshotReviewTree(wtDir)
 	if err != nil {
@@ -248,12 +247,12 @@ func TestAssertCleanReviewTreeRefusesModeTypeChanges(t *testing.T) {
 	// A chmod changes the tracked mode while leaving the bytes identical.
 	t.Run("chmod", func(t *testing.T) {
 		wtDir := t.TempDir()
-		gitT(t, wtDir, "init")
+		runGitTest(t, wtDir, "init")
 		if err := os.WriteFile(filepath.Join(wtDir, "mode.txt"), []byte("x\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		gitT(t, wtDir, "add", "mode.txt")
-		gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+		runGitTest(t, wtDir, "add", "mode.txt")
+		runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 		head, err := gitOut(wtDir, "rev-parse", "HEAD")
 		if err != nil {
 			t.Fatal(err)
@@ -273,12 +272,12 @@ func TestAssertCleanReviewTreeRefusesModeTypeChanges(t *testing.T) {
 	// have returned the identical bytes, missing the change.
 	t.Run("equalContentSymlink", func(t *testing.T) {
 		wtDir := t.TempDir()
-		gitT(t, wtDir, "init")
+		runGitTest(t, wtDir, "init")
 		if err := os.WriteFile(filepath.Join(wtDir, "mode.txt"), []byte("x\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		gitT(t, wtDir, "add", "mode.txt")
-		gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+		runGitTest(t, wtDir, "add", "mode.txt")
+		runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 		head, err := gitOut(wtDir, "rev-parse", "HEAD")
 		if err != nil {
 			t.Fatal(err)
@@ -304,12 +303,12 @@ func TestAssertCleanReviewTreeRefusesModeTypeChanges(t *testing.T) {
 	// snapshot must name it without ever opening the FIFO, which would block.
 	t.Run("fifo", func(t *testing.T) {
 		wtDir := t.TempDir()
-		gitT(t, wtDir, "init")
+		runGitTest(t, wtDir, "init")
 		if err := os.WriteFile(filepath.Join(wtDir, "mode.txt"), []byte("x\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		gitT(t, wtDir, "add", "mode.txt")
-		gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+		runGitTest(t, wtDir, "add", "mode.txt")
+		runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 		head, err := gitOut(wtDir, "rev-parse", "HEAD")
 		if err != nil {
 			t.Fatal(err)
@@ -337,7 +336,7 @@ func TestAssertCleanReviewTreeRefusesModeTypeChanges(t *testing.T) {
 // the tracked files deleted, but the gate must name the directory on its own.
 func TestAssertCleanReviewTreeRefusesSymlinkedDirectory(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.MkdirAll(filepath.Join(wtDir, "src"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -347,8 +346,8 @@ func TestAssertCleanReviewTreeRefusesSymlinkedDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "src", "b.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", ".")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", ".")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -392,12 +391,12 @@ func TestAssertCleanReviewTreeRefusesSymlinkedDirectory(t *testing.T) {
 // names review.json as the one file to write.
 func TestAssertCleanReviewTreeRefusesUntrackedArtifact(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "source.go")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -449,15 +448,15 @@ func TestAssertCleanReviewTreeRefusesUntrackedArtifact(t *testing.T) {
 // and content, so the in-place edit must be refused naming it.
 func TestAssertCleanReviewTreeRefusesEditedUntrackedFixture(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(wtDir, "fixture.txt"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "source.go")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -489,13 +488,13 @@ func TestAssertCleanReviewTreeRefusesEditedUntrackedFixture(t *testing.T) {
 // newline-named tracked file is refused naming it.
 func TestSnapshotReviewTreeHandlesNewlinedPath(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	name := "a\nb.txt" // a newline, which git quotes in newline output
 	if err := os.WriteFile(filepath.Join(wtDir, name), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", ".")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", ".")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -526,7 +525,7 @@ func TestSnapshotReviewTreeHandlesNewlinedPath(t *testing.T) {
 // naming the submodule path.
 func TestAssertCleanReviewTreeRefusesSubmoduleEdit(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 
 	// Build a checked-out submodule: an ordinary git repo at wtDir/vendor holding
 	// its own tracked file. A gitlink is just an index entry of mode 160000 whose
@@ -536,12 +535,12 @@ func TestAssertCleanReviewTreeRefusesSubmoduleEdit(t *testing.T) {
 	if err := os.MkdirAll(vendor, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, vendor, "init", "-b", "main")
+	runGitTest(t, vendor, "init", "-b", "main")
 	if err := os.WriteFile(filepath.Join(vendor, "inner.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, vendor, "add", "inner.txt")
-	gitT(t, vendor, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "inner")
+	runGitTest(t, vendor, "add", "inner.txt")
+	runGitTest(t, vendor, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "inner")
 	subHead, err := gitOut(vendor, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -549,8 +548,8 @@ func TestAssertCleanReviewTreeRefusesSubmoduleEdit(t *testing.T) {
 
 	// Record the gitlink in the parent index and commit it, so the parent sees
 	// the submodule by a 160000 entry exactly as it would after `submodule add`.
-	gitT(t, wtDir, "update-index", "--add", "--cacheinfo", "160000,"+subHead+",vendor")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "track submodule")
+	runGitTest(t, wtDir, "update-index", "--add", "--cacheinfo", "160000,"+subHead+",vendor")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "track submodule")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -649,7 +648,7 @@ func TestWorkStateRejectsContentEdit(t *testing.T) {
 // of emitting identical before/after fingerprints that hide the mutation.
 func TestAssertCleanReviewTreeRefusesSameSizeMutationBeyondLimit(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	big := make([]byte, snapshotFileHashLimit+1)
 	for i := range big {
 		big[i] = 0x41
@@ -657,8 +656,8 @@ func TestAssertCleanReviewTreeRefusesSameSizeMutationBeyondLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "large.bin"), big, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "large.bin")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "large.bin")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -761,14 +760,6 @@ func TestParseChangedKeepsRenameDestination(t *testing.T) {
 	}
 }
 
-func gitT(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
-	}
-}
-
 // TestParseChangedKeepsFirstPathIntact pins the column contract. Porcelain
 // leaves the first column blank for a change that is not staged, so a modified
 // tracked file arrives as " M path". Trimming that blank shifts the fields left
@@ -793,7 +784,7 @@ func TestParseChangedKeepsFirstPathIntact(t *testing.T) {
 func gateBaseRepo(t *testing.T, files map[string]string) (string, string) {
 	t.Helper()
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	for path, body := range files {
 		if err := os.MkdirAll(filepath.Dir(filepath.Join(wtDir, path)), 0o755); err != nil {
 			t.Fatal(err)
@@ -802,8 +793,8 @@ func gateBaseRepo(t *testing.T, files map[string]string) (string, string) {
 			t.Fatal(err)
 		}
 	}
-	gitT(t, wtDir, "add", ".")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", ".")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	baseSHA, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -819,6 +810,16 @@ func writeReport(t *testing.T, wtDir, body string) {
 	}
 }
 
+func gateTestSchema(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "report.schema.json")
+	body := `{"type":"object","required":["summary","changed_files"],"properties":{"summary":{"type":"string"},"changed_files":{"type":"array"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // TestGateRefusesReportNamingUnchangedFile pins that a report claiming a file
 // that did not change is refused and the message names that file.
 func TestGateRefusesReportNamingUnchangedFile(t *testing.T) {
@@ -832,7 +833,7 @@ func TestGateRefusesReportNamingUnchangedFile(t *testing.T) {
 	}
 	writeReport(t, wtDir, `{"summary":"s","changed_files":["a.go"]}`)
 
-	_, _, err := gate(wtDir, baseSHA, "", "")
+	_, _, err := gate(wtDir, baseSHA, gateTestSchema(t), "")
 	if err == nil {
 		t.Fatal("gate accepted a report naming an unchanged file")
 	}
@@ -857,7 +858,7 @@ func TestGateRefusesReportOmittingChangedFile(t *testing.T) {
 	}
 	writeReport(t, wtDir, `{"summary":"s","changed_files":["b.go"]}`)
 
-	_, _, err := gate(wtDir, baseSHA, "", "")
+	_, _, err := gate(wtDir, baseSHA, gateTestSchema(t), "")
 	if err == nil {
 		t.Fatal("gate accepted a report omitting a changed file")
 	}
@@ -882,7 +883,7 @@ func TestGateNamesTraceTailWhenReportMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err := gate(wtDir, baseSHA, "", tracePath)
+	_, _, err := gate(wtDir, baseSHA, gateTestSchema(t), tracePath)
 	if err == nil {
 		t.Fatal("gate accepted a run with no report")
 	}
@@ -909,12 +910,12 @@ func TestCrossCheckNormalisesPaths(t *testing.T) {
 // edit rather than the Review revision.
 func TestAssertChecksCleanRefusesTrackedRewriteAllowsScratch(t *testing.T) {
 	wtDir := t.TempDir()
-	gitT(t, wtDir, "init")
+	runGitTest(t, wtDir, "init")
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitT(t, wtDir, "add", "source.go")
-	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	runGitTest(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
@@ -948,8 +949,8 @@ func TestAssertChecksCleanRefusesTrackedRewriteAllowsScratch(t *testing.T) {
 
 	// Staging is refused too, even when the file is restored to HEAD in the
 	// working tree: the index entry moved.
-	gitT(t, wtDir, "checkout", "--", "source.go")
-	gitT(t, wtDir, "add", "source.go")
+	runGitTest(t, wtDir, "checkout", "--", "source.go")
+	runGitTest(t, wtDir, "add", "source.go")
 	err = assertChecksClean(wtDir, head, before)
 	if err == nil {
 		t.Fatal("a check that staged a tracked file was not refused")

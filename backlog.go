@@ -17,7 +17,7 @@ type comment struct {
 // ghJSON runs the host CLI once. Tests replace it to stub the tracker without
 // invoking the host binary.
 var ghJSON = func(args ...string) ([]byte, error) {
-	return exec.Command("gh", args...).Output()
+	return runOutput(exec.Command("gh", args...))
 }
 
 // githubTracker adapts the GitHub CLI to the Tracker port. It is the only
@@ -142,13 +142,20 @@ func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	return eligibleFrom(items, branches, cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels), nil
+	retiring, err := retirementItemIDs(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	return eligibleFrom(items, branches, retiring, cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels), nil
 }
 
-func eligibleFrom(items []Item, branches, excluded, required []string) []Item {
-	covered := make(map[string]bool)
+func eligibleFrom(items []Item, branches, retiring, excluded, required []string) []Item {
+	covered := make(map[string]bool, len(branches)+len(retiring))
 	for _, branch := range branches {
 		covered[itemIDFromBranch(branch)] = true
+	}
+	for _, id := range retiring {
+		covered[id] = true
 	}
 	var ready []Item
 	for _, item := range items {
@@ -161,7 +168,7 @@ func eligibleFrom(items []Item, branches, excluded, required []string) []Item {
 		if len(required) > 0 && !hasTags(item, required) {
 			continue
 		}
-		if hasExcludedTag(item, excluded) {
+		if hasExcludedLabel(item, excluded) {
 			continue
 		}
 		ready = append(ready, item)
@@ -178,7 +185,7 @@ func hasTags(item Item, required []string) bool {
 	return true
 }
 
-func hasExcludedTag(item Item, excluded []string) bool {
+func hasExcludedLabel(item Item, excluded []string) bool {
 	for _, tag := range excluded {
 		if item.hasTag(tag) {
 			return true

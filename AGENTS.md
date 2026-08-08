@@ -22,7 +22,7 @@ Iron Forest has three declarations:
 
 Each declaration uses these files:
 
-- `agent.yaml` declares the harness, model, permissions, MCP wiring, and run limits.
+- `agent.yaml` declares the harness, model, commit identity, permissions, MCP wiring, and run limits.
 - `instructions.md` contains the system prompt and standing rules.
 - `prompt.md` contains the user-prompt template for one Subject.
 - `report.schema.json` defines the output contract enforced by the Gate.

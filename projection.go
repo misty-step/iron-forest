@@ -12,14 +12,21 @@ import (
 // and tests replace this function without invoking the host CLI.
 var projectionCommand = ghJSON
 
+var errHostMergePending = errors.New("Host merge is pending")
+var errHostMergeUnavailable = errors.New("Host merge request is unavailable")
+
 type projectionPullRequest struct {
-	Number int    `json:"number"`
-	URL    string `json:"url"`
+	Number            int    `json:"number"`
+	URL               string `json:"url"`
+	HeadRefOID        string `json:"headRefOid"`
+	HeadRefName       string `json:"headRefName"`
+	BaseRefName       string `json:"baseRefName"`
+	IsCrossRepository bool   `json:"isCrossRepository"`
 }
 
-func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error) {
-	out, err := projectionCommand("pr", "list", "-R", cfg.Repo, "--state", "open",
-		"--head", branch, "--json", "number,url")
+func projectionPRs(cfg Config, branch, state string) ([]projectionPullRequest, error) {
+	out, err := projectionCommand("pr", "list", "-R", cfg.Repo, "--state", state,
+		"--head", branch, "--json", "number,url,headRefOid,headRefName,baseRefName,isCrossRepository")
 	if err != nil {
 		return nil, err
 	}
@@ -27,28 +34,58 @@ func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error
 	if err := json.Unmarshal(out, &prs); err != nil {
 		return nil, err
 	}
+	for _, pr := range prs {
+		if pr.IsCrossRepository || pr.HeadRefName != branch || pr.BaseRefName != "master" {
+			return nil, fmt.Errorf("pull request %d does not originate from %s branch %q and target master",
+				pr.Number, cfg.Repo, branch)
+		}
+	}
+	return prs, nil
+}
+
+func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error) {
+	prs, err := projectionPRs(cfg, branch, "open")
+	if err != nil {
+		return nil, err
+	}
+	if len(prs) > 1 {
+		return nil, fmt.Errorf("multiple open pull requests for branch %q", branch)
+	}
 	return prs, nil
 }
 
 // projectBranch publishes a built branch as one idempotent pull request.
-func projectBranch(cfg Config, it Item, branch, body string) (string, error) {
+// expectedHead is non-empty only during Verifier recovery. An already-merged
+// request at that exact Revision is returned without creating a duplicate.
+func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (string, bool, error) {
 	if !cfg.Projection.Enabled {
-		return "", nil
+		return "", false, nil
 	}
 	prs, err := openProjectionPR(cfg, branch)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if len(prs) > 0 {
-		return prs[0].URL, nil
+		return prs[0].URL, false, nil
+	}
+	if expectedHead != "" {
+		merged, err := projectionPRs(cfg, branch, "merged")
+		if err != nil {
+			return "", false, err
+		}
+		for _, pr := range merged {
+			if pr.HeadRefOID == expectedHead {
+				return pr.URL, true, nil
+			}
+		}
 	}
 	created, err := projectionCommand("pr", "create", "-R", cfg.Repo,
 		"--base", "master", "--head", branch,
 		"--title", "forest: "+it.Title, "--body", body)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return strings.TrimSpace(string(created)), nil
+	return strings.TrimSpace(string(created)), false, nil
 }
 
 func verdictBody(v verdictNote, c checksNote) string {
@@ -104,50 +141,87 @@ func projectChecks(cfg Config, branch string, c checksNote) error {
 }
 
 // projectMerge asks the host to merge a pull request when it owns the target
-// branch. expectedHead is the reviewed Revision the merge must still point at:
-// it is passed to the host's expected-head facility so the host refuses to merge
-// a pull request whose head advanced past the reviewed Revision. An empty value
-// leaves the head unpinned.
+// branch. expectedHead is the reviewed Revision the merge must still point at.
+// A merged request with that exact head is durable recovery evidence: a prior
+// host merge succeeded, so the caller can retry Tracker retirement without
+// asking an already-closed request to merge again.
 func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
-	if !cfg.Projection.Enabled {
-		return errors.New("projection disabled")
-	}
-	prs, err := openProjectionPR(cfg, branch)
+	merged, pr, err := inspectProjectMerge(cfg, branch, strategy, expectedHead)
 	if err != nil {
 		return err
 	}
-	if len(prs) == 0 || prs[0].Number == 0 {
-		return fmt.Errorf("no open pull request for branch %q", branch)
+	if merged {
+		return nil
 	}
-	method := ""
-	switch strategy {
-	case "squash":
-		method = "--squash"
-	case "ff":
-		// --rebase replays the branch's own commits. --merge would add a merge
-		// commit, which contradicts the declared fast-forward shape.
-		method = "--rebase"
-	default:
-		return fmt.Errorf("unsupported merge strategy %q", strategy)
-	}
-	args := []string{"pr", "merge", strconv.Itoa(prs[0].Number),
-		"-R", cfg.Repo, method}
+	args := []string{"pr", "merge", strconv.Itoa(pr.Number),
+		"-R", cfg.Repo, "--squash"}
 	if expectedHead != "" {
 		args = append(args, "--match-head-commit", expectedHead)
 	}
-	_, err = projectionCommand(args...)
-	return err
+	if _, err := projectionCommand(args...); err != nil {
+		// The command can fail after the Host accepted or queued the request.
+		// Preserve intent and determine the exact merged head on a later pass.
+		return fmt.Errorf("%w: merge request: %v", errHostMergePending, err)
+	}
+	merged, _, err = inspectProjectMerge(cfg, branch, strategy, expectedHead)
+	if err != nil {
+		// The Host accepted the command. A merge queue can briefly expose
+		// neither view, so keep durable intent and observe it on the next pass.
+		return fmt.Errorf("%w: post-request state: %v", errHostMergePending, err)
+	}
+	if !merged {
+		return errHostMergePending
+	}
+	return nil
 }
 
-// prNumberFromURL extracts the pull request number from its URL.
-func prNumberFromURL(u string) int {
-	i := strings.LastIndex(u, "/")
-	if i < 0 {
-		return 0
-	}
-	n, err := strconv.Atoi(u[i+1:])
+func observeProjectMerge(cfg Config, branch, strategy, expectedHead string) error {
+	merged, _, err := inspectProjectMerge(cfg, branch, strategy, expectedHead)
 	if err != nil {
-		return 0
+		return err
 	}
-	return n
+	if !merged {
+		return errHostMergePending
+	}
+	return nil
+}
+
+func inspectProjectMerge(cfg Config, branch, strategy, expectedHead string) (bool, projectionPullRequest, error) {
+	if !cfg.Projection.Enabled {
+		return false, projectionPullRequest{}, errors.New("projection disabled")
+	}
+	if strategy != "squash" {
+		return false, projectionPullRequest{}, fmt.Errorf("Host projection supports only squash merge, got %q", strategy)
+	}
+	merged, err := projectionPRs(cfg, branch, "merged")
+	if err != nil {
+		return false, projectionPullRequest{}, err
+	}
+	for _, pr := range merged {
+		if expectedHead == "" || pr.HeadRefOID == expectedHead {
+			return true, projectionPullRequest{}, nil
+		}
+	}
+	prs, err := openProjectionPR(cfg, branch)
+	if err != nil {
+		return false, projectionPullRequest{}, err
+	}
+	if len(prs) == 0 {
+		if len(merged) > 0 {
+			return false, projectionPullRequest{}, fmt.Errorf("%w: merged pull request for branch %q does not match reviewed Revision %s",
+				errHostMergeUnavailable, branch, expectedHead)
+		}
+		return false, projectionPullRequest{}, fmt.Errorf("%w: no open or merged pull request for branch %q",
+			errHostMergeUnavailable, branch)
+	}
+	pr := prs[0]
+	if pr.Number == 0 {
+		return false, projectionPullRequest{}, fmt.Errorf("%w: open pull request for branch %q has no number",
+			errHostMergeUnavailable, branch)
+	}
+	if expectedHead != "" && pr.HeadRefOID != "" && pr.HeadRefOID != expectedHead {
+		return false, projectionPullRequest{}, fmt.Errorf("%w: open pull request for branch %q moved to %s after reviewed Revision %s",
+			errHostMergeUnavailable, branch, pr.HeadRefOID, expectedHead)
+	}
+	return false, pr, nil
 }

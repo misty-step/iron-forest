@@ -35,7 +35,6 @@ func (c *coreImpl) Config() (core.Config, error) {
 	}
 	return core.Config{
 		Repo:   cfg.Repo,
-		Commit: core.CommitIdentity{Name: cfg.Commit.Name, Email: cfg.Commit.Email},
 		Checks: checks,
 		Flows: core.Flows{
 			Builder: core.BuilderFlowConfig{
@@ -53,9 +52,9 @@ func (c *coreImpl) Config() (core.Config, error) {
 				Attempts:   cfg.Flows.Fixer.Attempts,
 			},
 			Manager: core.ManagerFlowConfig{
-				FlowConfig:  flowConfig(cfg.Flows.Manager.Enabled, cfg.Flows.Manager.Agent, cfg.Flows.Manager.IntervalSec),
-				ReadyDepth:  cfg.Flows.Manager.ReadyDepth,
-				ExcludeTags: cfg.Flows.Manager.ExcludeTags,
+				FlowConfig:    flowConfig(cfg.Flows.Manager.Enabled, cfg.Flows.Manager.Agent, cfg.Flows.Manager.IntervalSec),
+				ReadyDepth:    cfg.Flows.Manager.ReadyDepth,
+				ExcludeLabels: cfg.Flows.Manager.ExcludeLabels,
 			},
 		},
 		Projection: core.ProjectionConfig{Enabled: cfg.Projection.Enabled, MergeViaHost: cfg.Projection.MergeViaHost},
@@ -92,6 +91,7 @@ func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 			// field. The agents command always listed the directory name; an
 			// agent.yaml carrying its own `name:` must not change that output.
 			Name: name, Description: a.Description, Model: a.Model,
+			CommitName: a.Commit.Name, CommitEmail: a.Commit.Email,
 			Variant: a.Variant, Mode: a.Mode, DefSHA: a.DefSHA, Mcps: mcps,
 		})
 	}
@@ -307,11 +307,11 @@ func (c *coreImpl) Daemon() (core.Daemon, error) {
 // systemd --user and falling back to the workspace daemon lock.
 func probeDaemon(repoDir string) core.Daemon {
 	d := core.Daemon{Unit: "forest.service"}
-	out, err := exec.Command("systemctl", "--user", "is-active", "forest").Output()
+	out, err := runOutput(exec.Command("systemctl", "--user", "is-active", "forest"))
 	active := err == nil && strings.TrimSpace(string(out)) == "active"
 	d.Active = active
 	if active {
-		if pid, err := exec.Command("systemctl", "--user", "show", "forest", "-p", "MainPID", "--value").Output(); err == nil {
+		if pid, err := runOutput(exec.Command("systemctl", "--user", "show", "forest", "-p", "MainPID", "--value")); err == nil {
 			d.PID = strings.TrimSpace(string(pid))
 		}
 		d.Note = "systemd --user"

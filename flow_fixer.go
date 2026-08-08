@@ -99,10 +99,7 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
 	}
-	defer func() {
-		removeWorktree(repoDir, wtDir)
-		untrackWorktree(wtDir)
-	}()
+	defer cleanupWorktree(repoDir, wtDir)
 	out := Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
 	prompt, err := renderUserPrompt(a, issueData(it, request))
 	if err != nil {
@@ -133,7 +130,7 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
+	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, a.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}

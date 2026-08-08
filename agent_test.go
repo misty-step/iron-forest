@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,11 +36,17 @@ func writeAgentFixture(t *testing.T, repoDir, name, model string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	yaml := "description: " + name + "\nmodel: " + model + "\ndeadline_seconds: 3600\n"
+	yaml := "description: " + name + "\ncommit:\n  name: " + name + "\n  email: " + name + "@example.invalid\nmodel: " + model + "\ndeadline_seconds: 3600\n"
 	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "instructions.md"), []byte("do the work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte("{{.Task}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.schema.json"), []byte("{\"type\":\"object\"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -168,12 +173,13 @@ func TestLoadAgentAndDigestChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.DefSHA == "" || a.Model != "builder-model" {
+	if a.DefSHA == "" || a.Model != "builder-model" ||
+		a.Commit.Name != "builder" || a.Commit.Email != "builder@example.invalid" {
 		t.Fatalf("loaded agent = %#v", a)
 	}
 	first := a.DefSHA
 	path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
-	if err := os.WriteFile(path, []byte("description: builder\nmodel: changed-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("description: builder\ncommit:\n  name: builder\n  email: builder@example.invalid\nmodel: changed-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	b, err := loadAgent(repoDir, "builder")
@@ -190,13 +196,84 @@ func TestDeclaredAgentsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"builder", "verifier"} {
+	cfg, err := loadConfig(filepath.Join(repoDir, "forest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := map[string]string{
+		"builder":  cfg.Flows.Builder.Agent,
+		"verifier": cfg.Flows.Verifier.Agent,
+		"fixer":    cfg.Flows.Fixer.Agent,
+		"manager":  cfg.Flows.Manager.Agent,
+	}
+	for _, f := range flowsFor() {
+		name, ok := agents[f.Name()]
+		if !ok || name == "" {
+			t.Fatalf("flow %q has no configured agent", f.Name())
+		}
 		a, err := loadAgent(repoDir, name)
 		if err != nil {
-			t.Fatalf("loadAgent(%q): %v", name, err)
+			t.Fatalf("flow %q loadAgent(%q): %v", f.Name(), name, err)
 		}
 		if a.Name != name || a.Model == "" || a.DefSHA == "" {
-			t.Fatalf("incomplete %s declaration: %#v", name, a)
+			t.Fatalf("incomplete %s declaration for flow %s: %#v", name, f.Name(), a)
+		}
+	}
+}
+
+func TestLoadAgentRequiresPromptAndSchema(t *testing.T) {
+	for _, name := range []string{"prompt.md", "report.schema.json"} {
+		t.Run(name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			writeAgentFixture(t, repoDir, "builder", "builder-model")
+			if err := os.Remove(filepath.Join(repoDir, DefaultAgentsDir, "builder", name)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadAgent(repoDir, "builder"); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("loadAgent without %s = %v, want declaration error", name, err)
+			}
+		})
+	}
+}
+
+func TestLoadAgentRejectsAdditionalYAMLDocument(t *testing.T) {
+	repoDir := t.TempDir()
+	writeAgentFixture(t, repoDir, "builder", "builder-model")
+	path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("---\nmodel: ignored-model\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAgent(repoDir, "builder"); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("loadAgent with second YAML document = %v, want refusal", err)
+	}
+}
+
+func TestLoadAgentRejectsMalformedPromptAndSchema(t *testing.T) {
+	tests := []struct {
+		file string
+		body string
+	}{
+		{"prompt.md", "{{"},
+		{"report.schema.json", `[]`},
+		{"report.schema.json", `{"type":"array"}`},
+	}
+	for _, tc := range tests {
+		repoDir := t.TempDir()
+		writeAgentFixture(t, repoDir, "builder", "builder-model")
+		path := filepath.Join(repoDir, DefaultAgentsDir, "builder", tc.file)
+		if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadAgent(repoDir, "builder"); err == nil {
+			t.Fatalf("loadAgent accepted malformed %s: %s", tc.file, tc.body)
 		}
 	}
 }
@@ -207,9 +284,27 @@ func TestLoadRejectsMissingOrZeroDeadline(t *testing.T) {
 	// loaded agent has to carry a positive, finite wall-clock bound. Without
 	// this guard a missing line would default to zero and silently open an
 	// unbounded run.
+	for _, deadline := range []string{"", "deadline_seconds: 0\n"} {
+		repoDir := t.TempDir()
+		writeAgentFixture(t, repoDir, "builder", "builder-model")
+		body := "description: builder\ncommit:\n  name: builder\n  email: builder@example.invalid\n" +
+			"model: builder-model\n" + deadline
+		path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadAgent(repoDir, "builder"); err == nil ||
+			!strings.Contains(err.Error(), "deadline_seconds") {
+			t.Fatalf("loadAgent without finite deadline = %v\n%s", err, body)
+		}
+	}
+}
+
+func TestLoadRejectsMissingCommitIdentity(t *testing.T) {
 	for _, body := range []string{
-		"description: builder\nmodel: builder-model\n",
-		"description: builder\nmodel: builder-model\ndeadline_seconds: 0\n",
+		"description: builder\nmodel: builder-model\ndeadline_seconds: 3600\n",
+		"description: builder\ncommit:\n  name: builder\nmodel: builder-model\ndeadline_seconds: 3600\n",
+		"description: builder\ncommit:\n  email: builder@example.invalid\nmodel: builder-model\ndeadline_seconds: 3600\n",
 	} {
 		repoDir := t.TempDir()
 		dir := filepath.Join(repoDir, DefaultAgentsDir, "builder")
@@ -222,9 +317,42 @@ func TestLoadRejectsMissingOrZeroDeadline(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "instructions.md"), []byte("do the work\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadAgent(repoDir, "builder"); err == nil {
-			t.Fatalf("loadAgent accepted a declaration without a finite deadline:\n%s", body)
+		if _, err := loadAgent(repoDir, "builder"); err == nil ||
+			!strings.Contains(err.Error(), "commit.name and commit.email are required") {
+			t.Fatalf("loadAgent missing commit identity = %v\n%s", err, body)
 		}
+	}
+}
+
+func TestLoadAgentRejectsPathAndIdentityOverrides(t *testing.T) {
+	repoDir := t.TempDir()
+	if _, err := loadAgent(repoDir, "../outside"); err == nil {
+		t.Fatal("loadAgent accepted a path outside agents/")
+	}
+	for _, override := range []string{
+		"name: ../../tmp/evil\n",
+		"dir: ../../tmp/evil\n",
+	} {
+		repoDir := t.TempDir()
+		writeAgentFixture(t, repoDir, "builder", "builder-model")
+		path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(override); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadAgent(repoDir, "builder"); err == nil {
+			t.Fatalf("loadAgent accepted reserved identity field %q", strings.TrimSpace(override))
+		}
+	}
+	if err := renderMarkdown(t.TempDir(), &Agent{Name: "../evil"}); err == nil {
+		t.Fatal("renderMarkdown accepted an escaping agent name")
 	}
 }
 
@@ -256,24 +384,15 @@ func TestRunCategory(t *testing.T) {
 // ever reading a factory artifact inside a repository the factory commits to.
 func TestPublishedBranchHasNoOpenCodePath(t *testing.T) {
 	wtDir := t.TempDir()
-	run := func(args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", wtDir}, args...)...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
-		}
-		return string(out)
-	}
-	run("init", "-b", "master")
-	run("config", "user.email", "test@example.com")
-	run("config", "user.name", "test")
+	runGitTest(t, wtDir, "init", "-b", "master")
+	runGitTest(t, wtDir, "config", "user.email", "test@example.com")
+	runGitTest(t, wtDir, "config", "user.name", "test")
 	if err := os.WriteFile(filepath.Join(wtDir, "file.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	run("add", "-A")
-	run("commit", "-m", "init")
-	run("tag", "base")
+	runGitTest(t, wtDir, "add", "-A")
+	runGitTest(t, wtDir, "commit", "-m", "init")
+	runGitTest(t, wtDir, "tag", "base")
 
 	// Render the agent into a factory-owned config directory outside the
 	// worktree, exactly as runPhase does, then stage the whole working tree the
@@ -293,9 +412,9 @@ func TestPublishedBranchHasNoOpenCodePath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "result.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	run("add", "-A")
-	run("commit", "-m", "publish")
-	tree := run("ls-tree", "-r", "HEAD", "--name-only")
+	runGitTest(t, wtDir, "add", "-A")
+	runGitTest(t, wtDir, "commit", "-m", "publish")
+	tree := runGitTest(t, wtDir, "ls-tree", "-r", "HEAD", "--name-only")
 	for _, p := range strings.Split(strings.TrimSpace(tree), "\n") {
 		if strings.HasPrefix(p, ".opencode") {
 			t.Fatalf("published branch contains factory path %q", p)

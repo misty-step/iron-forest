@@ -4,8 +4,8 @@
 
 Iron Forest is a self-hosted software factory. One organization runs one
 installation, which works an arbitrary number of that organization's
-repositories. Each repository gets its own process, running three independent
-Flows: Builder, Verifier, and Fixer.
+repositories. Each repository gets its own process, running four independent
+Flows: Builder, Verifier, Fixer, and Manager.
 
 ## Value proposition
 
@@ -50,10 +50,10 @@ The Tracker is the work source. Tracker and Projection both call `gh`, so this
 repository requires GitHub today.
 
 Iron Forest runs its own checks in the worktree and writes their results as
-notes. It never reads a Host's checks, reviews, or merge decisions as factory
-state. Projection is optional; when enabled it publishes a branch and mirrors
-each decision as a comment, and it reads the open pull-request list so it does
-not create a second one.
+notes. It never reads a Host's checks or reviews as factory state. Projection
+is optional. It publishes branches, mirrors decisions, and reads pull-request
+identity for idempotent publication. When the Host owns merge, it reads the
+exact merged head only to recover a pending retirement.
 
 Agents run through opencode. Credentials are Mint markers in the opencode
 configuration. No `.env` adapter ships. An agent run carries no credential of

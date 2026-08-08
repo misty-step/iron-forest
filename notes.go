@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -45,29 +48,50 @@ const (
 	checksNotesRef  = "forest/checks"
 )
 
-var (
-	errNoteExists = errors.New("note already exists")
-	// errLocalNote reports a note that exists only in the local checkout. A
-	// note is a durable fact only when it also exists on the remote, so a
-	// local-pending note must never be mistaken for a remote winner.
-	errLocalNote = errors.New("note is local only; not durable on remote")
-)
+var errNoteExists = errors.New("note already exists")
 
 func notesRef(ref string) string {
 	return "refs/notes/" + ref
 }
 
-// fetchNotes reconciles every durable notes ref with the remote. It iterates
-// one ref at a time through fetchNoteRef so that a notes ref the remote does
-// not have removes any stale local note instead of leaving it to shadow the
-// absent remote fact.
-func fetchNotes(repoDir string) error {
-	for _, ref := range []string{verdictNotesRef, checksNotesRef} {
-		if err := fetchNoteRef(repoDir, ref); err != nil {
-			return err
-		}
+func durableNotesRef(ref string) string {
+	return "refs/notes/forest/durable/" + strings.TrimPrefix(ref, "refs/notes/")
+}
+
+func withNotesLock(repoDir string, fn func() error) error {
+	commonDir, err := gitOut(repoDir, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolve git common directory: %w", err)
 	}
-	return nil
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(repoDir, commonDir)
+	}
+	lock, err := os.OpenFile(filepath.Join(commonDir, "forest-notes.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open notes lock: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("lock durable notes: %w", err)
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
+	return fn()
+}
+
+// fetchNotes reconciles every durable notes ref with the remote under the same
+// lock used by note writers.
+func fetchNotes(repoDir string) error {
+	return withNotesLock(repoDir, func() error {
+		for _, ref := range []string{verdictNotesRef, checksNotesRef} {
+			if err := fetchNoteRef(repoDir, ref); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func missingRemoteRef(err error) bool {
@@ -111,9 +135,19 @@ func writeChecks(repoDir, sha string, c checksNote) error {
 	c.Time = time.Now().UTC().Format(time.RFC3339)
 	return writeNote(repoDir, checksNotesRef, sha, c)
 }
-func readNote(repoDir, ref, sha string) (string, bool, error) {
+func readNote(repoDir, ref, sha string) (body string, ok bool, err error) {
+	err = withNotesLock(repoDir, func() error {
+		// Readers use only the remote-confirmed snapshot. A local notes update
+		// from an interrupted writer can never enter this ref.
+		body, ok, err = readNoteUnlocked(repoDir, durableNotesRef(ref), sha)
+		return err
+	})
+	return body, ok, err
+}
+
+func readNoteUnlocked(repoDir, ref, sha string) (string, bool, error) {
 	cmd := exec.Command("git", "-C", repoDir, "notes", "--ref="+ref, "show", sha)
-	out, err := cmd.CombinedOutput()
+	out, err := runCombinedOutput(cmd)
 	if err != nil {
 		if noNote(err, out) {
 			return "", false, nil
@@ -140,59 +174,59 @@ func writeNote(repoDir, ref, sha string, value any) error {
 	// that printed an environment variable, or a verdict note that quoted one,
 	// must be scrubbed before it becomes a durable remote fact.
 	noteText := redactSecretShaped(string(body))
-	var pushErr error
-	for attempt := range 3 {
-		if err := git(repoDir, "notes", "--ref="+ref, "add", "-m", noteText, sha); err != nil {
-			if noteAlreadyExists(err) {
-				// The note already exists locally. It is only a durable fact if
-				// the remote also holds it, so settle the disagreement before
-				// reporting a win.
-				return settleNoteWrite(repoDir, ref, sha, err)
-			}
-			return fmt.Errorf("write %s note: %w", ref, err)
-		}
-		pushErr = git(repoDir, "push", "origin", notesRef(ref))
-		if pushErr == nil {
-			return nil
-		}
-		if attempt == 2 {
-			break
-		}
+	return withNotesLock(repoDir, func() error {
 		if err := fetchNoteRef(repoDir, ref); err != nil {
-			return fmt.Errorf("fetch %s note after push rejection: %w", ref, err)
+			return fmt.Errorf("reconcile %s note before write: %w", ref, err)
 		}
-	}
-	return fmt.Errorf("push %s note after three attempts: %w", ref, pushErr)
+		var pushErr error
+		for attempt := range 3 {
+			if err := git(repoDir, "notes", "--ref="+ref, "add", "-m", noteText, sha); err != nil {
+				if noteAlreadyExists(err) {
+					return settleNoteWrite(repoDir, ref, sha, err)
+				}
+				return fmt.Errorf("write %s note: %w", ref, err)
+			}
+			noteHead, err := gitOut(repoDir, "rev-parse", notesRef(ref))
+			if err != nil {
+				return fmt.Errorf("resolve %s note update: %w", ref, err)
+			}
+			pushErr = git(repoDir, "push", "origin", noteHead+":"+notesRef(ref))
+			if pushErr == nil {
+				if err := git(repoDir, "update-ref", durableNotesRef(ref), noteHead); err != nil {
+					return fmt.Errorf("record durable %s note snapshot: %w", ref, err)
+				}
+				return nil
+			}
+			if attempt == 2 {
+				if err := git(repoDir, "notes", "--ref="+notesRef(ref), "remove", sha); err != nil {
+					return fmt.Errorf("push %s note: %v; remove rejected local note: %w", ref, pushErr, err)
+				}
+				break
+			}
+			if err := fetchNoteRef(repoDir, ref); err != nil {
+				return fmt.Errorf("fetch %s note after push rejection: %w", ref, err)
+			}
+		}
+		return fmt.Errorf("push %s note after three attempts: %w", ref, pushErr)
+	})
 }
 
 // settleNoteWrite decides what an existing local note means after a failed
-// write. A note the remote already holds is a genuine durable winner and is
-// reported as errNoteExists; a note that exists only locally is a failed push
-// that is retried. If the retry lands, the remote holds the older local note
-// (not this caller's value), so it is still reported as errNoteExists for the
-// caller to reread; if the retry cannot land, the local note is removed so it
-// never silently satisfies a gate.
+// write. A note the remote already holds is a genuine durable winner. A note
+// that exists only locally is untrusted outbound data from an interrupted or
+// older writer, so the caller removes it rather than publishing it.
 func settleNoteWrite(repoDir, ref, sha string, cause error) error {
 	durable, err := remoteHasNote(repoDir, ref, sha)
 	if err != nil {
 		return fmt.Errorf("settle %s note: %w", ref, err)
 	}
 	if !durable {
-		if perr := git(repoDir, "push", "origin", notesRef(ref)); perr == nil {
-			// The retried push landed, but the value this caller computed was
-			// never installed: git notes add aborted on the already-existing
-			// local note. The remote now holds that older note, so report the
-			// write-once win and let the caller reread the durable value rather
-			// than trust its in-memory verdict/checks.
-			return fmt.Errorf("%w: %v", errNoteExists, cause)
-		} else if derr := git(repoDir, "notes", "--ref="+notesRef(ref), "remove", sha); derr != nil {
-			return fmt.Errorf("settle %s note: push %v; remove %w", ref, perr, derr)
+		if derr := git(repoDir, "notes", "--ref="+notesRef(ref), "remove", sha); derr != nil {
+			return fmt.Errorf("settle %s note: remove untrusted local note: %w", ref, derr)
 		}
-		return fmt.Errorf("%w: %v", errLocalNote, cause)
+		return fmt.Errorf("note is local only; removed before remote publication: %v", cause)
 	}
-	// Sync the remote winner into the live notes ref so the caller's read
-	// returns the durable note, then hand it the write-once signal.
-	if err := git(repoDir, "fetch", "origin", "+"+notesRef(ref)+":"+notesRef(ref)); err != nil {
+	if err := fetchNoteRef(repoDir, ref); err != nil {
 		return fmt.Errorf("settle %s note: sync remote: %w", ref, err)
 	}
 	return fmt.Errorf("%w: %v", errNoteExists, cause)
@@ -212,7 +246,7 @@ func remoteHasNote(repoDir, ref, sha string) (bool, error) {
 		}
 		return false, fmt.Errorf("fetch %s note to probe remote: %w", ref, err)
 	}
-	_, ok, err := readNote(repoDir, probe, sha)
+	_, ok, err := readNoteUnlocked(repoDir, probe, sha)
 	return ok, err
 }
 
@@ -231,11 +265,21 @@ func fetchNoteRef(repoDir, ref string) error {
 		if !missingRemoteRef(err) {
 			return err
 		}
-		// The remote holds no such notes ref, so any local note for it is stale:
-		// delete the ref rather than let it shadow the absent remote fact.
-		return git(repoDir, "update-ref", "-d", notesRef(ref))
+		// The remote holds no such notes ref. Delete both the mutable writer
+		// ref and the durable reader snapshot so local residue cannot survive.
+		var errs []error
+		for _, local := range []string{notesRef(ref), durableNotesRef(ref)} {
+			if err := git(repoDir, "update-ref", "-d", local); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
 	}
-	return nil
+	head, err := gitOut(repoDir, "rev-parse", notesRef(ref))
+	if err != nil {
+		return err
+	}
+	return git(repoDir, "update-ref", durableNotesRef(ref), head)
 }
 
 func readAttempts(repoDir, key string) (int, error) {

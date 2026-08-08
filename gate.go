@@ -605,7 +605,7 @@ func symlinkedAncestor(wtDir, rel string) bool {
 func checkSchema(file, schemaPath string) error {
 	sb, err := os.ReadFile(schemaPath)
 	if err != nil {
-		return nil // no declared schema; rely on the typed struct
+		return fmt.Errorf("read schema %s: %w", schemaPath, err)
 	}
 	var s struct {
 		Required   []string `json:"required"`
