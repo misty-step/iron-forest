@@ -88,7 +88,10 @@ func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 			})
 		}
 		out = append(out, core.AgentInfo{
-			Name: a.Name, Description: a.Description, Model: a.Model,
+			// Use the discovered directory name, not the declaration's name
+			// field. The agents command always listed the directory name; an
+			// agent.yaml carrying its own `name:` must not change that output.
+			Name: name, Description: a.Description, Model: a.Model,
 			Variant: a.Variant, Mode: a.Mode, DefSHA: a.DefSHA, Mcps: mcps,
 		})
 	}

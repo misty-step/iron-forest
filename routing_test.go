@@ -191,10 +191,16 @@ func TestCmdAgentsReportsMalformedAndContinues(t *testing.T) {
 
 // stubAPI is a minimal core.API for command tests that exercise one method.
 type stubAPI struct {
-	notesFn func(sha string) (core.Verdict, core.Checks, error)
+	configFn func() (core.Config, error)
+	notesFn  func(sha string) (core.Verdict, core.Checks, error)
 }
 
-func (stubAPI) Config() (core.Config, error)                           { return core.Config{}, nil }
+func (s stubAPI) Config() (core.Config, error) {
+	if s.configFn != nil {
+		return s.configFn()
+	}
+	return core.Config{}, nil
+}
 func (stubAPI) Agents() ([]core.AgentInfo, error)                      { return nil, nil }
 func (stubAPI) Ledger(core.LedgerQuery) ([]core.RunRecord, int, error) { return nil, 0, nil }
 func (stubAPI) Trace(string) ([]byte, error)                           { return nil, nil }
@@ -205,6 +211,27 @@ func (stubAPI) Branches() ([]core.BranchState, error)                  { return 
 func (stubAPI) Head() (string, error)                                  { return "", nil }
 func (stubAPI) Worktrees() ([]string, error)                           { return nil, nil }
 func (stubAPI) Daemon() (core.Daemon, error)                           { return core.Daemon{}, nil }
+
+// TestCmdWatchKeepsConfigFailurePrefix pins the #176 watch behavior: a
+// forest.yaml load failure is reported as "forest: <err>" exactly as dispatch
+// reported it before watch reached state through the core API, not with a
+// watch-specific "forest: watch: <err>" prefix.
+func TestCmdWatchKeepsConfigFailurePrefix(t *testing.T) {
+	api := stubAPI{configFn: func() (core.Config, error) {
+		return core.Config{}, errors.New("load error")
+	}}
+	code := 0
+	_, stderr := captureOutput(t, func() { code = cmdWatch(api, t.TempDir(), nil) })
+	if code != 1 {
+		t.Fatalf("cmdWatch code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "forest: load error") {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, "forest: load error")
+	}
+	if strings.Contains(stderr, "forest: watch:") {
+		t.Errorf("stderr = %q, must not carry a watch-specific prefix", stderr)
+	}
+}
 
 // TestCmdShowRestoresNoteErrorPrefixes pins the #176 show behavior: a failure
 // in each note subsystem keeps the per-subsystem stderr prefix the command has

@@ -109,6 +109,37 @@ func TestCoreAgentsListsDeclaredAgents(t *testing.T) {
 	}
 }
 
+// TestCoreAgentsUsesDirectoryNameNotDeclarationName pins the #176 regression:
+// coreImpl.Agents reports the discovered directory name even when the agent's
+// declaration carries its own `name:` field. The agents command always printed
+// the directory name, and Agent.Name is not yaml:"-", so a `name:` in agent.yaml
+// must not change a surface's output.
+func TestCoreAgentsUsesDirectoryNameNotDeclarationName(t *testing.T) {
+	api, work, _ := coreFixture(t)
+	dir := filepath.Join(work, DefaultAgentsDir, "builder")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"),
+		[]byte("name: renamed-in-yaml\ndescription: test agent\nmodel: test-model\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "instructions.md"),
+		[]byte("Be helpful.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := api.Agents()
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("Agents returned %d, want 1", len(agents))
+	}
+	if agents[0].Name != "builder" {
+		t.Fatalf("agent name = %q, want the discovered directory name %q", agents[0].Name, "builder")
+	}
+}
+
 func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	api, work, _ := coreFixture(t)
 	ws := filepath.Join(work, WorkspaceDir, "runs.jsonl")

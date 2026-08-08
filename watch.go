@@ -44,7 +44,10 @@ func cmdWatch(api core.API, repoDir string, args []string) int {
 
 	cfg, err := api.Config()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest: watch:", err)
+		// Before this seam, dispatch loaded forest.yaml and reported a load
+		// failure as "forest: <err>"; keep that prefix rather than adding a
+		// watch-specific one so the failure is byte-identical.
+		fmt.Fprintln(os.Stderr, "forest:", err)
 		return 1
 	}
 
