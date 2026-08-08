@@ -53,6 +53,10 @@ flows:
     agent: manager
     interval_seconds: 60
     ready_depth: 1
+    # Every non-dispatchable label a repository uses is declared here so the
+    # Manager never offers it to its agent. An epic groups Subjects rather than
+    # being one implementable Subject, so it must never be promoted.
+    exclude_labels: ["parked", "forest:failed", "epic"]
 
 # The human-facing surface. One way out: Iron Forest never reads it back.
 projection:
