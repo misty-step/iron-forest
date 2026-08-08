@@ -164,8 +164,10 @@ func writeNote(repoDir, ref, sha string, value any) error {
 // settleNoteWrite decides what an existing local note means after a failed
 // write. A note the remote already holds is a genuine durable winner and is
 // reported as errNoteExists; a note that exists only locally is a failed push
-// that is retried and, if it still cannot land, removed so it never silently
-// satisfies a gate.
+// that is retried. If the retry lands, the remote holds the older local note
+// (not this caller's value), so it is still reported as errNoteExists for the
+// caller to reread; if the retry cannot land, the local note is removed so it
+// never silently satisfies a gate.
 func settleNoteWrite(repoDir, ref, sha string, cause error) error {
 	durable, err := remoteHasNote(repoDir, ref, sha)
 	if err != nil {
@@ -173,7 +175,12 @@ func settleNoteWrite(repoDir, ref, sha string, cause error) error {
 	}
 	if !durable {
 		if perr := git(repoDir, "push", "origin", notesRef(ref)); perr == nil {
-			return nil
+			// The retried push landed, but the value this caller computed was
+			// never installed: git notes add aborted on the already-existing
+			// local note. The remote now holds that older note, so report the
+			// write-once win and let the caller reread the durable value rather
+			// than trust its in-memory verdict/checks.
+			return fmt.Errorf("%w: %v", errNoteExists, cause)
 		} else if derr := git(repoDir, "notes", "--ref="+notesRef(ref), "remove", sha); derr != nil {
 			return fmt.Errorf("settle %s note: push %v; remove %w", ref, perr, derr)
 		}
