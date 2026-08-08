@@ -183,14 +183,18 @@ func cmdShow(api core.API, sha string) int {
 		Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
 		Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
 	}
-	// Always build a non-nil results slice so a raw checks note with no rows
-	// (an absent, null, or explicitly empty results field) renders the same
-	// empty array the show command always printed, never `null`.
-	results := make([]checkResult, 0, len(c.Results))
-	for _, r := range c.Results {
-		results = append(results, checkResult{
-			Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
-		})
+	// Preserve the stored nil-versus-empty results shape so a null or absent
+	// results field renders `null` and an explicit empty array renders `[]`,
+	// exactly as the command always printed before reaching state through the
+	// core API.
+	var results []checkResult
+	if c.Results != nil {
+		results = make([]checkResult, len(c.Results))
+		for i, r := range c.Results {
+			results[i] = checkResult{
+				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
+			}
+		}
 	}
 	checks := checksNote{
 		Status:  c.Status,

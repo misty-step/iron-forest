@@ -170,10 +170,10 @@ func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 		verdict = core.Verdict{
 			Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
 			Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
-			// A note is only present when it carries a value-a useful decision:
-			// matching the surface's old presence heuristic, a note with neither
-			// a time nor a run id is not a meaningful entry and must not render.
-			Present: v.Time != "" || v.RunID != "",
+			// Presence is the note's existence, not a field heuristic: a valid
+			// verdict that lacks a time or run id is still a present decision,
+			// and the old show command emitted it as such.
+			Present: ok,
 		}
 	}
 	ch, ok2, err := readChecks(c.repoDir, sha)
@@ -186,16 +186,19 @@ func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 			Status:  ch.Status,
 			RunID:   ch.RunID,
 			Time:    ch.Time,
-			Present: ch.Time != "" || ch.RunID != "",
+			Present: ok2,
 		}
-		// Always build a non-nil slice so an absent or null results field in the
-		// raw note still serializes as an empty array, exactly as the surface's
-		// old read rendered it; an explicit empty array keeps its shape too.
-		checks.Results = make([]core.CheckResult, 0, len(ch.Results))
-		for _, r := range ch.Results {
-			checks.Results = append(checks.Results, core.CheckResult{
-				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
-			})
+		// Preserve the raw note's nil-versus-empty results shape: a null or
+		// absent results field stays nil so it renders `null`, while an explicit
+		// empty array stays non-nil so it renders `[]`, exactly as the surface
+		// read it before reaching state through the core API.
+		if ch.Results != nil {
+			checks.Results = make([]core.CheckResult, len(ch.Results))
+			for i, r := range ch.Results {
+				checks.Results[i] = core.CheckResult{
+					Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
+				}
+			}
 		}
 	}
 	return verdict, checks, nil

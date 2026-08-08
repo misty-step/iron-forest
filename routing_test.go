@@ -233,17 +233,18 @@ func TestCmdShowRestoresNoteErrorPrefixes(t *testing.T) {
 	}
 }
 
-// TestCmdShowBaseOutputNormalizesEmptyResultsRestoresMode pins the #176 show
+// TestCmdShowPreservesResultsNilVersusEmptyShape pins the #176 show
 // byte-for-byte behavior against the pre-#176 surface output: a checks note
 // whose results field is absent or null (e.g. writeChecks with only a status)
-// renders `results: []` exactly as it did before, and an explicit empty array
-// keeps the same `results: []` shape. Neither renders `null`.
-func TestCmdShowBaseOutputNormalizesEmptyResultsRestoresMode(t *testing.T) {
+// renders `results: null` exactly as it did before, and an explicit empty array
+// renders `results: []`. The nil-versus-empty shape is preserved through the
+// API; it is never collapsed one way or the other.
+func TestCmdShowPreservesResultsNilVersusEmptyShape(t *testing.T) {
 	cases := []struct {
 		name string
 		want string
 	}{
-		{"null", `"results": []`},
+		{"null", `"results": null`},
 		{"explicit-empty", `"results": []`},
 	}
 	for _, tc := range cases {
@@ -269,18 +270,15 @@ func TestCmdShowBaseOutputNormalizesEmptyResultsRestoresMode(t *testing.T) {
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("output missing %s:\n%s", tc.want, out)
 			}
-			if strings.Contains(out, `"results": null`) {
-				t.Errorf("output must not render results as null:\n%s", out)
-			}
 		})
 	}
 }
 
-// TestCmdShowOmitsNotesMissingTimeAndRunID pins the pre-#176 presence heuristic
-// that cmdShow kept when reaching state through the core API: a note that
-// carries neither a time nor a run id is not a meaningful decision and must not
-// be emitted, so the command falls back to showing nothing for that commit.
-func TestCmdShowOmitsNotesMissingTimeAndRunID(t *testing.T) {
+// TestCmdShowEmitsNoteLackingTimeAndRunID pins the pre-#176 show behavior that
+// cmdShow kept when reaching state through the core API: presence follows the
+// note's existence, not a field heuristic. A valid verdict that carries neither
+// a time nor a run id is still a present decision and must be emitted.
+func TestCmdShowEmitsNoteLackingTimeAndRunID(t *testing.T) {
 	api, work, sha := coreFixture(t)
 	// writeNote bypasses writeVerdict's time stamp, leaving both Time and RunID
 	// empty in the stored note.
@@ -292,7 +290,7 @@ func TestCmdShowOmitsNotesMissingTimeAndRunID(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdShow code = %d, want 0", code)
 	}
-	if strings.TrimSpace(out) != "{}" {
-		t.Errorf("output = %q, want {} for a note lacking time and run id", strings.TrimSpace(out))
+	if !strings.Contains(out, `"verdict": "approve"`) {
+		t.Errorf("output = %q, want the verdict note emitted despite missing time and run id", strings.TrimSpace(out))
 	}
 }
