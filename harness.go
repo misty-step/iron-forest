@@ -76,6 +76,32 @@ func isRunTimeout(err error) bool {
 	return errors.As(err, &rte)
 }
 
+// runCancelledError reports a run stopped by an operator or supervisor cancel
+// request over the live socket (see #163). It is distinct from both the
+// mechanical deadline timeout and an agent failure: the run's worktree and any
+// pushed branch are left intact for inspection, and the ledger records the run
+// as cancelled with its reason, never as an agent_failed row. reason names who
+// requested the cancel and why.
+type runCancelledError struct {
+	reason string
+}
+
+func (e *runCancelledError) Error() string {
+	if e.reason == "" {
+		return "run cancelled"
+	}
+	return "run cancelled: " + e.reason
+}
+
+// isRunCancelled reports whether err is, or wraps, a runCancelledError. A flow
+// uses it to classify an operator or supervisor cancel apart from a content or
+// agent failure, so a stopped run is recorded as cancelled and its worktree is
+// left in place for inspection.
+func isRunCancelled(err error) bool {
+	var rce *runCancelledError
+	return errors.As(err, &rce)
+}
+
 // maxTraceEventLabel caps how much of a trace event an error message carries.
 // A giant step event must not bloat a ledger row; the label names where the run
 // stopped, not the whole event.
@@ -128,8 +154,11 @@ type runStats struct {
 // to end; the concrete implementation is runPhaseImpl.
 var runPhase = runPhaseImpl
 
-// runPhaseImpl is the concrete implementation behind runPhase.
-func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
+// runPhaseImpl is the concrete implementation behind runPhase. runID names the
+// claimed run so runPhase can hand its cancellable context and agent to the live
+// registry (see live.go): the daemon then owns the cancel handle the card builds
+// here and can stop the run on evidence, not only on a constant.
+func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath, runID string) (runStats, error) {
 	var stats runStats
 	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
 		return stats, err
@@ -160,6 +189,10 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 		ctx, cancel = context.WithCancel(context.Background())
 	}
 	defer cancel()
+	// The daemon owns this cancel handle from here on: the live registry serves
+	// it to a cancel request over the socket, so a run no longer has to be found
+	// by PID and killed (see #163).
+	liveTrack.attach(runID, a.Name, cancel)
 
 	env, cleanup, err := childEnvironment()
 	if err != nil {
@@ -254,6 +287,13 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 			elapsed:   time.Since(started),
 			lastEvent: traceEventLabel(lastTrace),
 		}
+	}
+	// A cancel request over the live socket fires the same context this run
+	// built, so Wait returns because of that cancellation. That is an operator or
+	// supervisor stop, not a crash: name it cancelled and carry the reason the
+	// requester gave (#163).
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return stats, &runCancelledError{reason: liveTrack.reason(runID)}
 	}
 	if sc.Err() != nil {
 		return stats, sc.Err()

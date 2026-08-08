@@ -28,7 +28,9 @@ func usage() {
   forest show <sha>                  print verdict and checks notes
   forest version                     print the binary revision
   forest selfcheck                   verify config and agents offline
-  forest watch [--interval 2s]       show the operator board`)
+  forest watch [--interval 2s]       show the operator board
+  forest status                      what the live daemon is running
+  forest cancel <run-id> [--reason]  stop one live run`)
 }
 
 func run(args []string) int {
@@ -104,6 +106,10 @@ func run(args []string) int {
 		return cmdSelfcheck(repoDir)
 	case "watch":
 		return cmdWatch(api, repoDir, args[1:])
+	case "status":
+		return cmdLiveStatus(repoDir, args[1:])
+	case "cancel":
+		return cmdLiveCancel(repoDir, args[1:])
 	default:
 		usage()
 		return 2

@@ -131,6 +131,11 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
 	}
 	defer func() {
+		// A cancelled run leaves the worktree and its branch intact so the
+		// operator can inspect or continue the work (see #163).
+		if liveTrack.isCancelled(runID) {
+			return
+		}
 		removeWorktree(repoDir, wtDir)
 		untrackWorktree(wtDir)
 	}()
@@ -325,7 +330,7 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 		return out, stats, fmt.Errorf("review: pre-run snapshot: %w", err)
 	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
-	stats, phaseErr := runPhase(repoDir, wtDir, a, prompt, trace)
+	stats, phaseErr := runPhase(repoDir, wtDir, a, prompt, trace, runID)
 	// The worktree started at the Review revision; refuse a Verdict if the review
 	// edited a tracked file or moved HEAD since the snapshot, naming what changed.
 	// This assertion runs even when the phase crashed or timed out, so a verifier

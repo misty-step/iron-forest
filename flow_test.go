@@ -99,7 +99,7 @@ func TestBuilderPromptDeliveryFailureParksNotFixes(t *testing.T) {
 	defer func() { trackerFor = oldTracker }()
 
 	oldRun := runPhase
-	runPhase = func(_ string, _ string, _ *Agent, userPrompt, tracePath string) (runStats, error) {
+	runPhase = func(_ string, _ string, _ *Agent, userPrompt, tracePath, _ string) (runStats, error) {
 		return runStats{}, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
 	}
 	defer func() { runPhase = oldRun }()
@@ -156,7 +156,7 @@ func TestBuilderTimeoutFailureParksNotFixes(t *testing.T) {
 	defer func() { trackerFor = oldTracker }()
 
 	oldRun := runPhase
-	runPhase = func(_ string, _ string, _ *Agent, userPrompt, tracePath string) (runStats, error) {
+	runPhase = func(_ string, _ string, _ *Agent, userPrompt, tracePath, _ string) (runStats, error) {
 		return runStats{}, &runTimeoutError{elapsed: 3 * time.Minute, lastEvent: "step_finish"}
 	}
 	defer func() { runPhase = oldRun }()

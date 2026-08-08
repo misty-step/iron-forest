@@ -117,6 +117,16 @@ func serve(cfg Config, repoDir string, names []string) int {
 	reapOrphanWorktrees(repoDir)
 
 	var drain int32
+	// Serve live status and cancel over a local socket for the whole life of the
+	// daemon. It is removed on clean shutdown, and a stale socket from a crashed
+	// daemon is cleared first, so a restart never blocks on it.
+	sock, err := liveServerStart(repoDir, &drain)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "forest:", err)
+		return 1
+	}
+	defer liveServerStop(repoDir, sock)
+
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -296,6 +306,15 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 
 	runID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), s.Key)
 
+	// Claim the run in the live registry so a client can see and stop it while
+	// Act is under way. runPhase fills agent and the cancel handle once it
+	// starts the child; end runs when Act returns.
+	liveTrack.begin(&liveRun{
+		id: runID, flow: f.Name(), subject: s.Key, revision: s.Revision,
+		started: time.Now().UTC(),
+	})
+	defer liveTrack.end(runID)
+
 	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
 	out, err := f.Act(cfg, repoDir, s, runID)
 	rec := runRecord{
@@ -307,7 +326,15 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 	}
 	rec.setTokens(out)
 	if err != nil {
-		if draining(drain) {
+		if isRunCancelled(err) {
+			// An operator or supervisor stopped the run over the live socket. That
+			// is not a failure: name the cancellation and its reason (who and why),
+			// keep the spent tokens, and leave the worktree and branch intact. The
+			// status never reads as agent_failed (see the 2026-08-07 manual kill).
+			// rec.Error below carries the runCancelledError text, which names who
+			// requested the cancel and why.
+			rec.Status = "cancelled"
+		} else if draining(drain) {
 			// The operator stopped the daemon; the agent exited because of that,
 			// not because of its own work. Name the status so it never reads as a
 			// failure, keep the spent tokens, and leave the brake untouched.
