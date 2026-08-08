@@ -153,6 +153,20 @@ func (c *coreImpl) Trace(runID string) ([]byte, error) {
 		if err != nil {
 			continue
 		}
+		// runPhase records the exact prompt it delivered to the agent in a
+		// .prompt.txt sidecar beside the event stream (see runPhase in
+		// harness.go). A trace must record that full prompt too, not just the
+		// events, or a surface reading the trace loses the text that was sent.
+		// When the sidecar exists, append it after the events so both halves of
+		// the record survive; a run that predates the sidecar returns the events
+		// alone.
+		if prompt, perr := os.ReadFile(p + ".prompt.txt"); perr == nil {
+			out := make([]byte, 0, len(b)+1+len(prompt))
+			out = append(out, b...)
+			out = append(out, '\n')
+			out = append(out, prompt...)
+			return out, nil
+		}
 		return b, nil
 	}
 	return nil, fmt.Errorf("trace for run %s not found", runID)

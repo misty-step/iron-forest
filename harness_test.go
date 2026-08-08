@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -221,6 +222,65 @@ func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to load") {
 		t.Errorf("error %q did not record why the agent could not be loaded", err)
+	}
+}
+
+// TestRunPhaseDeliversLargePromptViaStdin pins the #204 fix: a prompt larger
+// than Linux's single-argument ceiling (maxArgLen = 131072) must still reach the
+// agent. runPhase streamed the prompt as one argv entry, so anything over that
+// failed with a raw fork/exec "argument list too long" before opencode was
+// reached. The harness now writes the full prompt to a .prompt.txt file beside
+// the trace and streams the same text on stdin, which has no per-entry ceiling.
+// The stub captures both channels: runPhase must succeed (never E2BIG), the
+// prompt must arrive whole on stdin, and it must not appear in argv.
+func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
+	big := strings.Repeat("prompt-payload", (200*1024)/len("prompt-payload")) + "END-MARKER"
+	if len(big) <= maxArgLen {
+		t.Fatalf("test prompt is %d bytes, must exceed maxArgLen %d", len(big), maxArgLen)
+	}
+	stdinMarker := filepath.Join(t.TempDir(), "stdin.txt")
+	argvMarker := filepath.Join(t.TempDir(), "argv.txt")
+	script := "#!/bin/sh\n" +
+		"cat > '" + stdinMarker + "'\n" +
+		"printf '%s\\n' \"$@\" > '" + argvMarker + "'\n" +
+		"exit 0\n"
+	wt, trace := fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	if _, err := runPhase(t.TempDir(), wt, a, big, trace); err != nil {
+		t.Fatalf("runPhase failed on a %d-byte prompt: %v", len(big), err)
+	}
+	got, err := os.ReadFile(stdinMarker)
+	if err != nil {
+		t.Fatalf("prompt did not reach the agent on stdin: %v", err)
+	}
+	if string(got) != big {
+		t.Errorf("stdin prompt mismatch: forwarded %d bytes, want %d", len(got), len(big))
+	}
+	argv, err := os.ReadFile(argvMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(argv), "prompt-payload") {
+		t.Errorf("prompt leaked into argv: %.120q", string(argv))
+	}
+}
+
+// TestPromptDeliveryErrorNamesSizeAndLimit pins requirement 3 of #204: a prompt
+// that cannot be delivered whole fails with a named error stating the prompt
+// size and the delivery ceiling, never the kernel's raw fork/exec "argument
+// list too long" message. Naming both makes a mechanical delivery failure
+// auditable and distinguishable from a content problem.
+func TestPromptDeliveryErrorNamesSizeAndLimit(t *testing.T) {
+	err := &promptDeliveryError{size: 134718, limit: maxArgLen}
+	msg := err.Error()
+	if !strings.Contains(msg, "134718") {
+		t.Errorf("error %q did not name the prompt size", msg)
+	}
+	if !strings.Contains(msg, strconv.Itoa(maxArgLen)) {
+		t.Errorf("error %q did not name the delivery ceiling %d", msg, maxArgLen)
+	}
+	if strings.Contains(msg, "fork/exec") || strings.Contains(msg, "argument list too long") {
+		t.Errorf("error %q leaked the raw kernel fork/exec message", msg)
 	}
 }
 

@@ -113,7 +113,13 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	stats, err := runPhase(repoDir, wtDir, a, prompt, trace)
 	out.addTokens(stats)
 	if err != nil {
+		// A mechanical prompt-delivery failure is not content to repair: the same
+		// prompt fails identically, so it parks (prompt_failed) instead of
+		// spending a Fixer attempt on an unchanged situation.
 		out.Status = "agent_failed"
+		if isPromptDelivery(err) {
+			out.Status = "prompt_failed"
+		}
 		return out, fmt.Errorf("agent: %w", err)
 	}
 	if _, _, err := gate(wtDir, baseSHA,

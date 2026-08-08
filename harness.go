@@ -5,12 +5,49 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
+
+// maxArgLen is the Linux ceiling on a single argv entry: MAX_ARG_STRLEN is
+// PAGE_SIZE * 32, or 131072 bytes on a 4 KiB page. It is not ARG_MAX (4 MiB
+// here). A prompt passed as one argv argument trips it with a raw fork/exec
+// "argument list too long" before the agent is reached, so the harness never
+// delivers a prompt through argv: it streams the prompt on stdin, which has no
+// such per-entry ceiling. The value is named so a delivery failure can state
+// the limit it is designed around.
+const maxArgLen = 131072
+
+// promptDeliveryError reports a prompt that could not be delivered whole to the
+// agent. It names both the prompt size and the delivery ceiling so the failure
+// is auditable, and it deliberately replaces the kernel's raw fork/exec
+// "argument list too long" message. A delivery failure is mechanical: the same
+// prompt will keep failing identically, so treating it as content to repair
+// would spend Fixer attempts on an unchanged situation. The durable stalled
+// brake parks it instead.
+type promptDeliveryError struct {
+	size  int
+	limit int
+}
+
+func (e *promptDeliveryError) Error() string {
+	return fmt.Sprintf("prompt of %d bytes cannot be delivered whole; the delivery ceiling is %d bytes", e.size, e.limit)
+}
+
+// isPromptDelivery reports whether err is, or wraps, a promptDeliveryError. A
+// flow uses it to classify a mechanical prompt-delivery failure apart from a
+// content or agent failure: the same prompt keeps failing identically, so it
+// must park (name prompt_failed) instead of spending Fixer attempts on an
+// unchanged situation.
+func isPromptDelivery(err error) bool {
+	var pde *promptDeliveryError
+	return errors.As(err, &pde)
+}
 
 // runStats is the session-level token accounting for one agent run. Every field
 // is a measured token class that must reach the ledger row; a class with no
@@ -24,8 +61,11 @@ type runStats struct {
 }
 
 // runPhase executes one named agent with opencode in a worktree and streams its
-// JSON event stream into the trace file. repoDir is the factory project: the
-// provider configuration the run actually needs is read from its
+// JSON event stream into the trace file. The prompt is written to a .prompt.txt
+// file beside the trace and streamed to opencode on stdin, so its size is
+// bounded by the model's context, not by Linux's per-argument ceiling (see
+// maxArgLen). repoDir is the factory project: the provider configuration the
+// run actually needs is read from its
 // .opencode/opencode.json and staged into the run's external config root. The
 // run is unbounded: no step ceiling and no deadline. A fixed bound is a guess
 // about how much work an item needs, and a wrong guess stops real work partway
@@ -34,7 +74,14 @@ type runStats struct {
 // harness exit marks the run failed: the error carries the exit status and
 // stderr so a crash or truncation is never mistaken for work the gate can
 // publish.
-func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
+//
+// runPhase is a package variable (see the indirection below) so a test can
+// force a promptDeliveryError and drive a flow's mechanical classification end
+// to end; the concrete implementation is runPhaseImpl.
+var runPhase = runPhaseImpl
+
+// runPhaseImpl is the concrete implementation behind runPhase.
+func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
 	var stats runStats
 	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
 		return stats, err
@@ -78,11 +125,24 @@ func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (ru
 	// whether it happens to ship a .opencode of its own.
 	env = append(env, "OPENCODE_DISABLE_PROJECT_CONFIG=1")
 
+	// The full prompt is delivered to opencode on its stdin, never as an argv
+	// entry: Linux caps one argument at maxArgLen, so a large prompt passed on
+	// the command line fails with a raw fork/exec "argument list too long"
+	// before opencode is reached. Stdin has no such per-entry ceiling, so the
+	// prompt's only remaining bound is the model's context. The exact text that
+	// was sent is also written to a .prompt.txt file beside the trace so a run
+	// stays auditable after the agent exits.
+	promptPath := filepath.Join(filepath.Dir(tracePath), filepath.Base(tracePath)+".prompt.txt")
+	if err := os.WriteFile(promptPath, []byte(userPrompt), 0o644); err != nil {
+		return stats, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
+	}
+
 	cmd := exec.CommandContext(ctx, "opencode", "run",
 		"--format", "json", "--model", a.Model, "--agent", a.Name,
-		"--auto", userPrompt)
+		"--auto")
 	cmd.Dir = wtDir
 	cmd.Env = env
+	cmd.Stdin = strings.NewReader(userPrompt)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -91,6 +151,11 @@ func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (ru
 		return stats, err
 	}
 	if err := cmd.Start(); err != nil {
+		// With stdin delivery an argument-limit start error is not expected, but
+		// if one ever surfaces it must be named, never the raw fork/exec text.
+		if errors.Is(err, syscall.E2BIG) {
+			return stats, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
+		}
 		return stats, err
 	}
 
