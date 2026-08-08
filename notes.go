@@ -45,24 +45,25 @@ const (
 	checksNotesRef  = "forest/checks"
 )
 
-var errNoteExists = errors.New("note already exists")
+var (
+	errNoteExists = errors.New("note already exists")
+	// errLocalNote reports a note that exists only in the local checkout. A
+	// note is a durable fact only when it also exists on the remote, so a
+	// local-pending note must never be mistaken for a remote winner.
+	errLocalNote = errors.New("note is local only; not durable on remote")
+)
 
 func notesRef(ref string) string {
 	return "refs/notes/" + ref
 }
 
+// fetchNotes reconciles every durable notes ref with the remote. It iterates
+// one ref at a time through fetchNoteRef so that a notes ref the remote does
+// not have removes any stale local note instead of leaving it to shadow the
+// absent remote fact.
 func fetchNotes(repoDir string) error {
-	specs := []string{
-		"+" + notesRef(verdictNotesRef) + ":" + notesRef(verdictNotesRef),
-		"+" + notesRef(checksNotesRef) + ":" + notesRef(checksNotesRef),
-	}
-	if err := git(repoDir, append([]string{"fetch", "origin"}, specs...)...); err == nil {
-		return nil
-	} else if !missingRemoteRef(err) {
-		return err
-	}
-	for _, spec := range specs {
-		if err := git(repoDir, "fetch", "origin", spec); err != nil && !missingRemoteRef(err) {
+	for _, ref := range []string{verdictNotesRef, checksNotesRef} {
+		if err := fetchNoteRef(repoDir, ref); err != nil {
 			return err
 		}
 	}
@@ -139,7 +140,10 @@ func writeNote(repoDir, ref, sha string, value any) error {
 	for attempt := range 3 {
 		if err := git(repoDir, "notes", "--ref="+ref, "add", "-m", string(body), sha); err != nil {
 			if noteAlreadyExists(err) {
-				return fmt.Errorf("%w: %v", errNoteExists, err)
+				// The note already exists locally. It is only a durable fact if
+				// the remote also holds it, so settle the disagreement before
+				// reporting a win.
+				return settleNoteWrite(repoDir, ref, sha, err)
 			}
 			return fmt.Errorf("write %s note: %w", ref, err)
 		}
@@ -157,6 +161,50 @@ func writeNote(repoDir, ref, sha string, value any) error {
 	return fmt.Errorf("push %s note after three attempts: %w", ref, pushErr)
 }
 
+// settleNoteWrite decides what an existing local note means after a failed
+// write. A note the remote already holds is a genuine durable winner and is
+// reported as errNoteExists; a note that exists only locally is a failed push
+// that is retried and, if it still cannot land, removed so it never silently
+// satisfies a gate.
+func settleNoteWrite(repoDir, ref, sha string, cause error) error {
+	durable, err := remoteHasNote(repoDir, ref, sha)
+	if err != nil {
+		return fmt.Errorf("settle %s note: %w", ref, err)
+	}
+	if !durable {
+		if perr := git(repoDir, "push", "origin", notesRef(ref)); perr == nil {
+			return nil
+		} else if derr := git(repoDir, "notes", "--ref="+notesRef(ref), "remove", sha); derr != nil {
+			return fmt.Errorf("settle %s note: push %v; remove %w", ref, perr, derr)
+		}
+		return fmt.Errorf("%w: %v", errLocalNote, cause)
+	}
+	// Sync the remote winner into the live notes ref so the caller's read
+	// returns the durable note, then hand it the write-once signal.
+	if err := git(repoDir, "fetch", "origin", "+"+notesRef(ref)+":"+notesRef(ref)); err != nil {
+		return fmt.Errorf("settle %s note: sync remote: %w", ref, err)
+	}
+	return fmt.Errorf("%w: %v", errNoteExists, cause)
+}
+
+// remoteHasNote reports whether the remote notes ref holds a note for sha. It
+// inspects the remote through a scratch ref so a stale local note can never be
+// mistaken for a durable remote fact.
+func remoteHasNote(repoDir, ref, sha string) (bool, error) {
+	probe := notesRef(ref) + "-probe"
+	defer func() {
+		_ = git(repoDir, "update-ref", "-d", probe)
+	}()
+	if err := git(repoDir, "fetch", "origin", "+"+notesRef(ref)+":"+probe); err != nil {
+		if missingRemoteRef(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("fetch %s note to probe remote: %w", ref, err)
+	}
+	_, ok, err := readNote(repoDir, probe, sha)
+	return ok, err
+}
+
 func noteAlreadyExists(err error) bool {
 	if err == nil {
 		return false
@@ -168,8 +216,13 @@ func noteAlreadyExists(err error) bool {
 
 func fetchNoteRef(repoDir, ref string) error {
 	spec := "+" + notesRef(ref) + ":" + notesRef(ref)
-	if err := git(repoDir, "fetch", "origin", spec); err != nil && !missingRemoteRef(err) {
-		return err
+	if err := git(repoDir, "fetch", "origin", spec); err != nil {
+		if !missingRemoteRef(err) {
+			return err
+		}
+		// The remote holds no such notes ref, so any local note for it is stale:
+		// delete the ref rather than let it shadow the absent remote fact.
+		return git(repoDir, "update-ref", "-d", notesRef(ref))
 	}
 	return nil
 }

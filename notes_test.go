@@ -198,6 +198,33 @@ func notesTestGitOutput(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// TestNotesRejectedPushIsNotDurable pins the #189 fix: a note that never
+// reached the remote is not a fact. The server rejects the notes push, so the
+// write fails and the abandoned local note must not be read as the winner on a
+// later pass.
+func TestNotesRejectedPushIsNotDurable(t *testing.T) {
+	remote, work, sha := notesTestRepository(t)
+	hook := filepath.Join(remote, "hooks", "update")
+	script := "#!/bin/sh\ncase \"$1\" in\n  refs/notes/forest/verdict)\n    echo 'verdict notes blocked' >&2\n    exit 1\n    ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVerdict(work, sha, verdictNote{
+		Verdict: "approve", Notes: "local only", Reviewer: "reviewer-a", RunID: "run-a",
+	}); err == nil {
+		t.Fatal("writeVerdict succeeded though the notes push is rejected")
+	} else if errors.Is(err, errNoteExists) {
+		t.Fatalf("writeVerdict = errNoteExists (%v); a rejected push is not a remote win", err)
+	}
+	// The next pass must not read the abandoned local note as a durable fact.
+	if err := fetchNotes(work); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readVerdict(work, sha); err != nil || ok {
+		t.Fatalf("verdict after rejected push = (present=%v, err=%v), want absent", ok, err)
+	}
+}
+
 // TestDropAttemptsRetiresTheRecord pins the leak this factory has already paid
 // for once: a retired subject must not leave a ref behind. The previous claim
 // scheme left one on every failure and made those items unworkable forever.
