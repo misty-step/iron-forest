@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -175,9 +176,11 @@ func gateReview(wtDir, schemaPath string) (review, error) {
 // it is expected to produce — but a change to any other tracked file, or a move
 // of HEAD, means the agent edited the tree the run was meant to judge, so the
 // checks that back a Verdict would describe an uncommitted experiment, never
-// the committed Review revision. It returns an error naming the offending paths
-// when the tree drifted, and nil when only the expected review record remains.
-func assertCleanReviewTree(wtDir, head string) error {
+// the committed Review revision. before is the porcelain snapshot taken before
+// the review run; only paths that changed since it are offending. It returns an
+// error naming every offending path when the tree drifted, and nil when only the
+// expected review record remains.
+func assertCleanReviewTree(wtDir, head, before string) error {
 	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("review: cannot read worktree HEAD: %w", err)
@@ -185,25 +188,21 @@ func assertCleanReviewTree(wtDir, head string) error {
 	if cur != head {
 		return fmt.Errorf("review moved HEAD: reviewed %s -> %s", short(head), short(cur))
 	}
-	out, err := gitOutRaw(wtDir, "status", "--porcelain")
+	after, err := gitOutRaw(wtDir, "status", "--porcelain")
 	if err != nil {
 		return fmt.Errorf("review: worktree status: %w", err)
 	}
+	pre := porcelainPaths(before)
 	var dirty []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if len(line) < 4 {
+	for _, path := range sortedPaths(porcelainPaths(after)) {
+		if pre[path] {
+			continue // unchanged since the pre-review snapshot
+		}
+		if path == "review.json" {
+			// review.json is exempt only when it is not hiding another path: a
+			// rename into review.json also moved its source, which stays in the
+			// offending set and refuses the run.
 			continue
-		}
-		if line[:2] == "??" {
-			continue // an untracked file is not a tracked-file edit
-		}
-		path := line[3:]
-		if i := strings.Index(path, " -> "); i >= 0 {
-			path = path[i+4:]
-		}
-		if path == "review.json" || strings.HasPrefix(path, ".forest/") {
-			continue // the review record itself, or a run artifact
 		}
 		dirty = append(dirty, path)
 	}
@@ -211,6 +210,42 @@ func assertCleanReviewTree(wtDir, head string) error {
 		return fmt.Errorf("review left the worktree dirty: %s", strings.Join(dirty, ", "))
 	}
 	return nil
+}
+
+// porcelainPaths returns every tracked path a porcelain line mentions, keeping
+// both sides of a rename: a rename means the source vanished and the target
+// appeared, so either side is a tracked-file change worth reporting. Untracked
+// files ("??") are not tracked edits and are ignored.
+func porcelainPaths(porcelain string) map[string]bool {
+	paths := make(map[string]bool)
+	for _, line := range strings.Split(porcelain, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
+			continue
+		}
+		if strings.HasPrefix(line, "??") {
+			continue // an untracked file is not a tracked-file edit
+		}
+		rest := line[3:]
+		if i := strings.Index(rest, " -> "); i >= 0 {
+			paths[rest[:i]] = true
+			paths[rest[i+4:]] = true
+			continue
+		}
+		paths[rest] = true
+	}
+	return paths
+}
+
+// sortedPaths returns the keys of m in deterministic order so refusals name
+// paths consistently instead of in map-iteration order.
+func sortedPaths(m map[string]bool) []string {
+	paths := make([]string, 0, len(m))
+	for p := range m {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // checkSchema validates a JSON run artifact against its declared JSON Schema:

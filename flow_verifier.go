@@ -298,14 +298,20 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	if err != nil {
 		return out, stats, fmt.Errorf("review: prompt: %w", err)
 	}
+	// Snapshot the worktree before the agent runs so a review that edits any
+	// tracked file or moves HEAD can be refused on comparison with this state.
+	before, err := gitOutRaw(wtDir, "status", "--porcelain")
+	if err != nil {
+		return out, stats, fmt.Errorf("review: pre-run status: %w", err)
+	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
 	stats, err = runPhase(repoDir, wtDir, a, prompt, trace)
 	if err != nil {
 		return out, stats, fmt.Errorf("review: %w", err)
 	}
-	// The worktree started clean at the Review revision; refuse a Verdict if the
-	// review edited a tracked file or moved HEAD, naming what it changed.
-	if err := assertCleanReviewTree(wtDir, head); err != nil {
+	// The worktree started at the Review revision; refuse a Verdict if the review
+	// edited a tracked file or moved HEAD since the snapshot, naming what changed.
+	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
 		return out, stats, err
 	}
 	rv, err := gateReview(wtDir, filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"))

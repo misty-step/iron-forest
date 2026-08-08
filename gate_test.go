@@ -64,8 +64,12 @@ func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	before, err := gitOutRaw(wtDir, "status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if err := assertCleanReviewTree(wtDir, head); err != nil {
+	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
 		t.Fatalf("a clean tree was refused: %v", err)
 	}
 
@@ -73,7 +77,7 @@ func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "review.json"), []byte(`{"verdict":"approve"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := assertCleanReviewTree(wtDir, head); err != nil {
+	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
 		t.Fatalf("writing only review.json was refused: %v", err)
 	}
 
@@ -81,12 +85,43 @@ func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n// edited\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err = assertCleanReviewTree(wtDir, head)
+	err = assertCleanReviewTree(wtDir, head, before)
 	if err == nil {
 		t.Fatal("an edited tracked file was not refused")
 	}
 	if !strings.Contains(err.Error(), "source.go") {
 		t.Fatalf("refusal %q does not name the offending path", err)
+	}
+}
+
+// TestAssertCleanReviewTreeRefusesRenameIntoSide pins that a review cannot hide
+// an edit to a tracked file inside the review record. A rename of source.go into
+// review.json changes the tracked source, so it must be refused naming the
+// source, never accepted as if the run only wrote the record.
+func TestAssertCleanReviewTreeRefusesRenameIntoReview(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "source.go")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := gitOutRaw(wtDir, "status", "--porcelain")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gitT(t, wtDir, "mv", "source.go", "review.json")
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("a rename into review.json was not refused")
+	}
+	if !strings.Contains(err.Error(), "source.go") {
+		t.Fatalf("refusal %q does not name the renamed source", err)
 	}
 }
 
@@ -112,7 +147,7 @@ func TestAssertCleanReviewTreeRefusesMovedHead(t *testing.T) {
 	gitT(t, wtDir, "add", "b.txt")
 	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "review commit")
 
-	err = assertCleanReviewTree(wtDir, head)
+	err = assertCleanReviewTree(wtDir, head, "")
 	if err == nil {
 		t.Fatal("a moved HEAD was not refused")
 	}
