@@ -47,6 +47,80 @@ func TestGateAcceptsAChangeToItsOwnDeclarations(t *testing.T) {
 	}
 }
 
+// TestAssertCleanReviewTreeRefusesAnEdit pins the Verifier's clean-tree gate:
+// a review that writes only review.json is accepted, while one that edits a
+// tracked file is refused with the offending path named, and one that moves
+// HEAD is refused too. Checks must back the committed Review revision, never an
+// uncommitted experiment.
+func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "source.go")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := assertCleanReviewTree(wtDir, head); err != nil {
+		t.Fatalf("a clean tree was refused: %v", err)
+	}
+
+	// review.json is the one file the Verifier is expected to write.
+	if err := os.WriteFile(filepath.Join(wtDir, "review.json"), []byte(`{"verdict":"approve"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertCleanReviewTree(wtDir, head); err != nil {
+		t.Fatalf("writing only review.json was refused: %v", err)
+	}
+
+	// Editing a tracked file must be refused with the path named.
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n// edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertCleanReviewTree(wtDir, head)
+	if err == nil {
+		t.Fatal("an edited tracked file was not refused")
+	}
+	if !strings.Contains(err.Error(), "source.go") {
+		t.Fatalf("refusal %q does not name the offending path", err)
+	}
+}
+
+// TestAssertCleanReviewTreeRefusesMovedHead pins the HEAD half of the clean-tree
+// gate: a review that commits must never yield a Verdict, because the checks
+// that back it ran against the pre-move tree.
+func TestAssertCleanReviewTreeRefusesMovedHead(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.WriteFile(filepath.Join(wtDir, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "a.txt")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(wtDir, "b.txt"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "b.txt")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "review commit")
+
+	err = assertCleanReviewTree(wtDir, head)
+	if err == nil {
+		t.Fatal("a moved HEAD was not refused")
+	}
+	if !strings.Contains(err.Error(), "HEAD") {
+		t.Fatalf("refusal %q does not name HEAD", err)
+	}
+}
+
 // TestParseChangedKeepsRenameDestination pins that a rename reports the path
 // that now exists, so the pull request body names real files.
 func TestParseChangedKeepsRenameDestination(t *testing.T) {

@@ -303,6 +303,11 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	if err != nil {
 		return out, stats, fmt.Errorf("review: %w", err)
 	}
+	// The worktree started clean at the Review revision; refuse a Verdict if the
+	// review edited a tracked file or moved HEAD, naming what it changed.
+	if err := assertCleanReviewTree(wtDir, head); err != nil {
+		return out, stats, err
+	}
 	rv, err := gateReview(wtDir, filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"))
 	if err != nil {
 		return out, stats, fmt.Errorf("review: %w", err)

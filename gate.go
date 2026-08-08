@@ -170,6 +170,49 @@ func gateReview(wtDir, schemaPath string) (review, error) {
 	return rv, nil
 }
 
+// assertCleanReviewTree refuses a Verdict from a review run that did not leave
+// the review worktree unchanged. A Verifier may write review.json — the one file
+// it is expected to produce — but a change to any other tracked file, or a move
+// of HEAD, means the agent edited the tree the run was meant to judge, so the
+// checks that back a Verdict would describe an uncommitted experiment, never
+// the committed Review revision. It returns an error naming the offending paths
+// when the tree drifted, and nil when only the expected review record remains.
+func assertCleanReviewTree(wtDir, head string) error {
+	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("review: cannot read worktree HEAD: %w", err)
+	}
+	if cur != head {
+		return fmt.Errorf("review moved HEAD: reviewed %s -> %s", short(head), short(cur))
+	}
+	out, err := gitOutRaw(wtDir, "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("review: worktree status: %w", err)
+	}
+	var dirty []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 4 {
+			continue
+		}
+		if line[:2] == "??" {
+			continue // an untracked file is not a tracked-file edit
+		}
+		path := line[3:]
+		if i := strings.Index(path, " -> "); i >= 0 {
+			path = path[i+4:]
+		}
+		if path == "review.json" || strings.HasPrefix(path, ".forest/") {
+			continue // the review record itself, or a run artifact
+		}
+		dirty = append(dirty, path)
+	}
+	if len(dirty) > 0 {
+		return fmt.Errorf("review left the worktree dirty: %s", strings.Join(dirty, ", "))
+	}
+	return nil
+}
+
 // checkSchema validates a JSON run artifact against its declared JSON Schema:
 // the file parses, and every required property is present and non-empty.
 func checkSchema(file, schemaPath string) error {
