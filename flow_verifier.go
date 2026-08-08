@@ -31,21 +31,22 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A durable merged fact outranks the live state: a subject that already
-	// landed must never be offered for a second merge, even if its branch and
-	// item survive an interrupted finalisation.
-	merged, err := mergedIDs(repoDir)
-	if err != nil {
-		return nil, fmt.Errorf("merged facts: %w", err)
-	}
+	// A durable merged fact outranks the live state, but only for the exact
+	// Revision it records: a branch that still points at that merged Revision must
+	// never be offered for a second merge, even if its item survives an
+	// interrupted finalisation. A branch that advanced past the merged Revision is
+	// new, unreviewed work and is offered as fresh instead of being stranded by an
+	// item-wide fact.
 	var fresh, mergeable []Subject
 	for _, branch := range branches {
-		if merged[itemIDFromBranch(branch)] {
-			continue
-		}
 		head, err := branchHead(repoDir, branch)
 		if err != nil {
 			return nil, fmt.Errorf("branch %s: %w", branch, err)
+		}
+		if note, ok, err := mergedNoteFor(repoDir, itemIDFromBranch(branch)); err != nil {
+			return nil, fmt.Errorf("merged facts: %w", err)
+		} else if ok && note.Revision == head {
+			continue
 		}
 		s := Subject{
 			Key:      "branch-" + branch,
@@ -395,10 +396,16 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item) error 
 		return err
 	}
 	if cfg.Projection.MergeViaHost {
-		// The host merges only a pull request whose head still is the reviewed
-		// Revision, via its expected-head facility. After a successful host merge,
-		// finishMerge retires the branch with a compare-and-set deletion.
+		// The host merge itself removes the reviewed branch on the host. The
+		// durable merged fact must therefore land BEFORE that removal, so there
+		// is no interval where the branch is gone but no fact exists to reconcile.
+		// Write it first; if the host then refuses to merge, remove the premature
+		// fact so a never-landed subject is not treated as merged.
+		if err := markMerged(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+			return fmt.Errorf("merge: merged fact: %w", err)
+		}
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
+			_ = dropMerged(repoDir, it.ID)
 			return fmt.Errorf("merge: projection: %w", err)
 		}
 		return finishMerge(cfg, repoDir, branch, reviewed, it)

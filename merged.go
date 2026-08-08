@@ -52,6 +52,48 @@ func markMerged(repoDir, id string, note mergedNote) error {
 	return nil
 }
 
+// mergedNoteFor returns the durable merged note for one item id, or false when
+// the item carries no merged fact. A selector compares it against a branch's
+// current head so a branch that advanced past the merged Revision is offered as
+// fresh work instead of suppressed by an item-wide fact.
+func mergedNoteFor(repoDir, id string) (mergedNote, bool, error) {
+	if id == "" {
+		return mergedNote{}, false, nil
+	}
+	ref := mergedRef(id)
+	sha, body, err := getBlobRef(repoDir, ref)
+	if err != nil {
+		return mergedNote{}, false, err
+	}
+	if sha == "" {
+		return mergedNote{}, false, nil
+	}
+	var note mergedNote
+	if err := json.Unmarshal([]byte(body), &note); err != nil {
+		return mergedNote{}, false, fmt.Errorf("merged %s: decode: %w", id, err)
+	}
+	return note, true, nil
+}
+
+// dropMerged removes the durable merged fact for one item. It is only a host-path
+// rollback: when the host refuses the merge after the fact was written first, the
+// fact was premature and must be removed so a never-landed subject is not treated
+// as merged. A fact for a merge that actually landed is never dropped.
+func dropMerged(repoDir, id string) error {
+	if id == "" {
+		return nil
+	}
+	ref := mergedRef(id)
+	sha, _, err := getBlobRef(repoDir, ref)
+	if err != nil {
+		return err
+	}
+	if sha == "" {
+		return nil
+	}
+	return deleteRef(repoDir, ref, sha)
+}
+
 // mergedIDs returns the set of opaque item ids that carry a durable merged fact.
 // A single listing covers every item, so a selector consults it once per pass
 // instead of probing one ref per open item.

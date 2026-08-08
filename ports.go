@@ -23,7 +23,9 @@ type Tracker interface {
 	Get(id string) (Item, error)
 	// Comment appends a comment to an item's discussion.
 	Comment(id, body string) error
-	// Close closes one item.
+	// Close closes one item. It is idempotent: closing an item that is already
+	// closed returns nil, so a crash after Close but before a subject's other
+	// effects land cannot block a later reconciliation pass from finishing them.
 	Close(id string) error
 	// SetTags adds and removes tags on one item in one call.
 	SetTags(id string, add, remove []string) error
