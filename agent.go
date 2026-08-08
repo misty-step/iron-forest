@@ -39,9 +39,19 @@ type Agent struct {
 	Variant     string   `yaml:"variant"`
 	Mode        string   `yaml:"mode"`
 	Temperature *float64 `yaml:"temperature"`
-	// No step ceiling and no deadline: opencode treats an absent `steps` as
-	// unbounded, which is the honest shape for work whose size is not known
-	// before an agent reads the item.
+	// DeadlineSeconds is the required positive wall-clock bound on one run, in
+	// seconds, taken from the agent declaration so each lane can set its own. A
+	// run that exceeds it is cancelled and recorded as a mechanical timeout (see
+	// runTimeoutError) rather than left to hold a lane forever. It bounds wall
+	// time only: the step ceiling stays deleted, and token spend stays the
+	// provider key's concern. loadAgent refuses a declaration that omits it or
+	// sets it to zero, so every loaded agent carries a finite bound and a
+	// missing configuration can never yield an unbounded run.
+	DeadlineSeconds int `yaml:"deadline_seconds"`
+	// No step ceiling: opencode treats an absent `steps` as unbounded, which is
+	// the honest shape for work whose size is not known before an agent reads
+	// the item. The wall-time bound that ends every stall lives in
+	// DeadlineSeconds, which is required and finite.
 	Permission map[string]string `yaml:"permission"`
 	MCP        []McpSpec         `yaml:"mcp"`
 
@@ -68,6 +78,13 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	// silently spend on it. The declaration owns this choice.
 	if a.Model == "" {
 		return nil, fmt.Errorf("agent %s: model is required", name)
+	}
+	// The wall-clock deadline is required and finite: a run that never ends
+	// holds a lane forever (see #207), so a declaration that omits it or sets it
+	// to zero cannot be loaded. Every loaded agent therefore carries a positive,
+	// bounded run, and no configuration can create an unbounded one.
+	if a.DeadlineSeconds <= 0 {
+		return nil, fmt.Errorf("agent %s: deadline_seconds is required and must be a positive number of seconds", name)
 	}
 	if a.Mode == "" {
 		a.Mode = "primary"

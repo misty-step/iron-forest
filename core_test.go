@@ -87,7 +87,7 @@ func TestCoreAgentsListsDeclaredAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"),
-		[]byte("description: test agent\nmodel: test-model\n"), 0o644); err != nil {
+		[]byte("description: test agent\nmodel: test-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "instructions.md"),
@@ -121,7 +121,7 @@ func TestCoreAgentsUsesDirectoryNameNotDeclarationName(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"),
-		[]byte("name: renamed-in-yaml\ndescription: test agent\nmodel: test-model\n"), 0o644); err != nil {
+		[]byte("name: renamed-in-yaml\ndescription: test agent\nmodel: test-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "instructions.md"),

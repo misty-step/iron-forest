@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRenderedAgentDeclaresNoStepCeiling pins the unbounded contract. opencode
@@ -454,5 +455,35 @@ func TestRunStatsTokenFieldsHaveLedgerConsumers(t *testing.T) {
 	if st.NumField() != len(wantFields) {
 		t.Errorf("runStats has %d fields, want %d; a measured class is either missing or not carried to the ledger",
 			st.NumField(), len(wantFields))
+	}
+}
+
+// TestRunPhaseTimesOutPastDeclaredBound is the falsifier for #207: a run whose
+// agent produces no output past its declared deadline must be cancelled and
+// recorded as a timeout, never left to hold a lane forever. The stub streams one
+// event then sleeps far past the agent's 1-second bound; runPhase must return a
+// runTimeoutError that names the elapsed time and the last trace event, and it
+// must do so soon after the bound rather than waiting for the sleep to finish.
+func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
+	wt, trace := fakeOpencode(t,
+		"#!/bin/sh\nprintf '{\"type\":\"shell\",\"content\":\"sleep\"}\\n'\nexec sleep 30\n")
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe", DeadlineSeconds: 1}
+	start := time.Now()
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("a run past its declared bound returned no error")
+	}
+	if !isRunTimeout(err) {
+		t.Fatalf("error %v is not a runTimeoutError", err)
+	}
+	if elapsed > 15*time.Second {
+		t.Errorf("run was not cancelled at the bound: returned after %s, but the stub sleeps 30s", elapsed)
+	}
+	if !strings.Contains(err.Error(), "deadline") {
+		t.Errorf("error %q did not name the deadline", err)
+	}
+	if !strings.Contains(err.Error(), "sleep") {
+		t.Errorf("error %q did not name the last trace event", err)
 	}
 }

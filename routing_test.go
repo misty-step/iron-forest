@@ -155,7 +155,7 @@ func TestCmdAgentsReportsMalformedAndContinues(t *testing.T) {
 	if err := os.MkdirAll(good, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(good, "agent.yaml"), []byte("description: good\nmodel: g-model\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(good, "agent.yaml"), []byte("description: good\nmodel: g-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(good, "instructions.md"), []byte("hi\n"), 0o644); err != nil {

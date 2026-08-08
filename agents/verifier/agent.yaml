@@ -8,6 +8,10 @@ harness: opencode
 mode: primary
 model: openrouter/openai/gpt-5.6-luna
 variant: max
+# A wall-clock deadline bounds every stall (see #207): time-bound only, never a
+# step ceiling. Runs that exceed this are cancelled and recorded as
+# timeout_failed.
+deadline_seconds: 3600
 # A large diff costs the reviewer reads before it can judge. Keep headroom so a
 permission:
   read: allow

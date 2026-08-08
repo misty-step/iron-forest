@@ -115,10 +115,15 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	if err != nil {
 		// A mechanical prompt-delivery failure is not content to repair: the same
 		// prompt fails identically, so it parks (prompt_failed) instead of
-		// spending a Fixer attempt on an unchanged situation.
+		// spending a Fixer attempt on an unchanged situation. A run that exceeded
+		// its declared deadline is the same shape: the same run keeps exceeding
+		// the same bound, so it parks (timeout_failed) rather than being repaired.
 		out.Status = "agent_failed"
 		if isPromptDelivery(err) {
 			out.Status = "prompt_failed"
+		}
+		if isRunTimeout(err) {
+			out.Status = "timeout_failed"
 		}
 		return out, fmt.Errorf("agent: %w", err)
 	}

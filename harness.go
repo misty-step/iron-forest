@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // maxArgLen is the Linux ceiling on a single argv entry: MAX_ARG_STRLEN is
@@ -49,6 +50,50 @@ func isPromptDelivery(err error) bool {
 	return errors.As(err, &pde)
 }
 
+// runTimeoutError reports a run that exceeded its declared wall-clock deadline
+// and was cancelled. It is mechanical: the same run keeps exceeding the same
+// declared bound, so it is never a content rejection a Fixer attempt could
+// repair; it must park (name timeout_failed) instead of spending attempts on an
+// unchanged situation. It names the elapsed time and the last observed trace
+// event so an operator can see where the run stopped, and it carries the
+// elapsed duration itself so a caller can reason about it.
+type runTimeoutError struct {
+	elapsed   time.Duration
+	lastEvent string
+}
+
+func (e *runTimeoutError) Error() string {
+	return fmt.Sprintf("agent run exceeded its deadline after %s; last trace event: %s", e.elapsed, e.lastEvent)
+}
+
+// isRunTimeout reports whether err is, or wraps, a runTimeoutError. A flow uses
+// it to classify a mechanical deadline timeout apart from a content or agent
+// failure: the same run keeps hitting the same declared bound, so it must park
+// (name timeout_failed) instead of spending a Fixer attempt on an unchanged
+// situation.
+func isRunTimeout(err error) bool {
+	var rte *runTimeoutError
+	return errors.As(err, &rte)
+}
+
+// maxTraceEventLabel caps how much of a trace event an error message carries.
+// A giant step event must not bloat a ledger row; the label names where the run
+// stopped, not the whole event.
+const maxTraceEventLabel = 200
+
+// traceEventLabel renders one trace line for an error message, truncated so a
+// huge event cannot bloat a ledger row. An empty trace reports "(none)".
+func traceEventLabel(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "(none)"
+	}
+	if len(line) > maxTraceEventLabel {
+		return line[:maxTraceEventLabel] + "..."
+	}
+	return line
+}
+
 // runStats is the session-level token accounting for one agent run. Every field
 // is a measured token class that must reach the ledger row; a class with no
 // consumer is the under-statement the ledger exists to prevent.
@@ -67,13 +112,16 @@ type runStats struct {
 // maxArgLen). repoDir is the factory project: the provider configuration the
 // run actually needs is read from its
 // .opencode/opencode.json and staged into the run's external config root. The
-// run is unbounded: no step ceiling and no deadline. A fixed bound is a guess
+// run is unbounded in steps: no step ceiling, because a fixed bound is a guess
 // about how much work an item needs, and a wrong guess stops real work partway
-// and reports it as a gate failure. The context stays cancellable so a
-// supervisor can stop a run on evidence rather than on a constant. Any non-zero
-// harness exit marks the run failed: the error carries the exit status and
-// stderr so a crash or truncation is never mistaken for work the gate can
-// publish.
+// and reports it as a gate failure. Wall time carries the agent's declared
+// deadline_seconds: loadAgent guarantees every loaded agent has a positive,
+// finite bound, and a run that exceeds it is cancelled and returned as a
+// runTimeoutError (see #207) so a stalled provider can never hold a lane
+// forever. The context stays cancellable so a supervisor can stop a run on
+// evidence rather than on a constant. Any non-zero harness exit marks the run
+// failed: the error carries the exit status and stderr so a crash or truncation
+// is never mistaken for work the gate can publish.
 //
 // runPhase is a package variable (see the indirection below) so a test can
 // force a promptDeliveryError and drive a flow's mechanical classification end
@@ -92,7 +140,25 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	}
 	defer trace.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// The run gets a wall-clock deadline from the agent's declaration. A bound
+	// on wall time is the mechanism that ends every stall, whatever its cause: a
+	// provider that accepts a connection and never answers leaves the process
+	// sleeping in epoll with the socket established, so no socket error ever
+	// fires and a cancellable-but-deadline-free context would hold the lane open
+	// forever. The deadline is per-lane because each agent declares its own, and
+	// loadAgent guarantees every loaded agent carries a positive, finite bound.
+	// The positive check below is kept defensively so even a zero value handed
+	// in directly never arms an immediate-timeout context in an unintended way;
+	// production runs always set the timeout because the deadline is validated
+	// at load time.
+	started := time.Now()
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if a.DeadlineSeconds > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(a.DeadlineSeconds)*time.Second)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
 	defer cancel()
 
 	env, cleanup, err := childEnvironment()
@@ -161,10 +227,14 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	lastTrace := ""
 	for sc.Scan() {
 		line := sc.Bytes()
 		if _, err := trace.Write(append(line, '\n')); err != nil {
 			return stats, err
+		}
+		if len(line) > 0 {
+			lastTrace = string(line)
 		}
 		if st, ok := parseStepFinish(line); ok {
 			stats.tokensIn += st.tokensIn
@@ -175,6 +245,16 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 		}
 	}
 	waitErr := cmd.Wait()
+	// A deadline expiry is detected before any exit-status reading: when the
+	// context's timer fires, exec.CommandContext kills the child and Wait returns
+	// because of that cancellation, not because of anything the agent did. That
+	// is a mechanical stop, so name it timeout and record where the run stopped.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return stats, &runTimeoutError{
+			elapsed:   time.Since(started),
+			lastEvent: traceEventLabel(lastTrace),
+		}
+	}
 	if sc.Err() != nil {
 		return stats, sc.Err()
 	}

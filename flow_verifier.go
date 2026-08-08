@@ -233,10 +233,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		if err != nil {
 			// A mechanical prompt-delivery failure names itself prompt_failed so it
 			// is never misread as a review verdict the Fixer should repair; the
-			// same prompt fails identically, so it parks instead.
+			// same prompt fails identically, so it parks instead. A review run
+			// that exceeded its declared deadline parks the same way
+			// (timeout_failed), never as a verdict to act on.
 			out.Status = "review_failed"
 			if isPromptDelivery(err) {
 				out.Status = "prompt_failed"
+			}
+			if isRunTimeout(err) {
+				out.Status = "timeout_failed"
 			}
 			return out, err
 		}
