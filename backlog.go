@@ -66,9 +66,24 @@ func (t githubTracker) Comment(id, body string) error {
 	return err
 }
 
-// Close closes one item.
+// Close closes one item. It is idempotent: closing an item that is already
+// closed is a no-op, so a retry after a crash between effects never fails forever
+// on an item a previous pass already closed.
 func (t githubTracker) Close(id string) error {
-	_, err := ghJSON("issue", "close", "-R", t.repo, id)
+	out, err := ghJSON("issue", "view", id, "-R", t.repo, "--json", "state")
+	if err != nil {
+		return err
+	}
+	var raw struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return err
+	}
+	if strings.EqualFold(raw.State, "closed") {
+		return nil
+	}
+	_, err = ghJSON("issue", "close", "-R", t.repo, id)
 	return err
 }
 
@@ -142,7 +157,21 @@ func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	return eligibleFrom(items, branches, cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels), nil
+	eligible := eligibleFrom(items, branches, cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels)
+	// A durable merged fact must exclude an item even while its Tracker item is
+	// still open, so eligibility never depends on Tracker state alone. This is
+	// the guard that closes the branch-deleted-but-not-yet-closed window.
+	merged, err := mergedIDs(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	kept := eligible[:0]
+	for _, it := range eligible {
+		if !merged[it.ID] {
+			kept = append(kept, it)
+		}
+	}
+	return kept, nil
 }
 
 func eligibleFrom(items []Item, branches, excluded, required []string) []Item {

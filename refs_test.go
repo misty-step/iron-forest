@@ -95,3 +95,49 @@ func TestListRefsEnumeratesPrefix(t *testing.T) {
 		t.Fatalf("listed %d refs, want 2", len(refs))
 	}
 }
+
+// newBranchRemoteRepo returns a repo whose origin has a branch named "forest/9-change"
+// pointing at the given commit target ("" pushes an empty — tests pass a real sha).
+func pushTestBranch(t *testing.T, repo, branch, target string) {
+	t.Helper()
+	runGitTest(t, repo, "push", "origin", target+":refs/heads/"+branch)
+}
+
+// TestDeleteBranchIfPresentIsIdempotentUnderRetry pins the cleanup idempotency of
+// item #190: deleting a branch that is already gone (a retry after a partial
+// finalisation) is a no-op, never a stale-ref error, so a concurrent pass cannot
+// make reconciliation fail forever.
+func TestDeleteBranchIfPresentIsIdempotentUnderRetry(t *testing.T) {
+	repo := newRefGitRepo(t)
+	// Materialise a commit so a branch can exist.
+	runGitTest(t, repo, "config", "user.email", "t@example.com")
+	runGitTest(t, repo, "config", "user.name", "test")
+	runGitTest(t, repo, "commit", "--allow-empty", "-m", "root")
+	head := strings.TrimSpace(runGitTest(t, repo, "rev-parse", "HEAD"))
+	pushTestBranch(t, repo, "forest/9-change", head)
+	// First deletion succeeds.
+	if err := deleteBranchIfPresent(repo, "forest/9-change", head); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	// A retry is a safe no-op instead of a stale-ref error.
+	if err := deleteBranchIfPresent(repo, "forest/9-change", head); err != nil {
+		t.Fatalf("retry delete of an already-removed branch: %v", err)
+	}
+}
+
+// TestDropAttemptsIsIdempotentUnderRetry pins the same boundary for the attempt
+// record: dropping an already-dropped record is a no-op, so a retry after a
+// concurrent pass never fails forever on a stale compare-and-set.
+func TestDropAttemptsIsIdempotentUnderRetry(t *testing.T) {
+	repo := newRefGitRepo(t)
+	ref := "refs/forest/attempt/item-11"
+	if err := putBlobRef(repo, ref, "attempt", ""); err != nil {
+		t.Fatalf("put attempt: %v", err)
+	}
+	if err := dropAttempts(repo, "item-11"); err != nil {
+		t.Fatalf("first drop: %v", err)
+	}
+	if err := dropAttempts(repo, "item-11"); err != nil {
+		t.Fatalf("retry drop of an already-dropped record: %v", err)
+	}
+}

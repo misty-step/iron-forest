@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -30,11 +31,22 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A durable merged fact outranks the live state, but only for the exact
+	// Revision it records: a branch that still points at that merged Revision must
+	// never be offered for a second merge, even if its item survives an
+	// interrupted finalisation. A branch that advanced past the merged Revision is
+	// new, unreviewed work and is offered as fresh instead of being stranded by an
+	// item-wide fact.
 	var fresh, mergeable []Subject
 	for _, branch := range branches {
 		head, err := branchHead(repoDir, branch)
 		if err != nil {
 			return nil, fmt.Errorf("branch %s: %w", branch, err)
+		}
+		if note, ok, err := mergedNoteFor(repoDir, itemIDFromBranch(branch)); err != nil {
+			return nil, fmt.Errorf("merged facts: %w", err)
+		} else if ok && note.Revision == head {
+			continue
 		}
 		s := Subject{
 			Key:      "branch-" + branch,
@@ -384,11 +396,21 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item) error 
 		return err
 	}
 	if cfg.Projection.MergeViaHost {
-		// The host merges only a pull request whose head still is the reviewed
-		// Revision, via its expected-head facility. After a successful host merge,
-		// finishMerge retires the branch with a compare-and-set deletion.
+		// The host lands the merge. A durable pending claim is written before the
+		// merge is committed to, so from that moment the subject is never fresh
+		// work even while its item is open; the claim survives a crash so restart
+		// can resolve it. On any projectMerge error the claim is deliberately left
+		// in place: an ambiguous host/network error may mean the merge actually
+		// landed, so it is never dropped here. Reconciliation observes the host to
+		// graduate the claim to landed or roll it back.
+		if err := markMergedClaim(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+			return fmt.Errorf("merge: merged claim: %w", err)
+		}
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
+		}
+		if err := confirmMerged(repoDir, it.ID); err != nil {
+			return fmt.Errorf("merge: confirm merged: %w", err)
 		}
 		return finishMerge(cfg, repoDir, branch, reviewed, it)
 	}
@@ -444,18 +466,31 @@ func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item) error {
 	default:
 		return fmt.Errorf("merge: unsupported strategy %q", cfg.Flows.Verifier.Merge)
 	}
-	// One atomic push updates master and deletes the source branch. The lease on
-	// master pins the merge to the tree it was built on; the lease on the source
-	// branch pins the deletion to the reviewed Revision, so newer, unreviewed
-	// work is never merged around or deleted.
+	// A durable merged fact lands atomically with the master update and the
+	// branch deletion, so no interval lets the merged subject look like fresh
+	// work: eligibility consults the fact, so once this push lands the Builder
+	// can never re-select the item no matter what happens to the Tracker next.
+	media, err := json.Marshal(mergedNote{Branch: branch, Revision: reviewed, State: mergedLanded})
+	if err != nil {
+		return fmt.Errorf("merge: encode merged record: %w", err)
+	}
+	mergedFact, err := gitBlob(repoDir, string(media))
+	if err != nil {
+		return fmt.Errorf("merge: merged record blob: %w", err)
+	}
+	// One atomic push updates master, deletes the source branch, and records the
+	// durable merged fact. The lease on master pins the merge to the tree it was
+	// built on; the lease on the source branch pins the deletion to the reviewed
+	// Revision, so newer, unreviewed work is never merged around or deleted.
 	if err := git(mergeDir, "push", "--atomic",
 		"--force-with-lease=refs/heads/master:"+masterTip,
 		"--force-with-lease=refs/heads/"+branch+":"+reviewed,
-		"origin", "HEAD:master", ":"+branch); err != nil {
+		"origin", "HEAD:master", ":"+branch,
+		mergedFact+":"+mergedRef(it.ID)); err != nil {
 		return fmt.Errorf("merge: push: %w", err)
 	}
-	// The atomic push already deleted the branch, so retiring only clears the
-	// item and its attempt record.
+	// The atomic push already deleted the branch and recorded the fact, so
+	// retiring only clears the item and its attempt record.
 	return retireItem(cfg, repoDir, branch, it)
 }
 
@@ -480,21 +515,34 @@ func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
 	return nil
 }
 
-// finishMerge retires a landed subject on the host path: the branch is deleted
+// finishMerge retires a landed subject on the host path. It records the durable
+// landed fact first (idempotently — a claim already graduated by mergeVerified is
+// left untouched), so eligibility no longer depends on the Tracker the moment
+// the merge lands; then it closes the item and drops its attempt record before
+// removing the branch. Ordering close before deletion means no window deletes the
+// branch while the item still looks like fresh work, and every effect is
+// idempotent so a retry after partial failure is safe. The branch is deleted
 // only when it still is the reviewed Revision — a compare-and-set deletion — and
-// the item is closed, so no lane selects it again. A branch that advanced past
-// the reviewed Revision is left in place with its newer, unreviewed commits.
+// a branch that advanced past it is left in place with its newer, unreviewed
+// commits.
 func finishMerge(cfg Config, repoDir, branch, reviewed string, it Item) error {
-	if err := deleteRef(repoDir, "refs/heads/"+branch, reviewed); err != nil {
+	if err := markMerged(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed, State: mergedLanded}); err != nil {
+		return fmt.Errorf("merge: merged fact: %w", err)
+	}
+	if err := retireItem(cfg, repoDir, branch, it); err != nil {
+		return err
+	}
+	if err := deleteBranchIfPresent(repoDir, branch, reviewed); err != nil {
 		return fmt.Errorf("merge: delete branch %s (wanted %s): %w", branch, reviewed, err)
 	}
-	return retireItem(cfg, repoDir, branch, it)
+	return nil
 }
 
-// retireItem closes a merged subject and drops its attempt record. The source
-// branch is already gone — deleted atomically with the master push on the git
-// path, or by finishMerge after a host merge — so retiring only clears the
-// item's bookkeeping and never touches a branch ref.
+// retireItem closes a merged subject and drops its attempt record. It never
+// touches a branch ref: the git path already deleted the branch atomically with
+// the master push, and the host path deletes it only after this call returns.
+// The item is closed before the branch goes away so eligibility — which reads
+// the open items — never offers a merged subject as fresh work.
 func retireItem(cfg Config, repoDir, branch string, it Item) error {
 	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
 		return fmt.Errorf("merge: close item: %w", err)
