@@ -90,11 +90,11 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 // variantSuffix renders the reasoning variant beside the model for operator
 // output, so a listing states the effort a model actually runs at instead of
 // leaving it to be inferred from the model name.
-func variantSuffix(a *Agent) string {
-	if a.Variant == "" {
+func variantSuffix(variant string) string {
+	if variant == "" {
 		return ""
 	}
-	return "@" + a.Variant
+	return "@" + variant
 }
 
 // discoverAgents lists the declared agents under agents/.

@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/misty-step/iron-forest/core"
 )
@@ -73,7 +75,11 @@ func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 	for _, name := range names {
 		a, err := loadAgent(c.repoDir, name)
 		if err != nil {
-			return nil, err
+			// Keep listing the rest: one malformed declaration must not hide the
+			// agents that follow it, matching what the agents command reported
+			// before this seam existed. The caller prints the error and moves on.
+			out = append(out, core.AgentInfo{Name: name, Err: err.Error()})
+			continue
 		}
 		mcps := make([]core.McpSpec, 0, len(a.MCP))
 		for _, m := range a.MCP {
@@ -82,17 +88,20 @@ func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 			})
 		}
 		out = append(out, core.AgentInfo{
-			Name: a.Name, Description: a.Description, Model: a.Model,
+			// Use the discovered directory name, not the declaration's name
+			// field. The agents command always listed the directory name; an
+			// agent.yaml carrying its own `name:` must not change that output.
+			Name: name, Description: a.Description, Model: a.Model,
 			Variant: a.Variant, Mode: a.Mode, DefSHA: a.DefSHA, Mcps: mcps,
 		})
 	}
 	return out, nil
 }
 
-func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, error) {
-	runs, _, err := loadLedger(ledgerPath(c.repoDir))
+func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, int, error) {
+	runs, invalid, err := loadLedger(ledgerPath(c.repoDir))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	out := make([]core.RunRecord, 0, len(runs))
 	for _, r := range runs {
@@ -122,7 +131,7 @@ func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, error) {
 			Error:         r.Error,
 		})
 	}
-	return out, nil
+	return out, invalid, nil
 }
 
 func (c *coreImpl) Trace(runID string) ([]byte, error) {
@@ -153,35 +162,46 @@ func (c *coreImpl) Trace(runID string) ([]byte, error) {
 // verdict and checks notes for one commit.
 func (c *coreImpl) Notes(sha string) (core.Verdict, core.Checks, error) {
 	if err := fetchNotes(c.repoDir); err != nil {
-		return core.Verdict{}, core.Checks{}, err
+		return core.Verdict{}, core.Checks{}, &core.StageError{Stage: core.StageFetch, Err: err}
 	}
 	v, ok, err := readVerdict(c.repoDir, sha)
 	if err != nil {
-		return core.Verdict{}, core.Checks{}, err
+		return core.Verdict{}, core.Checks{}, &core.StageError{Stage: core.StageVerdict, Err: err}
 	}
 	var verdict core.Verdict
 	if ok {
 		verdict = core.Verdict{
 			Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
 			Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
+			// Presence is the note's existence, not a field heuristic: a valid
+			// verdict that lacks a time or run id is still a present decision,
+			// and the old show command emitted it as such.
+			Present: ok,
 		}
 	}
 	ch, ok2, err := readChecks(c.repoDir, sha)
 	if err != nil {
-		return verdict, core.Checks{}, err
+		return verdict, core.Checks{}, &core.StageError{Stage: core.StageChecks, Err: err}
 	}
 	var checks core.Checks
 	if ok2 {
 		checks = core.Checks{
 			Status:  ch.Status,
-			Results: make([]core.CheckResult, 0, len(ch.Results)),
 			RunID:   ch.RunID,
 			Time:    ch.Time,
+			Present: ok2,
 		}
-		for _, r := range ch.Results {
-			checks.Results = append(checks.Results, core.CheckResult{
-				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
-			})
+		// Preserve the raw note's nil-versus-empty results shape: a null or
+		// absent results field stays nil so it renders `null`, while an explicit
+		// empty array stays non-nil so it renders `[]`, exactly as the surface
+		// read it before reaching state through the core API.
+		if ch.Results != nil {
+			checks.Results = make([]core.CheckResult, len(ch.Results))
+			for i, r := range ch.Results {
+				checks.Results[i] = core.CheckResult{
+					Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
+				}
+			}
 		}
 	}
 	return verdict, checks, nil
@@ -198,18 +218,47 @@ func (c *coreImpl) Items() ([]core.Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]core.Item, 0, len(subjects))
+	return toCoreItems(subjectsToItems(subjects)), nil
+}
+
+func subjectsToItems(subjects []Subject) []Item {
+	items := make([]Item, 0, len(subjects))
 	for _, s := range subjects {
-		comments := make([]core.Comment, 0, len(s.Item.Comments))
-		for _, cm := range s.Item.Comments {
+		items = append(items, s.Item)
+	}
+	return items
+}
+
+// EligibleItems returns the tracker backlog without the builder's stalled-item
+// filtering: every open item that is not already covered by a forest branch and
+// passes the builder's label filters. The live watch board polls this exact
+// backlog, which is what it displayed before #176 routed it through the API.
+func (c *coreImpl) EligibleItems() ([]core.Item, error) {
+	cfg, err := loadConfig(filepath.Join(c.repoDir, "forest.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	items, err := eligibleItems(cfg, c.repoDir)
+	if err != nil {
+		return nil, err
+	}
+	return toCoreItems(items), nil
+}
+
+// toCoreItems adapts controller items into the core package's owned shape.
+func toCoreItems(items []Item) []core.Item {
+	out := make([]core.Item, 0, len(items))
+	for _, it := range items {
+		comments := make([]core.Comment, 0, len(it.Comments))
+		for _, cm := range it.Comments {
 			comments = append(comments, core.Comment{Body: cm.Body, CreatedAt: cm.CreatedAt})
 		}
 		out = append(out, core.Item{
-			ID: s.Item.ID, Title: s.Item.Title, Body: s.Item.Body,
-			UpdatedAt: s.Item.UpdatedAt, Tags: s.Item.Tags, Comments: comments,
+			ID: it.ID, Title: it.Title, Body: it.Body,
+			UpdatedAt: it.UpdatedAt, Tags: it.Tags, Comments: comments,
 		})
 	}
-	return out, nil
+	return out
 }
 
 func (c *coreImpl) Branches() ([]core.BranchState, error) {
@@ -228,7 +277,57 @@ func (c *coreImpl) Branches() ([]core.BranchState, error) {
 	return out, nil
 }
 
-func (c *coreImpl) DaemonPresent() (bool, error) {
-	s := probeDaemon(c.repoDir)
-	return s.Active, nil
+func (c *coreImpl) Head() (string, error) {
+	return gitOut(c.repoDir, "rev-parse", "--short", "HEAD")
+}
+
+func (c *coreImpl) Worktrees() ([]string, error) {
+	return worktreePaths(c.repoDir), nil
+}
+
+func (c *coreImpl) Daemon() (core.Daemon, error) {
+	return probeDaemon(c.repoDir), nil
+}
+
+// probeDaemon reports whether the factory service is active, preferring
+// systemd --user and falling back to the workspace daemon lock.
+func probeDaemon(repoDir string) core.Daemon {
+	d := core.Daemon{Unit: "forest.service"}
+	out, err := exec.Command("systemctl", "--user", "is-active", "forest").Output()
+	active := err == nil && strings.TrimSpace(string(out)) == "active"
+	d.Active = active
+	if active {
+		if pid, err := exec.Command("systemctl", "--user", "show", "forest", "-p", "MainPID", "--value").Output(); err == nil {
+			d.PID = strings.TrimSpace(string(pid))
+		}
+		d.Note = "systemd --user"
+		return d
+	}
+	lock := filepath.Join(repoDir, WorkspaceDir, "daemon.lock")
+	if f, err := os.Open(lock); err == nil {
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		_ = f.Close()
+		if err != nil {
+			d.Active = true
+			d.Note = "daemon.lock held (not via systemd?)"
+			return d
+		}
+	}
+	d.Note = "inactive"
+	return d
+}
+
+// worktreePaths lists every worktree path for the checkout.
+func worktreePaths(repoDir string) []string {
+	out, err := gitOut(repoDir, "worktree", "list", "--porcelain")
+	if err != nil || out == "" {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if path := strings.TrimPrefix(line, "worktree "); path != line && path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }

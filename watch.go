@@ -4,19 +4,19 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/misty-step/iron-forest/core"
 )
 
 // cmdWatch draws a live operator board from the ledger, refs, and daemon.
 // The default frame is local-only. Pass --live-gh to poll the tracker backlog.
 // Ctrl-C restores the cursor and exits.
-func cmdWatch(cfg Config, repoDir string, args []string) int {
+func cmdWatch(api core.API, repoDir string, args []string) int {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() {
@@ -42,6 +42,15 @@ func cmdWatch(cfg Config, repoDir string, args []string) int {
 		return 2
 	}
 
+	cfg, err := api.Config()
+	if err != nil {
+		// Before this seam, dispatch loaded forest.yaml and reported a load
+		// failure as "forest: <err>"; keep that prefix rather than adding a
+		// watch-specific one so the failure is byte-identical.
+		fmt.Fprintln(os.Stderr, "forest:", err)
+		return 1
+	}
+
 	fmt.Fprint(os.Stdout, "\033[?25l")
 	defer fmt.Fprint(os.Stdout, "\033[?25h\033[0m")
 
@@ -51,12 +60,15 @@ func cmdWatch(cfg Config, repoDir string, args []string) int {
 
 	var (
 		mu      sync.Mutex
-		items   []Item
+		items   []core.Item
 		itemErr string
 	)
 	if liveGH {
 		refresh := func() {
-			got, err := eligibleItems(cfg, repoDir)
+			// The live board shows the raw tracker backlog (eligible, not
+			// stalled-filtered) exactly as it always did; list is the surface
+			// that applies the builder's stall filter.
+			got, err := api.EligibleItems()
 			mu.Lock()
 			if err != nil {
 				itemErr = err.Error()
@@ -80,7 +92,7 @@ func cmdWatch(cfg Config, repoDir string, args []string) int {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
-		snap := loadWatchSnapshot(cfg, repoDir)
+		snap := loadWatchSnapshot(api, cfg.Repo)
 		if liveGH {
 			mu.Lock()
 			snap.Backlog = items
@@ -105,66 +117,36 @@ type watchSnapshot struct {
 	Repo       string
 	Version    string
 	HeadShort  string
-	Daemon     daemonSnap
+	Daemon     core.Daemon
 	Worktrees  []string
 	LiveGH     bool
-	Backlog    []Item
+	Backlog    []core.Item
 	BacklogErr string
 	Flows      map[string][]runRecord
 }
 
-type daemonSnap struct {
-	Active bool
-	PID    string
-	Unit   string
-	Note   string
-}
-
-func loadWatchSnapshot(cfg Config, repoDir string) watchSnapshot {
-	ws := filepath.Join(repoDir, WorkspaceDir)
+func loadWatchSnapshot(api core.API, repo string) watchSnapshot {
 	s := watchSnapshot{
 		DrawnAt: time.Now().UTC(),
-		Repo:    cfg.Repo,
+		Repo:    repo,
 		Version: version,
 		Flows:   map[string][]runRecord{"builder": nil, "verifier": nil, "fixer": nil},
 	}
-	if h, err := gitOut(repoDir, "rev-parse", "--short", "HEAD"); err == nil {
+	if h, err := api.Head(); err == nil {
 		s.HeadShort = h
 	}
-	s.Daemon = probeDaemon(repoDir)
-	all, _, _ := loadLedger(filepath.Join(ws, "runs.jsonl"))
+	if d, err := api.Daemon(); err == nil {
+		s.Daemon = d
+	}
+	all, _, _ := api.Ledger(core.LedgerQuery{})
 	s.Flows = groupRuns(all, 8)
-	s.Worktrees = worktreePaths(repoDir)
+	if wt, err := api.Worktrees(); err == nil {
+		s.Worktrees = wt
+	}
 	return s
 }
 
-func probeDaemon(repoDir string) daemonSnap {
-	d := daemonSnap{Unit: "forest.service"}
-	out, err := exec.Command("systemctl", "--user", "is-active", "forest").Output()
-	active := err == nil && strings.TrimSpace(string(out)) == "active"
-	d.Active = active
-	if active {
-		if pid, err := exec.Command("systemctl", "--user", "show", "forest", "-p", "MainPID", "--value").Output(); err == nil {
-			d.PID = strings.TrimSpace(string(pid))
-		}
-		d.Note = "systemd --user"
-		return d
-	}
-	lock := filepath.Join(repoDir, WorkspaceDir, "daemon.lock")
-	if f, err := os.Open(lock); err == nil {
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		_ = f.Close()
-		if err != nil {
-			d.Active = true
-			d.Note = "daemon.lock held (not via systemd?)"
-			return d
-		}
-	}
-	d.Note = "inactive"
-	return d
-}
-
-func groupRuns(all []runRecord, n int) map[string][]runRecord {
+func groupRuns(all []core.RunRecord, n int) map[string][]runRecord {
 	groups := map[string][]runRecord{
 		"builder":  nil,
 		"verifier": nil,
@@ -175,7 +157,7 @@ func groupRuns(all []runRecord, n int) map[string][]runRecord {
 		if name != "builder" && name != "verifier" && name != "fixer" {
 			continue
 		}
-		groups[name] = append(groups[name], r)
+		groups[name] = append(groups[name], coreRunRecord(r))
 	}
 	for name, runs := range groups {
 		if len(runs) > n {
@@ -183,20 +165,6 @@ func groupRuns(all []runRecord, n int) map[string][]runRecord {
 		}
 	}
 	return groups
-}
-
-func worktreePaths(repoDir string) []string {
-	out, err := gitOut(repoDir, "worktree", "list", "--porcelain")
-	if err != nil || out == "" {
-		return nil
-	}
-	var paths []string
-	for _, line := range strings.Split(out, "\n") {
-		if path := strings.TrimPrefix(line, "worktree "); path != line && path != "" {
-			paths = append(paths, path)
-		}
-	}
-	return paths
 }
 
 func renderWatch(w *os.File, s watchSnapshot) {

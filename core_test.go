@@ -109,6 +109,37 @@ func TestCoreAgentsListsDeclaredAgents(t *testing.T) {
 	}
 }
 
+// TestCoreAgentsUsesDirectoryNameNotDeclarationName pins the #176 regression:
+// coreImpl.Agents reports the discovered directory name even when the agent's
+// declaration carries its own `name:` field. The agents command always printed
+// the directory name, and Agent.Name is not yaml:"-", so a `name:` in agent.yaml
+// must not change a surface's output.
+func TestCoreAgentsUsesDirectoryNameNotDeclarationName(t *testing.T) {
+	api, work, _ := coreFixture(t)
+	dir := filepath.Join(work, DefaultAgentsDir, "builder")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"),
+		[]byte("name: renamed-in-yaml\ndescription: test agent\nmodel: test-model\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "instructions.md"),
+		[]byte("Be helpful.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := api.Agents()
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("Agents returned %d, want 1", len(agents))
+	}
+	if agents[0].Name != "builder" {
+		t.Fatalf("agent name = %q, want the discovered directory name %q", agents[0].Name, "builder")
+	}
+}
+
 func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	api, work, _ := coreFixture(t)
 	ws := filepath.Join(work, WorkspaceDir, "runs.jsonl")
@@ -120,9 +151,12 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if err := os.WriteFile(ws, []byte(rows), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	all, err := api.Ledger(core.LedgerQuery{})
+	all, invalid, err := api.Ledger(core.LedgerQuery{})
 	if err != nil {
 		t.Fatalf("Ledger: %v", err)
+	}
+	if invalid != 0 {
+		t.Fatalf("Ledger invalid = %d, want 0", invalid)
 	}
 	if len(all) != 2 {
 		t.Fatalf("Ledger returned %d rows, want 2", len(all))
@@ -130,12 +164,31 @@ func TestCoreLedgerReadsRowsAndFiltersByFlow(t *testing.T) {
 	if all[0].Flow != "builder" || all[0].TokensIn != 10 || all[0].CacheRead != 30 || all[0].CacheWrite != 4 || all[0].Reasoning != 5 {
 		t.Fatalf("row 0 = %+v, want builder with 10 fresh, 30 cached-read, 4 cached-write, 5 reasoning in", all[0])
 	}
-	builder, err := api.Ledger(core.LedgerQuery{Flow: "builder"})
+	builder, _, err := api.Ledger(core.LedgerQuery{Flow: "builder"})
 	if err != nil {
 		t.Fatalf("Ledger(builder): %v", err)
 	}
 	if len(builder) != 1 || builder[0].RunID != "r1" {
 		t.Fatalf("Ledger(builder) = %+v, want only r1", builder)
+	}
+}
+
+// TestCoreRunRecordCopiesEveryTokenClass guards the #176 regression where the
+// stats aggregator's adapter dropped CacheRead, CacheWrite, and Reasoning. The
+// ledger carries all five classes, and stats text/JSON must total and break
+// them down byte-identically, so every class must survive the core->runRecord
+// mapping unchanged, not silently zero.
+func TestCoreRunRecordCopiesEveryTokenClass(t *testing.T) {
+	got := coreRunRecord(core.RunRecord{
+		Time: "2026-01-01T00:00:00Z", RunID: "r1", Flow: "builder",
+		Status: "built", TokensIn: 10, TokensOut: 2,
+		CacheRead: 30, CacheWrite: 4, Reasoning: 5,
+	})
+	if got.TokensIn != 10 || got.TokOut != 2 {
+		t.Fatalf("input/output mismapped: got %+v", got)
+	}
+	if got.CacheRead != 30 || got.CacheWrite != 4 || got.Reasoning != 5 {
+		t.Fatalf("cached/reasoning classes dropped to zero: got %+v", got)
 	}
 }
 
@@ -293,11 +346,11 @@ func TestCoreBranchesListsForestBranches(t *testing.T) {
 
 func TestCoreDaemonPresentWithNoDaemon(t *testing.T) {
 	api, _, _ := coreFixture(t)
-	up, err := api.DaemonPresent()
+	d, err := api.Daemon()
 	if err != nil {
-		t.Fatalf("DaemonPresent: %v", err)
+		t.Fatalf("Daemon: %v", err)
 	}
-	if up {
-		t.Fatal("DaemonPresent reported a daemon in a bare test environment")
+	if d.Active {
+		t.Fatal("Daemon reported active in a bare test environment")
 	}
 }
