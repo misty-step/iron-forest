@@ -209,8 +209,10 @@ first diff yourself. When a full pass has landed and you trust the checks, set
 Expect these on a first run:
 
 - **A cold build is slow.** Cantrip's first pass peaked at 8.2 GB and 18 minutes
-  of CPU pulling its dependency tree. There is no step ceiling or deadline by
-  design, so let it finish.
+  of CPU pulling its dependency tree. There is no step ceiling by design, so let
+  it finish. Wall time is bounded by each agent's `deadline_seconds`; a run that
+  outlives it is cancelled and recorded as `timeout_failed` (mechanical), and
+  its lane reopens on the next pass.
 - **Three failures on one revision park the item.** The repeat-failure brake is
   a ref under `refs/forest/stalled/`. Fix the cause, then move the item's
   revision — a comment is enough — and it becomes selectable again.

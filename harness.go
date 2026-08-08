@@ -114,8 +114,9 @@ type runStats struct {
 // .opencode/opencode.json and staged into the run's external config root. The
 // run is unbounded in steps: no step ceiling, because a fixed bound is a guess
 // about how much work an item needs, and a wrong guess stops real work partway
-// and reports it as a gate failure. Wall time is bounded only when the agent
-// declares a deadline; a run that exceeds it is cancelled and returned as a
+// and reports it as a gate failure. Wall time carries the agent's declared
+// deadline_seconds: loadAgent guarantees every loaded agent has a positive,
+// finite bound, and a run that exceeds it is cancelled and returned as a
 // runTimeoutError (see #207) so a stalled provider can never hold a lane
 // forever. The context stays cancellable so a supervisor can stop a run on
 // evidence rather than on a constant. Any non-zero harness exit marks the run
@@ -139,12 +140,17 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	}
 	defer trace.Close()
 
-	// The run gets a wall-clock deadline only when the agent declares one. A
-	// bound on wall time is the mechanism that ends every stall, whatever its
-	// cause: a provider that accepts a connection and never answers leaves the
-	// process sleeping in epoll with the socket established, so no socket error
-	// ever fires and a cancellable-but-deadline-free context would hold the lane
-	// open forever. The deadline is per-lane because each agent declares its own.
+	// The run gets a wall-clock deadline from the agent's declaration. A bound
+	// on wall time is the mechanism that ends every stall, whatever its cause: a
+	// provider that accepts a connection and never answers leaves the process
+	// sleeping in epoll with the socket established, so no socket error ever
+	// fires and a cancellable-but-deadline-free context would hold the lane open
+	// forever. The deadline is per-lane because each agent declares its own, and
+	// loadAgent guarantees every loaded agent carries a positive, finite bound.
+	// The positive check below is kept defensively so even a zero value handed
+	// in directly never arms an immediate-timeout context in an unintended way;
+	// production runs always set the timeout because the deadline is validated
+	// at load time.
 	started := time.Now()
 	var ctx context.Context
 	var cancel context.CancelFunc

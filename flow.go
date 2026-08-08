@@ -123,7 +123,7 @@ func serve(cfg Config, repoDir string, names []string) int {
 		<-sig // first signal: finish the in-flight agents, start no new pass
 		atomic.StoreInt32(&drain, 1)
 		fmt.Fprintln(os.Stderr, "forest: draining, waiting for in-flight agents")
-		<-sig // second signal: the operator's only clock, since agents are unbounded
+		<-sig // second signal: the operator's hard stop, which still outranks the agents' own wall-clock deadlines
 		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
 		for _, dir := range trackedWorktrees() {
 			removeWorktree(repoDir, dir)

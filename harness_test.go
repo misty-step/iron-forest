@@ -487,14 +487,3 @@ func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
 		t.Errorf("error %q did not name the last trace event", err)
 	}
 }
-
-// TestRunPhaseEndsWithoutDeclaredDeadline pins that a deadline is opt-in per
-// agent: an agent that declares none keeps the previous cancellable-but-unbounded
-// behaviour, so a clean run still succeeds without a bound.
-func TestRunPhaseEndsWithoutDeclaredDeadline(t *testing.T) {
-	wt, trace := fakeOpencode(t, "#!/bin/sh\nexit 0\n")
-	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(t.TempDir(), wt, a, "task", trace); err != nil {
-		t.Fatalf("a run without a declared deadline must succeed: %v", err)
-	}
-}

@@ -37,7 +37,7 @@ func writeAgentFixture(t *testing.T, repoDir, name, model string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	yaml := "description: " + name + "\nmodel: " + model + "\n"
+	yaml := "description: " + name + "\nmodel: " + model + "\ndeadline_seconds: 3600\n"
 	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestLoadAgentAndDigestChanges(t *testing.T) {
 	}
 	first := a.DefSHA
 	path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
-	if err := os.WriteFile(path, []byte("description: builder\nmodel: changed-model\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("description: builder\nmodel: changed-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	b, err := loadAgent(repoDir, "builder")
@@ -197,6 +197,33 @@ func TestDeclaredAgentsLoad(t *testing.T) {
 		}
 		if a.Name != name || a.Model == "" || a.DefSHA == "" {
 			t.Fatalf("incomplete %s declaration: %#v", name, a)
+		}
+	}
+}
+
+func TestLoadRejectsMissingOrZeroDeadline(t *testing.T) {
+	// A run that never ends holds a lane forever (see #207), so an agent whose
+	// declaration omits deadline_seconds or sets it to zero must not load: every
+	// loaded agent has to carry a positive, finite wall-clock bound. Without
+	// this guard a missing line would default to zero and silently open an
+	// unbounded run.
+	for _, body := range []string{
+		"description: builder\nmodel: builder-model\n",
+		"description: builder\nmodel: builder-model\ndeadline_seconds: 0\n",
+	} {
+		repoDir := t.TempDir()
+		dir := filepath.Join(repoDir, DefaultAgentsDir, "builder")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "agent.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "instructions.md"), []byte("do the work\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadAgent(repoDir, "builder"); err == nil {
+			t.Fatalf("loadAgent accepted a declaration without a finite deadline:\n%s", body)
 		}
 	}
 }
