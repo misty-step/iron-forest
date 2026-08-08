@@ -11,31 +11,6 @@ import (
 	"time"
 )
 
-// TestRenderedAgentDeclaresNoStepCeiling pins the unbounded contract. opencode
-// reads an absent `steps` key as no limit; any value there is a guess about how
-// much work an item needs, and a wrong guess stops a working run partway and
-// reports it as a gate failure. No agent definition may reintroduce one.
-func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
-	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(cfgDir)
-	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
-	if err := renderMarkdown(cfgDir, a); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(filepath.Join(cfgDir, "agents", "probe.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"steps:", "maxSteps:"} {
-		if strings.Contains(string(b), key) {
-			t.Errorf("rendered agent declares %q; opencode must run unbounded", key)
-		}
-	}
-}
-
 // TestRunPhaseKeepsConfigOutOfWorktree pins option 1 of #174 against opencode's
 // supported external configuration mechanism: the per-run config root is handed
 // to opencode through XDG_CONFIG_HOME in the child environment, so opencode

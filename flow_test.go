@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -194,5 +195,69 @@ func TestBuilderTimeoutFailureParksNotFixes(t *testing.T) {
 	}
 	if n, err := readAttempts(repo, "branch-forest/9-wide-change"); err != nil || n != 0 {
 		t.Fatalf("fixer attempts = (%d, %v), want 0; a timeout must not spend a repair attempt", n, err)
+	}
+}
+
+// claimFlow is a Flow stub whose Act signals entry and then blocks until the
+// test releases it, so one run can hold the subject claim while we try a second
+// concurrent actOnSubject on the same Subject.
+type claimFlow struct {
+	calls   int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (*claimFlow) Name() string                             { return "builder" }
+func (*claimFlow) Select(Config, string) ([]Subject, error) { return aSubject, nil }
+func (*claimFlow) Interval(Config) time.Duration            { return 0 }
+func (*claimFlow) Enabled(Config) bool                      { return true }
+
+func (c *claimFlow) Act(Config, string, Subject, string) (Outcome, error) {
+	atomic.AddInt32(&c.calls, 1)
+	c.entered <- struct{}{}
+	<-c.release
+	return Outcome{Status: "done"}, nil
+}
+
+// TestActOnSubjectRefusesConcurrentSubjectClaim defends the in-flight claim in
+// actOnSubject. Two actOnSubject calls race on one Subject behind a barrier: the
+// first run is parked inside Act holding the claim while the second call is
+// made. The second must be refused as busy and must neither invoke Act nor write
+// a ledger row, so deleting the claim wiring leaves exactly one Act call and one
+// ledger row and fails this test.
+func TestActOnSubjectRefusesConcurrentSubjectClaim(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	f := &claimFlow{entered: make(chan struct{}, 1), release: make(chan struct{})}
+
+	var first, second int
+	done := make(chan struct{}, 2)
+	go func() {
+		first = actOnSubject(f, Config{}, repo, aSubject[0], nil)
+		done <- struct{}{}
+	}()
+	<-f.entered // the first run is inside Act and holds the subject claim
+	go func() {
+		second = actOnSubject(f, Config{}, repo, aSubject[0], nil)
+		done <- struct{}{}
+	}()
+	close(f.release) // let any in-flight Act finish
+	<-done
+	<-done
+
+	if second != codeBusy {
+		t.Errorf("concurrent actOnSubject code = %d, want %d (refused)", second, codeBusy)
+	}
+	if first != 0 {
+		t.Errorf("first actOnSubject code = %d, want 0", first)
+	}
+	if calls := atomic.LoadInt32(&f.calls); calls != 1 {
+		t.Errorf("Act called %d times, want exactly 1", calls)
+	}
+	rows, _, err := loadLedger(ledgerPath(repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("ledger rows = %d, want exactly 1", len(rows))
 	}
 }
