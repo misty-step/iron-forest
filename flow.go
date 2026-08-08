@@ -282,10 +282,13 @@ func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string)
 	return 1, ""
 }
 
-// actOnSubject excludes one subject within this process, acts, and records.
-// The read-side update gate spans Act so a binary swap cannot interrupt it.
-// Act must never take this lock again: a second read lock behind a waiting
-// writer deadlocks.
+// actOnSubject excludes one subject within this process and across every
+// checkout, acts, and records. Admission is claimed with a durable,
+// compare-and-set git fact before the expensive work starts, so a second
+// checkout or a manual run that loses the race never spends an agent run on a
+// Subject another participant is already working. The read-side update gate
+// spans Act so a binary swap cannot interrupt it. Act must never take this lock
+// again: a second read lock behind a waiting writer deadlocks.
 func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) int {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
@@ -295,6 +298,20 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 	defer inFlight.release(s.Key)
 
 	runID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), s.Key)
+
+	release, err := claimAdmission(repoDir, f.Name(), runID, s)
+	if err != nil {
+		if isAdmissionHeld(err) {
+			// Another participant (a daemon on this host, or a concurrent
+			// checkout) holds the Subject. Refuse with the named error: no agent
+			// run is spent and no ledger row is written.
+			fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+			return codeBusy
+		}
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+		return 1
+	}
+	defer release()
 
 	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
 	out, err := f.Act(cfg, repoDir, s, runID)
@@ -331,8 +348,10 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 }
 
 // runOnce acts on one named subject with one flow, outside the daemon. It does
-// not take the singleton lock, so the in-process subject exclusion remains the
-// only guard for a manual dispatch beside a running daemon.
+// not take the singleton lock, so it can run beside a daemon; the durable,
+// compare-and-set admission claimed by actOnSubject is what stops a manual run
+// from acting on a Subject a daemon is already working, refusing with a named
+// error before any agent run is spent.
 func runOnce(cfg Config, repoDir, flowName, subject string) int {
 	if err := verifyHostConfig(repoDir); err != nil {
 		fmt.Fprintln(os.Stderr, "forest:", err)
