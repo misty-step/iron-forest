@@ -195,6 +195,10 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 	for _, branch := range branches {
 		covered[itemIDFromBranch(branch)] = true
 	}
+	merged, err := mergedIDs(repoDir)
+	if err != nil {
+		return managerPlan{}, err
+	}
 	open := make(map[string]Item, len(items))
 	for _, it := range items {
 		open[it.ID] = it
@@ -205,12 +209,13 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 	// Slot accounting and reaping run across the open, ready, branchless
 	// assignments. A branch owns a ready item's slot and queue position
 	// downstream, so a covered item is left alone; an open one is counted healthy
-	// or withdrawn on a durable fact. Closed items never appear here.
+	// or withdrawn on a durable fact. Closed items never appear here. A merged
+	// item is never work: it already landed, so the Manager must not offer it.
 	for _, it := range items {
 		if !it.hasTag(readyTag) {
 			continue
 		}
-		if covered[it.ID] {
+		if covered[it.ID] || merged[it.ID] {
 			continue
 		}
 		withdraw, err := managerWithdraw(repoDir, it, open)
@@ -225,9 +230,13 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 	}
 	var cands []Item
 	// The model only ever judges the deterministic candidate set: open, not
-	// assigned or branch-owned, unexcluded, unstalled, and unblocked.
+	// assigned or branch-owned, unexcluded, unstalled, unblocked, and not already
+	// merged.
 	for _, it := range items {
 		if covered[it.ID] {
+			continue
+		}
+		if merged[it.ID] {
 			continue
 		}
 		if it.hasTag(readyTag) {

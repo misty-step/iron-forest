@@ -142,7 +142,21 @@ func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	return eligibleFrom(items, branches, cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels), nil
+	eligible := eligibleFrom(items, branches, cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels)
+	// A durable merged fact must exclude an item even while its Tracker item is
+	// still open, so eligibility never depends on Tracker state alone. This is
+	// the guard that closes the branch-deleted-but-not-yet-closed window.
+	merged, err := mergedIDs(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	kept := eligible[:0]
+	for _, it := range eligible {
+		if !merged[it.ID] {
+			kept = append(kept, it)
+		}
+	}
+	return kept, nil
 }
 
 func eligibleFrom(items []Item, branches, excluded, required []string) []Item {

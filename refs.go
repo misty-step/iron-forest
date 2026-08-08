@@ -77,6 +77,21 @@ func deleteRef(repoDir, ref, expectSHA string) error {
 	return refWriteError(err)
 }
 
+// deleteBranchIfPresent removes a source branch only when it still exists,
+// matching it to its reviewed Revision with a compare-and-delete. A branch
+// already removed by an earlier effect is left alone, so a retry after partial
+// failure is a safe no-op instead of a stale-ref error.
+func deleteBranchIfPresent(repoDir, branch, revision string) error {
+	out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil
+	}
+	return deleteRef(repoDir, "refs/heads/"+branch, revision)
+}
+
 func getBlobRef(repoDir, ref string) (sha, content string, err error) {
 	out, err := gitCommand(repoDir, "ls-remote", "origin", ref)
 	if err != nil {

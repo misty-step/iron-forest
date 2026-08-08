@@ -116,6 +116,13 @@ func serve(cfg Config, repoDir string, names []string) int {
 	// starts, so a stale run directory never survives a restart.
 	reapOrphanWorktrees(repoDir)
 
+	// Reconcile merged-but-unfinished subjects before any lane starts, so a
+	// restart reaches a consistent state without operator action. A failure here
+	// is logged, never fatal: the lane loop reconciles again on every pass.
+	if err := reconcileMerged(cfg, repoDir); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: reconcile: %v\n", err)
+	}
+
 	var drain int32
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -237,6 +244,12 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 		if !f.Enabled(cfg) {
 			time.Sleep(f.Interval(cfg))
 			continue
+		}
+		// Reconcile merged-but-unfinished subjects on every pass so a partial
+		// failure is completed on a later pass, without needing a restart. Each
+		// effect is idempotent, so running alongside a live merge is safe.
+		if err := reconcileMerged(cfg, repoDir); err != nil {
+			fmt.Fprintf(os.Stderr, "forest: %s reconcile: %v\n", f.Name(), err)
 		}
 		if err := verifyHostConfig(repoDir); err != nil {
 			// The host config was modified outside this lane: a run left a
