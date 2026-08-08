@@ -87,7 +87,13 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	}
 	out.addTokens(stats)
 	if err != nil {
+		// A mechanical delivery failure is not a content or agent failure: the
+		// same prompt keeps failing identically, so it must be named prompt_failed
+		// and park rather than look like work a Fixer attempt could repair.
 		out.Status = "agent_failed"
+		if isPromptDelivery(err) {
+			out.Status = "prompt_failed"
+		}
 		return out, fmt.Errorf("agent: %w", err)
 	}
 	changed, rep, err := gate(wtDir, baseSHA,

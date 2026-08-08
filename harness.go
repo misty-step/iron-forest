@@ -39,6 +39,16 @@ func (e *promptDeliveryError) Error() string {
 	return fmt.Sprintf("prompt of %d bytes cannot be delivered whole; the delivery ceiling is %d bytes", e.size, e.limit)
 }
 
+// isPromptDelivery reports whether err is, or wraps, a promptDeliveryError. A
+// flow uses it to classify a mechanical prompt-delivery failure apart from a
+// content or agent failure: the same prompt keeps failing identically, so it
+// must park (name prompt_failed) instead of spending Fixer attempts on an
+// unchanged situation.
+func isPromptDelivery(err error) bool {
+	var pde *promptDeliveryError
+	return errors.As(err, &pde)
+}
+
 // runStats is the session-level token accounting for one agent run. Every field
 // is a measured token class that must reach the ledger row; a class with no
 // consumer is the under-statement the ledger exists to prevent.
@@ -64,7 +74,14 @@ type runStats struct {
 // harness exit marks the run failed: the error carries the exit status and
 // stderr so a crash or truncation is never mistaken for work the gate can
 // publish.
-func runPhase(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
+//
+// runPhase is a package variable (see the indirection below) so a test can
+// force a promptDeliveryError and drive a flow's mechanical classification end
+// to end; the concrete implementation is runPhaseImpl.
+var runPhase = runPhaseImpl
+
+// runPhaseImpl is the concrete implementation behind runPhase.
+func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
 	var stats runStats
 	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
 		return stats, err

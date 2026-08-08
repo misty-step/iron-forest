@@ -267,6 +267,36 @@ func TestCoreTraceReadsNestedVerifierTrace(t *testing.T) {
 	}
 }
 
+// TestCoreTraceIncludesPromptSidecar pins #204's trace contract: runPhase
+// records the full prompt it delivered beside the event stream as <trace>.
+// prompt.txt, and Trace must return that prompt so a surface reading the trace
+// sees the exact text that was sent, not just the events that followed.
+func TestCoreTraceIncludesPromptSidecar(t *testing.T) {
+	api, work, _ := coreFixture(t)
+	runsDir := filepath.Join(work, WorkspaceDir, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	events := []byte("{\"step\":1}\n{\"step\":2}\n")
+	if err := os.WriteFile(filepath.Join(runsDir, "run-abc.builder.jsonl"), events, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prompt := []byte("review this change in full, including every line")
+	if err := os.WriteFile(filepath.Join(runsDir, "run-abc.builder.jsonl.prompt.txt"), prompt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := api.Trace("run-abc")
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	if !bytes.Contains(got, prompt) {
+		t.Fatalf("Trace = %q, want it to contain the delivered prompt %q", got, prompt)
+	}
+	if !bytes.Contains(got, events) {
+		t.Fatalf("Trace = %q, want it to contain the event stream %q", got, events)
+	}
+}
+
 func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 	api, work, sha := coreFixture(t)
 	if v, c, err := api.Notes(sha); err != nil || v.Verdict != "" || c.Status != "" {

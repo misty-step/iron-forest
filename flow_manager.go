@@ -132,7 +132,13 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	// prevent.
 	out.addTokens(stats)
 	if err != nil {
+		// A mechanical prompt-delivery failure names itself prompt_failed rather
+		// than agent_failed: the same prompt fails identically, so it must park
+		// instead of spending a judge attempt it can never satisfy.
 		out.Status = "agent_failed"
+		if isPromptDelivery(err) {
+			out.Status = "prompt_failed"
+		}
 		return out, err
 	}
 	promoted, err := applyManagerPick(tk, plan.cands, rep.Pick)

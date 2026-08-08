@@ -231,7 +231,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		verdict, stats, err = verifierReview(cfg, repoDir, wtDir, it, baseSHA, runID, a)
 		out.addTokens(stats)
 		if err != nil {
+			// A mechanical prompt-delivery failure names itself prompt_failed so it
+			// is never misread as a review verdict the Fixer should repair; the
+			// same prompt fails identically, so it parks instead.
 			out.Status = "review_failed"
+			if isPromptDelivery(err) {
+				out.Status = "prompt_failed"
+			}
 			return out, err
 		}
 	}
