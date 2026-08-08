@@ -187,6 +187,33 @@ func flowNames(fs []Flow) string {
 	return out
 }
 
+// hostConfigName is the factory's own composition file. It is the one source of
+// truth for the checks: the runner executes every declared check on the host
+// through sh -c (see runner.go), so it is the only file whose contents an agent
+// wants to change to gain host execution on the next pass.
+const hostConfigName = "forest.yaml"
+
+// verifyHostConfig is the authority boundary that gates the host config against
+// check injection (#119). A run executes only inside a linked worktree, so any
+// working-tree change to the factory's own forest.yaml is a command installed
+// out of band: the next pass would re-read it (see runFlowLoop) and run the
+// altered checks: on the host, on a path that survives the worktree's removal.
+// The factory therefore refuses to let any flow act while the host forest.yaml
+// differs from the committed revision. The one legitimate way to change what the
+// runner executes is to commit the change — so the diff is empty — and let it
+// arrive through independent review and merge. On a mismatch it returns an error
+// naming the file, which the pass loop reports and uses to skip acting.
+func verifyHostConfig(repoDir string) error {
+	out, err := gitOutRaw(repoDir, "status", "--porcelain", "--", hostConfigName)
+	if err != nil {
+		return fmt.Errorf("cannot verify host config %s: %w", hostConfigName, err)
+	}
+	if strings.TrimSpace(out) != "" {
+		return fmt.Errorf("host config %s was modified outside the worktree; refusing to act (git diff HEAD -- %s must be empty)", hostConfigName, hostConfigName)
+	}
+	return nil
+}
+
 // runFlowLoop is one lane's whole life: select, act, record, sleep. Config is
 // re-read every pass so an operator edit lands without a restart, and a failing
 // pass never stops the lane.
@@ -208,6 +235,15 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
 			cfg = nc
 		}
 		if !f.Enabled(cfg) {
+			time.Sleep(f.Interval(cfg))
+			continue
+		}
+		if err := verifyHostConfig(repoDir); err != nil {
+			// The host config was modified outside this lane: a run left a
+			// working-tree write in forest.yaml, which would change what the next
+			// pass's checks execute on the host. Refuse to act this pass, name the
+			// file, and retry on the next interval so an operator sees it.
+			fmt.Fprintf(os.Stderr, "forest: %s: %v\n", f.Name(), err)
 			time.Sleep(f.Interval(cfg))
 			continue
 		}
@@ -298,6 +334,10 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 // not take the singleton lock, so the in-process subject exclusion remains the
 // only guard for a manual dispatch beside a running daemon.
 func runOnce(cfg Config, repoDir, flowName, subject string) int {
+	if err := verifyHostConfig(repoDir); err != nil {
+		fmt.Fprintln(os.Stderr, "forest:", err)
+		return 1
+	}
 	for _, f := range flowsFor() {
 		if f.Name() != flowName {
 			continue
