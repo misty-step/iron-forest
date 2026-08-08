@@ -630,3 +630,60 @@ func TestCrossCheckNormalisesPaths(t *testing.T) {
 		t.Fatalf("crossCheck rejected a normalisable match: %v", err)
 	}
 }
+
+// TestAssertChecksCleanRefusesTrackedRewriteAllowsScratch pins the check-phase
+// clean-tree gate: a check may create untracked scratch output without refusing
+// the result, but rewriting or staging a tracked file must refuse the pass note
+// naming the offending path, because the green would describe an uncommitted
+// edit rather than the Review revision.
+func TestAssertChecksCleanRefusesTrackedRewriteAllowsScratch(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "source.go")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Untracked scratch output (a build artifact) does not change the Revision,
+	// so a check that leaves one behind is accepted.
+	if err := os.WriteFile(filepath.Join(wtDir, "artifact.bin"), []byte("scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertChecksClean(wtDir, head, before); err != nil {
+		t.Fatalf("a check that created untracked scratch was refused: %v", err)
+	}
+
+	// Rewriting a tracked file refuses, naming the path.
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n// tainted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertChecksClean(wtDir, head, before)
+	if err == nil {
+		t.Fatal("a check that rewrote a tracked file was not refused")
+	}
+	if !strings.Contains(err.Error(), "source.go") {
+		t.Fatalf("refusal %q does not name the rewritten tracked path", err)
+	}
+
+	// Staging is refused too, even when the file is restored to HEAD in the
+	// working tree: the index entry moved.
+	gitT(t, wtDir, "checkout", "--", "source.go")
+	gitT(t, wtDir, "add", "source.go")
+	err = assertChecksClean(wtDir, head, before)
+	if err == nil {
+		t.Fatal("a check that staged a tracked file was not refused")
+	}
+	if !strings.Contains(err.Error(), "source.go") {
+		t.Fatalf("refusal %q does not name the staged tracked path", err)
+	}
+}

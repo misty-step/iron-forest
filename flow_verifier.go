@@ -176,6 +176,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// key to; the value above was the pre-rebase head.
 	out.BaseSHA = newHead
 
+	// Snapshot the pristine reviewed tree before any agent code runs, so a check
+	// that rewrites or stages a tracked file is visible afterwards: its green
+	// would then judge an uncommitted edit, never the Review revision it was
+	// declared to test.
+	beforeChecks, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		out.Status = "checks_environment_failed"
+		return out, fmt.Errorf("review snapshot: %w", err)
+	}
 	checks, checkErr := runChecks(cfg, wtDir, runID)
 	// A preflight failure means no declared check ran: the child environment
 	// could not be built, the toolchain was missing, or FOREST_CHECK_PATH did
@@ -186,6 +195,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	if checkErr != nil && checks.Status == "" {
 		out.Status = "checks_environment_failed"
 		return out, fmt.Errorf("checks: %w", checkErr)
+	}
+	// A check that rewrote or staged a tracked file — or moved HEAD — is refused:
+	// the green it reports is an artifact of its own uncommitted edit, not of the
+	// Review revision. No Checks note is written, so the head is neither offered
+	// to a reviewer (no Verdict may rest on the untrustworthy result) nor to the
+	// Fixer (there is nothing to repair in the committed tree).
+	if cleanErr := assertChecksClean(wtDir, baseSHA, beforeChecks); cleanErr != nil {
+		out.Status = "checks_refused"
+		return out, fmt.Errorf("checks: %w", cleanErr)
 	}
 	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
 		if !errors.Is(err, errNoteExists) {

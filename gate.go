@@ -223,32 +223,8 @@ func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error 
 	if err != nil {
 		return fmt.Errorf("review: %w", err)
 	}
-	var dirty []string
-	keys := make(map[string]bool, len(before.work)+len(after.work))
-	for path := range before.work {
-		keys[path] = true
-	}
-	for path := range after.work {
-		keys[path] = true
-	}
-	for _, path := range sortedPaths(keys) {
-		if before.work[path] != after.work[path] || before.idx[path] != after.idx[path] {
-			dirty = append(dirty, path)
-		}
-	}
-	keys = make(map[string]bool, len(before.dirs)+len(after.dirs))
-	for path := range before.dirs {
-		keys[path] = true
-	}
-	for path := range after.dirs {
-		keys[path] = true
-	}
-	for _, dir := range sortedPaths(keys) {
-		if before.dirs[dir] != after.dirs[dir] {
-			dirty = append(dirty, dir)
-		}
-	}
-	keys = make(map[string]bool, len(before.untracked)+len(after.untracked))
+	dirty := trackedDrift(before, after)
+	keys := make(map[string]bool, len(before.untracked)+len(after.untracked))
 	for path := range before.untracked {
 		keys[path] = true
 	}
@@ -275,6 +251,69 @@ func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error 
 	if len(dirty) > 0 {
 		sort.Strings(dirty)
 		return fmt.Errorf("review left the worktree dirty: %s", strings.Join(dirty, ", "))
+	}
+	return nil
+}
+
+// trackedDrift returns the paths whose tracked leaf, index entry or parent
+// directory node differs between two snapshots, or nil when the tracked tree is
+// identical. Untracked paths are deliberately not compared here: the callers
+// decide separately whether scratch output is admissible.
+func trackedDrift(before, after reviewTreeSnapshot) []string {
+	var dirty []string
+	keys := make(map[string]bool, len(before.work)+len(after.work))
+	for path := range before.work {
+		keys[path] = true
+	}
+	for path := range after.work {
+		keys[path] = true
+	}
+	for _, path := range sortedPaths(keys) {
+		if before.work[path] != after.work[path] || before.idx[path] != after.idx[path] {
+			dirty = append(dirty, path)
+		}
+	}
+	keys = make(map[string]bool, len(before.dirs)+len(after.dirs))
+	for path := range before.dirs {
+		keys[path] = true
+	}
+	for path := range after.dirs {
+		keys[path] = true
+	}
+	for _, dir := range sortedPaths(keys) {
+		if before.dirs[dir] != after.dirs[dir] {
+			dirty = append(dirty, dir)
+		}
+	}
+	return dirty
+}
+
+// assertChecksClean refuses a pass note from a check run that did not leave the
+// tracked tree unchanged. A check may create untracked scratch output, but
+// rewriting a tracked file, staging an edit, swapping a tracked directory for a
+// symlink, or moving HEAD means the green it reports describes an uncommitted
+// experiment rather than the Review revision it was declared to test. before
+// must be the snapshot taken immediately before the checks ran. It compares the
+// tracked leaves, their index entries, the parent-directory topology, and HEAD,
+// and ignores untracked paths, which real checks legitimately create and which
+// never change the Revision. It returns an error naming every offending tracked
+// path when the tree drifted, and nil when only untracked scratch output
+// remains.
+func assertChecksClean(wtDir, head string, before reviewTreeSnapshot) error {
+	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("checks: cannot read worktree HEAD: %w", err)
+	}
+	if cur != head {
+		return fmt.Errorf("checks moved HEAD: reviewed %s -> %s", short(head), short(cur))
+	}
+	after, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		return fmt.Errorf("checks: %w", err)
+	}
+	if dirty := trackedDrift(before, after); len(dirty) > 0 {
+		sort.Strings(dirty)
+		return fmt.Errorf("checks left the tracked tree dirty: %s", strings.Join(dirty, ", "))
 	}
 	return nil
 }
