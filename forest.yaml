@@ -42,14 +42,14 @@ flows:
     interval_seconds: 40
     attempts: 10
   manager:
-    # Disabled until #204 lands. The lane is correct; it cannot start.
-    # renderManagerPrompt embeds every candidate's body and comments, and the
-    # prompt is passed as one argv entry. Linux caps a single argument at
-    # MAX_ARG_STRLEN (PAGE_SIZE * 32 = 131072). At 91 open items the bodies
-    # alone are 165,476 bytes, so fork/exec fails before the model is reached
-    # and every pass writes an agent_failed row. Re-enable when #204 gives the
-    # harness a prompt channel that is not argv.
-    enabled: false
+    # Re-enabled by #204: the harness now delivers the prompt on stdin instead
+    # of one argv entry, so the lane is no longer blocked by Linux's
+    # MAX_ARG_STRLEN (PAGE_SIZE * 32 = 131072). Previously at 91 open items the
+    # candidate bodies alone were 165,476 bytes and every pass failed with a raw
+    # fork/exec "argument list too long" before the model was reached, writing an
+    # agent_failed row each time. With the prompt on stdin the candidate bodies
+    # and comment threads can grow with the backlog.
+    enabled: true
     agent: manager
     interval_seconds: 60
     ready_depth: 1
