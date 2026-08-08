@@ -516,6 +516,117 @@ func TestSnapshotReviewTreeHandlesNewlinedPath(t *testing.T) {
 	}
 }
 
+// TestAssertCleanReviewTreeRefusesSubmoduleEdit pins the nested submodule blind
+// spot the gitlink-only fingerprint leaves open: the parent's index records a
+// submodule by a 160000 gitlink entry, and a checked-out submodule's tracked
+// files live in a separate repository the parent snapshot never reads. A verifier
+// that edits a file inside the submodule leaves the gitlink and every parent
+// fingerprint unchanged, yet the checks it ran saw the edited file. The snapshot
+// must fingerprint the submodule's own working tree, so the edit is refused
+// naming the submodule path.
+func TestAssertCleanReviewTreeRefusesSubmoduleEdit(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+
+	// Build a checked-out submodule: an ordinary git repo at wtDir/vendor holding
+	// its own tracked file. A gitlink is just an index entry of mode 160000 whose
+	// blob is the submodule's HEAD, which the parent records while never looking
+	// inside the checked-out directory it points at.
+	vendor := filepath.Join(wtDir, "vendor")
+	if err := os.MkdirAll(vendor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, vendor, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(vendor, "inner.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, vendor, "add", "inner.txt")
+	gitT(t, vendor, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "inner")
+	subHead, err := gitOut(vendor, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Record the gitlink in the parent index and commit it, so the parent sees
+	// the submodule by a 160000 entry exactly as it would after `submodule add`.
+	gitT(t, wtDir, "update-index", "--add", "--cacheinfo", "160000,"+subHead+",vendor")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "track submodule")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
+		t.Fatalf("a clean tree with a submodule was refused: %v", err)
+	}
+
+	// Editing a tracked file inside the checked-out submodule must refuse and name
+	// the submodule path, even though the parent gitlink entry is unchanged.
+	if err := os.WriteFile(filepath.Join(wtDir, "vendor", "inner.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("editing a tracked file inside a submodule was not refused")
+	}
+	if !strings.Contains(err.Error(), "vendor") {
+		t.Fatalf("refusal %q does not name the submodule path", err)
+	}
+}
+
+// TestWorkStateBoundsFilePathRead pins #191's unbounded-read fix: workState must
+// stop hashing a regular file's content after a fixed number of bytes, so a path
+// a verifier truncates sparse to a huge apparent size cannot make the post-run
+// snapshot spend unbounded time streaming it. The fingerprint still records the
+// file's apparent length separately, so a truncation-to-huge refuses the Verdict
+// on the size without the snapshot ever reading the huge tail.
+func TestWorkStateBoundsFilePathRead(t *testing.T) {
+	wtDir := t.TempDir()
+	// A file whose first bytes are the same before and after, but that grows to a
+	// huge sparse apparent size. The bounded hash prefix is identical, yet the
+	// recorded size differs, so the fingerprints must differ.
+	path := "huge.bin"
+	small := filepath.Join(wtDir, path)
+	if err := os.WriteFile(small, []byte("prefix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := workState(wtDir, path)
+
+	// Truncate to a sparse file far larger than the hash limit; the first bytes
+	// remain "prefix\n", and only the apparent length changes. The bounded hash
+	// prefix is identical, yet the separately-recorded size differs, so the
+	// fingerprints must differ without the snapshot streaming the huge tail.
+	if err := os.Truncate(small, int64(snapshotFileHashLimit)*8); err != nil {
+		t.Fatal(err)
+	}
+	after := workState(wtDir, path)
+	if before == after {
+		t.Fatal("bounded fingerprint did not change when a file grew to a huge sparse size")
+	}
+}
+
+// TestWorkStateBoundedReadRejectsSameContentDifferentSize pins that the byte
+// bound still detects a content edit within the capped prefix, so bounding reads
+// does not silently accept a rewrite of ordinary source files.
+func TestWorkStateBoundedReadRejectsSameContentDifferentSize(t *testing.T) {
+	wtDir := t.TempDir()
+	path := "a.txt"
+	if err := os.WriteFile(filepath.Join(wtDir, path), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := workState(wtDir, path)
+	if err := os.WriteFile(filepath.Join(wtDir, path), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if before == workState(wtDir, path) {
+		t.Fatal("bounded fingerprint missed a content edit within the capped prefix")
+	}
+}
+
 // TestWorkStateDoesNotFollowSymlinkedParent pins #191's bounded-memory fix for
 // the fingerprint: os.Lstat only avoids following the final path component, so a
 // tracked leaf beneath a symlinked parent would otherwise be resolved through the
