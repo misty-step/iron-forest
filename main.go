@@ -28,6 +28,8 @@ func usage() {
   forest show <sha>                  print verdict and checks notes
   forest version                     print the binary revision
   forest selfcheck                   verify config and agents offline
+  forest scan-secrets [--no-generic] <dir>
+                                      scan a working tree for leaked credentials
   forest watch [--interval 2s]       show the operator board`)
 }
 
@@ -102,6 +104,8 @@ func run(args []string) int {
 		return 0
 	case "selfcheck":
 		return cmdSelfcheck(repoDir)
+	case "scan-secrets":
+		return cmdScanSecrets(args[1:])
 	case "watch":
 		return cmdWatch(api, repoDir, args[1:])
 	default:
