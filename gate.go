@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +32,8 @@ var runArtifacts = []string{"report.json", "review.json"}
 // gate verifies the build agent's claims against reality after the run:
 //   - the agent did not commit (HEAD is still the base)
 //   - it produced a non-empty change
-//   - report.json exists and satisfies its declared schema
+//   - report.json exists, satisfies its declared schema, and its changed_files
+//     cross-check against the real change
 //
 // It returns the changed file list that becomes the pull request body.
 //
@@ -38,7 +41,7 @@ var runArtifacts = []string{"report.json", "review.json"}
 // security boundary, because the code enforcing it was itself writable by any
 // run, and it blocked the factory from working on its own declarations. The
 // boundary that holds is independent review on the exact commit.
-func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
+func gate(wtDir, baseSHA, schemaPath, tracePath string) ([]string, report, error) {
 	var rep report
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
@@ -64,16 +67,87 @@ func gate(wtDir, baseSHA, schemaPath string) ([]string, report, error) {
 	}
 	repFile := filepath.Join(wtDir, "report.json")
 	if err := checkSchema(repFile, schemaPath); err != nil {
-		return nil, rep, err
+		return nil, rep, reportMissingTrace(err, tracePath)
 	}
 	raw, err := os.ReadFile(repFile)
 	if err != nil {
-		return nil, rep, fmt.Errorf("report.json missing: %w", err)
+		return nil, rep, reportMissingTrace(err, tracePath)
 	}
 	if err := json.Unmarshal(raw, &rep); err != nil {
 		return nil, rep, fmt.Errorf("report.json is invalid JSON: %w", err)
 	}
+	if err := crossCheck(real, rep.ChangedFiles); err != nil {
+		return nil, rep, err
+	}
 	return real, rep, nil
+}
+
+// crossCheck refuses a report whose changed_files misdescribes the real change:
+// it names a claimed file that did not change, and a changed file the report
+// omits. Paths are normalised on both sides so a rename is judged on the path
+// it now names rather than on an accidental slash or dot difference.
+func crossCheck(real, claimed []string) error {
+	realSet := make(map[string]bool, len(real))
+	for _, p := range real {
+		realSet[normalizePath(p)] = true
+	}
+	claimedSet := make(map[string]bool, len(claimed))
+	for _, p := range claimed {
+		claimedSet[normalizePath(p)] = true
+	}
+	for _, p := range claimed {
+		if !realSet[normalizePath(p)] {
+			return fmt.Errorf("report claims changed file %q that did not change", p)
+		}
+	}
+	for _, p := range real {
+		if !claimedSet[normalizePath(p)] {
+			return fmt.Errorf("report omits changed file %q", p)
+		}
+	}
+	return nil
+}
+
+// normalizePath reduces a porcelain or reported path to a comparable form:
+// forward slashes, cleaned of "." and "..", no leading separators.
+func normalizePath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	return strings.Trim(filepath.ToSlash(filepath.Clean(p)), "/")
+}
+
+// reportMissingTrace augments an error reading report.json with the trace tail
+// so an operator sees where a run stopped instead of only "report.json
+// missing". It augments only an absent file; any other read or schema error is
+// returned unchanged.
+func reportMissingTrace(err error, tracePath string) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("report.json missing: %w\ntrace tail:\n%s", err, traceTail(tracePath, 5))
+	}
+	return err
+}
+
+// traceTail returns up to n trailing non-empty lines of a trace file, each
+// capped by traceEventLabel, so a failure names where the run stopped. A
+// missing, unreadable, or empty trace reports "(no trace available)".
+func traceTail(path string, n int) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "(no trace available)"
+	}
+	lines := strings.Split(string(b), "\n")
+	var tail []string
+	for len(lines) > 0 && len(tail) < n {
+		line := strings.TrimSpace(lines[len(lines)-1])
+		lines = lines[:len(lines)-1]
+		if line == "" {
+			continue
+		}
+		tail = append([]string{traceEventLabel(line)}, tail...)
+	}
+	if len(tail) == 0 {
+		return "(no trace available)"
+	}
+	return strings.Join(tail, "\n")
 }
 
 // gateReview parses the review agent's review.json and validates its verdict.
