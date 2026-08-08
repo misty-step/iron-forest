@@ -24,6 +24,16 @@ func (failingFlow) Act(Config, string, Subject, string) (Outcome, error) {
 	return Outcome{TokIn: 7}, errAgentCrash
 }
 
+type terminalStaleFlow struct{}
+
+func (terminalStaleFlow) Name() string                             { return "verifier" }
+func (terminalStaleFlow) Select(Config, string) ([]Subject, error) { return nil, nil }
+func (terminalStaleFlow) Interval(Config) time.Duration            { return 0 }
+func (terminalStaleFlow) Enabled(Config) bool                      { return true }
+func (terminalStaleFlow) Act(Config, string, Subject, string) (Outcome, error) {
+	return Outcome{Status: "stale"}, errRetirementStale
+}
+
 type operatorRedactionFlow struct{ secret string }
 
 func (operatorRedactionFlow) Name() string                             { return "builder" }
@@ -209,6 +219,21 @@ func TestAgentFailureStillCounts(t *testing.T) {
 	}
 	if !stalled {
 		t.Fatalf("real failures did not reach the brake; they must count")
+	}
+}
+
+func TestActOnSubjectImmediatelyBrakesStaleBranchRetirement(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	revision := strings.Repeat("a", 40)
+	subject := Subject{
+		Key: "branch-forest/17-stale", Kind: subjectBranch, Revision: revision,
+		ID: "17", Branch: "forest/17-stale",
+	}
+	if code := actOnSubject(terminalStaleFlow{}, Config{}, repo, subject, nil); code != 1 {
+		t.Fatalf("stale branch retirement code = %d, want failure", code)
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, revision); err != nil || !stalled {
+		t.Fatalf("stale branch retirement brake = %v, %v; want immediate terminal brake", stalled, err)
 	}
 }
 func TestActOnSubjectRedactsOperatorText(t *testing.T) {

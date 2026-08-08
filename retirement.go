@@ -33,6 +33,16 @@ type retirementFact struct {
 	Record retirementRecord
 }
 
+func sanitizeRetirementRecord(record retirementRecord) (retirementRecord, error) {
+	if secretShaped(record.Branch) || secretShaped(record.ItemID) {
+		return retirementRecord{}, errors.New("retirement control identity has credential-shaped text")
+	}
+	record.Title = redactSecretShaped(record.Title)
+	record.Agent = redactSecretShaped(record.Agent)
+	record.Model = redactSecretShaped(record.Model)
+	return record, nil
+}
+
 func retirementRef(branch, revision string) string {
 	return retirementRefPrefix + encodeRefComponent(branch) + "/" + encodeRefComponent(revision)
 }
@@ -42,7 +52,11 @@ func retirementPayload(record retirementRecord) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode retirement: %w", err)
 	}
-	return string(payload), nil
+	body := string(payload)
+	if secretShaped(body) {
+		return "", errors.New("encode retirement: credential-shaped text remains")
+	}
+	return body, nil
 }
 
 func validHex(value string, bytes int) bool {
@@ -86,7 +100,10 @@ func validateRetirementRecord(ref string, record retirementRecord) error {
 }
 
 func prepareRetirement(repoDir string, record retirementRecord) (retirementFact, error) {
-	record.Title = redactSecretShaped(record.Title)
+	record, err := sanitizeRetirementRecord(record)
+	if err != nil {
+		return retirementFact{}, err
+	}
 	ref := retirementRef(record.Branch, record.Revision)
 	if err := validateRetirementRecord(ref, record); err != nil {
 		return retirementFact{}, err
@@ -121,7 +138,10 @@ func readRetirement(repoDir, branch, revision string) (retirementFact, bool, err
 }
 
 func recordRetirement(repoDir string, record retirementRecord) (retirementFact, error) {
-	record.Title = redactSecretShaped(record.Title)
+	record, err := sanitizeRetirementRecord(record)
+	if err != nil {
+		return retirementFact{}, err
+	}
 	ref := retirementRef(record.Branch, record.Revision)
 	if err := validateRetirementRecord(ref, record); err != nil {
 		return retirementFact{}, err
@@ -231,6 +251,13 @@ func dropRetirement(repoDir string, fact retirementFact) error {
 	return nil
 }
 
+func dropStaleRetirement(repoDir string, fact retirementFact, cause error) error {
+	if err := dropRetirement(repoDir, fact); err != nil {
+		return fmt.Errorf("%w: %v; drop stale intent: %v", errRetirementStale, cause, err)
+	}
+	return fmt.Errorf("%w: %v", errRetirementStale, cause)
+}
+
 // mergeVerified lands only the Revision that carried the approving Verdict.
 // A retirement fact makes the multi-system effect resumable. Git writes its
 // landed fact atomically with master. The host path writes pending intent first,
@@ -265,10 +292,7 @@ func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Age
 		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), reviewed)
 	if err != nil {
 		if errors.Is(err, errHostMergeUnavailable) {
-			if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
-				return fmt.Errorf("merge: projection stale: %v; drop pending retirement: %w", err, dropErr)
-			}
-			return fmt.Errorf("%w: %v", errRetirementStale, err)
+			return dropStaleRetirement(repoDir, fact, err)
 		}
 		return fmt.Errorf("%w: %v", errHostMergePending, err)
 	}
@@ -277,10 +301,7 @@ func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Age
 	}
 	if err != nil {
 		if errors.Is(err, errHostMergeUnavailable) {
-			if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
-				return fmt.Errorf("merge: projection stale: %v; drop pending retirement: %w", err, dropErr)
-			}
-			return fmt.Errorf("%w: %v", errRetirementStale, err)
+			return dropStaleRetirement(repoDir, fact, err)
 		}
 		return fmt.Errorf("%w: %v", errHostMergePending, err)
 	}
@@ -368,10 +389,7 @@ func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it I
 		}
 		if err != nil {
 			if errors.Is(err, errHostMergeUnavailable) {
-				if dropErr := dropRetirement(repoDir, fact); dropErr != nil {
-					return fmt.Errorf("merge: stale Host retirement: %v; drop intent: %w", err, dropErr)
-				}
-				return fmt.Errorf("%w: %v", errRetirementStale, err)
+				return dropStaleRetirement(repoDir, fact, err)
 			}
 			return fmt.Errorf("%w: %v", errHostMergePending, err)
 		}

@@ -35,9 +35,9 @@ no authority reconciler. No path is withheld from an agent; the factory may
 work on its own declarations, and independent review on the exact commit is
 what decides whether that work lands.
 
-Coordination is facts, not locks. A Verdict or Checks note is keyed to the exact
-reviewed commit and written once; git refuses the second writer. Attempts and the
-repeat-failure brake are compare-and-set refs. Branch publication carries the
+Durable coordination uses git facts. Host-local locks serialize admission and note updates.
+A Verdict or Checks note is keyed to the exact reviewed commit and written once; git refuses the second writer.
+Attempts and the repeat-failure brake are compare-and-set refs. Branch publication carries the
 observed remote tip, so a lost race fails cleanly.
 Admission uses a durable claim ref for each canonical Subject and a per-owner
 lock keyed by repository and item. It excludes concurrent actions across
@@ -144,4 +144,4 @@ are the same program seen from three places.
 - Reading Host checks, reviews, or merge state as factory state.
 - Central policy for repositories the installation does not own.
 - A coordinated merge across repositories.
-- Two processes working one repository at the same time.
+- Concurrent ownership of one repository by two Hosts.

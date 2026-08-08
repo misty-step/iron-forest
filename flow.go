@@ -392,10 +392,10 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 		} else {
 			var brakeErr error
 			switch {
-			case s.Kind != subjectRetirement:
-				brakeErr = recordStalled(repoDir, f.Name(), s.Key, s.Revision)
 			case errors.Is(err, errRetirementStale):
 				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			case s.Kind != subjectRetirement:
+				brakeErr = recordStalled(repoDir, f.Name(), s.Key, s.Revision)
 			}
 			if brakeErr != nil {
 				err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)

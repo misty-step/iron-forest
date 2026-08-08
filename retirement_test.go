@@ -29,6 +29,7 @@ func testRetirementRecord(branch, revision, itemID string) retirementRecord {
 
 func TestRetirementRecordRejectsUnsafeIdentity(t *testing.T) {
 	revision := strings.Repeat("b", 40)
+	const secret = "sk-AAAAAAAAAAAAAAAA"
 	tests := map[string]func(*retirementRecord){
 		"non-forest branch": func(r *retirementRecord) { r.Branch = "master" },
 		"wrong item":        func(r *retirementRecord) { r.ItemID = "10" },
@@ -44,6 +45,10 @@ func TestRetirementRecordRejectsUnsafeIdentity(t *testing.T) {
 		"bad state":         func(r *retirementRecord) { r.State = "started" },
 		"pending native":    func(r *retirementRecord) { r.State = "pending" },
 		"fast-forward Host": func(r *retirementRecord) { r.Transport, r.Strategy = "host", "ff" },
+		"secret control": func(r *retirementRecord) {
+			r.ItemID = secret
+			r.Branch = BranchPrefix + encodeBranchID(secret) + "-change"
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -123,7 +128,7 @@ func TestRetirementRecordAllowsEmptyTitleSlug(t *testing.T) {
 	}
 }
 
-func TestRetirementWritersRedactMutableTitle(t *testing.T) {
+func TestRetirementWritersRedactMutableText(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	for name, writeFact := range map[string]func(string, retirementRecord) (retirementFact, error){
 		"prepared": prepareRetirement,
@@ -133,16 +138,20 @@ func TestRetirementWritersRedactMutableTitle(t *testing.T) {
 			repo := newRefGitRepo(t)
 			record := testRetirementRecord("forest/9-change", strings.Repeat("b", 40), "9")
 			record.Title = "change " + secret
+			record.Agent = "verifier-" + secret
+			record.Model = "model-" + secret
 			fact, err := writeFact(repo, record)
 			if err != nil {
 				t.Fatal(err)
 			}
 			body := runGitTest(t, repo, "cat-file", "-p", fact.SHA)
 			if strings.Contains(body, secret) || !strings.Contains(body, secretRedacted) {
-				t.Fatalf("retirement fact retained mutable credential-shaped title: %s", body)
+				t.Fatalf("retirement fact retained mutable credential-shaped text: %s", body)
 			}
-			if fact.Record.Title != "change "+secretRedacted {
-				t.Fatalf("retirement record title = %q, want redacted title", fact.Record.Title)
+			if strings.Contains(fact.Record.Title, secret) ||
+				strings.Contains(fact.Record.Agent, secret) ||
+				strings.Contains(fact.Record.Model, secret) {
+				t.Fatalf("returned retirement record retained mutable credential-shaped text: %#v", fact.Record)
 			}
 		})
 	}
@@ -938,5 +947,48 @@ func TestRetirementStaleAdvancedBranchRecordsTerminalBrake(t *testing.T) {
 	}
 	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || !stalled {
 		t.Fatalf("advanced retirement brake = %v, %v; want terminal brake", stalled, err)
+	}
+}
+
+func TestStaleHostRetirementDropFailureStillBrakes(t *testing.T) {
+	branch := "forest/16-stale-host"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "16", Transport: "host",
+		Strategy: "squash", Title: "stale host", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	hook := filepath.Join(origin, "hooks", "update")
+	script := "#!/bin/sh\ncase \"$1\" in\n  refs/forest/retirement/*) exit 1 ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return []byte(`[{"number":16,"url":"https://github.com/owner/repo/pull/16","headRefOid":"` +
+			strings.Repeat("c", 40) + `","headRefName":"` + branch +
+			`","baseRefName":"master","isCrossRepository":false}]`), nil
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	subject := Subject{
+		Key: "branch-" + branch, Kind: subjectRetirement, Revision: reviewed,
+		ID: "16", Branch: branch, Head: reviewed, Item: Item{ID: "16", Title: "stale host"},
+	}
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+		t.Fatalf("stale Host retirement code = %d, want failure", code)
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || !stalled {
+		t.Fatalf("stale Host retirement brake = %v, %v; want terminal brake", stalled, err)
+	}
+	if facts, err := listRetirements(repo); err != nil || len(facts) != 1 {
+		t.Fatalf("stale Host retirement facts = (%#v, %v), want retained intent", facts, err)
 	}
 }
