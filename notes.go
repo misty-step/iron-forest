@@ -283,7 +283,10 @@ func bumpAttempts(repoDir, key string) (int, error) {
 
 // dropAttempts removes a subject's attempt record. A retired subject must not
 // leave one behind: the old claim scheme made items permanently unworkable
-// exactly this way, by leaving a ref nobody would ever read again.
+// exactly this way, by leaving a ref nobody would ever read again. It is
+// idempotent under concurrent retries: if the compare-and-set delete loses to a
+// concurrent pass, the ref is re-checked and an already-dropped record is a
+// success rather than a stale-ref error.
 func dropAttempts(repoDir, key string) error {
 	ref := "refs/forest/attempt/" + key
 	sha, _, err := getBlobRef(repoDir, ref)
@@ -293,5 +296,16 @@ func dropAttempts(repoDir, key string) error {
 	if sha == "" {
 		return nil
 	}
-	return git(repoDir, "push", "--force-with-lease="+ref+":"+sha, "origin", ":"+ref)
+	_, err = gitCommand(repoDir, "push", "--force-with-lease="+ref+":"+sha, "origin", ":"+ref)
+	err = refWriteError(err)
+	if errors.Is(err, errRefMoved) {
+		sha, _, rerr := getBlobRef(repoDir, ref)
+		if rerr != nil {
+			return rerr
+		}
+		if sha == "" {
+			return nil // a concurrent pass already dropped it
+		}
+	}
+	return err
 }

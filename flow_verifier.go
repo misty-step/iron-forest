@@ -396,17 +396,21 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item) error 
 		return err
 	}
 	if cfg.Projection.MergeViaHost {
-		// The host merge itself removes the reviewed branch on the host. The
-		// durable merged fact must therefore land BEFORE that removal, so there
-		// is no interval where the branch is gone but no fact exists to reconcile.
-		// Write it first; if the host then refuses to merge, remove the premature
-		// fact so a never-landed subject is not treated as merged.
-		if err := markMerged(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
-			return fmt.Errorf("merge: merged fact: %w", err)
+		// The host lands the merge. A durable pending claim is written before the
+		// merge is committed to, so from that moment the subject is never fresh
+		// work even while its item is open; the claim survives a crash so restart
+		// can resolve it. On any projectMerge error the claim is deliberately left
+		// in place: an ambiguous host/network error may mean the merge actually
+		// landed, so it is never dropped here. Reconciliation observes the host to
+		// graduate the claim to landed or roll it back.
+		if err := markMergedClaim(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+			return fmt.Errorf("merge: merged claim: %w", err)
 		}
 		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
-			_ = dropMerged(repoDir, it.ID)
 			return fmt.Errorf("merge: projection: %w", err)
+		}
+		if err := confirmMerged(repoDir, it.ID); err != nil {
+			return fmt.Errorf("merge: confirm merged: %w", err)
 		}
 		return finishMerge(cfg, repoDir, branch, reviewed, it)
 	}
@@ -466,7 +470,7 @@ func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item) error {
 	// branch deletion, so no interval lets the merged subject look like fresh
 	// work: eligibility consults the fact, so once this push lands the Builder
 	// can never re-select the item no matter what happens to the Tracker next.
-	media, err := json.Marshal(mergedNote{Branch: branch, Revision: reviewed})
+	media, err := json.Marshal(mergedNote{Branch: branch, Revision: reviewed, State: mergedLanded})
 	if err != nil {
 		return fmt.Errorf("merge: encode merged record: %w", err)
 	}
@@ -512,16 +516,17 @@ func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
 }
 
 // finishMerge retires a landed subject on the host path. It records the durable
-// merged fact first, so eligibility no longer depends on the Tracker the moment
+// landed fact first (idempotently — a claim already graduated by mergeVerified is
+// left untouched), so eligibility no longer depends on the Tracker the moment
 // the merge lands; then it closes the item and drops its attempt record before
-// removing the branch. Ordering close before deletion means no window deletes
-// the branch while the item still looks like fresh work, and every effect is
+// removing the branch. Ordering close before deletion means no window deletes the
+// branch while the item still looks like fresh work, and every effect is
 // idempotent so a retry after partial failure is safe. The branch is deleted
 // only when it still is the reviewed Revision — a compare-and-set deletion — and
 // a branch that advanced past it is left in place with its newer, unreviewed
 // commits.
 func finishMerge(cfg Config, repoDir, branch, reviewed string, it Item) error {
-	if err := markMerged(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+	if err := markMerged(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed, State: mergedLanded}); err != nil {
 		return fmt.Errorf("merge: merged fact: %w", err)
 	}
 	if err := retireItem(cfg, repoDir, branch, it); err != nil {

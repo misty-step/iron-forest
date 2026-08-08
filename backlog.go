@@ -66,9 +66,24 @@ func (t githubTracker) Comment(id, body string) error {
 	return err
 }
 
-// Close closes one item.
+// Close closes one item. It is idempotent: closing an item that is already
+// closed is a no-op, so a retry after a crash between effects never fails forever
+// on an item a previous pass already closed.
 func (t githubTracker) Close(id string) error {
-	_, err := ghJSON("issue", "close", "-R", t.repo, id)
+	out, err := ghJSON("issue", "view", id, "-R", t.repo, "--json", "state")
+	if err != nil {
+		return err
+	}
+	var raw struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return err
+	}
+	if strings.EqualFold(raw.State, "closed") {
+		return nil
+	}
+	_, err = ghJSON("issue", "close", "-R", t.repo, id)
 	return err
 }
 

@@ -322,3 +322,172 @@ func TestReconcileIgnoredWithoutMergedFact(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestPendingClaimRolledBackWhenMergeNeverLanded proves the reviewer's first
+// point for item #190: a durable pending claim is not treated as proof that a
+// merge landed. When the host confirms the pull request never merged, reconciliation
+// rolls the premature claim back and leaves the item and branch as fresh work —
+// it does not close the item or delete the branch.
+func TestPendingClaimRolledBackWhenMergeNeverLanded(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	reviewed := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	st := &closeTracker{items: []Item{{ID: "9", Title: "change"}}}
+	old := trackerFor
+	trackerFor = func(string) Tracker { return st }
+	defer func() { trackerFor = old }()
+
+	oldProj := projectionCommand
+	defer func() { projectionCommand = oldProj }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return []byte(`{"state":"open"}`), nil // the host never merged it
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true}
+
+	// A crash after committing to the merge but before the merge ran leaves a
+	// pending claim (the equivalent of a crash right after the claim write).
+	if err := markMergedClaim(repo, "9", mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+		t.Fatalf("markMergedClaim: %v", err)
+	}
+	if err := reconcileMerged(cfg, repo); err != nil {
+		t.Fatalf("reconcileMerged: %v", err)
+	}
+	if len(st.closed) != 0 {
+		t.Fatalf("never-merged item was closed: %v", st.closed)
+	}
+	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out == "" {
+		t.Fatalf("never-merged branch %q was deleted by reconciliation", branch)
+	}
+	set, err := mergedIDs(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set["9"] {
+		t.Fatal("pending claim not rolled back after the merge was confirmed absent")
+	}
+}
+
+// TestPendingClaimFinalisedWhenHostMerged proves the complementary half of the
+// host-merge protocol: when the host did merge the pull request (a crash or an
+// ambiguous network error after the merge landed but before the claim graduated),
+// reconciliation observes that, graduates the claim to landed, and completes the
+// finalisation — it never erases the proof of a real merge.
+func TestPendingClaimFinalisedWhenHostMerged(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	reviewed := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	st := &closeTracker{items: []Item{{ID: "9", Title: "change"}}}
+	old := trackerFor
+	trackerFor = func(string) Tracker { return st }
+	defer func() { trackerFor = old }()
+
+	oldProj := projectionCommand
+	defer func() { projectionCommand = oldProj }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return []byte(`{"state":"merged"}`), nil // the host did merge it
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true}
+
+	if err := markMergedClaim(repo, "9", mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+		t.Fatalf("markMergedClaim: %v", err)
+	}
+	if err := reconcileMerged(cfg, repo); err != nil {
+		t.Fatalf("reconcileMerged: %v", err)
+	}
+	if len(st.closed) != 1 || st.closed[0] != "9" {
+		t.Fatalf("merged item closed = %v, want [9]", st.closed)
+	}
+	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out != "" {
+		t.Fatalf("landed branch %q still on origin after reconciliation: %s", branch, out)
+	}
+	set, err := mergedIDs(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set["9"] {
+		t.Fatal("landed claim was dropped instead of being retained")
+	}
+}
+
+// TestProjectMergeErrorLeavesClaimForReconciliation proves the reviewer's second
+// point for item #190: an ambiguous host/network error on the merge does not drop
+// the durable claim. Dropping it could erase proof that the merge actually landed;
+// instead the claim survives for reconciliation to observe. Until then the item is
+// never closed and its branch is never deleted.
+func TestProjectMergeErrorLeavesClaimForReconciliation(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	reviewed := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	st := &closeTracker{items: []Item{{ID: "9", Title: "change"}}}
+	old := trackerFor
+	trackerFor = func(string) Tracker { return st }
+	defer func() { trackerFor = old }()
+
+	oldProj := projectionCommand
+	defer func() { projectionCommand = oldProj }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "merge" {
+			return nil, errors.New("ambiguous host/network error")
+		}
+		if len(args) > 1 && args[1] == "list" {
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9"}]`), nil
+		}
+		return []byte(`{"state":"merged"}`), nil // the merge actually landed
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Merge = "squash"
+
+	if err := mergeVerified(cfg, repo, branch, reviewed, Item{ID: "9", Title: "change"}); err == nil {
+		t.Fatal("mergeVerified with an ambiguous merge error returned nil")
+	}
+	set, err := mergedIDs(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set["9"] {
+		t.Fatal("durable claim erased after an ambiguous merge error")
+	}
+	if len(st.closed) != 0 {
+		t.Fatalf("item closed while the merge was unconfirmed: %v", st.closed)
+	}
+	// Reconciliation observes the host and completes the finalisation.
+	if err := reconcileMerged(cfg, repo); err != nil {
+		t.Fatalf("reconcileMerged: %v", err)
+	}
+	if len(st.closed) != 1 {
+		t.Fatalf("item closed = %v, want one close after reconcile", st.closed)
+	}
+	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out != "" {
+		t.Fatalf("landed branch %q not deleted after reconcile: %s", branch, out)
+	}
+}

@@ -80,16 +80,37 @@ func deleteRef(repoDir, ref, expectSHA string) error {
 // deleteBranchIfPresent removes a source branch only when it still exists,
 // matching it to its reviewed Revision with a compare-and-delete. A branch
 // already removed by an earlier effect is left alone, so a retry after partial
-// failure is a safe no-op instead of a stale-ref error.
+// failure is a safe no-op instead of a stale-ref error. If the compare-and-delete
+// loses to a concurrent pass, the branch is re-checked: when it is now gone the
+// effect already happened and the retry is a success, not a stale-ref error.
 func deleteBranchIfPresent(repoDir, branch, revision string) error {
-	out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/"+branch)
+	gone := func() (bool, error) {
+		out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/"+branch)
+		if err != nil {
+			return false, err
+		}
+		return strings.TrimSpace(out) == "", nil
+	}
+	isGone, err := gone()
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(out) == "" {
+	if isGone {
 		return nil
 	}
-	return deleteRef(repoDir, "refs/heads/"+branch, revision)
+	err = deleteRef(repoDir, "refs/heads/"+branch, revision)
+	if errors.Is(err, errRefMoved) {
+		// A concurrent pass deleted the branch after our check. Confirm it is
+		// gone; if so this effect already happened and the retry is a no-op.
+		isGone, rerr := gone()
+		if rerr != nil {
+			return rerr
+		}
+		if isGone {
+			return nil
+		}
+	}
+	return err
 }
 
 func getBlobRef(repoDir, ref string) (sha, content string, err error) {
