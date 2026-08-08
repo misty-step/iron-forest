@@ -429,18 +429,7 @@ func TestServeSecondSignalDoesNotWaitForUpdater(t *testing.T) {
 		"FOREST_SERVE_UPDATE_FINISHED="+finished,
 	)
 	cmd.Stdout, cmd.Stderr = diagnostics, diagnostics
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	waited := false
-	t.Cleanup(func() {
-		if !waited {
-			_ = cmd.Process.Kill()
-			<-done
-		}
-	})
+	done, markWaited := startTestProcess(t, cmd)
 	startDeadline := time.Now().Add(10 * time.Second)
 	for {
 		if body, err := os.ReadFile(started); err == nil && string(body) == "started" {
@@ -448,7 +437,7 @@ func TestServeSecondSignalDoesNotWaitForUpdater(t *testing.T) {
 		}
 		select {
 		case err := <-done:
-			waited = true
+			markWaited()
 			log, _ := os.ReadFile(diagnosticsPath)
 			t.Fatalf("updater serve exited before start: %v: %s", err, log)
 		default:
@@ -478,7 +467,7 @@ func TestServeSecondSignalDoesNotWaitForUpdater(t *testing.T) {
 	}
 	select {
 	case err := <-done:
-		waited = true
+		markWaited()
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 			log, _ := os.ReadFile(diagnosticsPath)

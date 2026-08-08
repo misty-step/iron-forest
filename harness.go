@@ -335,11 +335,11 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	// entry: Linux caps one argument at maxArgLen, so a large prompt passed on
 	// the command line fails with a raw fork/exec "argument list too long"
 	// before opencode is reached. Stdin has no such per-entry ceiling, so the
-	// prompt's only remaining bound is the model's context. The exact text that
-	// was sent is also written to a .prompt.txt file beside the trace so a run
-	// stays auditable after the agent exits.
+	// prompt's only remaining bound is the model's context. A redacted copy is
+	// written beside the trace so a run stays auditable without retaining
+	// credential-shaped values from mutable Tracker or repository content.
 	promptPath := filepath.Join(filepath.Dir(tracePath), filepath.Base(tracePath)+".prompt.txt")
-	if err := os.WriteFile(promptPath, []byte(userPrompt), 0o644); err != nil {
+	if err := os.WriteFile(promptPath, []byte(redactSecretShaped(userPrompt)), 0o600); err != nil {
 		return stats, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
 	}
 

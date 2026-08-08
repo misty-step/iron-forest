@@ -206,12 +206,13 @@ func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
 // than Linux's single-argument ceiling (maxArgLen = 131072) must still reach the
 // agent. runPhase streamed the prompt as one argv entry, so anything over that
 // failed with a raw fork/exec "argument list too long" before opencode was
-// reached. The harness now writes the full prompt to a .prompt.txt file beside
-// the trace and streams the same text on stdin, which has no per-entry ceiling.
-// The stub captures both channels: runPhase must succeed (never E2BIG), the
-// prompt must arrive whole on stdin, and it must not appear in argv.
+// reached. The harness streams the full prompt on stdin and writes only a
+// redacted audit copy beside the trace. The stub captures both channels:
+// runPhase must succeed, stdin must receive the whole prompt, and argv and the
+// durable audit copy must retain no credential-shaped value.
 func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
-	big := strings.Repeat("prompt-payload", (200*1024)/len("prompt-payload")) + "END-MARKER"
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	big := strings.Repeat("prompt-payload", (200*1024)/len("prompt-payload")) + secret + "END-MARKER"
 	if len(big) <= maxArgLen {
 		t.Fatalf("test prompt is %d bytes, must exceed maxArgLen %d", len(big), maxArgLen)
 	}
@@ -239,6 +240,20 @@ func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
 	}
 	if strings.Contains(string(argv), "prompt-payload") {
 		t.Errorf("prompt leaked into argv: %.120q", string(argv))
+	}
+	audit, err := os.ReadFile(trace + ".prompt.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(audit), secret) || !strings.Contains(string(audit), secretRedacted) {
+		t.Errorf("durable prompt audit retained credential-shaped text")
+	}
+	info, err := os.Stat(trace + ".prompt.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("durable prompt audit mode = %o, want 600", got)
 	}
 }
 

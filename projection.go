@@ -81,7 +81,8 @@ func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (stri
 	}
 	created, err := projectionCommand("pr", "create", "-R", cfg.Repo,
 		"--base", "master", "--head", branch,
-		"--title", "forest: "+it.Title, "--body", body)
+		"--title", redactSecretShaped("forest: "+it.Title),
+		"--body", redactSecretShaped(body))
 	if err != nil {
 		return "", false, err
 	}

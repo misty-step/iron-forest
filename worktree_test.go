@@ -249,17 +249,8 @@ func TestReaperPreservesWorktreeOwnedByAnotherProcess(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	waited := false
-	t.Cleanup(func() {
-		_ = stdin.Close()
-		if !waited {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-	})
+	done, markWaited := startTestProcess(t, cmd)
+	t.Cleanup(func() { _ = stdin.Close() })
 	line, err := bufio.NewReader(stdout).ReadString('\n')
 	if err != nil {
 		t.Fatalf("read owner worktree: %v: %s", err, stderr.String())
@@ -276,10 +267,10 @@ func TestReaperPreservesWorktreeOwnedByAnotherProcess(t *testing.T) {
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Wait(); err != nil {
+	if err := <-done; err != nil {
 		t.Fatalf("owner helper: %v: %s", err, stderr.String())
 	}
-	waited = true
+	markWaited()
 }
 
 func TestGitCommitIgnoresAmbientIdentity(t *testing.T) {

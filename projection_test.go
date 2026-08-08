@@ -121,13 +121,19 @@ func TestProjectBranchCreatesMissingRequest(t *testing.T) {
 		}
 	}
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	got, _, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", "")
+	const secret = "AKIA1234567890ABCDEF"
+	got, _, err := projectBranch(cfg, Item{Title: "change " + secret},
+		"forest/7-change", "body "+secret, "")
 	if err != nil || got != "https://github.com/owner/repo/pull/24" {
 		t.Fatalf("projectBranch create = (%q, %v)", got, err)
 	}
 	if !hasArgumentPair(createArgs, "--base", "master") ||
 		!hasArgumentPair(createArgs, "--head", "forest/7-change") {
 		t.Fatalf("projection create args = %v, want master target and exact source", createArgs)
+	}
+	if !hasArgumentPair(createArgs, "--title", "forest: change "+secretRedacted) ||
+		!hasArgumentPair(createArgs, "--body", "body "+secretRedacted) {
+		t.Fatalf("projection create args retained mutable secret-shaped text: %v", createArgs)
 	}
 }
 
