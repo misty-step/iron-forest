@@ -234,7 +234,10 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 		t.Fatalf("fresh head = %#v, want one subject at %s", subjects, head)
 	}
 
-	// A failing check is the fact a rebase conflict or a broken build leaves.
+	// A genuine failing check is the fact a broken build leaves (a rebase
+	// conflict is a mechanical failure and never writes this note, #195). A
+	// failed-checks head carries a fact and is the Fixer's work, not a head the
+	// Verifier rechecks and re-reviews forever.
 	fail := checksNote{
 		Status:  "fail",
 		RunID:   "run-1",
@@ -680,6 +683,153 @@ func TestVerifierReviewNamesMutationWhenPhaseErrors(t *testing.T) {
 	// No Verdict may rest on a tree the review itself changed.
 	if _, ok, rerr := readVerdict(repo, head); rerr != nil || ok {
 		t.Fatalf("verdict note on head = (found=%v, err=%v), want none when the review mutated the tree", ok, rerr)
+	}
+}
+
+// TestVerifierConflictParksForOperator pins #195's carve-out for a rebase
+// conflict: it is a mechanical failure, not a failing check on the change, so
+// it must park the head with its cause instead of writing a failing Checks note
+// that routes the branch to the Fixer, who would spend a repair attempt on a
+// conflict no change in code can resolve. Repeating the conflict never spends a
+// Fixer attempt and never touches the content brake.
+func TestVerifierConflictParksForOperator(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-conflict"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "file.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "file.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch edit")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	rebaseTestWriteFile(t, filepath.Join(repo, "file.txt"), "master\n")
+	rebaseTestGit(t, repo, "add", "file.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "master edit")
+	rebaseTestGit(t, repo, "push", "-q", "origin", "master")
+
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+	}
+	defer func() { ghJSON = oldGH }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = false
+	cfg.Projection = ProjectionConfig{}
+
+	subject := Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch, Head: head,
+	}
+	for range stalledRunLimit {
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+			t.Fatalf("conflicting verifier pass code = %d, want 1", code)
+		}
+	}
+	if _, ok, err := readChecks(repo, head); err != nil || ok {
+		t.Fatalf("a rebase conflict wrote a checks note = (found=%v, err=%v); want none so the Fixer never repairs it", ok, err)
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, head); err != nil || stalled {
+		t.Fatalf("a rebase conflict braked the verifier = %v, %v; it is mechanical and must not touch the content brake", stalled, err)
+	}
+	if parked, err := parkedOn(repo, "verifier", subject.Key, head); err != nil || !parked {
+		t.Fatalf("repeated conflicts did not park = %v, %v", parked, err)
+	}
+	// The Fixer never sees the branch, so no repair attempt is spent.
+	repairs, err := (fixerFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range repairs {
+		if r.Branch == branch || r.Key == subject.Key {
+			t.Fatalf("fixer was offered a mechanically-conflicted head: %#v", r)
+		}
+	}
+	if n, err := readAttempts(repo, subject.Key, head); err != nil || n != 0 {
+		t.Fatalf("fixer attempts on a conflicted branch = (%d, %v), want 0", n, err)
+	}
+}
+
+// TestManualRepairReleasesMergeableBranch pins #195's requirement that
+// recovering a branch by hand clears the repair budget. Attempts key to the
+// head they were spent on, so once the branch's head advances after a repair,
+// the branch is selectable without raw git instead of staying blocked by
+// attempts a conflict consumed on an older head.
+func TestManualRepairReleasesMergeableBranch(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	key := "branch-" + branch
+	cfg := defaultConfig()
+	cfg.Flows.Fixer.Attempts = 3
+	cfg.Flows.Verifier.AutoMerge = true
+
+	// Spend the whole repair budget on the old head: once it is green and
+	// approved, the Verifier must not offer it for merge.
+	seedGreenApproved := func(sha string) {
+		if err := writeVerdict(repo, sha, verdictNote{Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: "def", RunID: "seed"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeChecks(repo, sha, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedGreenApproved(head)
+	for range cfg.Flows.Fixer.Attempts {
+		if _, err := bumpAttempts(repo, key, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range subjects {
+		if s.Branch == branch {
+			t.Fatalf("a branch whose repair budget is spent was offered for merge: %#v", s)
+		}
+	}
+
+	// The operator repairs the branch by hand: the head advances.
+	rebaseTestGit(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "repaired.txt"), "fixed\n")
+	rebaseTestGit(t, repo, "add", "repaired.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "operator repair")
+	rebaseTestGit(t, repo, "push", "-q", "origin", branch)
+	newHead := remoteBranchHead(t, repo, branch)
+	if newHead == head {
+		t.Fatal("manual repair did not advance the head")
+	}
+
+	// The new head is green and approved after re-review; the old attempt budget
+	// does not apply, so the branch is mergeable again without deleting a ref.
+	if attempts, err := readAttempts(repo, key, newHead); err != nil || attempts != 0 {
+		t.Fatalf("attempts on the operator-repaired head = (%d, %v), want 0", attempts, err)
+	}
+	seedGreenApproved(newHead)
+	subjects, err = (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, s := range subjects {
+		if s.Branch == branch {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the manually-repaired branch is not mergeable; it must clear its budget without raw git: %#v", subjects)
 	}
 }
 

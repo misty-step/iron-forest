@@ -104,24 +104,30 @@ func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 func TestNotesAttemptsStartAtZeroAndIncrement(t *testing.T) {
 	_, work, _ := notesTestRepository(t)
 	key := "branch-forest/7-example"
-	if got, err := readAttempts(work, key); err != nil || got != 0 {
+	const head = "head-a"
+	if got, err := readAttempts(work, key, head); err != nil || got != 0 {
 		t.Fatalf("initial attempts = (%d, %v), want (0, nil)", got, err)
 	}
-	if got, err := bumpAttempts(work, key); err != nil || got != 1 {
+	if got, err := bumpAttempts(work, key, head); err != nil || got != 1 {
 		t.Fatalf("first bump = (%d, %v), want (1, nil)", got, err)
 	}
-	if got, err := bumpAttempts(work, key); err != nil || got != 2 {
+	if got, err := bumpAttempts(work, key, head); err != nil || got != 2 {
 		t.Fatalf("second bump = (%d, %v), want (2, nil)", got, err)
 	}
-	if got, err := readAttempts(work, key); err != nil || got != 2 {
+	if got, err := readAttempts(work, key, head); err != nil || got != 2 {
 		t.Fatalf("stored attempts = (%d, %v), want (2, nil)", got, err)
+	}
+	// The count keys to the head it was recorded against: an operator repairing a
+	// branch by hand moves the head, and the new head reads a fresh budget.
+	if got, err := readAttempts(work, key, "head-b"); err != nil || got != 0 {
+		t.Fatalf("attempts for a new, operator-repaired head = (%d, %v), want (0, nil)", got, err)
 	}
 }
 
 func TestNotesAttemptsCASRetriesAreBounded(t *testing.T) {
 	remote, work, _ := notesTestRepository(t)
 	key := "branch-forest/7-example"
-	if _, err := bumpAttempts(work, key); err != nil {
+	if _, err := bumpAttempts(work, key, "head-a"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,7 +143,7 @@ func TestNotesAttemptsCASRetriesAreBounded(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := bumpAttempts(work, key)
+		_, err := bumpAttempts(work, key, "head-a")
 		done <- err
 	}()
 	select {
@@ -267,16 +273,16 @@ func TestDropAttemptsRetiresTheRecord(t *testing.T) {
 	if err := dropAttempts(work, key); err != nil {
 		t.Fatalf("dropAttempts on an absent record = %v, want nil", err)
 	}
-	if _, err := bumpAttempts(work, key); err != nil {
+	if _, err := bumpAttempts(work, key, "head-a"); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := readAttempts(work, key); err != nil || n != 1 {
+	if n, err := readAttempts(work, key, "head-a"); err != nil || n != 1 {
 		t.Fatalf("readAttempts after bump = (%d, %v), want (1, nil)", n, err)
 	}
 	if err := dropAttempts(work, key); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := readAttempts(work, key); err != nil || n != 0 {
+	if n, err := readAttempts(work, key, "head-a"); err != nil || n != 0 {
 		t.Fatalf("readAttempts after drop = (%d, %v), want (0, nil)", n, err)
 	}
 	out, err := gitOut(work, "ls-remote", "origin", "refs/forest/attempt/"+key)

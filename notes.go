@@ -37,7 +37,8 @@ type checksNote struct {
 }
 
 type attemptsNote struct {
-	Count int `json:"count"`
+	Count int    `json:"count"`
+	Head  string `json:"head,omitempty"`
 }
 
 const (
@@ -238,7 +239,13 @@ func fetchNoteRef(repoDir, ref string) error {
 	return nil
 }
 
-func readAttempts(repoDir, key string) (int, error) {
+// readAttempts returns how many repairs a branch has published, keyed to the
+// head the count was recorded against. A head the record has not seen — an
+// operator's manual repair that moved the branch — is a new situation and reads
+// as zero, so an approved, green branch an operator fixed is selectable again
+// without deleting a ref. head may be empty to keep reading a plain per-branch
+// count.
+func readAttempts(repoDir, key, head string) (int, error) {
 	_, body, err := getBlobRef(repoDir, "refs/forest/attempt/"+key)
 	if err != nil {
 		return 0, err
@@ -250,10 +257,17 @@ func readAttempts(repoDir, key string) (int, error) {
 	if err := json.Unmarshal([]byte(body), &a); err != nil {
 		return 0, fmt.Errorf("decode attempt record: %w", err)
 	}
+	if a.Head != "" && head != "" && a.Head != head {
+		return 0, nil
+	}
 	return a.Count, nil
 }
 
-func bumpAttempts(repoDir, key string) (int, error) {
+// bumpAttempts records one more published repair on a branch, keyed to the head
+// that repair landed on. The count always carries forward across the branch's
+// own chain of repairs, so the attempt ceiling keeps binding; the head-keyed
+// reset lives in readAttempts, where a foreign head sees a fresh budget.
+func bumpAttempts(repoDir, key, head string) (int, error) {
 	ref := "refs/forest/attempt/" + key
 	var casErr error
 	for range 5 {
@@ -270,7 +284,7 @@ func bumpAttempts(repoDir, key string) (int, error) {
 			count = a.Count
 		}
 		count++
-		payload, err := json.Marshal(attemptsNote{Count: count})
+		payload, err := json.Marshal(attemptsNote{Count: count, Head: head})
 		if err != nil {
 			return 0, fmt.Errorf("encode attempt record: %w", err)
 		}

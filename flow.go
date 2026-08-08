@@ -313,11 +313,24 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 			// failure, keep the spent tokens, and leave the brake untouched.
 			rec.Status = shutdownStatus
 		} else {
-			if brakeErr := recordStalled(repoDir, f.Name(), s.Key, s.Revision); brakeErr != nil {
-				err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)
-			}
 			if rec.Status == "" || rec.Status == "done" {
 				rec.Status = failStatus(err)
+			}
+			// Classify the failure instead of braking any Act error. Content — a
+			// failing check, a gate refusal, a rejected verdict — is what the
+			// repair budget exists for, so only it engages the repeat-failure
+			// brake. A mechanical failure (host or provider outage, worktree,
+			// rebase conflict, publish race, preflight) parks with its cause and
+			// is retried on a later pass without touching the brake or any
+			// attempt budget.
+			if mechanicalStatus(rec.Status) {
+				if parkErr := parkFailure(repoDir, f.Name(), s.Key, s.Revision, err); parkErr != nil {
+					err = fmt.Errorf("%w; record parked: %v", err, parkErr)
+				}
+			} else {
+				if brakeErr := recordStalled(repoDir, f.Name(), s.Key, s.Revision); brakeErr != nil {
+					err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)
+				}
 			}
 		}
 		rec.Error = err.Error()
@@ -361,6 +374,22 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 	}
 	fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", flowName)
 	return 2
+}
+
+// mechanicalStatus reports whether a ledger status names a mechanical failure:
+// one the agent could not plausibly fix, so it must park for an operator instead
+// of spending an attempt or the repeat-failure brake. Every other failing status
+// is content — a failing check, a gate refusal, a rejected verdict — the
+// situations a repair attempt exists for.
+func mechanicalStatus(status string) bool {
+	switch status {
+	case "attempts_failed", "branch_failed", "checks_environment_failed",
+		"checks_refused", "comment_failed", "item_failed", "merge_failed",
+		"notes_failed", "projection_failed", "prompt_failed", "publish_failed",
+		"rebase_failed", "timeout_failed", "tracker_failed", "worktree_failed":
+		return true
+	}
+	return false
 }
 
 // failStatus maps a stage-prefixed error to the ledger's failure vocabulary.

@@ -45,7 +45,7 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if !(hasVerdict && v.Verdict == "changes") && !(hasChecks && checks.Status == "fail") {
 			continue
 		}
-		attempts, err := readAttempts(repoDir, key)
+		attempts, err := readAttempts(repoDir, key, head)
 		if err != nil {
 			return nil, fmt.Errorf("attempts %s: %w", branch, err)
 		}
@@ -60,6 +60,17 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			return nil, fmt.Errorf("stalled %s: %w", key, err)
 		}
 		if stalled {
+			continue
+		}
+		// A parked head needs an operator, not another repair: the same repair
+		// keeps failing identically, so a mechanical hold (worktree, publish,
+		// prompt, timeout) must not keep paying an agent. The head advancing
+		// after the operator's repair releases the hold.
+		parked, err := parkedOn(repoDir, "fixer", key, head)
+		if err != nil {
+			return nil, fmt.Errorf("parked %s: %w", key, err)
+		}
+		if parked {
 			continue
 		}
 		subjects = append(subjects, Subject{
@@ -137,7 +148,16 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
-	count, err := bumpAttempts(repoDir, s.Key)
+	// The attempt count keys to the head this repair published, not to the
+	// branch: a budget the Fixer spent on one head must not stick to a branch an
+	// operator later repairs by hand. The push above moved the branch, so read
+	// the head it now points at.
+	fixedHead, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		out.Status = "publish_failed"
+		return out, fmt.Errorf("publish: read fixed head: %w", err)
+	}
+	count, err := bumpAttempts(repoDir, s.Key, fixedHead)
 	if err != nil {
 		out.Status = "attempts_failed"
 		return out, fmt.Errorf("attempts: %w", err)
