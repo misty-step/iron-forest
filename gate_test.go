@@ -578,52 +578,104 @@ func TestAssertCleanReviewTreeRefusesSubmoduleEdit(t *testing.T) {
 	}
 }
 
-// TestWorkStateBoundsFilePathRead pins #191's unbounded-read fix: workState must
-// stop hashing a regular file's content after a fixed number of bytes, so a path
-// a verifier truncates sparse to a huge apparent size cannot make the post-run
-// snapshot spend unbounded time streaming it. The fingerprint still records the
-// file's apparent length separately, so a truncation-to-huge refuses the Verdict
-// on the size without the snapshot ever reading the huge tail.
-func TestWorkStateBoundsFilePathRead(t *testing.T) {
+// TestWorkStateFailsClosedForFileLargerThanLimit pins #191's requirement to
+// refuse any tracked-file change: workState must not hash only a bounded prefix
+// of a regular file and silently accept a same-size mutation beyond it. A file
+// whose content extends past snapshotFileHashLimit cannot be fully verified by a
+// bounded read, so workState fails closed — returns an error — rather than emit a
+// fingerprint that would hide an edit in the unread tail. snapshotReviewTree then
+// propagates that error so the clean-tree gate refuses the Verdict because the
+// path cannot be shown unchanged. The read stops at the limit, so the hostile
+// huge sparse file that motivated the bound cannot stall the snapshot.
+func TestWorkStateFailsClosedForFileLargerThanLimit(t *testing.T) {
 	wtDir := t.TempDir()
-	// A file whose first bytes are the same before and after, but that grows to a
-	// huge sparse apparent size. The bounded hash prefix is identical, yet the
-	// recorded size differs, so the fingerprints must differ.
-	path := "huge.bin"
-	small := filepath.Join(wtDir, path)
-	if err := os.WriteFile(small, []byte("prefix\n"), 0o644); err != nil {
+	path := "large.bin"
+	// A file right at the limit is fully fingerprinted: complete content is
+	// hashed, so a same-size mutation anywhere in it changes the digest.
+	atLimit := make([]byte, snapshotFileHashLimit)
+	for i := range atLimit {
+		atLimit[i] = 0x41
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, path), atLimit, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	before := workState(wtDir, path)
+	if fp, err := workState(wtDir, path); err != nil {
+		t.Fatalf("file at the limit was not fully fingerprinted: %v", err)
+	} else if fp == "" {
+		t.Fatal("file at the limit produced an empty fingerprint")
+	}
 
-	// Truncate to a sparse file far larger than the hash limit; the first bytes
-	// remain "prefix\n", and only the apparent length changes. The bounded hash
-	// prefix is identical, yet the separately-recorded size differs, so the
-	// fingerprints must differ without the snapshot streaming the huge tail.
-	if err := os.Truncate(small, int64(snapshotFileHashLimit)*8); err != nil {
+	// One byte over the limit cannot be fully verified: fail closed.
+	if err := os.WriteFile(filepath.Join(wtDir, path),
+		append(append([]byte(nil), atLimit...), 0x42), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	after := workState(wtDir, path)
-	if before == after {
-		t.Fatal("bounded fingerprint did not change when a file grew to a huge sparse size")
+	if _, err := workState(wtDir, path); err == nil {
+		t.Fatal("workState emitted a fingerprint for a file larger than the content limit instead of failing closed")
 	}
 }
 
-// TestWorkStateBoundedReadRejectsSameContentDifferentSize pins that the byte
-// bound still detects a content edit within the capped prefix, so bounding reads
-// does not silently accept a rewrite of ordinary source files.
-func TestWorkStateBoundedReadRejectsSameContentDifferentSize(t *testing.T) {
+// TestWorkStateRejectsContentEditPins that a content edit anywhere in a fully
+// fingerprinted file changes the digest, so an ordinary source change cannot
+// slip past the clean-tree comparison.
+func TestWorkStateRejectsContentEdit(t *testing.T) {
 	wtDir := t.TempDir()
 	path := "a.txt"
 	if err := os.WriteFile(filepath.Join(wtDir, path), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	before := workState(wtDir, path)
+	before, err := workState(wtDir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(wtDir, path), []byte("two\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if before == workState(wtDir, path) {
-		t.Fatal("bounded fingerprint missed a content edit within the capped prefix")
+	after, err := workState(wtDir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("fingerprint missed a content edit")
+	}
+}
+
+// TestAssertCleanReviewTreeRefusesSameSizeMutationBeyondLimit is the regression
+// test for #191's tail-mutation hole: replacing bytes beyond the 1 MiB read
+// prefix while preserving the file length, mode and type must never be accepted.
+// workState fails closed for a file whose content runs past the limit — it
+// cannot be proven unchanged — so the snapshot is refused and the clean-tree gate
+// refuses the Verdict for the very tree the reviewer was meant to judge, instead
+// of emitting identical before/after fingerprints that hide the mutation.
+func TestAssertCleanReviewTreeRefusesSameSizeMutationBeyondLimit(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	big := make([]byte, snapshotFileHashLimit+1)
+	for i := range big {
+		big[i] = 0x41
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "large.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "large.bin")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The tracked worktree cannot be fully fingerprinted, so the snapshot — and
+	// therefore any attempt to prove the review left the tree unchanged — errors
+	// and the gate fails closed instead of comparing bounded prefixes.
+	if _, err := snapshotReviewTree(wtDir); err == nil {
+		t.Fatal("snapshot succeeded on a tracked file larger than the content limit; a tail mutation would escape")
+	}
+
+	// A clean-tree assertion on such a tree is equally refused: no Verdict may
+	// rest on a tree this review cannot show unchanged. (The before snapshot
+	// cannot be built, so this guards the gate's refusal, not a bogus comparison.)
+	if err := assertCleanReviewTree(wtDir, head, reviewTreeSnapshot{}); err == nil {
+		t.Fatal("clean-tree gate accepted a tree it cannot fully fingerprint")
 	}
 }
 
@@ -662,7 +714,10 @@ func TestWorkStateDoesNotFollowSymlinkedParent(t *testing.T) {
 	if err := os.Symlink("one", filepath.Join(wtDir, "src")); err != nil {
 		t.Fatal(err)
 	}
-	viaOne := workState(wtDir, "src/a.go")
+	viaOne, err := workState(wtDir, "src/a.go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Swap the symlink target to the other, larger directory.
 	if err := os.Remove(filepath.Join(wtDir, "src")); err != nil {
 		t.Fatal(err)
@@ -670,7 +725,10 @@ func TestWorkStateDoesNotFollowSymlinkedParent(t *testing.T) {
 	if err := os.Symlink("two", filepath.Join(wtDir, "src")); err != nil {
 		t.Fatal(err)
 	}
-	viaTwo := workState(wtDir, "src/a.go")
+	viaTwo, err := workState(wtDir, "src/a.go")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if viaOne != viaTwo {
 		t.Fatalf("leaf fingerprint followed the symlinked parent: one=%q two=%q", viaOne, viaTwo)
 	}
@@ -685,7 +743,11 @@ func TestWorkStateDoesNotFollowSymlinkedParent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "src", "a.go"), []byte("tracked\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if realFP := workState(wtDir, "src/a.go"); viaOne == realFP {
+	realFP, err := workState(wtDir, "src/a.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaOne == realFP {
 		t.Fatal("via-symlink fingerprint equals the real file's fingerprint")
 	}
 }

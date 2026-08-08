@@ -385,11 +385,19 @@ func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
 		if isGitlink(meta) {
 			snap.work[path] = submoduleState(wtDir, path)
 		} else {
-			snap.work[path] = workState(wtDir, path)
+			fp, err := workState(wtDir, path)
+			if err != nil {
+				return reviewTreeSnapshot{}, err
+			}
+			snap.work[path] = fp
 		}
 		for _, dir := range parentDirs(path) {
 			if _, seen := snap.dirs[dir]; !seen {
-				snap.dirs[dir] = workState(wtDir, dir)
+				fp, err := workState(wtDir, dir)
+				if err != nil {
+					return reviewTreeSnapshot{}, err
+				}
+				snap.dirs[dir] = fp
 			}
 		}
 	}
@@ -402,7 +410,11 @@ func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
 			// Fingerprint each untracked path, not just record its name, so an
 			// existing non-ignored fixture edited in place still drifts even
 			// though the path set is unchanged.
-			snap.untracked[path] = workState(wtDir, path)
+			fp, err := workState(wtDir, path)
+			if err != nil {
+				return reviewTreeSnapshot{}, err
+			}
+			snap.untracked[path] = fp
 		}
 	}
 	return snap, nil
@@ -422,11 +434,12 @@ func parentDirs(path string) []string {
 	return dirs
 }
 
-// snapshotFileHashLimit bounds the number of content bytes workState hashes from
-// any one regular file before recording its total size and moving on, so a
-// verifier cannot give a file a huge sparse apparent length and make the post-run
-// snapshot read all of it. The length is still recorded and compared separately,
-// so a change in size alone refuses the Verdict without the read ever completing.
+// snapshotFileHashLimit bounds the number of content bytes workState reads from
+// any one regular file, so a verifier cannot give a file a huge (possibly sparse)
+// apparent length and make the snapshot stream all of it. Reading stops after
+// snapshotFileHashLimit bytes, but a file whose content runs past that bound can
+// no longer be fully verified, so workState fails closed rather than emit a
+// fingerprint that hides a same-size mutation in the unread tail.
 const snapshotFileHashLimit = 1 << 20 // 1 MiB of content per path
 
 // workState fingerprints a tracked path's working-tree object. It captures
@@ -434,19 +447,22 @@ const snapshotFileHashLimit = 1 << 20 // 1 MiB of content per path
 // symlink its target — so a chmod, a regular-file-for-symlink swap, or a symlink
 // retarget all change the fingerprint even when the read bytes would not. It
 // stats with Lstat, never the following stat, and reads content only from a real
-// regular file, streamed through a bounded buffer capped at
-// snapshotFileHashLimit bytes, or from a symlink's target, so a path replaced by
-// a FIFO, socket, device, an endless stream, or a huge sparse file is
-// fingerprinted without blocking or exhausting the factory. A regular leaf under
-// a symlinked parent is fingerprinted by its own type and mode without following
-// the link, so a verifier cannot point a tracked directory at a huge external file
-// and stall the refusal. "" means the tracked path is absent, i.e.
-// it was deleted, which is as much a change as a rewrite is.
-func workState(wtDir, path string) string {
+// regular file, streamed through a buffer capped at snapshotFileHashLimit bytes,
+// or from a symlink's target, so a path replaced by a FIFO, socket, device, an
+// endless stream, or a huge sparse file is fingerprinted without blocking or
+// exhausting the factory. A regular leaf under a symlinked parent is fingerprinted
+// by its own type and mode without following the link, so a verifier cannot point
+// a tracked directory at a huge external file and stall the refusal. It never
+// emits a fingerprint for content it could not read in full: a regular file larger
+// than snapshotFileHashLimit returns an error, because no bounded fingerprint can
+// prove such a file unchanged (a same-size mutation beyond the read prefix would
+// share every recorded field). "" means the tracked path is absent, i.e. it was
+// deleted, which is as much a change as a rewrite is.
+func workState(wtDir, path string) (string, error) {
 	full := filepath.Join(wtDir, path)
 	fi, err := os.Lstat(full)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	mode := fi.Mode()
 	h := sha1.New()
@@ -481,27 +497,31 @@ func workState(wtDir, path string) string {
 			fmt.Fprintf(h, "type:file;unreadable")
 			break
 		}
-		// Hash only a bounded prefix of the bytes, not the whole file, so a path a
-		// verifier truncated sparse to a huge size cannot make the post-run
-		// snapshot spend unbounded time streaming it: the digest stops after
-		// snapshotFileHashLimit bytes no matter how long the file is. The apparent
-		// length is recorded separately and compared on its own, so a grow, a
-		// shrink, or a truncation-to-huge still drifts even though the hashed
-		// prefix is capped; only a change confined beyond the capped prefix with an
-		// otherwise identical size escapes the comparison, which is the accepted
-		// cost of bounding a hostile read.
 		fmt.Fprintf(h, "type:file;perm:%04o;data:", mode.Perm())
-		n, copyErr := io.Copy(h, io.LimitReader(f, snapshotFileHashLimit))
+		// Read one byte past the limit so a file whose content runs on beyond the
+		// bounded prefix is detected without ever streaming the whole tail. For a
+		// file up to the limit this hashes its complete content, so an edit
+		// anywhere in an ordinary source file changes the digest.
+		n, copyErr := io.Copy(h, io.LimitReader(f, snapshotFileHashLimit+1))
 		f.Close()
 		if copyErr != nil {
 			fmt.Fprintf(h, ";read-error")
 			break
 		}
-		fmt.Fprintf(h, ";len:%d;size:%d", n, fi.Size())
+		if n > snapshotFileHashLimit {
+			// Content extends beyond the bytes we hashed; a tracked edit confined
+			// to that tail would share this identical prefix, so the fingerprint
+			// cannot prove the file unchanged. Fail closed instead of silently
+			// accepting the escape: refuse the Verdict because this path cannot be
+			// fully verified. The read stopped at the limit, so a hostile huge
+			// sparse file cannot stall the snapshot.
+			return "", fmt.Errorf("path %q cannot be fully fingerprinted: %d bytes exceed the %d-byte content limit", path, fi.Size(), snapshotFileHashLimit)
+		}
+		fmt.Fprintf(h, ";size:%d", fi.Size())
 	default:
 		fmt.Fprintf(h, "type:%d", mode)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // isGitlink reports whether an `ls-files -s` index entry is a submodule (gitlink)
