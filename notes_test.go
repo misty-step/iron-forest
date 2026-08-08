@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -196,6 +197,64 @@ func notesTestGitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s: %v", strings.Join(cmdArgs, " "), err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// TestNotesRejectedPushIsNotDurable pins the #189 fix: a note that never
+// reached the remote is not a fact. The server rejects the notes push, so the
+// write fails and the abandoned local note must not be read as the winner on a
+// later pass.
+func TestNotesRejectedPushIsNotDurable(t *testing.T) {
+	remote, work, sha := notesTestRepository(t)
+	hook := filepath.Join(remote, "hooks", "update")
+	script := "#!/bin/sh\ncase \"$1\" in\n  refs/notes/forest/verdict)\n    echo 'verdict notes blocked' >&2\n    exit 1\n    ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVerdict(work, sha, verdictNote{
+		Verdict: "approve", Notes: "local only", Reviewer: "reviewer-a", RunID: "run-a",
+	}); err == nil {
+		t.Fatal("writeVerdict succeeded though the notes push is rejected")
+	} else if errors.Is(err, errNoteExists) {
+		t.Fatalf("writeVerdict = errNoteExists (%v); a rejected push is not a remote win", err)
+	}
+	// The next pass must not read the abandoned local note as a durable fact.
+	if err := fetchNotes(work); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := readVerdict(work, sha); err != nil || ok {
+		t.Fatalf("verdict after rejected push = (present=%v, err=%v), want absent", ok, err)
+	}
+}
+
+// TestNotesPreExistingLocalNoteWinsOnRetry pins the #189 fix's retry path: a
+// local note left behind by a failed push becomes the durable value once the
+// retry lands. A caller proposing a different value must see errNoteExists and
+// reread the older local note instead of trusting its in-memory verdict.
+func TestNotesPreExistingLocalNoteWinsOnRetry(t *testing.T) {
+	_, work, sha := notesTestRepository(t)
+
+	// Install a local note directly, exactly as a failed push would leave it,
+	// without letting it reach the remote.
+	local := verdictNote{Verdict: "approve", Notes: "pre-existing local", Reviewer: "reviewer-a", RunID: "run-local"}
+	body, err := json.Marshal(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notesTestGit(t, work, "notes", "--ref=forest/verdict", "add", "-m", string(body), sha)
+
+	// This caller proposes a different value. The write must report a win so the
+	// caller rereads the durable (older local) note rather than its proposal.
+	proposed := verdictNote{Verdict: "reject", Notes: "proposed", Reviewer: "reviewer-b", RunID: "run-b"}
+	if err := writeVerdict(work, sha, proposed); !errors.Is(err, errNoteExists) {
+		t.Fatalf("writeVerdict retry = %v, want errNoteExists so the caller rereads the durable note", err)
+	}
+	read, ok, err := readVerdict(work, sha)
+	if err != nil || !ok {
+		t.Fatalf("verdict after retry = (present=%v, err=%v), want the durable local note", ok, err)
+	}
+	if read.Verdict != local.Verdict || read.Notes != local.Notes {
+		t.Fatalf("winning verdict = %#v, want the pre-existing local note %#v, not the proposed %#v", read, local, proposed)
+	}
 }
 
 // TestDropAttemptsRetiresTheRecord pins the leak this factory has already paid
