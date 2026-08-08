@@ -52,7 +52,7 @@ type admissionClaim struct {
 // canonicalAdmissionKey joins item and factory-branch forms for one item. A
 // singleton Subject keeps its declared stable key.
 func canonicalAdmissionKey(s Subject) string {
-	if s.ID != "" && (s.Kind == "item" || s.Kind == "branch" || s.Kind == "retirement") {
+	if s.ID != "" && (s.Kind == subjectItem || s.Kind == subjectBranch || s.Kind == subjectRetirement) {
 		return "item-" + s.ID
 	}
 	return s.Key

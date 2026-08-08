@@ -75,7 +75,7 @@ func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (stri
 		}
 		for _, pr := range merged {
 			if pr.HeadRefOID == expectedHead {
-				return pr.URL, true, nil
+				return pr.URL, cfg.Projection.MergeViaHost, nil
 			}
 		}
 	}

@@ -47,12 +47,19 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	for _, fact := range retirements {
 		record := fact.Record
 		retiring[record.Branch] = true
-		recoveries = append(recoveries, Subject{
-			Key: "branch-" + record.Branch, Kind: "retirement",
+		s := Subject{
+			Key: "branch-" + record.Branch, Kind: subjectRetirement,
 			Revision: record.Revision, Label: "retire " + record.Branch,
 			ID: record.ItemID, Branch: record.Branch, Head: record.Revision,
 			Item: Item{ID: record.ItemID, Title: record.Title},
-		})
+		}
+		stalled, err := stalledOn(repoDir, "verifier", s.Key, s.Revision)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", s.Key, err)
+		}
+		if !stalled {
+			recoveries = append(recoveries, s)
+		}
 	}
 	var fresh, mergeable []Subject
 	for _, branch := range branches {
@@ -62,7 +69,7 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		}
 		s := Subject{
 			Key:      "branch-" + branch,
-			Kind:     "branch",
+			Kind:     subjectBranch,
 			Revision: head,
 			Label:    branch,
 			ID:       itemIDFromBranch(branch),
@@ -145,7 +152,7 @@ func mergeBlocked(cfg Config, attempts int) string {
 var errRetirementStale = errors.New("retirement intent is stale")
 
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	if s.Kind == "retirement" {
+	if s.Kind == subjectRetirement {
 		fact, found, err := readRetirement(repoDir, s.Branch, s.Revision)
 		if err != nil {
 			return Outcome{Branch: s.Branch, BaseSHA: s.Revision, Status: "merge_failed"}, err
@@ -621,7 +628,7 @@ func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it I
 		if record.Transport != "host" {
 			return fmt.Errorf("retirement %s is pending without Host transport", fact.Ref)
 		}
-		err := projectMerge(cfg, record.Branch, record.Strategy, record.Revision)
+		err := observeProjectMerge(cfg, record.Branch, record.Strategy, record.Revision)
 		if err != nil {
 			if errors.Is(err, errHostMergeUnavailable) {
 				if dropErr := dropRetirement(repoDir, fact); dropErr != nil {

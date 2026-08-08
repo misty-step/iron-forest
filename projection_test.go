@@ -90,10 +90,15 @@ func TestProjectBranchRecognizesAlreadyMergedReviewedHead(t *testing.T) {
 			return nil, errors.New("unexpected host command")
 		}
 	}
-	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true, MergeViaHost: true}}
 	url, merged, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", reviewed)
 	if err != nil || !merged || url != "https://github.com/owner/repo/pull/23" {
 		t.Fatalf("merged Projection recovery = (%q, %v, %v)", url, merged, err)
+	}
+	cfg.Projection.MergeViaHost = false
+	url, merged, err = projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", reviewed)
+	if err != nil || merged || url != "https://github.com/owner/repo/pull/23" {
+		t.Fatalf("one-way Projection recovery = (%q, %v, %v)", url, merged, err)
 	}
 	if createCalls != 0 {
 		t.Fatalf("merged Projection recovery created %d duplicate request(s)", createCalls)

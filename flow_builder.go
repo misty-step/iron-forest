@@ -41,7 +41,7 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		}
 		subjects = append(subjects, Subject{
 			Key:      key,
-			Kind:     "item",
+			Kind:     subjectItem,
 			Revision: it.UpdatedAt,
 			Label:    fmt.Sprintf("#%s %s", it.ID, it.Title),
 			ID:       it.ID,

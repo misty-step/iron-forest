@@ -440,7 +440,7 @@ func TestHardStopAgentProcessHelper(t *testing.T) {
 		return
 	}
 	cmd := exec.Command("/bin/sh", "-c", "(while :; do printf x >> '"+heartbeat+"'; sleep 0.05; done) & wait")
-	if err := startManagedCommand(cmd, false); err != nil {
+	if err := startManagedCommand(cmd); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

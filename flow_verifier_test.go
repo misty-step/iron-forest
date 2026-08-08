@@ -1194,9 +1194,9 @@ func TestPendingHostRetirementRecoversAfterBranchAutoDelete(t *testing.T) {
 	}
 }
 
-// TestPendingHostRetirementUsesRecordedStrategy proves recovery repeats the
-// recorded merge effect, not a strategy changed in later configuration.
-func TestPendingHostRetirementUsesRecordedStrategy(t *testing.T) {
+// TestPendingHostRetirementObservesRecordedStrategy proves recovery observes
+// the recorded merge effect without asking an open request to merge again.
+func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	branch := "forest/11-strategy"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -1210,52 +1210,33 @@ func TestPendingHostRetirementUsesRecordedStrategy(t *testing.T) {
 	}
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
-	var mergeArgs []string
-	merged := false
+	mergeCalls, listCalls := 0, 0
 	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[1] == "merge" {
+			mergeCalls++
+			return nil, errors.New("recovery attempted a duplicate Host merge")
+		}
 		if len(args) >= 2 && args[1] == "list" {
-			state := ""
+			listCalls++
 			for i := 0; i+1 < len(args); i++ {
-				if args[i] == "--state" {
-					state = args[i+1]
+				if args[i] == "--state" && args[i+1] == "open" {
+					return []byte(`[{"number":11,"url":"https://github.com/owner/repo/pull/11","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
 				}
-			}
-			if state == "open" && !merged {
-				return []byte(`[{"number":11,"url":"https://github.com/owner/repo/pull/11","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-			}
-			if state == "merged" && merged {
-				return []byte(`[{"number":11,"url":"https://github.com/owner/repo/pull/11","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
 			}
 			return []byte(`[]`), nil
 		}
-		if len(args) >= 2 && args[1] == "merge" {
-			mergeArgs = append([]string(nil), args...)
-			merged = true
-			return nil, nil
-		}
 		return nil, errors.New("unexpected Host command")
 	}
-	oldGH := ghJSON
-	defer func() { ghJSON = oldGH }()
-	ghJSON = func(...string) ([]byte, error) { return []byte(`{}`), nil }
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Merge = "ff"
-	if err := recoverRetirementFact(cfg, repo, fact, Item{ID: "11", Title: "strategy"}); err != nil {
-		t.Fatal(err)
+	err = recoverRetirementFact(cfg, repo, fact, Item{ID: "11", Title: "strategy"})
+	if !errors.Is(err, errHostMergePending) {
+		t.Fatalf("pending retirement observation = %v, want merge pending", err)
 	}
-	foundSquash := false
-	for _, arg := range mergeArgs {
-		foundSquash = foundSquash || arg == "--squash"
-	}
-	if !foundSquash {
-		t.Fatalf("recovery merge args %v do not use recorded squash strategy", mergeArgs)
-	}
-	for _, arg := range mergeArgs {
-		if arg == "--rebase" {
-			t.Fatalf("recovery merge args %v used current ff strategy", mergeArgs)
-		}
+	if mergeCalls != 0 || listCalls == 0 {
+		t.Fatalf("recovery effects: merge=%d list=%d, want no merge and an observation", mergeCalls, listCalls)
 	}
 }
 
@@ -1291,7 +1272,7 @@ func TestRetirementFactBlocksAdvancedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subjects) != 1 || subjects[0].Kind != "retirement" || subjects[0].Revision != reviewed {
+	if len(subjects) != 1 || subjects[0].Kind != subjectRetirement || subjects[0].Revision != reviewed {
 		t.Fatalf("advanced retirement subjects = %#v, want old durable fact", subjects)
 	}
 	if _, err := (verifierFlow{}).Act(cfg, repo, subjects[0], "advanced-retirement"); err == nil ||
@@ -1303,6 +1284,18 @@ func TestRetirementFactBlocksAdvancedBranch(t *testing.T) {
 	}
 	if got := remoteBranchHead(t, repo, branch); got != advanced {
 		t.Fatalf("advanced branch = %s, want %s intact", got, advanced)
+	}
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "verifier", "branch-"+branch, reviewed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	subjects, err = (verifierFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 0 {
+		t.Fatalf("stalled retirement remained selectable: %#v", subjects)
 	}
 }
 

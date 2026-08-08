@@ -12,19 +12,27 @@ import (
 	"time"
 )
 
+type subjectKind string
+
+const (
+	subjectItem       subjectKind = "item"
+	subjectBranch     subjectKind = "branch"
+	subjectRetirement subjectKind = "retirement"
+)
+
 // A Subject is the one thing a flow acts on in a pass. Key stays stable across
 // revisions of the same work. Revision is what the flow actually saw: an item's
 // update stamp, or a branch's head commit. A flow that recorded a decision
 // against a revision must not decide again until the revision moves.
 type Subject struct {
 	Key      string // "item-41", "branch-forest/41-add-notes"
-	Kind     string // item | branch
-	Revision string // item updatedAt, or branch head sha
+	Kind     subjectKind
+	Revision string // item update stamp or branch head commit
 	Label    string // one line for the operator
 	ID       string // tracker item identity, opaque to the controller
-	Item     Item   // Kind == "item"
-	Branch   string // Kind == "branch"
-	Head     string // Kind == "branch": head commit sha
+	Item     Item   // subjectItem or subjectRetirement
+	Branch   string // subjectBranch or subjectRetirement
+	Head     string // branch head commit
 }
 
 // An Outcome is what one Act call did. It becomes one ledger row. There is no

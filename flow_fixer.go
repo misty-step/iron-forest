@@ -64,7 +64,7 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		}
 		subjects = append(subjects, Subject{
 			Key:      key,
-			Kind:     "branch",
+			Kind:     subjectBranch,
 			Revision: head,
 			Label:    branch,
 			ID:       itemIDFromBranch(branch),

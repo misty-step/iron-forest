@@ -48,7 +48,7 @@ func killRunProcessGroup(pid int) error {
 	return nil
 }
 
-func startManagedCommand(cmd *exec.Cmd, allowDuringStop bool) error {
+func startManagedCommand(cmd *exec.Cmd) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if cmd.Cancel != nil {
 		cmd.Cancel = func() error {
@@ -61,7 +61,7 @@ func startManagedCommand(cmd *exec.Cmd, allowDuringStop bool) error {
 
 	runProcesses.Lock()
 	defer runProcesses.Unlock()
-	if runProcesses.stopping && !allowDuringStop {
+	if runProcesses.stopping {
 		return errors.New("run start refused during hard stop")
 	}
 	if err := cmd.Start(); err != nil {
@@ -102,7 +102,7 @@ func waitRunCommand(cmd *exec.Cmd) error {
 }
 
 func runCommand(cmd *exec.Cmd) error {
-	if err := startManagedCommand(cmd, false); err != nil {
+	if err := startManagedCommand(cmd); err != nil {
 		return err
 	}
 	return waitRunCommand(cmd)
@@ -356,7 +356,7 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	if err != nil {
 		return stats, err
 	}
-	if err := startManagedCommand(cmd, false); err != nil {
+	if err := startManagedCommand(cmd); err != nil {
 		// With stdin delivery an argument-limit start error is not expected, but
 		// if one ever surfaces it must be named, never the raw fork/exec text.
 		if errors.Is(err, syscall.E2BIG) {

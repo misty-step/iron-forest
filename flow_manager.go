@@ -195,7 +195,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 // admission immediately before the tag Effect.
 func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, remove []string) (bool, error) {
 	release, err := claimAdmission(repoDir, cfg.Repo, "manager", Subject{
-		Key: "item-" + it.ID, Kind: "item", ID: it.ID, Revision: it.UpdatedAt,
+		Key: "item-" + it.ID, Kind: subjectItem, ID: it.ID, Revision: it.UpdatedAt,
 	})
 	if errors.Is(err, errAdmissionHeld) {
 		return false, nil
