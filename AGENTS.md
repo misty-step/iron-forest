@@ -6,7 +6,7 @@ This file is the contributor contract for Iron Forest.
 
 Use these names for system concepts: Flow, Run, Phase, Subject, Revision,
 Selector, Effect, Verdict, Gate, Ledger, Tracker, Host, Runner, Projection,
-Builder, Verifier, and Fixer.
+Builder, Verifier, Fixer, and Manager.
 
 Forbidden vocabulary includes the retired animal labels, the former action and state words, and the obsolete configuration noun.
 Do not add accounting for monetary amounts.
@@ -14,10 +14,11 @@ Use the system names above in source, tests, issues, commits, and documentation.
 
 ## Agent declarations
 
-Iron Forest has two declarations:
+Iron Forest has three declarations:
 
 - `agents/builder/` contains the Builder declaration.
 - `agents/verifier/` contains the Verifier declaration.
+- `agents/manager/` contains the Manager declaration.
 
 Each declaration uses these files:
 
@@ -29,8 +30,9 @@ Each declaration uses these files:
 
 The Builder writes `report.json` after it implements a Subject.
 The Verifier writes `review.json` after it produces a Verdict.
+The Manager writes `report.json` after it picks one candidate.
 The Builder declaration currently includes `skills/go-style.md`.
-The Verifier declaration has no skills directory.
+The Verifier and Manager declarations have no skills directory.
 
 ## Gate
 

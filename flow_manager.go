@@ -352,8 +352,7 @@ var managerJudge = runManagerJudge
 // lane has no repository to touch; the Manager's whole effect on the world is
 // the tags Act applies afterward.
 func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (managerReport, runStats, error) {
-	workspace := workspaceDir(repoDir)
-	runDir, cleanup, err := createManagerRunDir(workspace)
+	runDir, cleanup, err := createManagerRunDir()
 	if err != nil {
 		return managerReport{}, runStats{}, err
 	}
@@ -363,7 +362,7 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 	if err != nil {
 		return managerReport{}, runStats{}, err
 	}
-	trace := filepath.Join(workspace, "runs", runID+".manager.jsonl")
+	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".manager.jsonl")
 	stats, err := runPhase(repoDir, runDir, a, prompt, trace)
 	if err != nil {
 		return managerReport{}, stats, err
@@ -374,13 +373,23 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 
 // renderManagerPrompt renders the judgement request for one candidate set. The
 // agent ranks the offered items and returns one, so the prompt is scoped to the
-// filtered set and never to the whole backlog.
+// filtered set and never to the whole backlog. Each candidate carries its body,
+// tags, and comment thread so the model can rank by their content, not just by
+// id and title.
 func renderManagerPrompt(a *Agent, cands []Item) (string, error) {
 	var b strings.Builder
 	b.WriteString("Choose exactly one item to promote next. Return it in report.json as {\"pick\": \"<id>\", \"reason\": \"<short reason>\"}.\n\n")
 	b.WriteString("Candidates:\n")
 	for _, it := range cands {
-		fmt.Fprintf(&b, "- %s %s (updated %s)\n", it.ID, it.Title, it.UpdatedAt)
+		content := it.Body
+		if comments := renderComments(it.Comments); comments != "" {
+			content += "\n\n## Item comments\n" + comments
+		}
+		tags := strings.Join(it.Tags, ", ")
+		if tags == "" {
+			tags = "(none)"
+		}
+		fmt.Fprintf(&b, "- %s %s (updated %s, tags %s)\n%s\n", it.ID, it.Title, it.UpdatedAt, tags, strings.TrimSpace(content))
 	}
 	return renderUserPrompt(a, map[string]any{
 		"Task":  b.String(),
@@ -413,15 +422,13 @@ func readManagerReportFile(wtDir string) (managerReport, error) {
 }
 
 // createManagerRunDir makes a throwaway empty directory for the Manager's agent
-// to run in. The lane reads items from the Tracker and writes one report, so it
-// needs no checkout: giving a judgement-only agent a repository would hand it
-// authority it must not have.
-func createManagerRunDir(workspace string) (string, func(), error) {
-	base := filepath.Join(workspace, "runs")
-	if err := os.MkdirAll(base, 0o755); err != nil {
-		return "", nil, err
-	}
-	dir, err := os.MkdirTemp(base, "manager-")
+// to run in. It lives outside the checkout, in system temp, following #174's
+// pattern for the agent config root: with bash allowed the agent's cwd is not
+// under any enclosing git checkout, so a lane that claims no repository
+// authority cannot discover and modify the managed repository or its refs. The
+// lane reads the Tracker and writes one report; it needs no repository at all.
+func createManagerRunDir() (string, func(), error) {
+	dir, err := os.MkdirTemp("", "forest-manager-")
 	if err != nil {
 		return "", nil, err
 	}
