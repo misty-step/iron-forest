@@ -100,6 +100,76 @@ func TestResolveProviderNoneFails(t *testing.T) {
 	}
 }
 
+// TestResolveProviderRejectsCredentiallessConfig pins the validation asked for
+// in review: a config file that parses but carries no usable credential — an
+// empty document, an empty provider block, or malformed JSON — must not resolve
+// as a config mechanism, so selfcheck reports nothing rather than a route that
+// would fail the first real run.
+func TestResolveProviderRejectsCredentiallessConfig(t *testing.T) {
+	t.Setenv(openRouterKeyVar, "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	factory := t.TempDir()
+	oc := filepath.Join(factory, ".opencode")
+	if err := os.MkdirAll(oc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{}`, `{"provider":{}}`, `{"provider":{"openrouter":{"options":{}}}}`, `not json`} {
+		if err := os.WriteFile(filepath.Join(oc, "opencode.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mech, _, ok := resolveProvider(factory)
+		if ok {
+			t.Fatalf("config %q: expected no mechanism, got %v", body, mech)
+		}
+	}
+	if _, err := providerMechanismReport(factory); err == nil {
+		t.Fatal("providerMechanismReport must error on a credentialless config")
+	}
+}
+
+// TestResolveProviderValidConfigPins that an operator-declared config with a
+// literal apiKey resolves as the config mechanism, preserved verbatim, and that
+// an {env:...} reference (not a Mint marker) is likewise reported as config.
+func TestResolveProviderValidConfig(t *testing.T) {
+	t.Setenv(openRouterKeyVar, "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	for _, body := range []string{
+		`{"provider":{"openrouter":{"options":{"apiKey":"sk-real-key"}}}}`,
+		`{"provider":{"openrouter":{"options":{"apiKey":"{env:OPENROUTER_API_KEY}"}}}}`,
+	} {
+		factory := t.TempDir()
+		oc := filepath.Join(factory, ".opencode")
+		if err := os.MkdirAll(oc, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(oc, "opencode.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mech, cfg, ok := resolveProvider(factory)
+		if !ok || mech != mechConfig {
+			t.Fatalf("config %q: expected config mechanism, got ok=%v mech=%v", body, ok, mech)
+		}
+		if string(cfg) != body {
+			t.Fatalf("config must be preserved verbatim, got %s", cfg)
+		}
+	}
+}
+
+// TestResolveProviderEnvMarker pins the safe selfcheck mechanism: a check run
+// carries only the non-secret providerEnvActiveVar marker, and the resolver
+// treats it as the env route so a scrubbed selfcheck reports the same mechanism
+// the agents use without ever receiving the key value.
+func TestResolveProviderEnvMarker(t *testing.T) {
+	t.Setenv(openRouterKeyVar, "")
+	t.Setenv(providerEnvActiveVar, "1")
+	mech, _, ok := resolveProvider(t.TempDir())
+	if !ok || mech != mechEnv {
+		t.Fatalf("env marker must resolve as env mechanism, got ok=%v mech=%v", ok, mech)
+	}
+}
+
 // TestEnvProviderConfigBaseURLOverride pins the broker base-URL override: with
 // FOREST_PROVIDER_BASE_URL set, the env config points at the broker proxy while
 // still taking the key from the environment.

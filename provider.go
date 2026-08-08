@@ -51,6 +51,14 @@ const (
 	// Ledger row, or a log line.
 	openRouterKeyVar = "OPENROUTER_API_KEY"
 
+	// providerEnvActiveVar is a non-secret marker a check run carries to record
+	// that the env credential route is active. A check executes arbitrary
+	// declared commands, so the key value itself must never leave the daemon
+	// (see childBaseEnv); this marker lets a declared selfcheck report the same
+	// mechanism the agents resolve without ever exposing the credential. It is
+	// set to a constant, never the key value, and is not written to disk.
+	providerEnvActiveVar = "FOREST_PROVIDER_ENV"
+
 	// providerBaseURLOverride is an optional broker base-URL override for the
 	// env mechanism. A host that fronts OpenRouter with its own credential
 	// broker proxy (for example Mint) points this at that proxy, so the broker
@@ -121,18 +129,25 @@ const (
 
 // resolveProvider returns the active credential mechanism for a run and the
 // opencode.json bytes to stage under the run config root. The environment-key
-// mechanism wins when openRouterKeyVar is set, so an operator outside Misty
-// Step who supplies an OpenRouter key gets a direct route even when a Mint
-// config ships with the factory. Otherwise an opencode configuration file that
-// resolves (a Mint broker marker, or a hand-written config) is preserved as the
-// operator configured it. When nothing resolves, ok is false and the caller
-// decides whether that is an error.
+// mechanism wins when openRouterKeyVar is set (or a check run reports that route
+// via providerEnvActiveVar), so an operator outside Misty Step who supplies an
+// OpenRouter key gets a direct route even when a Mint config ships with the
+// factory. Otherwise an opencode configuration file that resolves is preserved
+// as the operator configured it; a config that carries no usable credential
+// (empty or malformed) is rejected rather than reported. When nothing resolves,
+// ok is false and the caller decides whether that is an error.
 func resolveProvider(repoDir string) (mech providerMechanism, cfg []byte, ok bool) {
-	if os.Getenv(openRouterKeyVar) != "" {
+	if os.Getenv(openRouterKeyVar) != "" || os.Getenv(providerEnvActiveVar) != "" {
 		return mechEnv, envProviderConfig(), true
 	}
 	b, found := providerConfigBytes(repoDir)
 	if !found {
+		return mechNone, nil, false
+	}
+	if !providerConfigValid(b) {
+		// A config file resolved but carries no usable credential: an empty
+		// provider block or a malformed document cannot authenticate a run, so
+		// treat it as unresolved rather than report a config mechanism.
 		return mechNone, nil, false
 	}
 	if hasMintMarker(b) {
@@ -202,6 +217,25 @@ func hasMintMarker(b []byte) bool {
 	}
 	for _, p := range cfg.Provider {
 		if strings.HasPrefix(p.Options.APIKey, mintMarkerPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// providerConfigValid reports whether an opencode.json resolves a usable
+// credential: at least one provider entry whose options list a non-empty
+// apiKey, whether that is a Mint broker marker, an {env:...} reference, or a
+// literal key. A document that does not parse, or one whose providers all lack
+// an apiKey, authenticates nothing: it is rejected so selfcheck cannot report a
+// config mechanism that would fail the first real run.
+func providerConfigValid(b []byte) bool {
+	var cfg openCodeConfig
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return false
+	}
+	for _, p := range cfg.Provider {
+		if p.Options.APIKey != "" {
 			return true
 		}
 	}

@@ -227,6 +227,41 @@ func TestHostToolchainMechanismScopedToChecks(t *testing.T) {
 	}
 }
 
+// TestProviderEnvRouteScopedToChecks pins the reconciliation of the provider
+// credential with the child environments. An agent run carries the
+// OPENROUTER_API_KEY value so opencode can resolve the {env:...} reference in
+// the staged provider config, while a check run carries only the non-secret
+// FOREST_PROVIDER_ENV marker, so a declared `go run . selfcheck` learns the env
+// route is active without ever receiving the credential.
+func TestProviderEnvRouteScopedToChecks(t *testing.T) {
+	t.Setenv(openRouterKeyVar, "sk-secret")
+	t.Setenv(providerEnvActiveVar, "")
+
+	agent, cleanup, err := childEnvironment()
+	if err != nil {
+		t.Fatalf("childEnvironment returned error: %v", err)
+	}
+	defer cleanup()
+	if got := envValue(t, agent, openRouterKeyVar); got != "sk-secret" {
+		t.Fatalf("agent env %s=%q, want the key value", openRouterKeyVar, got)
+	}
+	if got := envValue(t, agent, providerEnvActiveVar); got != "" {
+		t.Fatalf("agent env %s=%q, want none", providerEnvActiveVar, got)
+	}
+
+	check, cleanup, err := checkEnvironment()
+	if err != nil {
+		t.Fatalf("checkEnvironment returned error: %v", err)
+	}
+	defer cleanup()
+	if got := envValue(t, check, openRouterKeyVar); got != "" {
+		t.Fatalf("check env leaked %s=%q, want none", openRouterKeyVar, got)
+	}
+	if got := envValue(t, check, providerEnvActiveVar); got != "1" {
+		t.Fatalf("check env %s=%q, want 1", providerEnvActiveVar, got)
+	}
+}
+
 // TestRunChecksHostProxyResolvesWithMetadata pins the actual proxy behavior the
 // item calls out, not a self-contained fake. A host toolchain "cargo" is a
 // proxy that reads RUSTUP_HOME to find its real driver. With a private HOME and
