@@ -22,3 +22,10 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+      # A merged branch must never carry the factory's Mint markers or proxy host
+      # anywhere but the operator-owned files excluded in forest.secrets.yaml.
+      # The daemon's own `secrets` check (see forest.yaml) runs the full scan and
+      # fails closed when the generic scanner is absent; CI runs the built-in
+      # content rules so the gate is green without an external binary.
+      - name: Scan for leaked credentials
+        run: go run . scan-secrets --no-generic .
