@@ -90,9 +90,15 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		// A mechanical delivery failure is not a content or agent failure: the
 		// same prompt keeps failing identically, so it must be named prompt_failed
 		// and park rather than look like work a Fixer attempt could repair.
+		// A run that exceeded its declared deadline is likewise mechanical: the
+		// same run keeps exceeding the same bound, so it parks (timeout_failed)
+		// rather than look like a rejected change to repair.
 		out.Status = "agent_failed"
 		if isPromptDelivery(err) {
 			out.Status = "prompt_failed"
+		}
+		if isRunTimeout(err) {
+			out.Status = "timeout_failed"
 		}
 		return out, fmt.Errorf("agent: %w", err)
 	}

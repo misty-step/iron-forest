@@ -9,6 +9,10 @@ harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
 temperature: 0.2
+# A wall-clock deadline bounds every stall (see #207): time-bound only, never a
+# step ceiling. Runs that exceed this are cancelled and recorded as
+# timeout_failed.
+deadline_seconds: 3600
 # The manager writes only report.json in its throwaway run directory. Reads and
 # edits are allowed so it can reason; every network and repository surface is
 # denied, so it can neither research nor act beyond the one report it proposes.

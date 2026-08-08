@@ -7,6 +7,11 @@ harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
 temperature: 0.2
+# A wall-clock deadline bounds every stall, whatever its cause: a provider that
+# accepts a connection and never answers would otherwise hold a lane forever
+# (see #207). Time-bound only; there is no step ceiling. Runs that exceed this
+# are cancelled and recorded as timeout_failed.
+deadline_seconds: 3600
 # before it could write report.json, and the gate then failed on the missing
 # file rather than naming the real stop. Cost stays bounded by the provider key.
 permission:

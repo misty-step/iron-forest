@@ -134,10 +134,15 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		// A mechanical prompt-delivery failure names itself prompt_failed rather
 		// than agent_failed: the same prompt fails identically, so it must park
-		// instead of spending a judge attempt it can never satisfy.
+		// instead of spending a judge attempt it can never satisfy. A run that
+		// exceeded its declared deadline is the same shape: it parks
+		// (timeout_failed) instead of being re-judged.
 		out.Status = "agent_failed"
 		if isPromptDelivery(err) {
 			out.Status = "prompt_failed"
+		}
+		if isRunTimeout(err) {
+			out.Status = "timeout_failed"
 		}
 		return out, err
 	}

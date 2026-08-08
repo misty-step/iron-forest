@@ -39,9 +39,16 @@ type Agent struct {
 	Variant     string   `yaml:"variant"`
 	Mode        string   `yaml:"mode"`
 	Temperature *float64 `yaml:"temperature"`
-	// No step ceiling and no deadline: opencode treats an absent `steps` as
-	// unbounded, which is the honest shape for work whose size is not known
-	// before an agent reads the item.
+	// DeadlineSeconds is the wall-clock bound on one run, in seconds, taken from
+	// the agent declaration so each lane can set its own. A run that exceeds it
+	// is cancelled and recorded as a mechanical timeout (see runTimeoutError)
+	// rather than left to hold a lane forever. It bounds wall time only: the
+	// step ceiling stays deleted, and token spend stays the provider key's
+	// concern. Zero (or absent) means the run is unbounded in time.
+	DeadlineSeconds int `yaml:"deadline_seconds"`
+	// No step ceiling: opencode treats an absent `steps` as unbounded, which is
+	// the honest shape for work whose size is not known before an agent reads
+	// the item. A wall-time bound, if declared, lives in DeadlineSeconds.
 	Permission map[string]string `yaml:"permission"`
 	MCP        []McpSpec         `yaml:"mcp"`
 
