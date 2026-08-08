@@ -92,7 +92,7 @@ func cmdWatch(api core.API, repoDir string, args []string) int {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
-		snap := loadWatchSnapshot(api, cfg.Repo)
+		snap := loadWatchSnapshot(api, cfg.Repo, repoDir)
 		if liveGH {
 			mu.Lock()
 			snap.Backlog = items
@@ -123,9 +123,14 @@ type watchSnapshot struct {
 	Backlog    []core.Item
 	BacklogErr string
 	Flows      map[string][]runRecord
+	Live       []liveRunView
 }
 
-func loadWatchSnapshot(api core.API, repo string) watchSnapshot {
+// loadWatchSnapshot reads one frame. repo is the display name; repoDir is the
+// checkout path the live daemon's socket lives under, so watch acts as a client
+// of the live socket (see #163). A daemon that is down leaves Live empty rather
+// than erroring the board.
+func loadWatchSnapshot(api core.API, repo, repoDir string) watchSnapshot {
 	s := watchSnapshot{
 		DrawnAt: time.Now().UTC(),
 		Repo:    repo,
@@ -142,6 +147,9 @@ func loadWatchSnapshot(api core.API, repo string) watchSnapshot {
 	s.Flows = groupRuns(all, 8)
 	if wt, err := api.Worktrees(); err == nil {
 		s.Worktrees = wt
+	}
+	if resp, err := liveClient(repoDir, liveRequest{Type: "status"}); err == nil {
+		s.Live = resp.Runs
 	}
 	return s
 }
@@ -178,6 +186,21 @@ func renderWatch(w *os.File, s watchSnapshot) {
 		dstate = "UP"
 	}
 	fmt.Fprintf(w, "DAEMON  %s  unit=%s  pid=%s  %s\n", dstate, s.Daemon.Unit, orDash(s.Daemon.PID), s.Daemon.Note)
+	fmt.Fprintln(w)
+
+	fmt.Fprintf(w, "IN-FLIGHT (%d)  source=.forest/live.sock\n", len(s.Live))
+	if len(s.Live) == 0 {
+		if !s.Daemon.Active {
+			fmt.Fprintln(w, "  (daemon down)")
+		} else {
+			fmt.Fprintln(w, "  (none)")
+		}
+	} else {
+		for _, r := range s.Live {
+			fmt.Fprintf(w, "  %s  flow=%s subject=%s agent=%s since=%s\n",
+				r.RunID, r.Flow, orDash(r.Subject), orDash(r.Agent), r.Started)
+		}
+	}
 	fmt.Fprintln(w)
 
 	fmt.Fprintf(w, "WORKTREES (%d)  source=git worktree list --porcelain\n", len(s.Worktrees))
@@ -235,7 +258,7 @@ func renderWatch(w *os.File, s watchSnapshot) {
 	}
 
 	fmt.Fprintln(w, strings.Repeat("─", 78))
-	fmt.Fprintln(w, "sources: .forest/runs.jsonl  git worktree list --porcelain  git HEAD  .forest/daemon.lock  systemd --user forest.service")
+	fmt.Fprintln(w, "sources: .forest/runs.jsonl  git worktree list --porcelain  git HEAD  .forest/live.sock  .forest/daemon.lock  systemd --user forest.service")
 }
 
 func orDash(s string) string {

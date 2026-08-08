@@ -570,7 +570,7 @@ func TestVerifierRefusesPassNoteWhenCheckMutatesTree(t *testing.T) {
 			// The reviewer is blameless: it would write only review.json and approve.
 			reviewRan := false
 			oldRun := runPhase
-			runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string) (runStats, error) {
+			runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string, _ string) (runStats, error) {
 				reviewRan = true
 				if err := os.WriteFile(filepath.Join(wtDir, "review.json"), []byte(`{"verdict":"approve","summary":"looks fine","notes":""}`), 0o644); err != nil {
 					return runStats{}, err
@@ -647,7 +647,7 @@ func TestVerifierReviewNamesMutationWhenPhaseErrors(t *testing.T) {
 	phaseErr := errors.New("verifier crashed")
 	mutated := false
 	oldRun := runPhase
-	runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string) (runStats, error) {
+	runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string, _ string) (runStats, error) {
 		mutated = true
 		if err := os.WriteFile(filepath.Join(wtDir, "file.txt"), []byte("tainted\n"), 0o644); err != nil {
 			return runStats{}, err

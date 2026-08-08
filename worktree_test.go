@@ -169,6 +169,53 @@ func TestEncodeBranchIDBijective(t *testing.T) {
 	}
 }
 
+// TestPreservedWorktreeSurvivesReapAndReselect pins the reviewer's concern that
+// a cancelled run's inspection worktree must not be destroyed by the next pass
+// or a daemon restart: reapOrphanWorktrees skips a preserved worktree, and
+// createWorktree reuses the preserved dir instead of removing and recreating it
+// (see #163).
+func TestPreservedWorktreeSurvivesReapAndReselect(t *testing.T) {
+	repo := setupTestRepo(t)
+	workspace := filepath.Join(repo, WorkspaceDir)
+	wtDir, _, _, err := createWorktree(repo, workspace, "50", "inspect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// I am the cancelled run leaving the worktree for inspection. Cleanup at the
+	// end removes it (which also untracks and unpreserves), keeping the global
+	// tracked set empty for sibling tests.
+	preserveWorktree(wtDir)
+	defer removeWorktree(repo, wtDir)
+
+	// A daemon restart must not reap it, and must not delete the whole
+	// worktrees directory while it survives.
+	reapOrphanWorktrees(repo)
+	if _, err := os.Stat(wtDir); err != nil {
+		t.Fatalf("preserved worktree %s was reaped: %v", wtDir, err)
+	}
+	found := false
+	for _, wt := range currentWorktrees(t, repo) {
+		if filepath.Clean(wt) == filepath.Clean(wtDir) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("preserved worktree %s not registered after reap", wtDir)
+	}
+
+	// A later pass over the still-unchanged subject must reuse it, not clobber it.
+	reused, _, _, err := createWorktree(repo, workspace, "50", "inspect")
+	if err != nil {
+		t.Fatalf("reuse of preserved worktree: %v", err)
+	}
+	if filepath.Clean(reused) != filepath.Clean(wtDir) {
+		t.Fatalf("createWorktree reused %s, want the preserved %s", reused, wtDir)
+	}
+	if _, err := os.Stat(wtDir); err != nil {
+		t.Fatalf("preserved worktree %s was removed on re-select", wtDir)
+	}
+}
+
 // TestTrackedWorktreesIsolateLanes pins the contract the drain handler depends
 // on: every live worktree is listed, and clearing one lane's worktree never
 // hides another lane's, which would leak it on an abrupt exit.

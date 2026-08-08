@@ -379,7 +379,7 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 		return managerReport{}, runStats{}, err
 	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".manager.jsonl")
-	stats, err := runPhase(repoDir, runDir, a, prompt, trace)
+	stats, err := runPhase(repoDir, runDir, a, prompt, trace, runID)
 	if err != nil {
 		return managerReport{}, stats, err
 	}

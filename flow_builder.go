@@ -71,6 +71,16 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return Outcome{Status: "worktree_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("worktree: %w", err)
 	}
 	defer func() {
+		// A cancelled run leaves the worktree and its branch intact for
+		// inspection; only a finished-or-failed run is cleaned up. The
+		// preservation is durable, not just this run's live entry: it survives
+		// re-selection (createWorktree reuses it) and a daemon restart
+		// (reapOrphanWorktrees skips it), so the operator's copy is not destroyed
+		// by the next pass (see #163).
+		if liveTrack.isCancelled(runID) {
+			preserveWorktree(wtDir)
+			return
+		}
 		removeWorktree(repoDir, wtDir)
 		untrackWorktree(wtDir)
 	}()
@@ -80,7 +90,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return Outcome{Status: "prompt_failed", Branch: branch, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, BaseSHA: baseSHA}, fmt.Errorf("prompt: %w", err)
 	}
 	trace := filepath.Join(workspace, "runs", runID+".builder.jsonl")
-	stats, err := runPhase(repoDir, wtDir, a, prompt, trace)
+	stats, err := runPhase(repoDir, wtDir, a, prompt, trace, runID)
 	out := Outcome{
 		Branch: branch, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
 		BaseSHA: baseSHA,

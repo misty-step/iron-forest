@@ -78,7 +78,7 @@ func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
 		"exit 0\n"
 	wt, trace := fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
+	if _, err := runPhase(factory, wt, a, "task", trace, "r1"); err != nil {
 		t.Fatalf("runPhase: %v", err)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -146,7 +146,7 @@ func TestRunPhaseIgnoresWorktreeProjectConfig(t *testing.T) {
 	}
 
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
+	if _, err := runPhase(factory, wt, a, "task", trace, "r1"); err != nil {
 		t.Fatalf("runPhase: %v", err)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -192,7 +192,7 @@ func TestRunPhaseFallsBackToGlobalProviderConfig(t *testing.T) {
 	factory := t.TempDir() // ships no .opencode/opencode.json
 	wt, trace := fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
+	if _, err := runPhase(factory, wt, a, "task", trace, "r1"); err != nil {
 		t.Fatalf("runPhase: %v", err)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -217,7 +217,7 @@ func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
 	trace := filepath.Join(t.TempDir(), "run", "agent.jsonl")
 	fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1")
 	if err == nil {
 		t.Fatal("runPhase must fail when opencode cannot load the agent")
 	}
@@ -247,7 +247,7 @@ func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
 		"exit 0\n"
 	wt, trace := fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(t.TempDir(), wt, a, big, trace); err != nil {
+	if _, err := runPhase(t.TempDir(), wt, a, big, trace, "r1"); err != nil {
 		t.Fatalf("runPhase failed on a %d-byte prompt: %v", len(big), err)
 	}
 	got, err := os.ReadFile(stdinMarker)
@@ -308,7 +308,7 @@ func fakeOpencode(t *testing.T, script string) (string, string) {
 func TestRunPhaseFailsOnHarnessCrash(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'model call rejected\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1")
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a crashed harness")
 	}
@@ -326,7 +326,7 @@ func TestRunPhaseFailsOnKilledHarness(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":1}}}\n'\nkill -KILL $$\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1")
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a signal-killed harness")
 	}
@@ -341,7 +341,7 @@ func TestRunPhaseFailsOnCrashAfterWork(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'model call rejected\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1")
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a non-zero crash after work")
 	}
@@ -362,7 +362,7 @@ func TestRunPhaseFailsOnAnyNonZeroExit(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'ran out of steps\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	stats, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1")
 	if err == nil {
 		t.Fatal("non-zero exit must fail the run")
 	}
@@ -376,7 +376,7 @@ func TestRunPhaseFailsOnAnyNonZeroExit(t *testing.T) {
 func TestRunPhaseSuccessWithoutSteps(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nexit 0\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(t.TempDir(), wt, a, "task", trace); err != nil {
+	if _, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1"); err != nil {
 		t.Fatalf("clean zero exit must succeed: %v", err)
 	}
 }
@@ -391,7 +391,7 @@ func TestNoTokenClassDroppedBetweenTraceAndRow(t *testing.T) {
 	script := "#!/bin/sh\nprintf '%s\\n' '" + step + "'\nexit 0\n"
 	wt, trace := fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	stats, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
 		"#!/bin/sh\nprintf '{\"type\":\"shell\",\"content\":\"sleep\"}\\n'\nexec sleep 30\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe", DeadlineSeconds: 1}
 	start := time.Now()
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace, "r1")
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("a run past its declared bound returned no error")

@@ -22,7 +22,7 @@ func TestBuilderBlockedOnCredentialShapedReport(t *testing.T) {
 	defer func() { trackerFor = oldTracker }()
 
 	oldRun := runPhase
-	runPhase = func(_ string, wtDir string, _ *Agent, userPrompt, tracePath string) (runStats, error) {
+	runPhase = func(_ string, wtDir string, _ *Agent, userPrompt, tracePath, _ string) (runStats, error) {
 		// The agent is a stub: it edits a file and writes a report whose summary
 		// carries a credential-shaped token, exactly the forced report.json of the
 		// oracle.

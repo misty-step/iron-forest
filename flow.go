@@ -117,6 +117,16 @@ func serve(cfg Config, repoDir string, names []string) int {
 	reapOrphanWorktrees(repoDir)
 
 	var drain int32
+	// Serve live status and cancel over a local socket for the whole life of the
+	// daemon. It is removed on clean shutdown, and a stale socket from a crashed
+	// daemon is cleared first, so a restart never blocks on it.
+	sock, err := liveServerStart(repoDir, &drain)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "forest:", err)
+		return 1
+	}
+	defer liveServerStop(repoDir, sock)
+
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -296,6 +306,15 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 
 	runID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), s.Key)
 
+	// Claim the run in the live registry so a client can see and stop it while
+	// Act is under way. runPhase fills agent and the cancel handle once it
+	// starts the child; end runs when Act returns.
+	liveTrack.begin(&liveRun{
+		id: runID, flow: f.Name(), subject: s.Key, revision: s.Revision,
+		started: time.Now().UTC(),
+	})
+	defer liveTrack.end(runID)
+
 	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
 	out, err := f.Act(cfg, repoDir, s, runID)
 	rec := runRecord{
@@ -306,6 +325,27 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 		BaseSHA: out.BaseSHA, ReviewVerdict: out.Verdict,
 	}
 	rec.setTokens(out)
+
+	// Terminal cancellation: a run is cancelled whether runPhase returned the
+	// runCancelledError because the cancel fired while the child was still live,
+	// or a request arrived after runPhase returned but before this row was
+	// recorded. Either way the operator or supervisor stopped it, so the row
+	// names the cancellation and its reason — never a built row and never another
+	// stage failure — keeps the spend, and its worktree stays for inspection. The
+	// check runs while the run is still in the live registry (the deferred end
+	// below has not run yet), so a pending request is always visible here (see
+	// #163).
+	if liveTrack.isCancelled(runID) {
+		if err == nil {
+			err = &runCancelledError{reason: liveTrack.reason(runID)}
+		}
+		rec.Status = "cancelled"
+		rec.Error = err.Error()
+		_ = appendRun(workspaceDir(repoDir), rec)
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+		return 1
+	}
+
 	if err != nil {
 		if draining(drain) {
 			// The operator stopped the daemon; the agent exited because of that,
