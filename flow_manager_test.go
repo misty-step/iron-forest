@@ -60,52 +60,6 @@ func TestManagerPromotesExactlyOneWhenSlotEmpty(t *testing.T) {
 	}
 }
 
-// TestManagerExcludesLabeledCandidates proves a hard, deterministic filter: an
-// open item that carries any label the repository declares in
-// flows.manager.exclude_labels is never offered to the model as a candidate and
-// cannot be promoted, even when a report names it. An epic groups Subjects rather
-// than being one implementable Subject, so the label keeps the Manager from
-// wasting a Builder run on it.
-func TestManagerExcludesLabeledCandidates(t *testing.T) {
-	cfg := managerCfg()
-	cfg.ExcludeTags = append(cfg.ExcludeTags, "epic")
-	repo := newRefGitRepo(t)
-	items := []Item{
-		{ID: "1", Title: "do the thing", UpdatedAt: "u1", Body: "clear scope"},
-		{ID: "15", Title: "EPIC: many subjects", UpdatedAt: "u2", Body: "a group of work", Tags: []string{"epic"}},
-	}
-	plan, err := buildManagerPlan(cfg, repo, items, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plan.cands) != 1 || plan.cands[0].ID != "1" {
-		t.Fatalf("candidates = %v, want only the non-excluded item 1", ids(plan.cands))
-	}
-
-	// A report naming the excluded item must refuse it as out of set.
-	tk := newMemoryTracker()
-	for _, it := range items {
-		tk.seed(it)
-	}
-	promoted, err := applyManagerPick(tk, plan.cands, "15")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if promoted {
-		t.Fatal("an item with an excluded label must never be promoted")
-	}
-	if tk.items["15"].hasTag(readyTag) {
-		t.Fatal("an item with an excluded label must not carry the ready tag")
-	}
-}
-
-func ids(items []Item) []string {
-	out := make([]string, 0, len(items))
-	for _, it := range items {
-		out = append(out, it.ID)
-	}
-	return out
-}
 
 // TestManagerSlotOccupiedPromotesNothing proves a Manager pass that finds the
 // slot occupied (one healthy ready, unbranched assignment in flight) plans no
@@ -207,6 +161,35 @@ func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 		t.Fatal("a blocked item must not carry the ready tag")
 	}
 }
+
+// TestManagerNeverOffersRepositoryExcludedLabel proves the deployed YAML
+// policy reaches the production selector before the model sees candidates.
+func TestManagerNeverOffersRepositoryExcludedLabel(t *testing.T) {
+	cfg, err := loadConfig("forest.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	epic := Item{ID: "15", Title: "umbrella", UpdatedAt: "u1", Tags: []string{"epic"}}
+	leaf := Item{ID: "50", Title: "leaf", UpdatedAt: "u2"}
+	tk := newMemoryTracker()
+	tk.seed(epic)
+	tk.seed(leaf)
+	old := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = old }()
+
+	subjects, err := (managerFlow{}).Select(cfg, newRefGitRepo(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 1 {
+		t.Fatalf("subjects = %+v, want one leaf candidate", subjects)
+	}
+	if got, want := subjects[0].Revision, itemSetStamp([]Item{leaf}); got != want {
+		t.Fatalf("candidate revision = %q, want leaf revision %q", got, want)
+	}
+}
+
 
 // TestManagerReportOutsideSetRefuses proves a report naming an id outside the
 // candidate set promotes nothing (a refusal), rather than throwing an error that

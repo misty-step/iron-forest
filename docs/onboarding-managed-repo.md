@@ -72,9 +72,6 @@ flows:
     agent: manager
     interval_seconds: 60
     ready_depth: 1
-    # The Manager offers only dispatchable Subjects to its agent. Declare every
-    # label that is not one implementable item, or the Manager can promote it:
-    # Cantrip's "epic" groups Subjects, so it stays excluded here.
     exclude_labels: ["forest:failed", "parked", "epic"]
 
 projection:
@@ -85,12 +82,8 @@ projection:
 `checks:` is the whole stack declaration. Iron Forest never guesses a language.
 If a command's tool cannot start, the check fails and the note names the command.
 
-The exclusion is **repository-specific**: each repository passes its own
-non-dispatchable labels to the Manager through `flows.manager.exclude_labels`
-(for example Cantrip's `epic`, which groups Subjects instead of being one). The
-core filters by whatever labels a repository declares and never assumes one
-Tracker's hierarchy vocabulary. `epic` above is Cantrip's own; declare the labels
-your repository actually uses.
+`exclude_labels` is repository policy. Add every label that marks a
+non-dispatchable item. For example, exclude an `epic` that groups leaf items.
 
 ## 3. Declare the agents
 
@@ -110,12 +103,17 @@ agents/
     instructions.md
     prompt.md
     report.schema.json
+  manager/
+    agent.yaml
+    instructions.md
+    prompt.md
+    report.schema.json
 ```
 
 Copy this repository's `agents/` as a starting point and change the model,
-the permissions, and any language-specific skill. Do not declare a `steps` or
-`budget_seconds` key: both were deleted, and a fixed ceiling stops real work
-partway (`99b3b74`).
+permissions, and language-specific skill. Declare a positive
+`deadline_seconds`. Do not declare `steps` or `budget_seconds`; both fixed
+ceilings were deleted because they stop real work partway (`99b3b74`).
 
 ## 4. Keep the factory out of the repository's gates
 
