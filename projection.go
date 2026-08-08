@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -41,6 +42,41 @@ func projectionPRs(cfg Config, branch, state string) ([]projectionPullRequest, e
 		}
 	}
 	return prs, nil
+}
+
+// managedMergedProjectionPRs reads the bounded Host merge surface once. Only
+// same-repository, master-targeted forest branches can carry factory recovery.
+func managedMergedProjectionPRs(cfg Config) ([]projectionPullRequest, error) {
+	if !cfg.Projection.Enabled {
+		return nil, nil
+	}
+	out, err := projectionCommand("pr", "list", "-R", cfg.Repo, "--state", "merged", "--limit", "200",
+		"--json", "number,url,headRefOid,headRefName,baseRefName,isCrossRepository")
+	if err != nil {
+		return nil, err
+	}
+	var prs []projectionPullRequest
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, err
+	}
+	managed := prs[:0]
+	for _, pr := range prs {
+		if pr.IsCrossRepository || pr.BaseRefName != "master" ||
+			!strings.HasPrefix(pr.HeadRefName, BranchPrefix) || itemIDFromBranch(pr.HeadRefName) == "" {
+			continue
+		}
+		managed = append(managed, pr)
+	}
+	sort.Slice(managed, func(i, j int) bool {
+		if managed[i].HeadRefName != managed[j].HeadRefName {
+			return managed[i].HeadRefName < managed[j].HeadRefName
+		}
+		if managed[i].Number != managed[j].Number {
+			return managed[i].Number > managed[j].Number
+		}
+		return managed[i].HeadRefOID < managed[j].HeadRefOID
+	})
+	return managed, nil
 }
 
 func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error) {

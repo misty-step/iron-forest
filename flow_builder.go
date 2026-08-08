@@ -61,6 +61,34 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		}
 	}
 
+	if cfg.Projection.Enabled && cfg.Projection.MergeViaHost {
+		branches, err := forestBranches(repoDir)
+		if err != nil {
+			return Outcome{Status: "branch_failed"}, fmt.Errorf("branches: %w", err)
+		}
+		for _, branch := range branches {
+			if itemIDFromBranch(branch) == it.ID {
+				return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
+			}
+		}
+		retiring, err := retirementItemIDs(repoDir)
+		if err != nil {
+			return Outcome{Status: "branch_failed"}, fmt.Errorf("retirements: %w", err)
+		}
+		for _, id := range retiring {
+			if id == it.ID {
+				return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
+			}
+		}
+		merged, err := mergedProjectionCoverage(cfg, repoDir, []Item{it}, branches, retiring)
+		if err != nil {
+			return Outcome{Status: "notes_failed"}, fmt.Errorf("merged Projection recovery: %w", err)
+		}
+		if _, found := merged[it.ID]; found {
+			return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
+		}
+	}
+
 	a, err := loadAgent(repoDir, cfg.Flows.Builder.Agent)
 	if err != nil {
 		return Outcome{Status: "agent_failed"}, fmt.Errorf("agent: %w", err)

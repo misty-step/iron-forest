@@ -402,9 +402,6 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	branch := "forest/9-already-merged"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	runGitTest(t, repo, "checkout", "-q", "master")
-	runGitTest(t, repo, "branch", "-D", branch)
-	runGitTest(t, repo, "push", "-q", "origin", "--delete", branch)
-	runGitTest(t, repo, "fetch", "-q", "--prune", "origin")
 	writeAgentFixture(t, repo, "verifier", "verifier-model")
 	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}); err != nil {
 		t.Fatal(err)
@@ -416,13 +413,14 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	}
 	oldTracker := trackerFor
 	tk := newMemoryTracker()
-	tk.seed(Item{ID: "9", Title: "already merged"})
+	tk.seed(Item{ID: "9", Title: "renamed after build"})
 	trackerFor = func(string) Tracker { return tk }
 	defer func() { trackerFor = oldTracker }()
 
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	createCalls, mergeCalls := 0, 0
+	merged := false
 	projectionCommand = func(args ...string) ([]byte, error) {
 		state := ""
 		for i := 0; i+1 < len(args); i++ {
@@ -431,10 +429,14 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 			}
 		}
 		switch {
-		case args[1] == "list" && state == "open":
-			return []byte(`[]`), nil
-		case args[1] == "list" && state == "merged":
+		case args[1] == "list" && state == "open" && !merged:
 			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[1] == "list" && state == "merged" && merged:
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[1] == "list":
+			return []byte(`[]`), nil
+		case args[1] == "comment":
+			return nil, nil
 		case args[1] == "create":
 			createCalls++
 			return nil, errors.New("duplicate pull request")
@@ -449,12 +451,46 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Agent = "verifier"
-	cfg.Flows.Verifier.AutoMerge = true
-	subjects, err := (verifierFlow{}).Select(cfg, repo)
-	if err != nil || len(subjects) != 1 || subjects[0].Branch != branch || subjects[0].Head != reviewed {
-		t.Fatalf("Verifier Select recovery = (subjects=%#v, err=%v)", subjects, err)
+	cfg.Flows.Verifier.AutoMerge = false
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: "branch", Revision: reviewed,
+		ID: "9", Branch: branch, Head: reviewed,
+	}, "intent")
+	if err != nil || out.Status != "reviewed" {
+		t.Fatalf("initial Host intent = (status=%q, err=%v)", out.Status, err)
 	}
-	out, err := (verifierFlow{}).Act(cfg, repo, subjects[0], "recover")
+	if createCalls != 0 || mergeCalls != 0 {
+		t.Fatalf("intent made create/merge calls = %d/%d", createCalls, mergeCalls)
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || !found {
+		t.Fatalf("pending Host retirement = (found=%v, err=%v)", found, err)
+	}
+	runGitTest(t, repo, "branch", "-D", branch)
+	if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "fetch", "-q", "--prune", "origin")
+	builderSubjects, err := (builderFlow{}).Select(cfg, repo)
+	if err != nil || len(builderSubjects) != 0 {
+		t.Fatalf("Builder re-exposed retired item = (subjects=%#v, err=%v)", builderSubjects, err)
+	}
+	if err := os.RemoveAll(filepath.Join(repo, DefaultAgentsDir, "builder")); err != nil {
+		t.Fatal(err)
+	}
+	out, err = (builderFlow{}).Act(cfg, repo, Subject{
+		Key: "item-9", Kind: subjectItem, Revision: reviewed, ID: "9",
+		Item: Item{ID: "9", Title: "renamed after build"},
+	}, "stale-builder")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("stale Builder Act = (status=%q, err=%v), want stale without agent spend", out.Status, err)
+	}
+	merged = true
+
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("retirement recovery Select = (subjects=%#v, err=%v)", subjects, err)
+	}
+	out, err = (verifierFlow{}).Act(cfg, repo, subjects[0], "recover")
 	if err != nil || out.Status != "merged" {
 		t.Fatalf("Verifier merged-Projection recovery = (status=%q, err=%v)", out.Status, err)
 	}
@@ -463,6 +499,84 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	}
 	if _, err := tk.Get("9"); err == nil {
 		t.Fatal("recovery did not close the Tracker Item")
+	}
+}
+
+func TestVerifierSelectRecoversMergedProjectionAfterTitleChange(t *testing.T) {
+	branch := "forest/9-original-title"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	runGitTest(t, repo, "branch", "-D", branch)
+	if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "fetch", "-q", "--prune", "origin")
+	writeAgentFixture(t, repo, "builder", "builder-model")
+	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVerdict(repo, reviewed, verdictNote{
+		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model", DefSHA: "def", RunID: "seed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "9", Title: "renamed title"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	mergedQueries, createCalls, mergeCalls := 0, 0, 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		state := ""
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--state" {
+				state = args[i+1]
+			}
+		}
+		switch {
+		case args[1] == "list" && state == "merged":
+			mergedQueries++
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[1] == "list":
+			return []byte(`[]`), nil
+		case args[1] == "create":
+			createCalls++
+			return nil, errors.New("duplicate pull request")
+		case args[1] == "merge":
+			mergeCalls++
+			return nil, errors.New("duplicate Host merge")
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.AutoMerge = true
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Head != reviewed || subjects[0].Branch != branch {
+		t.Fatalf("merged coverage Select = (subjects=%#v, err=%v)", subjects, err)
+	}
+	if mergedQueries != 1 {
+		t.Fatalf("Verifier Select merged queries = %d, want one", mergedQueries)
+	}
+	builderSubjects, err := (builderFlow{}).Select(cfg, repo)
+	if err != nil || len(builderSubjects) != 0 {
+		t.Fatalf("Builder re-exposed merged item = (subjects=%#v, err=%v)", builderSubjects, err)
+	}
+	if err := os.RemoveAll(filepath.Join(repo, DefaultAgentsDir, "builder")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := (builderFlow{}).Act(cfg, repo, Subject{
+		Key: "item-9", Kind: subjectItem, Revision: reviewed, ID: "9", Item: Item{ID: "9", Title: "renamed title"},
+	}, "stale-builder")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("stale Builder Act = (status=%q, err=%v)", out.Status, err)
+	}
+	if createCalls != 0 || mergeCalls != 0 {
+		t.Fatalf("merged coverage made create/merge calls = %d/%d", createCalls, mergeCalls)
 	}
 }
 
@@ -509,6 +623,9 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 	defer func() { ghJSON = oldGH }()
 	closeCalls := 0
 	ghJSON = func(args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "list" {
+			return []byte(`[]`), nil
+		}
 		if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
 			closeCalls++
 			if closeCalls == 1 {
@@ -604,6 +721,9 @@ func TestPendingHostRetirementRecoversAfterBranchAutoDelete(t *testing.T) {
 	defer func() { ghJSON = oldGH }()
 	closeCalls := 0
 	ghJSON = func(args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "list" {
+			return []byte(`[]`), nil
+		}
 		if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
 			closeCalls++
 		}

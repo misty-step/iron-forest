@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -42,9 +43,11 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	}
 	var recoveries []Subject
 	retiring := make(map[string]bool, len(retirements))
+	retiringIDs := make(map[string]bool, len(retirements))
 	for _, fact := range retirements {
 		record := fact.Record
 		retiring[record.Branch] = true
+		retiringIDs[record.ItemID] = true
 		s := Subject{
 			Key: "branch-" + record.Branch, Kind: subjectRetirement,
 			Revision: record.Revision, Label: "retire " + record.Branch,
@@ -60,54 +63,11 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		}
 	}
 	if cfg.Projection.Enabled && cfg.Projection.MergeViaHost {
-		// A Host merge can remove the source branch before the next Select. Probe
-		// only open, unbranched items, so this bounded read cannot create work.
-		items, err := trackerFor(cfg.Repo).ListOpen()
+		merged, err := mergedProjectionRecoverySubjects(cfg, repoDir, branchHeads, retiringIDs)
 		if err != nil {
-			return nil, fmt.Errorf("items: %w", err)
+			return nil, fmt.Errorf("merged Projection recovery: %w", err)
 		}
-		for _, it := range items {
-			if it.ID == "" {
-				continue
-			}
-			branch := fmt.Sprintf("%s%s-%s", BranchPrefix, encodeBranchID(it.ID), slug(redactSecretShaped(it.Title)))
-			if _, found := branchHeads[branch]; found || retiring[branch] {
-				continue
-			}
-			merged, pr, inspectErr := inspectProjectMerge(cfg, branch, cfg.Flows.Verifier.Merge, "")
-			if inspectErr != nil {
-				if errors.Is(inspectErr, errHostMergeUnavailable) {
-					continue
-				}
-				return nil, fmt.Errorf("projection %s: %w", branch, inspectErr)
-			}
-			if !merged || pr.HeadRefOID == "" {
-				continue
-			}
-			verdict, hasVerdict, verdictErr := readVerdict(repoDir, pr.HeadRefOID)
-			if verdictErr != nil {
-				return nil, fmt.Errorf("verdict %s: %w", branch, verdictErr)
-			}
-			checks, hasChecks, checksErr := readChecks(repoDir, pr.HeadRefOID)
-			if checksErr != nil {
-				return nil, fmt.Errorf("checks %s: %w", branch, checksErr)
-			}
-			if !hasVerdict || verdict.Verdict != "approve" || !hasChecks || checks.Status != "pass" {
-				continue
-			}
-			key := "branch-" + branch
-			stalled, stallErr := stalledOn(repoDir, "verifier", key, pr.HeadRefOID)
-			if stallErr != nil {
-				return nil, fmt.Errorf("stalled %s: %w", key, stallErr)
-			}
-			if stalled {
-				continue
-			}
-			recoveries = append(recoveries, Subject{
-				Key: key, Kind: subjectBranch, Revision: pr.HeadRefOID,
-				Label: branch, ID: it.ID, Branch: branch, Head: pr.HeadRefOID, Item: it,
-			})
-		}
+		recoveries = append(recoveries, merged...)
 	}
 	var fresh, mergeable []Subject
 	for _, branch := range branches {
@@ -174,6 +134,52 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	recoveries = append(recoveries, fresh...)
 	recoveries = append(recoveries, mergeable...)
 	return recoveries, nil
+}
+
+func mergedProjectionRecoverySubjects(cfg Config, repoDir string, branchHeads map[string]string, retired map[string]bool) ([]Subject, error) {
+	items, err := trackerFor(cfg.Repo).ListOpen()
+	if err != nil {
+		return nil, err
+	}
+	branches := make([]string, 0, len(branchHeads))
+	for branch := range branchHeads {
+		branches = append(branches, branch)
+	}
+	retiring := make([]string, 0, len(retired))
+	for id := range retired {
+		retiring = append(retiring, id)
+	}
+	coverage, err := mergedProjectionCoverage(cfg, repoDir, items, branches, retiring)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(coverage))
+	for id := range coverage {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	itemsByID := make(map[string]Item, len(items))
+	for _, it := range items {
+		itemsByID[it.ID] = it
+	}
+	var subjects []Subject
+	for _, id := range ids {
+		pr := coverage[id]
+		key := "branch-" + pr.HeadRefName
+		stalled, err := stalledOn(repoDir, "verifier", key, pr.HeadRefOID)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", key, err)
+		}
+		if stalled {
+			continue
+		}
+		subjects = append(subjects, Subject{
+			Key: key, Kind: subjectBranch, Revision: pr.HeadRefOID,
+			Label: pr.HeadRefName, ID: id, Branch: pr.HeadRefName,
+			Head: pr.HeadRefOID, Item: itemsByID[id],
+		})
+	}
+	return subjects, nil
 }
 
 // mergeBlocked names why an approved, green branch may not land now, or returns
@@ -429,6 +435,16 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		return out, fmt.Errorf("attempts: %w", err)
 	}
 	if why := mergeBlocked(cfg, attempts); why != "" {
+		if cfg.Projection.MergeViaHost && !cfg.Flows.Verifier.AutoMerge && attempts < cfg.Flows.Fixer.Attempts {
+			if _, err := recordRetirement(repoDir, retirementRecord{
+				Branch: s.Branch, Revision: baseSHA, ItemID: it.ID, Transport: "host",
+				Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "pending",
+				Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
+			}); err != nil {
+				out.Status = "merge_failed"
+				return out, fmt.Errorf("merge: record Host retirement: %w", err)
+			}
+		}
 		out.Status = "reviewed"
 		return out, nil
 	}
