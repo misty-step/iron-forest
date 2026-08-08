@@ -119,7 +119,7 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.BaseSHA = baseSHA
 		return out, fmt.Errorf("blocked: report carries credential-shaped prose; no branch or pull request published")
 	}
-	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
+	if err := commitAndPush(cfg, repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}

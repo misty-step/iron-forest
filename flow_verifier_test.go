@@ -893,8 +893,33 @@ func TestStalledOnPersistsOutsideLedger(t *testing.T) {
 // needs to resolve a conflict: a rebased branch must be able to land, and only
 // against the commit the run actually observed.
 func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
-	_, work, _ := notesTestRepository(t)
+	root := t.TempDir()
+	origin := filepath.Join(root, "owner", "repo.git")
+	work := filepath.Join(root, "work")
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(origin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run("init", "--bare", "--initial-branch=master", origin)
+	run("init", "--initial-branch=master", work)
+	run("-C", work, "config", "user.email", "forest-test@example.com")
+	run("-C", work, "config", "user.name", "forest-test")
+	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", work, "add", "file.txt")
+	run("-C", work, "commit", "-m", "first")
+	run("-C", work, "remote", "add", "origin", origin)
+	run("-C", work, "push", "-q", "-u", "origin", "master")
 	branch := "forest/9-rewrite"
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Commit = CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
 	notesTestGit(t, work, "checkout", "-q", "-b", branch)
 	if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("branch\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -923,13 +948,13 @@ func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, "stale.txt"), []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAndPush(work, work, branch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", id, it); err == nil {
+	if err := commitAndPush(cfg, work, work, branch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", id, it); err == nil {
 		t.Fatal("a stale observed ref must lose the push")
 	}
 	if err := os.WriteFile(filepath.Join(work, "fix.txt"), []byte("repair\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAndPush(work, work, branch, observed, id, it); err != nil {
+	if err := commitAndPush(cfg, work, work, branch, observed, id, it); err != nil {
 		t.Fatalf("rebased branch with the observed ref = %v, want nil", err)
 	}
 	remote := notesTestGitOutput(t, work, "rev-parse", "refs/remotes/origin/"+branch)
