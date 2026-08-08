@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -171,16 +173,30 @@ func gateReview(wtDir, schemaPath string) (review, error) {
 	return rv, nil
 }
 
+// reviewTreeSnapshot is the complete tracked state of a review worktree at one
+// moment: for every path the index tracks, the working-tree content hash and the
+// blob the index holds for it. Two snapshots of the same revision are equal
+// exactly when no tracked file's content or index state moved in between, so a
+// full comparison can prove a review left the tree untouched.
+type reviewTreeSnapshot struct {
+	work map[string]string // path -> sha1 of the working-tree bytes; "" when gone
+	idx  map[string]string // path -> index blob sha; absent when not in the index
+}
+
 // assertCleanReviewTree refuses a Verdict from a review run that did not leave
-// the review worktree unchanged. A Verifier may write review.json — the one file
-// it is expected to produce — but a change to any other tracked file, or a move
-// of HEAD, means the agent edited the tree the run was meant to judge, so the
-// checks that back a Verdict would describe an uncommitted experiment, never
-// the committed Review revision. before is the porcelain snapshot taken before
-// the review run; only paths that changed since it are offending. It returns an
+// the tracked worktree unchanged. A Verifier may write review.json — the one
+// file it is expected to produce — but any tracked-file change between the
+// before-snapshot and the run's end, or any move of HEAD, means the agent edited
+// the tree the run was meant to judge: the checks that back a Verdict would then
+// describe an uncommitted experiment, never the committed Review revision. before
+// must be the snapshot taken immediately before the review runs. The comparison
+// is complete and symmetric — it records working-tree content and index state per
+// tracked path — so editing a file that was already dirty, staging it, or
+// restoring it to clean is refused exactly as a fresh edit is. It returns an
 // error naming every offending path when the tree drifted, and nil when only the
-// expected review record remains.
-func assertCleanReviewTree(wtDir, head, before string) error {
+// expected review record remains. review.json is untracked, so it never enters a
+// snapshot and needs no special case here.
+func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error {
 	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("review: cannot read worktree HEAD: %w", err)
@@ -188,53 +204,27 @@ func assertCleanReviewTree(wtDir, head, before string) error {
 	if cur != head {
 		return fmt.Errorf("review moved HEAD: reviewed %s -> %s", short(head), short(cur))
 	}
-	after, err := gitOutRaw(wtDir, "status", "--porcelain")
+	after, err := snapshotReviewTree(wtDir)
 	if err != nil {
-		return fmt.Errorf("review: worktree status: %w", err)
+		return fmt.Errorf("review: %w", err)
 	}
-	pre := porcelainPaths(before)
+	keys := make(map[string]bool, len(before.work)+len(after.work))
+	for path := range before.work {
+		keys[path] = true
+	}
+	for path := range after.work {
+		keys[path] = true
+	}
 	var dirty []string
-	for _, path := range sortedPaths(porcelainPaths(after)) {
-		if pre[path] {
-			continue // unchanged since the pre-review snapshot
+	for _, path := range sortedPaths(keys) {
+		if before.work[path] != after.work[path] || before.idx[path] != after.idx[path] {
+			dirty = append(dirty, path)
 		}
-		if path == "review.json" {
-			// review.json is exempt only when it is not hiding another path: a
-			// rename into review.json also moved its source, which stays in the
-			// offending set and refuses the run.
-			continue
-		}
-		dirty = append(dirty, path)
 	}
 	if len(dirty) > 0 {
 		return fmt.Errorf("review left the worktree dirty: %s", strings.Join(dirty, ", "))
 	}
 	return nil
-}
-
-// porcelainPaths returns every tracked path a porcelain line mentions, keeping
-// both sides of a rename: a rename means the source vanished and the target
-// appeared, so either side is a tracked-file change worth reporting. Untracked
-// files ("??") are not tracked edits and are ignored.
-func porcelainPaths(porcelain string) map[string]bool {
-	paths := make(map[string]bool)
-	for _, line := range strings.Split(porcelain, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if len(line) < 4 {
-			continue
-		}
-		if strings.HasPrefix(line, "??") {
-			continue // an untracked file is not a tracked-file edit
-		}
-		rest := line[3:]
-		if i := strings.Index(rest, " -> "); i >= 0 {
-			paths[rest[:i]] = true
-			paths[rest[i+4:]] = true
-			continue
-		}
-		paths[rest] = true
-	}
-	return paths
 }
 
 // sortedPaths returns the keys of m in deterministic order so refusals name
@@ -246,6 +236,48 @@ func sortedPaths(m map[string]bool) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// snapshotReviewTree captures the complete state of every tracked path: whether
+// the working file exists and its content, and the blob the index holds for it.
+func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
+	out, err := gitOutRaw(wtDir, "ls-files", "-s")
+	if err != nil {
+		return reviewTreeSnapshot{}, fmt.Errorf("review: read index: %w", err)
+	}
+	snap := reviewTreeSnapshot{
+		work: make(map[string]string),
+		idx:  make(map[string]string),
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		// "ls-files -s" emits "<mode> <blob> <stage>\t<path>".
+		meta, path, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(meta)
+		if len(fields) < 2 {
+			continue
+		}
+		snap.idx[path] = fields[1] // the index blob of the tracked path
+		snap.work[path] = workHash(wtDir, path)
+	}
+	return snap, nil
+}
+
+// workHash returns the sha1 of the working-tree bytes of path, or "" when the
+// file is absent from the working tree; a missing file means the tracked path
+// was deleted, which is as much a change as a rewrite is.
+func workHash(wtDir, path string) string {
+	data, err := os.ReadFile(filepath.Join(wtDir, path))
+	if err != nil {
+		return ""
+	}
+	sum := sha1.Sum(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // checkSchema validates a JSON run artifact against its declared JSON Schema:

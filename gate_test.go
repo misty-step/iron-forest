@@ -64,7 +64,7 @@ func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := gitOutRaw(wtDir, "status", "--porcelain")
+	before, err := snapshotReviewTree(wtDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +94,71 @@ func TestAssertCleanReviewTreeRefusesAnEdit(t *testing.T) {
 	}
 }
 
+// TestAssertCleanReviewTreeComparesFullStateBothWays is the regression test for
+// the clean-tree gate's blind spot: when a tracked file is already dirty before
+// the review (because checks ran in the same worktree), the gate must still
+// refuse a review that changes its contents while keeping it dirty, stages it, or
+// restores it to clean. A path-set diff that only reads new paths misses all of
+// these, because the file is dirty before and dirty (or clean) after, so it never
+// appears fresh. Comparing complete pre/post content and index state in both
+// directions catches every one.
+func TestAssertCleanReviewTreeComparesFullStateBothWays(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", "source.go")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A check runs in the worktree first and leaves source.go dirty, so the
+	// pre-review snapshot is taken against a tree that is not clean to begin with.
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n// dirty by check\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The review edits the already-dirty file: content changes, still dirty.
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n// edited by review\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("editing an already-dirty tracked file was not refused")
+	}
+	if !strings.Contains(err.Error(), "source.go") {
+		t.Fatalf("refusal %q does not name the edited path", err)
+	}
+
+	// The review stages the dirty file: index state changed.
+	gitT(t, wtDir, "add", "source.go")
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("staging an already-dirty tracked file was not refused")
+	}
+	if !strings.Contains(err.Error(), "source.go") {
+		t.Fatalf("refusal %q does not name the staged path", err)
+	}
+
+	// The review restores the dirty file to clean: it vanishes from the dirt set,
+	// which a forward-only path diff would never notice.
+	gitT(t, wtDir, "checkout", "--", "source.go")
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("restoring an already-dirty tracked file to clean was not refused")
+	}
+	if !strings.Contains(err.Error(), "source.go") {
+		t.Fatalf("refusal %q does not name the restored path", err)
+	}
+}
+
 // TestAssertCleanReviewTreeRefusesRenameIntoSide pins that a review cannot hide
 // an edit to a tracked file inside the review record. A rename of source.go into
 // review.json changes the tracked source, so it must be refused naming the
@@ -110,7 +175,7 @@ func TestAssertCleanReviewTreeRefusesRenameIntoReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := gitOutRaw(wtDir, "status", "--porcelain")
+	before, err := snapshotReviewTree(wtDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +212,12 @@ func TestAssertCleanReviewTreeRefusesMovedHead(t *testing.T) {
 	gitT(t, wtDir, "add", "b.txt")
 	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "review commit")
 
-	err = assertCleanReviewTree(wtDir, head, "")
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = assertCleanReviewTree(wtDir, head, before)
 	if err == nil {
 		t.Fatal("a moved HEAD was not refused")
 	}

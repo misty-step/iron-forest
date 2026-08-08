@@ -298,11 +298,13 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	if err != nil {
 		return out, stats, fmt.Errorf("review: prompt: %w", err)
 	}
-	// Snapshot the worktree before the agent runs so a review that edits any
-	// tracked file or moves HEAD can be refused on comparison with this state.
-	before, err := gitOutRaw(wtDir, "status", "--porcelain")
+	// Snapshot the tracked worktree before the agent runs so a review that edits
+	// any tracked file, stages a change, or moves HEAD can be refused on full
+	// comparison with this state. The snapshot records content and index state,
+	// so an edit to a file a check already dirtied is caught too.
+	before, err := snapshotReviewTree(wtDir)
 	if err != nil {
-		return out, stats, fmt.Errorf("review: pre-run status: %w", err)
+		return out, stats, fmt.Errorf("review: pre-run snapshot: %w", err)
 	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
 	stats, err = runPhase(repoDir, wtDir, a, prompt, trace)
