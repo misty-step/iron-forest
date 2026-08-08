@@ -59,6 +59,56 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			recoveries = append(recoveries, s)
 		}
 	}
+	if cfg.Projection.Enabled && cfg.Projection.MergeViaHost {
+		// A Host merge can remove the source branch before the next Select. Probe
+		// only open, unbranched items, so this bounded read cannot create work.
+		items, err := trackerFor(cfg.Repo).ListOpen()
+		if err != nil {
+			return nil, fmt.Errorf("items: %w", err)
+		}
+		for _, it := range items {
+			if it.ID == "" {
+				continue
+			}
+			branch := fmt.Sprintf("%s%s-%s", BranchPrefix, encodeBranchID(it.ID), slug(redactSecretShaped(it.Title)))
+			if _, found := branchHeads[branch]; found || retiring[branch] {
+				continue
+			}
+			merged, pr, inspectErr := inspectProjectMerge(cfg, branch, cfg.Flows.Verifier.Merge, "")
+			if inspectErr != nil {
+				if errors.Is(inspectErr, errHostMergeUnavailable) {
+					continue
+				}
+				return nil, fmt.Errorf("projection %s: %w", branch, inspectErr)
+			}
+			if !merged || pr.HeadRefOID == "" {
+				continue
+			}
+			verdict, hasVerdict, verdictErr := readVerdict(repoDir, pr.HeadRefOID)
+			if verdictErr != nil {
+				return nil, fmt.Errorf("verdict %s: %w", branch, verdictErr)
+			}
+			checks, hasChecks, checksErr := readChecks(repoDir, pr.HeadRefOID)
+			if checksErr != nil {
+				return nil, fmt.Errorf("checks %s: %w", branch, checksErr)
+			}
+			if !hasVerdict || verdict.Verdict != "approve" || !hasChecks || checks.Status != "pass" {
+				continue
+			}
+			key := "branch-" + branch
+			stalled, stallErr := stalledOn(repoDir, "verifier", key, pr.HeadRefOID)
+			if stallErr != nil {
+				return nil, fmt.Errorf("stalled %s: %w", key, stallErr)
+			}
+			if stalled {
+				continue
+			}
+			recoveries = append(recoveries, Subject{
+				Key: key, Kind: subjectBranch, Revision: pr.HeadRefOID,
+				Label: branch, ID: it.ID, Branch: branch, Head: pr.HeadRefOID, Item: it,
+			})
+		}
+	}
 	var fresh, mergeable []Subject
 	for _, branch := range branches {
 		head := branchHeads[branch]

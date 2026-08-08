@@ -450,10 +450,11 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Agent = "verifier"
 	cfg.Flows.Verifier.AutoMerge = true
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: "branch", Revision: reviewed,
-		ID: "9", Branch: branch, Head: reviewed,
-	}, "recover")
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Branch != branch || subjects[0].Head != reviewed {
+		t.Fatalf("Verifier Select recovery = (subjects=%#v, err=%v)", subjects, err)
+	}
+	out, err := (verifierFlow{}).Act(cfg, repo, subjects[0], "recover")
 	if err != nil || out.Status != "merged" {
 		t.Fatalf("Verifier merged-Projection recovery = (status=%q, err=%v)", out.Status, err)
 	}
