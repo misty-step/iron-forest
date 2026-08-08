@@ -93,15 +93,6 @@ func (e *runCancelledError) Error() string {
 	return "run cancelled: " + e.reason
 }
 
-// isRunCancelled reports whether err is, or wraps, a runCancelledError. A flow
-// uses it to classify an operator or supervisor cancel apart from a content or
-// agent failure, so a stopped run is recorded as cancelled and its worktree is
-// left in place for inspection.
-func isRunCancelled(err error) bool {
-	var rce *runCancelledError
-	return errors.As(err, &rce)
-}
-
 // maxTraceEventLabel caps how much of a trace event an error message carries.
 // A giant step event must not bloat a ledger row; the label names where the run
 // stopped, not the whole event.

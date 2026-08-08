@@ -131,9 +131,12 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
 	}
 	defer func() {
-		// A cancelled run leaves the worktree and its branch intact so the
-		// operator can inspect or continue the work (see #163).
+		// A cancelled run leaves the worktree and its branch intact for
+		// inspection; only a finished-or-failed run is cleaned up. The
+		// preservation is durable so re-selection and a daemon restart do not
+		// destroy the operator's copy (see #163).
 		if liveTrack.isCancelled(runID) {
+			preserveWorktree(wtDir)
 			return
 		}
 		removeWorktree(repoDir, wtDir)

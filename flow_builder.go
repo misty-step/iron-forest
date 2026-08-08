@@ -71,10 +71,14 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return Outcome{Status: "worktree_failed", Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}, fmt.Errorf("worktree: %w", err)
 	}
 	defer func() {
-		// A cancelled run leaves the worktree and its branch intact so the
-		// operator can inspect or continue the work; only a finished-or-failed
-		// run is cleaned up (see #163).
+		// A cancelled run leaves the worktree and its branch intact for
+		// inspection; only a finished-or-failed run is cleaned up. The
+		// preservation is durable, not just this run's live entry: it survives
+		// re-selection (createWorktree reuses it) and a daemon restart
+		// (reapOrphanWorktrees skips it), so the operator's copy is not destroyed
+		// by the next pass (see #163).
 		if liveTrack.isCancelled(runID) {
+			preserveWorktree(wtDir)
 			return
 		}
 		removeWorktree(repoDir, wtDir)

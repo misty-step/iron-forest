@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -104,6 +105,58 @@ func TestLiveStatusAndCancel(t *testing.T) {
 	}
 	if last.TokensIn != 7 {
 		t.Errorf("cancelled run tokensIn = %d, want 7 (spend kept)", last.TokensIn)
+	}
+}
+
+// TestCancelAcceptedBeforeAttachIsHonored pins the atomicity of the pending
+// cancel and the cancel handle: a request accepted while the run is visible but
+// before attach stored its context must still stop the run. Before the fix, the
+// later attach never honored the pending request, so a successful cancel
+// response let the run continue (see #163).
+func TestCancelAcceptedBeforeAttachIsHonored(t *testing.T) {
+	id := "20260808T000000Z-item-1"
+	cancelled := make(chan struct{})
+	lr := &liveRun{id: id, started: time.Now()}
+	liveTrack.begin(lr)
+
+	// Accept the cancel while the run has no cancel handle yet.
+	if !liveTrack.cancel(id, "early") {
+		t.Fatalf("cancel did not find the run %s", id)
+	}
+	// The run now attaches its handle; the pending request must fire it.
+	var once sync.Once
+	liveTrack.attach(id, "a", func() {
+		once.Do(func() { close(cancelled) })
+	})
+	select {
+	case <-cancelled:
+	case <-time.After(1 * time.Second):
+		t.Fatal("a cancel accepted before attach did not stop the run")
+	}
+	liveTrack.end(id)
+}
+
+// TestHoistLiveFlags pins that the advertised `forest cancel <run-id> --reason
+// ...` form is parsed: Go's FlagSet stops at the first positional token, so a
+// reason flag written after the run id must be hoisted ahead of it (see #163).
+func TestHoistLiveFlags(t *testing.T) {
+	out := hoistLiveFlags([]string{"run-1", "--reason", "blue", "--by", "bob"})
+	want := []string{"--reason", "blue", "--by", "bob", "run-1"}
+	if len(out) != len(want) {
+		t.Fatalf("hoistLiveFlags = %v, want %v", out, want)
+	}
+	for i := range want {
+		if out[i] != want[i] {
+			t.Fatalf("hoistLiveFlags = %v, want %v", out, want)
+		}
+	}
+	// Equals-form flags and a positional-only call keep working too.
+	out = hoistLiveFlags([]string{"--reason=why", "run-2"})
+	if len(out) != 2 || out[0] != "--reason=why" || out[1] != "run-2" {
+		t.Fatalf("hoistLiveFlags = %v, want [--reason=why run-2]", out)
+	}
+	if got := hoistLiveFlags([]string{"run-3"}); len(got) != 1 || got[0] != "run-3" {
+		t.Fatalf("hoistLiveFlags = %v, want [run-3]", got)
 	}
 }
 

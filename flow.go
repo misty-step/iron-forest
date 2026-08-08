@@ -325,16 +325,29 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 		BaseSHA: out.BaseSHA, ReviewVerdict: out.Verdict,
 	}
 	rec.setTokens(out)
+
+	// Terminal cancellation: a run is cancelled whether runPhase returned the
+	// runCancelledError because the cancel fired while the child was still live,
+	// or a request arrived after runPhase returned but before this row was
+	// recorded. Either way the operator or supervisor stopped it, so the row
+	// names the cancellation and its reason — never a built row and never another
+	// stage failure — keeps the spend, and its worktree stays for inspection. The
+	// check runs while the run is still in the live registry (the deferred end
+	// below has not run yet), so a pending request is always visible here (see
+	// #163).
+	if liveTrack.isCancelled(runID) {
+		if err == nil {
+			err = &runCancelledError{reason: liveTrack.reason(runID)}
+		}
+		rec.Status = "cancelled"
+		rec.Error = err.Error()
+		_ = appendRun(workspaceDir(repoDir), rec)
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+		return 1
+	}
+
 	if err != nil {
-		if isRunCancelled(err) {
-			// An operator or supervisor stopped the run over the live socket. That
-			// is not a failure: name the cancellation and its reason (who and why),
-			// keep the spent tokens, and leave the worktree and branch intact. The
-			// status never reads as agent_failed (see the 2026-08-07 manual kill).
-			// rec.Error below carries the runCancelledError text, which names who
-			// requested the cancel and why.
-			rec.Status = "cancelled"
-		} else if draining(drain) {
+		if draining(drain) {
 			// The operator stopped the daemon; the agent exited because of that,
 			// not because of its own work. Name the status so it never reads as a
 			// failure, keep the spent tokens, and leave the brake untouched.

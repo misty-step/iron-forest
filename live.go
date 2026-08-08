@@ -50,12 +50,19 @@ func (r *liveRegistry) begin(lr *liveRun) {
 
 // attach fills a run's agent and cancel handle the moment runPhase starts the
 // child. A run that never reaches runPhase keeps the zero values, which is a
-// truthful "claimed but not yet started".
+// truthful "claimed but not yet started". If a cancel was already accepted while
+// the run was visible but before this handle was stored, the pending request is
+// honored immediately so the run never outlives an accepted cancellation: a
+// cancel call and this attach serialize on the same lock, so the pending
+// cancelReason is always visible here (see #163).
 func (r *liveRegistry) attach(id, agent string, cancel context.CancelFunc) {
 	r.mu.Lock()
 	if lr, ok := r.runs[id]; ok {
 		lr.agent = agent
 		lr.cancel = cancel
+		if cancel != nil && lr.cancelReason != "" {
+			lr.cancel()
+		}
 	}
 	r.mu.Unlock()
 }
@@ -69,16 +76,20 @@ func (r *liveRegistry) end(id string) {
 
 // cancel records who requested the cancellation and why, then stops the run's
 // context. It reports whether the run existed. Reason joins who and why in one
-// auditable string; an empty request records "operator".
+// auditable string; an empty request records "operator". The cancel handle is
+// invoked under the mutex, never after releasing it, so a concurrent attach that
+// reads the pending reason under the same lock and a concurrent cancel both
+// observe the handle through one serialized access: no unsynchronized read of
+// lr.cancel can race a write in attach (see #163).
 func (r *liveRegistry) cancel(id, reason string) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	lr, ok := r.runs[id]
 	if ok {
 		lr.cancelReason = reason
-	}
-	r.mu.Unlock()
-	if ok && lr.cancel != nil {
-		lr.cancel()
+		if lr.cancel != nil {
+			lr.cancel()
+		}
 	}
 	return ok
 }
@@ -300,7 +311,12 @@ func cmdLiveCancel(repoDir string, args []string) int {
 	by := "operator"
 	fs.StringVar(&reason, "reason", "", "why the run is cancelled")
 	fs.StringVar(&by, "by", "operator", "who requested the cancel")
-	if err := fs.Parse(args); err != nil {
+	// Go's FlagSet stops parsing at the first non-flag argument, so the
+	// advertised `forest cancel <run-id> --reason ...` form would leave the
+	// reason flag unparsed and reject it as extra arguments. Hoist every flag
+	// (and its value) to the front of the list so the flags parse no matter
+	// where they appear relative to the positional run id (see #163).
+	if err := fs.Parse(hoistLiveFlags(args)); err != nil {
 		if err == flag.ErrHelp {
 			return 0
 		}
@@ -319,4 +335,34 @@ func cmdLiveCancel(repoDir string, args []string) int {
 	}
 	fmt.Printf("cancelling %s\n", fs.Arg(0))
 	return 0
+}
+
+// hoistLiveFlags reorders an argument list so every flag token (and the value
+// of a two-token flag) comes before every positional token. Go's FlagSet stops
+// at the first non-flag token, so without this a flag written after a
+// positional — `forest cancel <run-id> --reason why` — is never parsed. The
+// recognized value-taking flags are reason and by; every other dash-prefixed
+// token (such as -h) is left as a flag too, and every other token is positional.
+func hoistLiveFlags(args []string) []string {
+	var flags, rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--reason" || a == "-reason" ||
+			a == "--by" || a == "-by":
+			flags = append(flags, a)
+			if i+1 < len(args) {
+				flags = append(flags, args[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "--reason=") ||
+			strings.HasPrefix(a, "--by="):
+			flags = append(flags, a)
+		case strings.HasPrefix(a, "-"):
+			flags = append(flags, a)
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return append(flags, rest...)
 }
