@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -224,6 +225,107 @@ func TestAssertCleanReviewTreeRefusesMovedHead(t *testing.T) {
 	if !strings.Contains(err.Error(), "HEAD") {
 		t.Fatalf("refusal %q does not name HEAD", err)
 	}
+}
+
+// TestAssertCleanReviewTreeRefusesModeTypeChanges is the regression test for the
+// clean-tree gate reading only bytes: a chmod, a swap of a tracked regular file
+// for an equal-content symlink, and a swap for a FIFO all change git-tracked
+// state even though the read bytes are identical or unreadable, so each must be
+// refused naming the path. The FIFO case also pins that fingerprinting never
+// blocks reading a non-regular object: opening it for content would hang.
+func TestAssertCleanReviewTreeRefusesModeTypeChanges(t *testing.T) {
+	wantRefused := func(t *testing.T, wtDir, head string, before reviewTreeSnapshot) {
+		t.Helper()
+		err := assertCleanReviewTree(wtDir, head, before)
+		if err == nil {
+			t.Fatal("a mode/type change to a tracked path was not refused")
+		}
+		if !strings.Contains(err.Error(), "mode.txt") {
+			t.Fatalf("refusal %q does not name the changed path", err)
+		}
+	}
+
+	// A chmod changes the tracked mode while leaving the bytes identical.
+	t.Run("chmod", func(t *testing.T) {
+		wtDir := t.TempDir()
+		gitT(t, wtDir, "init")
+		if err := os.WriteFile(filepath.Join(wtDir, "mode.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitT(t, wtDir, "add", "mode.txt")
+		gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+		head, err := gitOut(wtDir, "rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := snapshotReviewTree(wtDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(wtDir, "mode.txt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		wantRefused(t, wtDir, head, before)
+	})
+
+	// Replacing a tracked regular file with a symlink whose target has the same
+	// content must still refuse: the old byte-read followed the link and would
+	// have returned the identical bytes, missing the change.
+	t.Run("equalContentSymlink", func(t *testing.T) {
+		wtDir := t.TempDir()
+		gitT(t, wtDir, "init")
+		if err := os.WriteFile(filepath.Join(wtDir, "mode.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitT(t, wtDir, "add", "mode.txt")
+		gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+		head, err := gitOut(wtDir, "rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := snapshotReviewTree(wtDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer := filepath.Join(wtDir, "peer.txt")
+		if err := os.WriteFile(peer, []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(wtDir, "mode.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("peer.txt", filepath.Join(wtDir, "mode.txt")); err != nil {
+			t.Fatal(err)
+		}
+		wantRefused(t, wtDir, head, before)
+	})
+
+	// Replacing a tracked regular file with a FIFO changes the object type; the
+	// snapshot must name it without ever opening the FIFO, which would block.
+	t.Run("fifo", func(t *testing.T) {
+		wtDir := t.TempDir()
+		gitT(t, wtDir, "init")
+		if err := os.WriteFile(filepath.Join(wtDir, "mode.txt"), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitT(t, wtDir, "add", "mode.txt")
+		gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+		head, err := gitOut(wtDir, "rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := snapshotReviewTree(wtDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(wtDir, "mode.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(filepath.Join(wtDir, "mode.txt"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		wantRefused(t, wtDir, head, before)
+	})
 }
 
 // TestParseChangedKeepsRenameDestination pins that a rename reports the path

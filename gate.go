@@ -174,13 +174,14 @@ func gateReview(wtDir, schemaPath string) (review, error) {
 }
 
 // reviewTreeSnapshot is the complete tracked state of a review worktree at one
-// moment: for every path the index tracks, the working-tree content hash and the
-// blob the index holds for it. Two snapshots of the same revision are equal
-// exactly when no tracked file's content or index state moved in between, so a
-// full comparison can prove a review left the tree untouched.
+// moment: for every path the index tracks, the full index entry (mode, blob,
+// stage) and a working-tree fingerprint of its type, mode and content. Two
+// snapshots of the same revision are equal exactly when no tracked path's type,
+// mode, content, index entry or symlink target moved in between, so a full
+// comparison can prove a review left the tree untouched.
 type reviewTreeSnapshot struct {
-	work map[string]string // path -> sha1 of the working-tree bytes; "" when gone
-	idx  map[string]string // path -> index blob sha; absent when not in the index
+	work map[string]string // path -> fingerprint of the working-tree object; "" when gone
+	idx  map[string]string // path -> whole "<mode> <blob> <stage>" index entry
 }
 
 // assertCleanReviewTree refuses a Verdict from a review run that did not leave
@@ -190,12 +191,13 @@ type reviewTreeSnapshot struct {
 // the tree the run was meant to judge: the checks that back a Verdict would then
 // describe an uncommitted experiment, never the committed Review revision. before
 // must be the snapshot taken immediately before the review runs. The comparison
-// is complete and symmetric — it records working-tree content and index state per
-// tracked path — so editing a file that was already dirty, staging it, or
-// restoring it to clean is refused exactly as a fresh edit is. It returns an
-// error naming every offending path when the tree drifted, and nil when only the
-// expected review record remains. review.json is untracked, so it never enters a
-// snapshot and needs no special case here.
+// is complete and symmetric — it records the working tree's type, mode and
+// content, and the full index entry, per tracked path — so editing a file that
+// was already dirty, staging it, chmodding it, swapping it for an equal-content
+// symlink, or restoring it to clean is refused exactly as a fresh edit is. It
+// returns an error naming every offending path when the tree drifted, and nil
+// when only the expected review record remains. review.json is untracked, so it
+// never enters a snapshot and needs no special case here.
 func assertCleanReviewTree(wtDir, head string, before reviewTreeSnapshot) error {
 	cur, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
@@ -238,8 +240,12 @@ func sortedPaths(m map[string]bool) []string {
 	return paths
 }
 
-// snapshotReviewTree captures the complete state of every tracked path: whether
-// the working file exists and its content, and the blob the index holds for it.
+// snapshotReviewTree captures the complete state of every tracked path: the
+// whole index entry (mode, blob, stage) and a working-tree fingerprint that
+// records the object's type, mode and, for a regular file, its bytes or, for a
+// symlink, its target. The fingerprint never reads the content of a non-regular
+// object, so a path a review replaced with a FIFO, device or stream cannot make
+// the snapshot block.
 func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
 	out, err := gitOutRaw(wtDir, "ls-files", "-s")
 	if err != nil {
@@ -258,26 +264,59 @@ func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
 		if !ok {
 			continue
 		}
-		fields := strings.Fields(meta)
-		if len(fields) < 2 {
-			continue
-		}
-		snap.idx[path] = fields[1] // the index blob of the tracked path
-		snap.work[path] = workHash(wtDir, path)
+		// Record the whole index entry, not just the blob: git tracks the mode
+		// separately, so a staged chmod (same blob, new mode) would otherwise
+		// sail through the clean-tree comparison.
+		snap.idx[path] = meta
+		snap.work[path] = workState(wtDir, path)
 	}
 	return snap, nil
 }
 
-// workHash returns the sha1 of the working-tree bytes of path, or "" when the
-// file is absent from the working tree; a missing file means the tracked path
-// was deleted, which is as much a change as a rewrite is.
-func workHash(wtDir, path string) string {
-	data, err := os.ReadFile(filepath.Join(wtDir, path))
+// workState fingerprints a tracked path's working-tree object. It captures
+// everything git tracks — type, mode and, for a regular file its bytes or, for a
+// symlink its target — so a chmod, a regular-file-for-symlink swap, or a symlink
+// retarget all change the fingerprint even when the read bytes would not. It
+// stats with Lstat, never the following stat, and reads content only from a real
+// regular file (bounded by its size) or a symlink's target, so a path replaced by
+// a FIFO, socket, device or an endless stream is fingerprinted by its type alone
+// and never blocks the gate. "" means the tracked path is absent, i.e. it was
+// deleted, which is as much a change as a rewrite is.
+func workState(wtDir, path string) string {
+	full := filepath.Join(wtDir, path)
+	fi, err := os.Lstat(full)
 	if err != nil {
 		return ""
 	}
-	sum := sha1.Sum(data)
-	return hex.EncodeToString(sum[:])
+	mode := fi.Mode()
+	h := sha1.New()
+	fmt.Fprintf(h, "%04o", mode.Perm()) // the mode bits, so chmod changes the hash
+	switch {
+	case mode&os.ModeSymlink != 0:
+		target, err := os.Readlink(full)
+		if err != nil {
+			target = "\x00unreadable"
+		}
+		fmt.Fprintf(h, "link:%s", target)
+	case mode&os.ModeNamedPipe != 0:
+		h.Write([]byte("type:fifo"))
+	case mode&os.ModeSocket != 0:
+		h.Write([]byte("type:socket"))
+	case mode&os.ModeDevice != 0:
+		h.Write([]byte("type:device"))
+	case mode.IsDir():
+		h.Write([]byte("type:dir"))
+	case mode.IsRegular():
+		data, err := os.ReadFile(full)
+		if err != nil {
+			data = nil
+		}
+		fmt.Fprintf(h, "type:file;len:%d;", len(data))
+		h.Write(data)
+	default:
+		fmt.Fprintf(h, "type:%d", mode)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // checkSchema validates a JSON run artifact against its declared JSON Schema:
