@@ -396,25 +396,35 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item) error 
 		return err
 	}
 	if cfg.Projection.MergeViaHost {
-		// The host lands the merge. A durable pending claim is written before the
-		// merge is committed to, so from that moment the subject is never fresh
-		// work even while its item is open; the claim survives a crash so restart
-		// can resolve it. On any projectMerge error the claim is deliberately left
-		// in place: an ambiguous host/network error may mean the merge actually
-		// landed, so it is never dropped here. Reconciliation observes the host to
-		// graduate the claim to landed or roll it back.
-		if err := markMergedClaim(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
-			return fmt.Errorf("merge: merged claim: %w", err)
-		}
-		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
-			return fmt.Errorf("merge: projection: %w", err)
-		}
-		if err := confirmMerged(repoDir, it.ID); err != nil {
-			return fmt.Errorf("merge: confirm merged: %w", err)
-		}
-		return finishMerge(cfg, repoDir, branch, reviewed, it)
+		return mergeHostPath(cfg, repoDir, branch, reviewed, it)
 	}
 	return mergeGitPath(cfg, repoDir, branch, reviewed, it)
+}
+
+// mergeHostPath lands an approved branch on the host path. It holds mergeCoord
+// for the whole claim→merge→confirm sequence, the same lock reconcileMerged takes
+// while observing and mutating one subject's claim, so a concurrent
+// reconciliation pass can never observe the pull request as open, drop the pending
+// claim, and then let the host merge succeed with no claim left to confirm. A
+// durable pending claim is written before the merge is committed to, so from that
+// moment the subject is never fresh work even while its item is open; the claim
+// survives a crash so restart can resolve it. On any projectMerge error the claim
+// is deliberately left in place: an ambiguous host/network error may mean the
+// merge actually landed, so it is never dropped here. Reconciliation observes the
+// host to graduate the claim to landed or roll it back.
+func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item) error {
+	mergeCoord.Lock()
+	defer mergeCoord.Unlock()
+	if err := markMergedClaim(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+		return fmt.Errorf("merge: merged claim: %w", err)
+	}
+	if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
+		return fmt.Errorf("merge: projection: %w", err)
+	}
+	if err := confirmMerged(repoDir, it.ID); err != nil {
+		return fmt.Errorf("merge: confirm merged: %w", err)
+	}
+	return finishMerge(cfg, repoDir, branch, reviewed, it)
 }
 
 // mergeGitPath lands an approved branch on the git path: it builds one merge

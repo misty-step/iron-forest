@@ -2,9 +2,12 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
 
 // closeTracker is a Tracker stub whose Close can be forced to fail (item #190):
@@ -489,5 +492,188 @@ func TestProjectMergeErrorLeavesClaimForReconciliation(t *testing.T) {
 	}
 	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out != "" {
 		t.Fatalf("landed branch %q not deleted after reconcile: %s", branch, out)
+	}
+}
+
+// TestMergeHostMergeSerializesWithReconcileOverPendingClaim covers the reviewer's
+// interleaving for item #190: reconcileMerged runs concurrently with the verifier's
+// in-flight host merge and did not serialize with it. On the flawed path, between
+// markMergedClaim and projectMerge reconciliation would observe the pull request
+// as open, drop the claim, and then let the merge succeed with no claim left to
+// confirm, so confirmMerged failed with "no claim recorded" and finishMerge never
+// ran. mergeHostPath now holds mergeCoord across the claim→merge→confirm sequence,
+// and reconcileMerged holds the same lock per subject, so the rollback can never
+// race the in-flight merge: the merge always completes and the item is closed.
+func TestMergeHostMergeSerializesWithReconcileOverPendingClaim(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	reviewed := remoteBranchHead(t, repo, branch)
+	rebaseTestGit(t, repo, "checkout", "-q", "master")
+
+	st := &closeTracker{items: []Item{{ID: "9", Title: "change"}}}
+	old := trackerFor
+	trackerFor = func(string) Tracker { return st }
+	defer func() { trackerFor = old }()
+
+	mergeStarted := make(chan struct{})
+	releaseMerge := make(chan struct{})
+	sawOpen := make(chan struct{}, 1)
+
+	oldProj := projectionCommand
+	defer func() { projectionCommand = oldProj }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) > 1 && args[1] == "list" {
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9"}]`), nil
+		}
+		if len(args) > 1 && args[1] == "view" {
+			select {
+			case sawOpen <- struct{}{}:
+			default:
+			}
+			return []byte(`{"state":"open"}`), nil // observe the PR before the merge
+		}
+		if len(args) > 1 && args[1] == "merge" {
+			select {
+			case mergeStarted <- struct{}{}:
+			default:
+			}
+			<-releaseMerge  // park the merge mid-flight
+			return nil, nil // the host merges
+		}
+		return nil, nil
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Merge = "squash"
+	it := Item{ID: "9", Title: "change"}
+
+	// A crash before a previous merge ran left a pending claim, so the claim
+	// already exists when the resumed in-flight merge re-derives the world.
+	if err := markMergedClaim(repo, "9", mergedNote{Branch: branch, Revision: reviewed}); err != nil {
+		t.Fatalf("markMergedClaim: %v", err)
+	}
+
+	var mergeErr, recErr error
+	mergeDone := make(chan struct{})
+	go func() {
+		mergeErr = mergeVerified(cfg, repo, branch, reviewed, it)
+		close(mergeDone)
+	}()
+	<-mergeStarted // the merge is committed to and mid-flight
+
+	reconcileDone := make(chan struct{})
+	go func() {
+		recErr = reconcileMerged(cfg, repo)
+		close(reconcileDone)
+	}()
+
+	// Give reconciliation a moment to try to observe the claim. On a serialized
+	// implementation it blocks on mergeCoord and must not see the claim as open;
+	// on the flawed path it drops the claim, which makes the bug observable.
+	select {
+	case <-sawOpen:
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(releaseMerge)
+
+	<-mergeDone
+	<-reconcileDone
+
+	if mergeErr != nil {
+		t.Fatalf("mergeVerified: %v", mergeErr)
+	}
+	if recErr != nil {
+		t.Fatalf("reconcileMerged: %v", recErr)
+	}
+	if len(st.closed) == 0 || st.closed[len(st.closed)-1] != "9" {
+		t.Fatalf("merged item not closed after merge: %v", st.closed)
+	}
+	note, ok, err := mergedNoteFor(repo, "9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !note.landed() {
+		t.Fatalf("merged fact not landed after merge: %+v ok=%v", note, ok)
+	}
+	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out != "" {
+		t.Fatalf("merged branch %q still present: %s", branch, out)
+	}
+	if len(sawOpen) != 0 {
+		t.Fatalf("reconciliation observed the claim open mid-merge: the rollback raced the in-flight merge")
+	}
+}
+
+// TestMarkMergedConcurrentIsIdempotent pins the reviewer's point for item #190
+// that markMerged must not surface CAS errors on concurrent retries despite being
+// described as idempotent. Many passes racing the same compare-and-set all return
+// nil and exactly one durable fact is recorded.
+func TestMarkMergedConcurrentIsIdempotent(t *testing.T) {
+	repo := setupTestRepo(t)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []error
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := markMerged(repo, "9", mergedNote{Branch: "forest/9-change", Revision: "deadbeef"}); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		t.Errorf("markMerged concurrent: %v", err)
+	}
+	refs, err := listRefs(repo, mergedRefPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("merged refs = %d, want exactly 1 durable fact", len(refs))
+	}
+}
+
+// TestDropMergedClaimConcurrentIsIdempotent pins the companion point for item
+// #190: dropMergedClaim must not surface CAS errors when many passes roll a pending
+// claim back at once. All return nil, and the claim is gone afterwards.
+func TestDropMergedClaimConcurrentIsIdempotent(t *testing.T) {
+	repo := setupTestRepo(t)
+	if err := markMergedClaim(repo, "9", mergedNote{Branch: "forest/9-change", Revision: "deadbeef"}); err != nil {
+		t.Fatalf("markMergedClaim: %v", err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []error
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := dropMergedClaim(repo, "9"); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("dropMergedClaim: %w", err))
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		t.Errorf("%v", err)
+	}
+	set, err := mergedIDs(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set["9"] {
+		t.Fatal("pending claim not dropped after concurrent rollback")
 	}
 }
