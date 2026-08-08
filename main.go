@@ -42,6 +42,15 @@ func run(args []string) int {
 		return 1
 	}
 	api := NewCore(repoDir)
+	// Route config validation through the core API, but keep the pre-#176
+	// ordering: load forest.yaml before dispatching any command, so every
+	// surface (including stats, agents, show, version, selfcheck, and watch)
+	// fails with the same "forest: <err>" before parsing flags or touching
+	// state.
+	if _, err := api.Config(); err != nil {
+		fmt.Fprintln(os.Stderr, "forest:", err)
+		return 1
+	}
 	switch args[0] {
 	case "list":
 		return cmdList(api)
