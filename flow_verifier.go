@@ -295,7 +295,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			return out, fmt.Errorf("merge: %w (attempt record failed: %v)", err, berr)
 		}
 		trackerFor(cfg.Repo).SetTags(it.ID, []string{failedLabel}, nil)
-		_ = trackerFor(cfg.Repo).Comment(it.ID, "Merge blocked: "+err.Error())
+		_ = trackerFor(cfg.Repo).Comment(it.ID, "Merge blocked: "+redactSecretShaped(err.Error()))
 		return out, err
 	}
 	out.Status = "merged"

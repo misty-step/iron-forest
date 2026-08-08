@@ -29,7 +29,7 @@ type Subject struct {
 // An Outcome is what one Act call did. It becomes one ledger row. There is no
 // money in it: spend is bounded by the provider key, not counted here.
 type Outcome struct {
-	Status  string // done | reviewed | merged | fixed | skipped | <stage>_failed
+	Status  string // done | reviewed | merged | fixed | skipped | blocked | <stage>_failed
 	Branch  string
 	PRURL   string
 	Verdict string

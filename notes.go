@@ -136,9 +136,13 @@ func writeNote(repoDir, ref, sha string, value any) error {
 	if err != nil {
 		return fmt.Errorf("encode %s note: %w", ref, err)
 	}
+	// A note is pushed to the remote, so its stored text is outbound: a check
+	// that printed an environment variable, or a verdict note that quoted one,
+	// must be scrubbed before it becomes a durable remote fact.
+	noteText := redactSecretShaped(string(body))
 	var pushErr error
 	for attempt := range 3 {
-		if err := git(repoDir, "notes", "--ref="+ref, "add", "-m", string(body), sha); err != nil {
+		if err := git(repoDir, "notes", "--ref="+ref, "add", "-m", noteText, sha); err != nil {
 			if noteAlreadyExists(err) {
 				// The note already exists locally. It is only a durable fact if
 				// the remote also holds it, so settle the disagreement before

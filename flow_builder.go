@@ -109,6 +109,16 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
+	// Agent-authored prose is published verbatim into the pull-request body, so
+	// a credential-shaped summary or note is a seam a secret could cross. Refuse
+	// the whole run before any branch is pushed or any projection is opened, and
+	// record it as blocked so an operator resolves the report instead of a broken
+	// pull request reaching the host.
+	if secretShaped(rep.Summary) || secretShaped(rep.Notes) {
+		out.Status = "blocked"
+		out.BaseSHA = baseSHA
+		return out, fmt.Errorf("blocked: report carries credential-shaped prose; no branch or pull request published")
+	}
 	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
@@ -139,5 +149,7 @@ func builderProjectionBody(it Item, rep report, changed []string) string {
 	if notes := strings.TrimSpace(rep.Notes); notes != "" && !strings.EqualFold(notes, "none") {
 		fmt.Fprintf(&b, "\nNotes: %s\n", notes)
 	}
-	return b.String()
+	// Defense in depth on the projection body itself: even a path that does not
+	// block still never ships a secret-shaped token verbatim.
+	return redactSecretShaped(b.String())
 }
