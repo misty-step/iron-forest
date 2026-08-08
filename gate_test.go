@@ -481,6 +481,104 @@ func TestAssertCleanReviewTreeRefusesEditedUntrackedFixture(t *testing.T) {
 	}
 }
 
+// TestSnapshotReviewTreeHandlesNewlinedPath pins #191's tracked-index parser
+// fix: git quotes a path containing a newline, tab or backslash in newline
+// -delimited `ls-files -s` output. Recording such an edit under the quoted key
+// made the before and after snapshots compare equal even though the tracked file
+// changed. The NUL-delimited read must key the exact path, so an edit to a
+// newline-named tracked file is refused naming it.
+func TestSnapshotReviewTreeHandlesNewlinedPath(t *testing.T) {
+	wtDir := t.TempDir()
+	gitT(t, wtDir, "init")
+	name := "a\nb.txt" // a newline, which git quotes in newline output
+	if err := os.WriteFile(filepath.Join(wtDir, name), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, wtDir, "add", ".")
+	gitT(t, wtDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+	head, err := gitOut(wtDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, name), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assertCleanReviewTree(wtDir, head, before)
+	if err == nil {
+		t.Fatal("editing a tracked path with a newline in its name was not refused")
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Fatalf("refusal %q does not name the newlined path", err)
+	}
+}
+
+// TestWorkStateDoesNotFollowSymlinkedParent pins #191's bounded-memory fix for
+// the fingerprint: os.Lstat only avoids following the final path component, so a
+// tracked leaf beneath a symlinked parent would otherwise be resolved through the
+// link and read from the link's target — a huge external file a verifier could
+// plant to stall or exhaust the factory before the clean-tree refusal is emitted.
+// workState must refuse to follow the symlinked parent and fingerprint the leaf by
+// its own type and mode alone, so the fingerprint is independent of the target's
+// content and size.
+func TestWorkStateDoesNotFollowSymlinkedParent(t *testing.T) {
+	wtDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wtDir, "one"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wtDir, "two"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "one", "a.go"), []byte("content A\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The second target is much bigger; both must be invisible to the fingerprint.
+	if err := os.WriteFile(filepath.Join(wtDir, "two", "a.go"), []byte(strings.Repeat("z", 1<<20)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wtDir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "src", "a.go"), []byte("tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(wtDir, "src")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("one", filepath.Join(wtDir, "src")); err != nil {
+		t.Fatal(err)
+	}
+	viaOne := workState(wtDir, "src/a.go")
+	// Swap the symlink target to the other, larger directory.
+	if err := os.Remove(filepath.Join(wtDir, "src")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("two", filepath.Join(wtDir, "src")); err != nil {
+		t.Fatal(err)
+	}
+	viaTwo := workState(wtDir, "src/a.go")
+	if viaOne != viaTwo {
+		t.Fatalf("leaf fingerprint followed the symlinked parent: one=%q two=%q", viaOne, viaTwo)
+	}
+	// The unsymlinked leaf of the same name and content fingerprints as a real
+	// file, so the via-symlink marker is what differs, not the bytes.
+	if err := os.Remove(filepath.Join(wtDir, "src")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wtDir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "src", "a.go"), []byte("tracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if realFP := workState(wtDir, "src/a.go"); viaOne == realFP {
+		t.Fatal("via-symlink fingerprint equals the real file's fingerprint")
+	}
+}
+
 // TestParseChangedKeepsRenameDestination pins that a rename reports the path
 // that now exists, so the pull request body names real files.
 func TestParseChangedKeepsRenameDestination(t *testing.T) {

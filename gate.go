@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -344,7 +345,7 @@ func sortedPaths(m map[string]bool) []string {
 // fingerprinted the same way as a tracked leaf so an in-place edit of an
 // existing fixture changes the comparison even though the path set does not.
 func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
-	out, err := gitOutRaw(wtDir, "ls-files", "-s")
+	out, err := gitOutRaw(wtDir, "ls-files", "-s", "-z")
 	if err != nil {
 		return reviewTreeSnapshot{}, fmt.Errorf("review: read index: %w", err)
 	}
@@ -354,12 +355,16 @@ func snapshotReviewTree(wtDir string) (reviewTreeSnapshot, error) {
 		dirs:      make(map[string]string),
 		untracked: make(map[string]string),
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if line == "" {
+	// "-z" emits each entry NUL-terminated and never quotes a path, so a tracked
+	// file whose name holds a newline, tab or backslash is keyed exactly as git
+	// tracks it. Newline-delimited "-s" output quotes such paths ("a\nb.txt"),
+	// which would record the edit under a key that never matches.
+	for _, entry := range strings.Split(out, "\x00") {
+		if entry == "" {
 			continue
 		}
 		// "ls-files -s" emits "<mode> <blob> <stage>\t<path>".
-		meta, path, ok := strings.Cut(line, "\t")
+		meta, path, ok := strings.Cut(entry, "\t")
 		if !ok {
 			continue
 		}
@@ -409,10 +414,13 @@ func parentDirs(path string) []string {
 // symlink its target — so a chmod, a regular-file-for-symlink swap, or a symlink
 // retarget all change the fingerprint even when the read bytes would not. It
 // stats with Lstat, never the following stat, and reads content only from a real
-// regular file (bounded by its size) or a symlink's target, so a path replaced by
-// a FIFO, socket, device or an endless stream is fingerprinted by its type alone
-// and never blocks the gate. "" means the tracked path is absent, i.e. it was
-// deleted, which is as much a change as a rewrite is.
+// regular file, streamed through a bounded buffer, or from a symlink's target, so
+// a path replaced by a FIFO, socket, device, an endless stream, or a huge sparse
+// file is fingerprinted without blocking or exhausting the factory. A regular
+// leaf under a symlinked parent is fingerprinted by its own type and mode without
+// following the link, so a verifier cannot point a tracked directory at a huge
+// external file and stall the refusal. "" means the tracked path is absent, i.e.
+// it was deleted, which is as much a change as a rewrite is.
 func workState(wtDir, path string) string {
 	full := filepath.Join(wtDir, path)
 	fi, err := os.Lstat(full)
@@ -438,16 +446,58 @@ func workState(wtDir, path string) string {
 	case mode.IsDir():
 		h.Write([]byte("type:dir"))
 	case mode.IsRegular():
-		data, err := os.ReadFile(full)
-		if err != nil {
-			data = nil
+		if symlinkedAncestor(wtDir, path) {
+			// Reading the leaf would resolve through a symlinked parent into its
+			// target, a huge external file a verifier could plant to stall or
+			// exhaust the factory before the refusal is emitted. Refuse to follow
+			// it: fingerprint the leaf's own type and mode, which still changes
+			// when the topology above it does.
+			fmt.Fprintf(h, "type:file;via:symlinked-parent;perm:%04o", mode.Perm())
+			break
 		}
-		fmt.Fprintf(h, "type:file;len:%d;", len(data))
-		h.Write(data)
+		f, err := os.Open(full)
+		if err != nil {
+			fmt.Fprintf(h, "type:file;unreadable")
+			break
+		}
+		// Hash through a bounded buffer rather than slurping the whole file, so a
+		// path a verifier truncated sparse to a huge size cannot exhaust memory:
+		// the digest is streamed in fixed-size chunks.
+		fmt.Fprintf(h, "type:file;perm:%04o;data:", mode.Perm())
+		n, copyErr := io.Copy(h, f)
+		f.Close()
+		if copyErr != nil {
+			fmt.Fprintf(h, ";read-error")
+			break
+		}
+		fmt.Fprintf(h, ";len:%d", n)
 	default:
 		fmt.Fprintf(h, "type:%d", mode)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// symlinkedAncestor reports whether any parent directory of rel, walking from
+// the worktree root down, is a symlink. os.Lstat only avoids following the final
+// component of a path, so a leaf beneath a symlinked parent would otherwise be
+// resolved through it into the link target. Refusing to follow keeps a verifier
+// from pointing a tracked directory at a huge external file and stalling or
+// exhausting the factory before the clean-tree refusal is emitted. It returns
+// false when a parent no longer exists, because the leaf that names it then
+// fingerprints as absent on its own.
+func symlinkedAncestor(wtDir, rel string) bool {
+	dir := filepath.Dir(rel)
+	for dir != "." && dir != "" && dir != string(filepath.Separator) {
+		fi, err := os.Lstat(filepath.Join(wtDir, dir))
+		if err != nil {
+			return false
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		dir = filepath.Dir(dir)
+	}
+	return false
 }
 
 // checkSchema validates a JSON run artifact against its declared JSON Schema:

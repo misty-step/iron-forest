@@ -325,14 +325,18 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 		return out, stats, fmt.Errorf("review: pre-run snapshot: %w", err)
 	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
-	stats, err = runPhase(repoDir, wtDir, a, prompt, trace)
-	if err != nil {
-		return out, stats, fmt.Errorf("review: %w", err)
-	}
+	stats, phaseErr := runPhase(repoDir, wtDir, a, prompt, trace)
 	// The worktree started at the Review revision; refuse a Verdict if the review
 	// edited a tracked file or moved HEAD since the snapshot, naming what changed.
+	// This assertion runs even when the phase crashed or timed out, so a verifier
+	// that edits a tracked file and then fails is refused for the edit — the
+	// required named clean-tree refusal — rather than reported only with the
+	// harness error, which would let the mutation slip through unexamined.
 	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
 		return out, stats, err
+	}
+	if phaseErr != nil {
+		return out, stats, fmt.Errorf("review: %w", phaseErr)
 	}
 	rv, err := gateReview(wtDir, filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"))
 	if err != nil {
