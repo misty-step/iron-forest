@@ -101,8 +101,12 @@ func projectChecks(cfg Config, branch string, c checksNote) error {
 	return err
 }
 
-// projectMerge asks the host to merge a pull request when it owns the target branch.
-func projectMerge(cfg Config, branch, strategy string) error {
+// projectMerge asks the host to merge a pull request when it owns the target
+// branch. expectedHead is the reviewed Revision the merge must still point at:
+// it is passed to the host's expected-head facility so the host refuses to merge
+// a pull request whose head advanced past the reviewed Revision. An empty value
+// leaves the head unpinned.
+func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	if !cfg.Projection.Enabled {
 		return errors.New("projection disabled")
 	}
@@ -124,8 +128,12 @@ func projectMerge(cfg Config, branch, strategy string) error {
 	default:
 		return fmt.Errorf("unsupported merge strategy %q", strategy)
 	}
-	_, err = projectionCommand("pr", "merge", strconv.Itoa(prs[0].Number),
-		"-R", cfg.Repo, method)
+	args := []string{"pr", "merge", strconv.Itoa(prs[0].Number),
+		"-R", cfg.Repo, method}
+	if expectedHead != "" {
+		args = append(args, "--match-head-commit", expectedHead)
+	}
+	_, err = projectionCommand(args...)
 	return err
 }
 

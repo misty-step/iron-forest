@@ -269,7 +269,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
-	if err := mergeVerified(cfg, repoDir, s.Branch, it); err != nil {
+	if err := mergeVerified(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
 		// A branch that cannot land needs a human, not another attempt. Spend one
 		// attempt so the merge selector stops offering it, and say so on the item.
 		out.Status = "merge_failed"
@@ -364,17 +364,45 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 	return head, nil
 }
 
-// mergeVerified lands an approved branch. The host path and the git path are
-// exclusive: a protected target branch means only the host may write it, and
-// building a local commit that is then discarded would waste the work and
-// confuse the next reader.
-func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
+// mergeVerified lands an approved branch, but only the Revision that carried
+// the approving Verdict. reviewed is that exact Revision: the head the checks
+// and the Verdict key to and that rebaseOntoMaster pushed to the remote. Before
+// any merge action, fenceMergeOnRevision confirms the remote branch still points
+// at it, so newer, unreviewed work pushed in the interval is never silently
+// discarded or deleted. The acting step that follows is itself compare-and-set:
+// the git path lands and deletes the source branch in one atomic push, and the
+// host path merges only a head that still is the reviewed Revision. The host
+// path and the git path are exclusive: a protected target branch means only the
+// host may write it, and building a local commit that is then discarded would
+// waste the work and confuse the next reader.
+func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item) error {
+	// fenceMergeOnRevision is the decision gate; the merge below is the acting
+	// step. Both pin to the same reviewed Revision, and each of the two effects
+	// carries its own compare-and-set, so a branch that advances in the gap
+	// between the two is neither merged nor deleted.
+	if err := fenceMergeOnRevision(repoDir, branch, reviewed); err != nil {
+		return err
+	}
 	if cfg.Projection.MergeViaHost {
-		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge); err != nil {
+		// The host merges only a pull request whose head still is the reviewed
+		// Revision, via its expected-head facility. After a successful host merge,
+		// finishMerge retires the branch with a compare-and-set deletion.
+		if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
 			return fmt.Errorf("merge: projection: %w", err)
 		}
-		return finishMerge(cfg, repoDir, branch, it)
+		return finishMerge(cfg, repoDir, branch, reviewed, it)
 	}
+	return mergeGitPath(cfg, repoDir, branch, reviewed, it)
+}
+
+// mergeGitPath lands an approved branch on the git path: it builds one merge
+// commit on a scratch worktree and retires the subject. The master update and
+// the source-branch deletion are a single atomic compare-and-set push, so the
+// merge lands exactly the reviewed Revision and never deletes newer, unreviewed
+// commits pushed in the review-to-merge interval. A branch that advanced past
+// the reviewed Revision fails the whole push: master is untouched, the branch
+// survives, and the next pass reviews the new head.
+func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item) error {
 	workspace := workspaceDir(repoDir)
 	mergeDir := filepath.Join(workspace, "worktrees", "merge-"+slug(branch))
 	trackWorktree(mergeDir)
@@ -385,6 +413,16 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	_ = os.RemoveAll(mergeDir)
 	if err := git(repoDir, "worktree", "prune"); err != nil {
 		return fmt.Errorf("merge: prune: %w", err)
+	}
+	// Refresh master so the merge builds on the current tree, and capture its tip
+	// as the lease for the atomic compare-and-set push below, closing the window
+	// between reading origin/master here and writing the merge commit to it.
+	if err := git(repoDir, "fetch", "origin", "master"); err != nil {
+		return fmt.Errorf("merge: fetch master: %w", err)
+	}
+	masterTip, err := gitOut(repoDir, "rev-parse", "origin/master")
+	if err != nil {
+		return fmt.Errorf("merge: origin/master: %w", err)
 	}
 	if err := git(repoDir, "worktree", "add", "--detach", mergeDir, "origin/master"); err != nil {
 		return fmt.Errorf("merge: worktree: %w", err)
@@ -406,18 +444,58 @@ func mergeVerified(cfg Config, repoDir, branch string, it Item) error {
 	default:
 		return fmt.Errorf("merge: unsupported strategy %q", cfg.Flows.Verifier.Merge)
 	}
-	if err := git(mergeDir, "push", "origin", "HEAD:master"); err != nil {
+	// One atomic push updates master and deletes the source branch. The lease on
+	// master pins the merge to the tree it was built on; the lease on the source
+	// branch pins the deletion to the reviewed Revision, so newer, unreviewed
+	// work is never merged around or deleted.
+	if err := git(mergeDir, "push", "--atomic",
+		"--force-with-lease=refs/heads/master:"+masterTip,
+		"--force-with-lease=refs/heads/"+branch+":"+reviewed,
+		"origin", "HEAD:master", ":"+branch); err != nil {
 		return fmt.Errorf("merge: push: %w", err)
 	}
-	return finishMerge(cfg, repoDir, branch, it)
+	// The atomic push already deleted the branch, so retiring only clears the
+	// item and its attempt record.
+	return retireItem(cfg, repoDir, branch, it)
 }
 
-// finishMerge retires a landed subject: the branch is gone and the item is
-// closed, so no lane selects it again.
-func finishMerge(cfg Config, repoDir, branch string, it Item) error {
-	if err := git(repoDir, "push", "origin", "--delete", branch); err != nil {
-		return fmt.Errorf("merge: delete branch: %w", err)
+// fenceMergeOnRevision refuses a merge the moment the remote branch no longer
+// points at the Revision that carried the approving Verdict. It fetches the
+// branch and compares its observed tip to the reviewed Revision, so a second
+// checkout, a manual run, or an operator pushing a new head in the review-to-merge
+// interval is never silently discarded. On a mismatch it returns an error naming
+// both Revisions and leaves the branch untouched for a fresh review; it never
+// deletes the branch or merges the stale tree.
+func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
+	if err := git(repoDir, "fetch", "origin", branch); err != nil {
+		return fmt.Errorf("merge: fetch %s: %w", branch, err)
 	}
+	observed, err := gitOut(repoDir, "rev-parse", "origin/"+branch)
+	if err != nil {
+		return fmt.Errorf("merge: observed tip of %s: %w", branch, err)
+	}
+	if observed != reviewed {
+		return fmt.Errorf("merge refused: branch %s advanced to %s after its approving Verdict on reviewed Revision %s; re-review the new head", branch, observed, reviewed)
+	}
+	return nil
+}
+
+// finishMerge retires a landed subject on the host path: the branch is deleted
+// only when it still is the reviewed Revision — a compare-and-set deletion — and
+// the item is closed, so no lane selects it again. A branch that advanced past
+// the reviewed Revision is left in place with its newer, unreviewed commits.
+func finishMerge(cfg Config, repoDir, branch, reviewed string, it Item) error {
+	if err := deleteRef(repoDir, "refs/heads/"+branch, reviewed); err != nil {
+		return fmt.Errorf("merge: delete branch %s (wanted %s): %w", branch, reviewed, err)
+	}
+	return retireItem(cfg, repoDir, branch, it)
+}
+
+// retireItem closes a merged subject and drops its attempt record. The source
+// branch is already gone — deleted atomically with the master push on the git
+// path, or by finishMerge after a host merge — so retiring only clears the
+// item's bookkeeping and never touches a branch ref.
+func retireItem(cfg Config, repoDir, branch string, it Item) error {
 	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
 		return fmt.Errorf("merge: close item: %w", err)
 	}

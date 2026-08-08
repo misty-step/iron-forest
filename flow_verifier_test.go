@@ -533,6 +533,178 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 	}
 }
 
+// TestFenceMergeOnReviewedRevision pins item #188: a merge may land only the
+// Revision that carried the approving Verdict. An unchanged remote branch passes
+// the fence; a branch that advanced after the Verdict is refused with both
+// Revisions named, and mergeVerified leaves the branch with its newer commits
+// intact rather than deleting it.
+func TestFenceMergeOnReviewedRevision(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	reviewed := remoteBranchHead(t, repo, branch)
+
+	// An unchanged remote branch is exactly the reviewed Revision: it passes.
+	if err := fenceMergeOnRevision(repo, branch, reviewed); err != nil {
+		t.Fatalf("unchanged branch refused by the fence: %v", err)
+	}
+
+	// The operator pushes newer, unreviewed work after the Verdict was written.
+	rebaseTestGit(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "later.txt"), "later\n")
+	rebaseTestGit(t, repo, "add", "later.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "newer unreviewed work")
+	rebaseTestGit(t, repo, "push", "-q", "origin", branch)
+	observed := remoteBranchHead(t, repo, branch)
+	if observed == reviewed {
+		t.Fatalf("branch did not advance, cannot probe the fence")
+	}
+
+	if err := fenceMergeOnRevision(repo, branch, reviewed); err == nil {
+		t.Fatalf("advanced branch passed the fence")
+	} else if !strings.Contains(err.Error(), reviewed[:8]) || !strings.Contains(err.Error(), observed[:8]) {
+		t.Fatalf("refusal %q does not name both the reviewed (%s) and observed (%s) Revisions", err, reviewed[:8], observed[:8])
+	}
+
+	// mergeVerified must refuse without deleting the branch, so the newer,
+	// unreviewed commits survive for the next pass to review.
+	if err := mergeVerified(defaultConfig(), repo, branch, reviewed, Item{ID: "9", Title: "change"}); err == nil {
+		t.Fatal("mergeVerified merged a branch that advanced past its reviewed Revision")
+	}
+	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out == "" {
+		t.Fatal("mergeVerified deleted the branch despite refusing the merge")
+	}
+	if got := remoteBranchHead(t, repo, branch); got != observed {
+		t.Fatalf("branch tip = %s, want the newer commits %s intact", got, observed)
+	}
+}
+
+// TestMergeGitPathPinsReviewedRevision pins the acting step that closes the gap
+// between fenceMergeOnRevision's read and the merge push: the git path updates
+// master and deletes the source branch in a single atomic compare-and-set push,
+// so a branch that advances after the fence was read is neither merged nor
+// deleted — master is untouched and the newer, unreviewed commits survive, while
+// an unchanged branch lands and is retired as before.
+func TestMergeGitPathPinsReviewedRevision(t *testing.T) {
+	newRepo := func(t *testing.T) (repo, branch, reviewed, masterBefore string) {
+		t.Helper()
+		repo = setupTestRepo(t)
+		branch = "forest/9-change"
+		rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+		rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+		rebaseTestGit(t, repo, "add", "branch.txt")
+		rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+		rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+		reviewed = remoteBranchHead(t, repo, branch)
+		masterBefore = remoteBranchHead(t, repo, "master")
+		return
+	}
+	// retireItem closes the item through the tracker, which talks to the host;
+	// stub it so the merge path is exercised without a host CLI.
+	oldGH := ghJSON
+	ghJSON = func(args ...string) ([]byte, error) { return []byte(`{}`), nil }
+	defer func() { ghJSON = oldGH }()
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{}
+	cfg.Flows.Verifier.Merge = "squash"
+	cfg.Commit = CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
+	it := Item{ID: "9", Title: "change"}
+
+	t.Run("unchanged branch lands and retires", func(t *testing.T) {
+		repo, branch, reviewed, masterBefore := newRepo(t)
+		if err := mergeGitPath(cfg, repo, branch, reviewed, it); err != nil {
+			t.Fatalf("mergeGitPath on an unchanged branch = %v, want nil", err)
+		}
+		if got := remoteBranchHead(t, repo, "master"); got == masterBefore {
+			t.Fatal("master did not advance on an unchanged branch")
+		}
+		if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out != "" {
+			t.Fatalf("source branch %q still on origin after landing: %s", branch, out)
+		}
+	})
+
+	t.Run("advanced branch is refused and survives", func(t *testing.T) {
+		repo, branch, reviewed, masterBefore := newRepo(t)
+		// The operator pushes newer, unreviewed work after the Verdict and after
+		// the fence was read, simulating the review-to-merge window.
+		rebaseTestGit(t, repo, "checkout", "-q", branch)
+		rebaseTestWriteFile(t, filepath.Join(repo, "later.txt"), "later\n")
+		rebaseTestGit(t, repo, "add", "later.txt")
+		rebaseTestGit(t, repo, "commit", "-q", "-m", "newer unreviewed work")
+		rebaseTestGit(t, repo, "push", "-q", "origin", branch)
+		observed := remoteBranchHead(t, repo, branch)
+		if observed == reviewed {
+			t.Fatal("branch did not advance, cannot probe the race")
+		}
+
+		if err := mergeGitPath(cfg, repo, branch, reviewed, it); err == nil {
+			t.Fatal("mergeGitPath merged a branch that advanced past its reviewed Revision")
+		}
+		if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
+			t.Fatalf("master advanced to %s after the refused merge, want %s", got, masterBefore)
+		}
+		if got := remoteBranchHead(t, repo, branch); got != observed {
+			t.Fatalf("branch tip = %s, want the newer commits %s intact", got, observed)
+		}
+	})
+}
+
+// TestMergeViaHostPinsReviewedHead pins the host path of item #188: a host merge
+// receives the expected-head facility pinned to the reviewed Revision, and when
+// the host refuses (head mismatch), the branch is not deleted so the newer,
+// unreviewed commits survive for re-review.
+func TestMergeViaHostPinsReviewedHead(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	rebaseTestGit(t, repo, "add", "branch.txt")
+	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
+	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	reviewed := remoteBranchHead(t, repo, branch)
+
+	oldProj := projectionCommand
+	defer func() { projectionCommand = oldProj }()
+	var mergeArgs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch args[1] {
+		case "list":
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9"}]`), nil
+		case "merge":
+			mergeArgs = append([]string(nil), args...)
+			return nil, errors.New("host refused: head does not match reviewed Revision")
+		default:
+			return nil, nil
+		}
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Merge = "squash"
+
+	if err := mergeVerified(cfg, repo, branch, reviewed, Item{ID: "9", Title: "change"}); err == nil {
+		t.Fatal("mergeVerified merged via host despite the host refusing the head")
+	}
+	pinned := false
+	for i := 0; i+1 < len(mergeArgs); i++ {
+		if mergeArgs[i] == "--match-head-commit" && mergeArgs[i+1] == reviewed {
+			pinned = true
+		}
+	}
+	if !pinned {
+		t.Fatalf("host merge args %v do not pin the reviewed Revision %s with --match-head-commit", mergeArgs, reviewed)
+	}
+	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out == "" {
+		t.Fatal("mergeVerified deleted the branch even though the host merge refused")
+	}
+}
+
 // TestStalledOnPersistsOutsideLedger pins the durable progress brake: three
 // failures on one revision stop a subject, a new revision resets it, and the
 // decision remains after the host-local ledger is removed.
