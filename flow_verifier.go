@@ -132,10 +132,11 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	defer func() {
 		// A cancelled run leaves the worktree and its branch intact for
-		// inspection; only a finished-or-failed run is cleaned up. The
-		// preservation is durable so re-selection and a daemon restart do not
-		// destroy the operator's copy (see #163).
-		if liveTrack.isCancelled(runID) {
+		// inspection; only a finished-or-failed run is cleaned up. The decision
+		// is atomic with cancel acceptance (see decideWorktreePreserved) and the
+		// preservation is durable across re-selection and a daemon restart (see
+		// the builder's cleanup and reapOrphanWorktrees for #163).
+		if liveTrack.decideWorktreePreserved(runID) {
 			preserveWorktree(wtDir)
 			return
 		}
@@ -295,6 +296,11 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
+	// A cancel accepted while the verdict was being projected halts the run
+	// before the branch lands for a run the socket already cancelled (see #163).
+	if cerr := cancelGate(runID); cerr != nil {
+		return out, cerr
+	}
 	if err := mergeVerified(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
 		// A branch that cannot land needs a human, not another attempt. Spend one
 		// attempt so the merge selector stops offering it, and say so on the item.
@@ -334,6 +340,14 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
 	stats, phaseErr := runPhase(repoDir, wtDir, a, prompt, trace, runID)
+	// A cancel accepted after the review agent returned halts the run before any
+	// Verdict, projection, or merge can act on a run the socket already
+	// cancelled. It also runs before the clean-tree assertion: a killed review
+	// may have left the worktree mid-edit, which is a cancelled run's inspection
+	// copy, not a refusal (see #163).
+	if cerr := cancelGate(runID); cerr != nil {
+		return out, stats, cerr
+	}
 	// The worktree started at the Review revision; refuse a Verdict if the review
 	// edited a tracked file or moved HEAD since the snapshot, naming what changed.
 	// This assertion runs even when the phase crashed or timed out, so a verifier

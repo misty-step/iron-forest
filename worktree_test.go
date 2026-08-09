@@ -216,6 +216,52 @@ func TestPreservedWorktreeSurvivesReapAndReselect(t *testing.T) {
 	}
 }
 
+// TestPreservedWorktreeSurvivesFreshProcess pins the reviewer's concern that
+// preservedWorktrees is only a process map: a daemon restart starts with an
+// empty map, so without a durable record a restart would reap the very worktree
+// a cancelled run left for inspection. The cancelled ledger row is that record —
+// reapOrphanWorktrees rebuilds the preserved set from it before removing
+// anything — so the copy survives a fresh process (see #163).
+func TestPreservedWorktreeSurvivesFreshProcess(t *testing.T) {
+	repo := setupTestRepo(t)
+	workspace := filepath.Join(repo, WorkspaceDir)
+	wtDir, branch, _, err := createWorktree(repo, workspace, "51", "restart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cancelled run left the worktree and recorded the cancelled row that
+	// names the branch it acted on.
+	preserveWorktree(wtDir)
+	defer removeWorktree(repo, wtDir)
+	if err := appendRun(workspace, runRecord{
+		Time: nowRFC(), RunID: "r-51", Flow: "builder", Subject: "item-51",
+		Status: "cancelled", Branch: branch, Error: "run cancelled: operator",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh daemon starts with an empty preserved map; only the ledger row
+	// survives the restart. Reaping must rebuild the marker from it, not remove
+	// the inspection copy.
+	preservedWorktrees.mu.Lock()
+	preservedWorktrees.dirs = make(map[string]struct{})
+	preservedWorktrees.mu.Unlock()
+
+	reapOrphanWorktrees(repo)
+	if _, err := os.Stat(wtDir); err != nil {
+		t.Fatalf("preserved worktree %s was reaped after a restart: %v", wtDir, err)
+	}
+	found := false
+	for _, wt := range currentWorktrees(t, repo) {
+		if filepath.Clean(wt) == filepath.Clean(wtDir) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("preserved worktree %s not registered after restart", wtDir)
+	}
+}
+
 // TestTrackedWorktreesIsolateLanes pins the contract the drain handler depends
 // on: every live worktree is listed, and clearing one lane's worktree never
 // hides another lane's, which would leak it on an abrupt exit.

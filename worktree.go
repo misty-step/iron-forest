@@ -205,11 +205,37 @@ func removeWorktree(repo, wtDir string) {
 	unpreserveWorktree(wtDir)
 }
 
+// preserveCancelledWorktrees marks the worktrees of cancelled ledger rows as
+// preserved, so an inspection copy the operator kept survives a daemon restart.
+// preservedWorktrees is only a process map, so a fresh process rebuilds it from
+// the one durable fact that names a cancelled run: its ledger row. The branch a
+// cancelled run acted on maps to its worktree path deterministically; a row
+// whose worktree is already gone marks nothing, so an operator who removed the
+// copy by hand unblocks the subject for a later pass (see #163).
+func preserveCancelledWorktrees(repoDir string) {
+	rows, _, err := loadLedger(ledgerPath(repoDir))
+	if err != nil {
+		return
+	}
+	for _, r := range rows {
+		if r.Status != "cancelled" || r.Branch == "" {
+			continue
+		}
+		dir := filepath.Join(workspaceDir(repoDir), "worktrees", r.Branch)
+		if _, err := os.Stat(dir); err == nil {
+			preserveWorktree(dir)
+		}
+	}
+}
+
 // reapOrphanWorktrees removes linked worktrees left by an interrupted process.
 // A worktree a cancelled run preserved for inspection is never reaped, so the
-// operator's copy survives a daemon restart (see #163).
+// operator's copy survives a daemon restart: the in-process preserved map is
+// first rebuilt from the cancelled ledger rows, then every listed worktree
+// without a preserved marker is removed (see #163).
 func reapOrphanWorktrees(repoDir string) {
 	prunePreservedWorktrees()
+	preserveCancelledWorktrees(repoDir)
 	wtRoot, err := filepath.Abs(filepath.Join(repoDir, WorkspaceDir, "worktrees"))
 	if err != nil {
 		return

@@ -67,11 +67,55 @@ func (r *liveRegistry) attach(id, agent string, cancel context.CancelFunc) {
 	r.mu.Unlock()
 }
 
-// end removes a run that finished from the registry.
+// end removes a run that finished from the registry. It is the tear-down used
+// by tests; production finalization goes through finish or
+// decideWorktreePreserved, both of which remove the run atomically with reading
+// its cancel state (see #163).
 func (r *liveRegistry) end(id string) {
 	r.mu.Lock()
 	delete(r.runs, id)
 	r.mu.Unlock()
+}
+
+// finish removes a run from the registry and returns the cancellation reason
+// recorded before this instant, or "" when the run was not cancelled. It is the
+// single handoff between the live socket and the ledger append: the removal and
+// the reason read happen in one critical section, so a cancel accepted before
+// this call is reflected in the returned reason and one arriving after it is
+// refused with "no live run". The ledger row's status therefore can never be a
+// success written after a cancel the socket already confirmed, and the flow
+// cleanup (decideWorktreePreserved) already settled the worktree's fate under
+// the same rule (see #163).
+func (r *liveRegistry) finish(id string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lr, ok := r.runs[id]
+	if !ok {
+		return ""
+	}
+	delete(r.runs, id)
+	return lr.cancelReason
+}
+
+// decideWorktreePreserved reports whether a run's worktree must be kept for
+// inspection because a cancel was accepted. It is the worktree's handoff with
+// the live socket: the decision and the registry removal happen in one critical
+// section, so a cancel accepted before this call is seen here (and the run stays
+// in the registry for finish to name on the ledger), while one accepted after it
+// is refused outright — the worktree removal that follows can never contradict a
+// cancel the socket already confirmed (see #163).
+func (r *liveRegistry) decideWorktreePreserved(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lr, ok := r.runs[id]
+	if !ok {
+		return false
+	}
+	if lr.cancelReason != "" {
+		return true
+	}
+	delete(r.runs, id)
+	return false
 }
 
 // cancel records who requested the cancellation and why, then stops the run's
@@ -105,9 +149,18 @@ func (r *liveRegistry) reason(id string) string {
 	return ""
 }
 
-// isCancelled reports whether a run had a cancel requested before it ended.
-func (r *liveRegistry) isCancelled(id string) bool {
-	return r.reason(id) != ""
+// cancelGate returns the runCancelledError naming a pending cancel for the run,
+// or nil when none is pending. A flow calls it the moment runPhase returns so a
+// cancel accepted then halts the run before subsequent checks, pushes, or
+// merges can act on a run the socket already cancelled. It is a best-effort
+// early abort: the registry's finish is the authoritative decision at record
+// time, so a cancel slipping past the gate is still recorded as cancelled (see
+// #163).
+func cancelGate(runID string) error {
+	if reason := liveTrack.reason(runID); reason != "" {
+		return &runCancelledError{reason: reason}
+	}
+	return nil
 }
 
 // liveRunView is one in-flight run as served over the socket.

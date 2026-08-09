@@ -308,12 +308,14 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 
 	// Claim the run in the live registry so a client can see and stop it while
 	// Act is under way. runPhase fills agent and the cancel handle once it
-	// starts the child; end runs when Act returns.
+	// starts the child. The registry entry is removed exactly once, by the
+	// flow's worktree handoff or by finish below, each atomically against cancel
+	// acceptance, never by a deferred end that could race a late request (see
+	// #163).
 	liveTrack.begin(&liveRun{
 		id: runID, flow: f.Name(), subject: s.Key, revision: s.Revision,
 		started: time.Now().UTC(),
 	})
-	defer liveTrack.end(runID)
 
 	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
 	out, err := f.Act(cfg, repoDir, s, runID)
@@ -326,19 +328,16 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 	}
 	rec.setTokens(out)
 
-	// Terminal cancellation: a run is cancelled whether runPhase returned the
-	// runCancelledError because the cancel fired while the child was still live,
-	// or a request arrived after runPhase returned but before this row was
-	// recorded. Either way the operator or supervisor stopped it, so the row
-	// names the cancellation and its reason — never a built row and never another
-	// stage failure — keeps the spend, and its worktree stays for inspection. The
-	// check runs while the run is still in the live registry (the deferred end
-	// below has not run yet), so a pending request is always visible here (see
-	// #163).
-	if liveTrack.isCancelled(runID) {
-		if err == nil {
-			err = &runCancelledError{reason: liveTrack.reason(runID)}
-		}
+	// Terminal cancellation: finish is the run's single handoff with the live
+	// socket. It removes the run from the registry and returns the reason of any
+	// cancel accepted before this instant, so a cancel accepted after it is
+	// refused and a successful row is never written behind a cancel the socket
+	// already confirmed. A cancelled run records the distinct cancelled status
+	// naming who and why — never a built row and never another stage failure —
+	// keeps its spend, and its worktree was already preserved by the flow's
+	// decideWorktreePreserved handoff (see #163).
+	if reason := liveTrack.finish(runID); reason != "" {
+		err = &runCancelledError{reason: reason}
 		rec.Status = "cancelled"
 		rec.Error = err.Error()
 		_ = appendRun(workspaceDir(repoDir), rec)

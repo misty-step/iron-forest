@@ -101,10 +101,11 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	}
 	defer func() {
 		// A cancelled run leaves the worktree and its branch intact for
-		// inspection; only a finished-or-failed run is cleaned up. The
-		// preservation is durable so re-selection and a daemon restart do not
-		// destroy the operator's copy (see #163).
-		if liveTrack.isCancelled(runID) {
+		// inspection; only a finished-or-failed run is cleaned up. The decision
+		// is atomic with cancel acceptance (see decideWorktreePreserved) and the
+		// preservation is durable across re-selection and a daemon restart (see
+		// the builder's cleanup and reapOrphanWorktrees for #163).
+		if liveTrack.decideWorktreePreserved(runID) {
 			preserveWorktree(wtDir)
 			return
 		}
@@ -120,6 +121,12 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	trace := filepath.Join(workspace, "runs", runID+".fixer.jsonl")
 	stats, err := runPhase(repoDir, wtDir, a, prompt, trace, runID)
 	out.addTokens(stats)
+	// A cancel accepted after the agent returned halts the run here, before a
+	// repair can be gated and pushed for a run the socket already cancelled (see
+	// #163).
+	if cerr := cancelGate(runID); cerr != nil {
+		return out, cerr
+	}
 	if err != nil {
 		// A mechanical prompt-delivery failure is not content to repair: the same
 		// prompt fails identically, so it parks (prompt_failed) instead of
@@ -140,6 +147,11 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		trace); err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
+	}
+	// A cancel accepted while the repair was being gated halts the run before
+	// the repair is pushed for a run the socket already cancelled (see #163).
+	if cerr := cancelGate(runID); cerr != nil {
+		return out, cerr
 	}
 	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"

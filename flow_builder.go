@@ -72,12 +72,15 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	}
 	defer func() {
 		// A cancelled run leaves the worktree and its branch intact for
-		// inspection; only a finished-or-failed run is cleaned up. The
-		// preservation is durable, not just this run's live entry: it survives
-		// re-selection (createWorktree reuses it) and a daemon restart
-		// (reapOrphanWorktrees skips it), so the operator's copy is not destroyed
-		// by the next pass (see #163).
-		if liveTrack.isCancelled(runID) {
+		// inspection; only a finished-or-failed run is cleaned up. The decision
+		// is atomic with cancel acceptance (see decideWorktreePreserved): once
+		// it settles on removal the run is gone from the live registry, so the
+		// removal can never contradict a cancel the socket confirmed, and the
+		// preservation is durable — it survives re-selection (createWorktree
+		// reuses it) and a daemon restart (reapOrphanWorktrees rebuilds it from
+		// the ledger) — so the operator's copy is not destroyed by the next pass
+		// (see #163).
+		if liveTrack.decideWorktreePreserved(runID) {
 			preserveWorktree(wtDir)
 			return
 		}
@@ -96,6 +99,11 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		BaseSHA: baseSHA,
 	}
 	out.addTokens(stats)
+	// A cancel accepted after the agent returned halts the run here, before the
+	// gate or a push can act on a run the socket already cancelled (see #163).
+	if cerr := cancelGate(runID); cerr != nil {
+		return out, cerr
+	}
 	if err != nil {
 		// A mechanical delivery failure is not a content or agent failure: the
 		// same prompt keeps failing identically, so it must be named prompt_failed
@@ -128,6 +136,11 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "blocked"
 		out.BaseSHA = baseSHA
 		return out, fmt.Errorf("blocked: report carries credential-shaped prose; no branch or pull request published")
+	}
+	// A cancel accepted while the report was being gated halts the run before
+	// the branch is pushed for a run the socket already cancelled (see #163).
+	if cerr := cancelGate(runID); cerr != nil {
+		return out, cerr
 	}
 	if err := commitAndPush(repoDir, wtDir, branch, "", cfg.Commit, it); err != nil {
 		out.Status = "publish_failed"

@@ -57,12 +57,15 @@ func TestLiveStatusAndCancel(t *testing.T) {
 		done <- actOnSubject(cancellableFlow{}, Config{}, repo, aSubject[0], nil)
 	}()
 
-	// The run registers as soon as actOnSubject claims it; wait for it to be
-	// visible to a status query so the assertion is deterministic.
+	// The run registers as soon as actOnSubject claims it, and runPhase attaches
+	// the agent a moment later; wait for a status query over the socket to see
+	// the fully-claimed run, so the assertion exercises the same liveClient path
+	// a real operator uses and not the in-process registry directly.
 	var got []liveRunView
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		got = liveTrack.snapshot()
-		if len(got) > 0 {
+		resp, err := liveClient(repo, liveRequest{Type: "status"})
+		if err == nil && len(resp.Runs) > 0 && resp.Runs[0].Agent != "" {
+			got = resp.Runs
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

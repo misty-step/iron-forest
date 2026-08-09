@@ -380,6 +380,11 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 	}
 	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".manager.jsonl")
 	stats, err := runPhase(repoDir, runDir, a, prompt, trace, runID)
+	// A cancel accepted after the judge returned halts the run before a pick can
+	// be promoted for a run the socket already cancelled (see #163).
+	if cerr := cancelGate(runID); cerr != nil {
+		return managerReport{}, stats, cerr
+	}
 	if err != nil {
 		return managerReport{}, stats, err
 	}
