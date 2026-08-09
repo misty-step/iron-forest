@@ -53,7 +53,7 @@ func (t githubTracker) ListOpen() ([]Item, error) {
 // Get reads one item by its opaque id.
 func (t githubTracker) Get(id string) (Item, error) {
 	out, err := ghJSON("issue", "view", "-R", t.repo, id,
-		"--json", "number,title,body,updatedAt,comments,labels")
+		"--json", "number,title,body,updatedAt,comments,labels,state")
 	if err != nil {
 		return Item{}, fmt.Errorf("%w: get item: %v", errTrackerUnavailable, err)
 	}
@@ -126,6 +126,7 @@ type issueJSON struct {
 	Body      string    `json:"body"`
 	UpdatedAt string    `json:"updatedAt"`
 	Comments  []comment `json:"comments"`
+	State     string    `json:"state"`
 	Labels    []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
@@ -140,6 +141,7 @@ func (i issueJSON) asItem() Item {
 		Title:     i.Title,
 		Body:      i.Body,
 		UpdatedAt: i.UpdatedAt,
+		State:     i.State,
 		Comments:  i.Comments,
 	}
 	for _, label := range i.Labels {
@@ -305,6 +307,15 @@ func (it Item) hasTag(name string) bool {
 		}
 	}
 	return false
+}
+
+// itemClosed reports whether a Tracker item carries the closed state. A human
+// who closes an item stops its work, and the branch lanes must honor that
+// signal: ListOpen no longer lists the item, but Get still returns it with a
+// State. An absent state is treated as open so a source that does not report
+// State never stops a live branch by mistake.
+func itemClosed(it Item) bool {
+	return strings.EqualFold(strings.TrimSpace(it.State), "closed")
 }
 
 func eligibleItemsAndFailures(cfg Config, repoDir string) ([]Item, []Subject, error) {

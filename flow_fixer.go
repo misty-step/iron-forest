@@ -141,6 +141,9 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "item_failed"
 		return out, fmt.Errorf("item: %w", err)
 	}
+	if itemClosed(it) {
+		return stopClosedItem(repoDir, "fixer", s)
+	}
 	exhausted := attempts >= cfg.Flows.Fixer.Attempts
 	if exhausted {
 		if err := markFixerFailed(cfg.Repo, repoDir, s.Revision, it); err != nil {

@@ -317,6 +317,9 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 		out.Status = "item_failed"
 		return out, fmt.Errorf("item: %w", err)
 	}
+	if itemClosed(it) {
+		return stopClosedItem(repoDir, "verifier", s)
+	}
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
 	if err != nil {

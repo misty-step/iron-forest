@@ -604,6 +604,107 @@ func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 	}
 }
 
+// TestClosedItemStopsBranchLanes is item #139's oracle: with a branch open and
+// its Tracker item closed, the verifier and fixer stop selecting that branch
+// and the run records the reason. Each lane acts on the branch once, records
+// the "closed" run and the terminal brake, and never offers the branch again —
+// so a human who closes an item never sees a checks run, a repair, or a merge.
+func TestClosedItemStopsBranchLanes(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{}
+
+	t.Run("verifier", func(t *testing.T) {
+		repo, branch, head := fixerBranch(t)
+		runGitTest(t, repo, "checkout", "-q", "master")
+		masterBefore := remoteBranchHead(t, repo, "master")
+		if err := writeVerdict(repo, head, verdictNote{
+			Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
+			DefSHA: strings.Repeat("a", 16), RunID: "seed",
+		}, testCommitIdentity()); err != nil {
+			t.Fatalf("seed verdict: %v", err)
+		}
+		if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed"}, testCommitIdentity()); err != nil {
+			t.Fatalf("seed checks: %v", err)
+		}
+		cfg.Flows.Verifier.AutoMerge = true
+
+		tk := newMemoryTracker()
+		tk.seed(Item{ID: "9", Title: "closed", State: "closed"})
+		oldTracker := trackerFor
+		trackerFor = func(string) Tracker { return tk }
+		defer func() { trackerFor = oldTracker }()
+
+		subjects, err := (verifierFlow{}).Select(cfg, repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subjects) != 1 || subjects[0].ID != "9" || subjects[0].Revision != head {
+			t.Fatalf("Verifier subjects before the closed Item = %#v, want item-9 at %s", subjects, head)
+		}
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subjects[0], nil); code != 1 {
+			t.Fatalf("Verifier closed-item pass code = %d, want the recorded-stop failure", code)
+		}
+		rows, invalid, err := loadLedger(ledgerPath(repo))
+		if err != nil || invalid != 0 || len(rows) != 1 {
+			t.Fatalf("Verifier Ledger = (%d rows, %d invalid, %v), want one run", len(rows), invalid, err)
+		}
+		if rows[0].Status != "closed" || !strings.Contains(rows[0].Error, "is closed") {
+			t.Fatalf("Verifier stop run = %#v, want status closed with the reason", rows[0])
+		}
+		if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
+			t.Fatalf("master advanced to %s from a closed Item, want %s", got, masterBefore)
+		}
+		if stalled, err := stalledOn(repo, "verifier", "branch-"+branch, head); err != nil || !stalled {
+			t.Fatalf("Verifier stop brake = (%v, %v), want terminal", stalled, err)
+		}
+		if subjects, err = (verifierFlow{}).Select(cfg, repo); err != nil || len(subjects) != 0 {
+			t.Fatalf("Verifier selected a closed Item's branch = (%#v, %v), want none", subjects, err)
+		}
+	})
+
+	t.Run("fixer", func(t *testing.T) {
+		repo, branch, head := fixerBranch(t)
+		if err := writeChecks(repo, head, checksNote{Status: "fail", RunID: "seed"}, testCommitIdentity()); err != nil {
+			t.Fatal(err)
+		}
+
+		tk := newMemoryTracker()
+		tk.seed(Item{ID: "9", Title: "closed", State: "closed"})
+		oldTracker := trackerFor
+		trackerFor = func(string) Tracker { return tk }
+		defer func() { trackerFor = oldTracker }()
+
+		subjects, err := (fixerFlow{}).Select(cfg, repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(subjects) != 1 || subjects[0].ID != "9" || subjects[0].Revision != head {
+			t.Fatalf("Fixer subjects before the closed Item = %#v, want item-9 at %s", subjects, head)
+		}
+		if code := actOnSubject(fixerFlow{}, cfg, repo, subjects[0], nil); code != 1 {
+			t.Fatalf("Fixer closed-item pass code = %d, want the recorded-stop failure", code)
+		}
+		rows, invalid, err := loadLedger(ledgerPath(repo))
+		if err != nil || invalid != 0 || len(rows) != 1 {
+			t.Fatalf("Fixer Ledger = (%d rows, %d invalid, %v), want one run", len(rows), invalid, err)
+		}
+		if rows[0].Status != "closed" || !strings.Contains(rows[0].Error, "is closed") {
+			t.Fatalf("Fixer stop run = %#v, want status closed with the reason", rows[0])
+		}
+		item, err := tk.Get("9")
+		if err != nil || item.hasTag(failedLabel) || len(item.Comments) != 0 {
+			t.Fatalf("closed Item after Fixer pass = (%#v, %v), want no handoff writes", item, err)
+		}
+		if stalled, err := stalledOn(repo, "fixer", "branch-"+branch, head); err != nil || !stalled {
+			t.Fatalf("Fixer stop brake = (%v, %v), want terminal", stalled, err)
+		}
+		if subjects, err = (fixerFlow{}).Select(cfg, repo); err != nil || len(subjects) != 0 {
+			t.Fatalf("Fixer selected a closed Item's branch = (%#v, %v), want none", subjects, err)
+		}
+	})
+}
+
 // TestMergeBlockedNamesEveryReason pins the single authority for merge policy.
 // Select and Act both consult it; a precondition that lives in only one of them
 // is how the two drifted and produced the hot loop above.

@@ -9,8 +9,12 @@ type Item struct {
 	Title     string
 	Body      string
 	UpdatedAt string
-	Tags      []string
-	Comments  []comment
+	// State is the tracker's own open/closed signal: "open", "closed", or
+	// empty when a source does not report it. A branch lane treats a closed
+	// Item as stopped work even when a forest branch for it still exists.
+	State    string
+	Tags     []string
+	Comments []comment
 }
 
 // Tracker is the work source. A flow lists open items, reads one item, and
