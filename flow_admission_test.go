@@ -35,6 +35,7 @@ func (f admissionProcessFlow) Act(Config, string, Subject, string) (Outcome, err
 type selectionFlow struct {
 	subjects []Subject
 	acted    *[]string
+	errors   map[string]error
 }
 
 func (f selectionFlow) Name() string                             { return "builder" }
@@ -43,6 +44,9 @@ func (f selectionFlow) Interval(Config) time.Duration            { return 0 }
 func (f selectionFlow) Enabled(Config) bool                      { return true }
 func (f selectionFlow) Act(_ Config, _ string, s Subject, _ string) (Outcome, error) {
 	*f.acted = append(*f.acted, s.Key)
+	if err := f.errors[s.Key]; err != nil {
+		return Outcome{Status: "merge_pending"}, err
+	}
 	return Outcome{Status: "done"}, nil
 }
 
@@ -199,7 +203,7 @@ func TestRunFlowPassContinuesAfterBusySubject(t *testing.T) {
 	var acted []string
 	code, key := runFlowPass(selectionFlow{
 		subjects: []Subject{busy, available}, acted: &acted,
-	}, Config{Repo: admissionTestRepo}, repo, nil)
+	}, Config{Repo: admissionTestRepo}, repo, nil, "")
 	if code != 0 || key != available.Key {
 		t.Fatalf("runFlowPass = (%d, %q), want success for %q", code, key, available.Key)
 	}
@@ -209,5 +213,28 @@ func TestRunFlowPassContinuesAfterBusySubject(t *testing.T) {
 	rows, _, err := loadLedger(ledgerPath(repo))
 	if err != nil || len(rows) != 1 || rows[0].Subject != available.Key {
 		t.Fatalf("Ledger = (%#v, %v), want one %q outcome", rows, err, available.Key)
+	}
+}
+
+func TestRunFlowPassRotatesPastRetryingSubject(t *testing.T) {
+	repo, _ := newAdmissionRepositories(t)
+	retrying := Subject{Key: "item-21", Kind: "item", ID: "21", Revision: "r1"}
+	available := Subject{Key: "item-22", Kind: "item", ID: "22", Revision: "r2"}
+	var acted []string
+	f := selectionFlow{
+		subjects: []Subject{retrying, available},
+		acted:    &acted,
+		errors:   map[string]error{retrying.Key: errHostMergePending},
+	}
+	code, key := runFlowPass(f, Config{Repo: admissionTestRepo}, repo, nil, "")
+	if code != 1 || key != retrying.Key {
+		t.Fatalf("first runFlowPass = (%d, %q), want retrying %q",
+			code, key, retrying.Key)
+	}
+	code, key = runFlowPass(f, Config{Repo: admissionTestRepo}, repo, nil, key)
+	if code != 0 || key != available.Key ||
+		len(acted) != 2 || acted[0] != retrying.Key || acted[1] != available.Key {
+		t.Fatalf("rotated runFlowPass = (%d, %q, %v), want %q then %q",
+			code, key, acted, retrying.Key, available.Key)
 	}
 }

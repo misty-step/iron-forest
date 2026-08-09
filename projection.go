@@ -15,6 +15,7 @@ var projectionCommand = ghJSON
 
 var errHostMergePending = errors.New("Host merge is pending")
 var errHostMergeRequestFailed = errors.New("Host merge request failed")
+var errHostMergeAccepted = errors.New("Host merge request was accepted")
 var errHostMergeUnavailable = errors.New("Host merge request is unavailable")
 var errHostMergeNoView = errors.New("Host merge request has no visible view")
 var errHostRevisionMoved = errors.New("Host Projection Revision moved")
@@ -225,12 +226,16 @@ func projectBranch(cfg Config, repoDir string, it Item, branch, body, expectedHe
 		return "", false, fmt.Errorf("%w: %w: branch %q moved to %s before Projection creation for Revision %s",
 			errHostMergeUnavailable, errHostRevisionMoved, branch, head, expectedHead)
 	}
+	if err := claimEffect(repoDir, "Projection-create", branch, expectedHead); err != nil {
+		return "", false, err
+	}
 	created, err := projectionCommand("pr", "create", "-R", cfg.Repo,
 		"--base", "master", "--head", branch,
 		"--title", redactSecretShaped("forest: "+it.Title),
 		"--body", redactSecretShaped(body))
 	if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("%w: create Projection for branch %q: %v",
+			errHostMergePending, branch, err)
 	}
 	createdURL := strings.TrimSpace(string(created))
 	if createdURL == "" {
@@ -273,7 +278,7 @@ func verdictBody(v verdictNote, c checksNote) string {
 
 // Projection comment bodies cross the Host boundary through one redacted sink.
 // expectedHead fences the comment to the exact Revision its evidence describes.
-func projectComment(cfg Config, branch, expectedHead, body string) error {
+func projectComment(cfg Config, repoDir, branch, expectedHead, body string) error {
 	if !cfg.Projection.Enabled {
 		return nil
 	}
@@ -303,6 +308,9 @@ func projectComment(cfg Config, branch, expectedHead, body string) error {
 	if exists {
 		return nil
 	}
+	if err := claimEffect(repoDir, "Projection-comment", branch, expectedHead); err != nil {
+		return err
+	}
 	_, publishErr := projectionCommand("api", "--method", "POST",
 		fmt.Sprintf("repos/%s/pulls/%d/reviews", cfg.Repo, prs[0].Number),
 		"--field", "event=COMMENT", "--field", "commit_id="+expectedHead,
@@ -319,21 +327,21 @@ func projectComment(cfg Config, branch, expectedHead, body string) error {
 			return reconcileErr
 		}
 		return fmt.Errorf("%w: publish Projection comment: %v; reconcile: %v",
-			errHostMergePending, publishErr, reconcileErr)
+			errHostMergeUnavailable, publishErr, reconcileErr)
 	}
-	return fmt.Errorf("%w: publish Projection comment: %v", errHostMergePending, publishErr)
+	return fmt.Errorf("%w: publish Projection comment: %v", errHostMergeUnavailable, publishErr)
 }
 
 // projectVerdict mirrors a git Verdict and its Checks as one pull-request comment.
-func projectVerdict(cfg Config, branch, expectedHead string, v verdictNote, c checksNote) error {
-	return projectComment(cfg, branch, expectedHead, verdictBody(v, c))
+func projectVerdict(cfg Config, repoDir, branch, expectedHead string, v verdictNote, c checksNote) error {
+	return projectComment(cfg, repoDir, branch, expectedHead, verdictBody(v, c))
 }
 
 // projectChecks mirrors a failing Checks result on the human surface. The
 // Verifier stops before review when a check fails, so this is the only signal
 // an operator would otherwise get for that Revision.
-func projectChecks(cfg Config, branch, expectedHead string, c checksNote) error {
-	return projectComment(cfg, branch, expectedHead,
+func projectChecks(cfg Config, repoDir, branch, expectedHead string, c checksNote) error {
+	return projectComment(cfg, repoDir, branch, expectedHead,
 		checksSummary(c)+"\n\n"+verdictBody(verdictNote{Verdict: "pending"}, c))
 }
 
@@ -356,21 +364,17 @@ func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	args := []string{"pr", "merge", strconv.Itoa(pr.Number),
 		"-R", cfg.Repo, "--squash", "--match-head-commit", expectedHead}
 	if _, err := projectionCommand(args...); err != nil {
-		// The command can fail after the Host accepted or queued the request.
-		// Preserve intent, but name the failed write so recovery can bound retries.
 		return fmt.Errorf("%w: %w: %v", errHostMergePending, errHostMergeRequestFailed, err)
 	}
 	merged, _, err = inspectProjectMerge(cfg, branch, strategy, expectedHead)
 	if err != nil {
-		if errors.Is(err, errHostMergeUnavailable) {
-			return err
-		}
-		// The Host accepted the command. A merge queue can briefly expose
-		// neither view, so keep durable intent and observe it on the next pass.
-		return fmt.Errorf("%w: post-request state: %v", errHostMergePending, err)
+		// The command completed successfully. Persist that accepted Effect even
+		// when the immediate Host view is unavailable.
+		return fmt.Errorf("%w: %w: post-request state: %v",
+			errHostMergePending, errHostMergeAccepted, err)
 	}
 	if !merged {
-		return errHostMergePending
+		return fmt.Errorf("%w: %w", errHostMergePending, errHostMergeAccepted)
 	}
 	return nil
 }

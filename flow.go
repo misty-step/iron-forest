@@ -268,14 +268,9 @@ func verifyHostConfig(repoDir string) error {
 
 // runFlowLoop is one lane's whole life: select, act, record, sleep. Config is
 // re-read every pass so an operator edit lands without a restart, and a failing
-// pass never stops the lane.
-//
-// The immediate re-select after productive work exists so a lane can pick up
-// sibling work its own write unblocked. It is only valid for *different* work:
-// if a pass acts on the same subject it just acted on, the lane is not making
-// progress and must wait. Without that rule any Effect that succeeds while
-// changing nothing becomes a hot loop, which is what 217 identical verifier
-// passes on one branch were.
+// pass never stops the lane. Every result waits for the configured interval.
+// The cursor resumes after the prior Subject so pending work cannot starve its
+// siblings.
 func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32, drainNow <-chan struct{}) {
 	var lastKey string
 	for {
@@ -309,13 +304,7 @@ func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32, drainNow <-ch
 			}
 			continue
 		}
-		code, key := runFlowPass(f, cfg, repoDir, drain)
-		if code == 0 && key != lastKey {
-			// This pass did work on a subject it did not just handle: its write
-			// may have made another subject actionable, so re-select at once.
-			lastKey = key
-			continue
-		}
+		_, key := runFlowPass(f, cfg, repoDir, drain, lastKey)
 		lastKey = key
 		if !waitFlowInterval(f.Interval(cfg), drainNow) {
 			return
@@ -338,11 +327,10 @@ func waitFlowInterval(interval time.Duration, drainNow <-chan struct{}) bool {
 	}
 }
 
-// runFlowPass acts on at most one subject and reports 0 when it did work, plus
-// the key of the subject it acted on so the caller can tell repeated work from
-// progress. One subject per pass keeps a lane's decisions small and re-reads the
-// world between them, so a lane never acts on state it has already invalidated.
-func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string) {
+// runFlowPass acts on at most one subject and reports 0 when it did work.
+// Selection resumes after the prior key, so one retryable or pending Subject
+// cannot starve another while each Effect still re-reads repository state.
+func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32, afterKey string) (int, string) {
 	subjects, err := f.Select(cfg, repoDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forest: %s select: %s\n", f.Name(), redactSecretShaped(err.Error()))
@@ -351,7 +339,15 @@ func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string)
 	if len(subjects) == 0 {
 		return 1, ""
 	}
-	for _, s := range subjects {
+	start := 0
+	for i, s := range subjects {
+		if s.Key == afterKey {
+			start = (i + 1) % len(subjects)
+			break
+		}
+	}
+	for offset := range len(subjects) {
+		s := subjects[(start+offset)%len(subjects)]
 		code := actOnSubject(f, cfg, repoDir, s, drain)
 		if code == codeBusy {
 			continue // another worker handles it; try the next candidate

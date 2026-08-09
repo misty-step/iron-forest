@@ -21,6 +21,29 @@ func (t *responseLossCommentTracker) Comment(id, body string) error {
 	return errors.New("response lost after acceptance")
 }
 
+type invisibleCommentTracker struct {
+	*memoryTracker
+	commentCalls int
+}
+
+func (t *invisibleCommentTracker) Comment(string, string) error {
+	t.commentCalls++
+	return errors.New("response lost without visible comment")
+}
+
+type responseLossTagTracker struct {
+	*memoryTracker
+	tagCalls int
+}
+
+func (t *responseLossTagTracker) SetTags(id string, add, remove []string) error {
+	t.tagCalls++
+	if err := t.memoryTracker.SetTags(id, add, remove); err != nil {
+		return err
+	}
+	return errors.New("response lost after acceptance")
+}
+
 // TestRebaseOntoMasterRebasesBehindBranch proves a branch behind master by a
 // non-conflicting commit is rebased onto origin/master and its new head pushed
 // with force, and that Act writes the checks note at the post-rebase head and
@@ -118,30 +141,151 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	}
 }
 
-func TestPublishMergeBlockedIsIdempotentAfterResponseLoss(t *testing.T) {
+func TestPublishTrackerCommentIsIdempotentAfterResponseLoss(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	const id = `/../../outside\trace?[x]`
 	memory := newMemoryTracker()
-	memory.seed(Item{ID: "9", Title: "change"})
+	memory.seed(Item{ID: id, Title: "change"})
 	tracker := &responseLossCommentTracker{memoryTracker: memory}
 	revision := strings.Repeat("a", 40)
 
-	it, err := tracker.Get("9")
+	it, err := tracker.Get(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publishMergeBlocked(tracker, it, revision, errors.New("merge failed")); err != nil {
+	marker := "<!-- iron-forest:merge-blocked revision=" + revision + " -->"
+	if err := publishTrackerComment(repo, tracker, it, "Tracker-comment", revision,
+		"Merge blocked: merge failed", marker); err != nil {
 		t.Fatalf("first publish: %v", err)
 	}
-	it, err = tracker.Get("9")
+	it, err = tracker.Get(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publishMergeBlocked(tracker, it, revision, errors.New("merge failed")); err != nil {
+	if err := publishTrackerComment(repo, tracker, it, "Tracker-comment", revision,
+		"Merge blocked: merge failed", marker); err != nil {
 		t.Fatalf("retry publish: %v", err)
 	}
 	if tracker.commentCalls != 1 || len(it.Comments) != 1 ||
 		!strings.Contains(it.Comments[0].Body, "<!-- iron-forest:merge-blocked revision="+revision+" -->") {
 		t.Fatalf("comments = (%d calls, %#v), want one exact-Revision effect",
 			tracker.commentCalls, it.Comments)
+	}
+}
+func TestPublishTrackerCommentDoesNotRepeatInvisibleOutcome(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	item := Item{ID: "9", Title: "change"}
+	memory := newMemoryTracker()
+	memory.seed(item)
+	tracker := &invisibleCommentTracker{memoryTracker: memory}
+	marker := "<!-- iron-forest:built revision=" + revision + " -->"
+	for range 2 {
+		err := publishTrackerComment(repo, tracker, item,
+			"Tracker-builder-comment", revision, "Built branch `forest/9-change`.", marker)
+		if !errors.Is(err, errHostMergeUnavailable) {
+			t.Fatalf("invisible Tracker comment = %v, want hard uncertainty", err)
+		}
+	}
+	if tracker.commentCalls != 1 {
+		t.Fatalf("Tracker comment calls = %d, want one", tracker.commentCalls)
+	}
+	if attempts, err := readAttempts(repo,
+		effectAttemptKey("Tracker-builder-comment", item.ID, revision)); err != nil || attempts != 1 {
+		t.Fatalf("Tracker comment claim = (%d, %v), want one", attempts, err)
+	}
+}
+
+func TestHostHandoffReconcilesAcceptedTagResponseLoss(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	item := Item{ID: "9", Title: "change"}
+	memory := newMemoryTracker()
+	memory.seed(item)
+	tracker := &responseLossTagTracker{memoryTracker: memory}
+	old := trackerFor
+	trackerFor = func(string) Tracker { return tracker }
+	defer func() { trackerFor = old }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	record := retirementRecord{Branch: "forest/9-change", Revision: revision, ItemID: item.ID}
+	err := recordHostMergeHandoff(cfg, repo, record, item, errors.New("Host refused merge"))
+	if !errors.Is(err, errRetirementRecoveryHard) {
+		t.Fatalf("Host handoff = %v, want durable hard handoff", err)
+	}
+	err = recordHostMergeHandoff(cfg, repo, record,
+		Item{ID: item.ID, Title: item.Title}, errors.New("Host refused merge"))
+	if !errors.Is(err, errRetirementRecoveryHard) {
+		t.Fatalf("reconstructed Host handoff = %v, want retained hard handoff", err)
+	}
+	got, getErr := tracker.Get(item.ID)
+	if getErr != nil || tracker.tagCalls != 1 || !got.hasTag(failedLabel) || len(got.Comments) != 1 {
+		t.Fatalf("reconciled handoff = (%#v, tags=%d, err=%v), want one tag call and one comment",
+			got, tracker.tagCalls, getErr)
+	}
+	if stalled, stallErr := stalledOn(repo, (verifierFlow{}).Name(),
+		retirementSubjectKey(record.Branch), revision); stallErr != nil || !stalled {
+		t.Fatalf("Host handoff brake = (%v, %v), want terminal", stalled, stallErr)
+	}
+}
+
+func TestVerifierSelectionDoesNotLetRetirementRecoveryStarveBranchWork(t *testing.T) {
+	const branch = "forest/2-fresh"
+	repo, _, _, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: "forest/1-pending", Revision: strings.Repeat("a", 40), ItemID: "1",
+		Transport: "host", Strategy: "squash", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	subjects, err := (verifierFlow{}).Select(defaultConfig(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 2 || subjects[0].Kind != subjectBranch || subjects[0].Branch != branch ||
+		subjects[1].Kind != subjectRetirement {
+		t.Fatalf("Verifier selection order = %#v, want branch work before pending retirement", subjects)
+	}
+}
+func TestMalformedRetirementDoesNotStarveUnrelatedBranchOrReopenItem(t *testing.T) {
+	const freshBranch = "forest/2-fresh"
+	repo, _, freshRevision, _ := newVerifierBranch(t, freshBranch)
+	badBranch := "forest/1-bad"
+	badRevision := strings.Repeat("b", 40)
+	if err := putBlobRef(repo, retirementRef(badBranch, badRevision), "{", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	subjects, err := (verifierFlow{}).Select(defaultConfig(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subjects) != 2 || subjects[0].Branch != freshBranch ||
+		subjects[1].Failure == nil || subjects[1].Branch != badBranch {
+		t.Fatalf("Verifier subjects = %#v, want fresh branch then invalid retirement", subjects)
+	}
+
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", Title: "bad retirement"})
+	tk.seed(Item{ID: "2", Title: "covered branch"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	if builderSubjects, err := (builderFlow{}).Select(defaultConfig(), repo); err != nil || len(builderSubjects) != 0 {
+		t.Fatalf("Builder subjects = (%#v, %v), want malformed retirement and branch excluded",
+			builderSubjects, err)
+	}
+	cfg := defaultConfig()
+	cfg.Flows.Verifier.Merge = "squash"
+	if _, err := recordPreparingHostRetirement(
+		cfg,
+		repo,
+		freshBranch,
+		freshRevision,
+		Item{ID: "2", Title: "covered branch"},
+	); err != nil {
+		t.Fatalf("unrelated retirement preparation = %v, want success", err)
 	}
 }
 
@@ -1479,5 +1623,142 @@ func TestVerifierActProjectsChecksAtPostRebaseHead(t *testing.T) {
 	if subjects, err := (fixerFlow{}).Select(cfg, repo); err != nil ||
 		len(subjects) != 1 || subjects[0].Branch != branch {
 		t.Fatalf("failed Checks Fixer Select = (%#v, %v), want repair branch", subjects, err)
+	}
+}
+
+func TestVerifierRecoversBuilderCommentBeforeAgentWork(t *testing.T) {
+	repo, branch, head := fixerBranch(t)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "9", Title: "comment recovery"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection.Enabled = true
+	cfg.Projection.MergeViaHost = true
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
+		Key: "branch-" + branch, Kind: subjectBranch, Revision: head,
+		Label: branch, ID: "9", Branch: branch,
+	}, "comment-recovery")
+	if err == nil || out.Status != "agent_failed" {
+		t.Fatalf("Verifier after comment recovery = (%#v, %v), want later agent failure", out, err)
+	}
+	item, getErr := tk.Get("9")
+	if getErr != nil || len(item.Comments) != 1 ||
+		!strings.Contains(item.Comments[0].Body, "iron-forest:built revision="+head) {
+		t.Fatalf("recovered Builder comment = (%#v, %v), want exact Revision marker", item.Comments, getErr)
+	}
+}
+
+func TestVerifierRetirementRecoversBuilderCommentAfterPreparationStop(t *testing.T) {
+	repo, branch, head := fixerBranch(t)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "9", Title: "comment recovery"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection.Enabled = true
+	cfg.Projection.MergeViaHost = true
+	item, err := tk.Get("9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact, err := recordPreparingHostRetirement(cfg, repo, branch, head, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := fact.Record
+	legacy.BuiltComment = false
+	if _, err := replaceRetirement(repo, fact, legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("restart selection = (%#v, %v), want one retirement recovery", subjects, err)
+	}
+	out, actErr := (verifierFlow{}).Act(cfg, repo, subjects[0], "retirement-comment-recovery")
+	if actErr == nil || out.Status != "agent_failed" {
+		t.Fatalf("retirement recovery = (%#v, %v), want comment before later agent failure", out, actErr)
+	}
+	got, err := tk.Get("9")
+	if err != nil || len(got.Comments) != 1 ||
+		!strings.Contains(got.Comments[0].Body, "iron-forest:built revision="+head) {
+		t.Fatalf("retirement recovered comment = (%#v, %v), want exact marker", got.Comments, err)
+	}
+}
+
+func TestMergedHostRecoveryPersistsObservationBeforeComment(t *testing.T) {
+	branch := "forest/9-observed-before-comment"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	tk := &invisibleCommentTracker{memoryTracker: newMemoryTracker()}
+	item := Item{ID: "9", Title: "observed recovery"}
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+
+	out, err := recoverHostMergedProjection(
+		cfg, repo, branch, reviewed, item,
+		Outcome{Branch: branch, BaseSHA: reviewed},
+	)
+	if err == nil || out.Status != "comment_failed" {
+		t.Fatalf("merged recovery = (%#v, %v), want comment failure after observation", out, err)
+	}
+	fact, found, readErr := readRetirement(repo, branch, reviewed)
+	if readErr != nil || !found || fact.Record.State != "observed" ||
+		fact.Record.BuiltComment {
+		t.Fatalf("durable observation = (%#v, found=%v, err=%v), want uncompleted observed fact",
+			fact, found, readErr)
+	}
+	if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	subjects, err := (builderFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 0 {
+		t.Fatalf("Builder after lost branch and comment = (%#v, %v), want retirement coverage", subjects, err)
+	}
+}
+
+func TestMalformedStallDoesNotSuppressHealthyVerifierBranch(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	badBranch := "forest/31-bad-stall"
+	goodBranch := "forest/32-good"
+	runGitTest(t, repo, "push", "-q", "origin",
+		revision+":refs/heads/"+badBranch,
+		revision+":refs/heads/"+goodBranch)
+	ref := stalledRef("verifier", "branch-"+badBranch)
+	blob, err := writeBlob(repo, "{malformed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "push", "-q", "origin", blob+":"+ref)
+
+	subjects, err := (verifierFlow{}).Select(defaultConfig(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badFailures := 0
+	goodHealthy := 0
+	for _, subject := range subjects {
+		if subject.Branch == badBranch && subject.Failure != nil {
+			badFailures++
+		}
+		if subject.Branch == goodBranch && subject.Failure == nil {
+			goodHealthy++
+		}
+	}
+	if badFailures != 1 || goodHealthy != 1 {
+		t.Fatalf("Verifier Subjects = %#v, want one quarantined brake and one healthy branch", subjects)
 	}
 }

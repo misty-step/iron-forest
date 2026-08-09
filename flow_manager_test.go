@@ -7,6 +7,19 @@ import (
 	"testing"
 )
 
+type mixedManagerTracker struct {
+	*memoryTracker
+	malformed Item
+}
+
+func (t *mixedManagerTracker) ListOpen() ([]Item, error) {
+	items, err := t.memoryTracker.ListOpen()
+	if err != nil {
+		return nil, err
+	}
+	return append([]Item{t.malformed}, items...), nil
+}
+
 func managerCfg() ManagerFlowCfg {
 	return ManagerFlowCfg{
 		FlowCfg:       FlowCfg{Enabled: true, Agent: "manager", IntervalSec: 120},
@@ -702,5 +715,87 @@ func TestManagerWithdrawsReadyForNewExclusion(t *testing.T) {
 	}
 	if !tk.items["2"].hasTag(readyTag) {
 		t.Fatal("Manager withdrew ready from a non-excluded item")
+	}
+}
+
+func TestManagerSelectKeepsHealthyItemBesideMalformedTrackerEvidence(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := &mixedManagerTracker{
+		memoryTracker: newMemoryTracker(),
+		malformed:     Item{ID: "9", Title: "malformed"},
+	}
+	tk.seed(Item{ID: "10", Title: "healthy", UpdatedAt: "r10"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		return managerReport{Pick: "10"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+	cfg := managerFlowConfig(repo)
+	cfg.Flows.Manager.Agent = "manager"
+
+	subjects, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures := 0
+	var plan Subject
+	for _, subject := range subjects {
+		if subject.Failure != nil {
+			failures++
+		}
+		if subject.Key == managerSubject && subject.Failure == nil {
+			plan = subject
+		}
+	}
+	if failures != 1 || plan.Key == "" {
+		t.Fatalf("Manager Subjects = %#v, want one quarantined Item and one healthy plan", subjects)
+	}
+	out, err := (managerFlow{}).Act(cfg, repo, plan, "mixed-item")
+	item, getErr := tk.Get("10")
+	if err != nil || out.Status != "done" || getErr != nil || !item.hasTag(readyTag) {
+		t.Fatalf("healthy Manager Effect = (status=%q item=%#v err=%v get=%v), want promoted Item", out.Status, item, err, getErr)
+	}
+}
+
+func TestManagerSelectKeepsHealthyItemBesideMalformedBuilderBrake(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	ref := stalledRef("builder", "item-9")
+	blob, err := writeBlob(repo, "{malformed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "push", "-q", "origin", blob+":"+ref)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker {
+		return trackerStub{items: []Item{
+			{ID: "9", Title: "bad brake", UpdatedAt: "r9"},
+			{ID: "10", Title: "healthy", UpdatedAt: "r10"},
+		}}
+	}
+	defer func() { trackerFor = oldTracker }()
+	cfg := defaultConfig()
+	cfg.Flows.Manager = managerCfg()
+
+	subjects, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures := 0
+	plans := 0
+	for _, subject := range subjects {
+		if subject.Failure != nil &&
+			strings.Contains(subject.Failure.Error(), "control evidence") {
+			failures++
+		}
+		if subject.Key == managerSubject && subject.Failure == nil {
+			plans++
+		}
+	}
+	if failures != 1 || plans != 1 {
+		t.Fatalf("Manager Subjects = %#v, want one quarantined brake and one healthy plan", subjects)
 	}
 }

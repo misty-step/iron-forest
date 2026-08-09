@@ -7,12 +7,13 @@ Four independent Flows run in one process and coordinate through git facts and T
 
 Each Flow selects a Subject, performs its Effect, and records a Run.
 Each lane uses its own interval. Admission excludes duplicate work on one Subject across processes and checkouts.
+After each pass, a lane resumes selection after the prior Subject. A retrying Subject cannot starve later work.
 
 | Flow | Selector | Effects |
 | --- | --- | --- |
-| Builder | Open Tracker items with every required label, without a forest branch, retirement fact, exclude label, or Builder stall at the current Revision. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. Host mode records `preparing` recovery state before creating a Projection. |
-| Verifier | Recovery retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and attempts remain, or one Host-preparation pass when Host merge is enabled and `auto_merge` is disabled. | Runs the configured Checks, refreshes durable notes, obtains an independent Verdict, upgrades Host retirement intent, recovers exact operator Host merges, and merges approved branches only when `auto_merge` is enabled. |
-| Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit. | Runs the Builder on the branch, passes the Gate, pushes the repair, and records the attempt. An exhausted branch gets `forest:failed` for a human. |
+| Builder | Open Tracker items with every required label, without a forest branch, retirement fact, exclude label, or Builder stall at the current Revision. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It publishes the Revision-marked Tracker comment before Host mode records `preparing` recovery state. |
+| Verifier | Recovery retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and Fixer attempts remain, or one Host-preparation pass when Host merge is enabled and `auto_merge` is disabled. | Runs the configured Checks, refreshes durable notes, obtains an independent Verdict, upgrades Host retirement intent, recovers exact operator Host merges, and merges approved branches only when `auto_merge` is enabled. |
+| Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit, plus exhausted branches whose human handoff is incomplete. | Runs the Builder on the branch and passes the Gate. One atomic push publishes both the repair and attempt count. An exhausted branch gets `forest:failed` for a human. |
 | Manager | Open Tracker items without a forest branch, retirement fact, ready label, configured exclude label, open blocker, or Builder stall. | Fills the configured ready depth one candidate per pass. It withdraws branchless ready items that become excluded, blocked, failed, or stalled. |
 
 ## State
@@ -23,14 +24,18 @@ checkout has one daemon process.
 - **Verdict:** `refs/notes/forest/verdict` stores a Verdict on the exact Revision reviewed.
 - **Checks:** `refs/notes/forest/checks` stores the result of Iron Forest's own `checks:` commands on that exact Revision.
 - **Retirement:** `refs/forest/retirement/` stores `preparing`, `pending`, `observed`, or `landed` merge recovery until the Tracker Item and branch retire.
-- **Ledger:** `.forest/runs.jsonl` is host telemetry outside git. It records each Run's Flow, Subject, Revision, Status, Verdict, and measured `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning` classes. It never records or computes money.
+- **Effect:** `refs/forest/attempt/effect-*` stores Revision-scoped write claims. Accepted Host merges and Tracker closes get separate acceptance claims.
+Manager and Fixer tag updates use Subject admission as intent. Repeating their exact add/remove operation is safe.
+- **Ledger:** `.forest/runs.jsonl` is host telemetry outside git. It records each Run's Flow, Subject, Revision, Status, and review verdict under `review`. It also records measured `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning` classes. It never records or computes money.
 
 A new commit has no Verdict or Checks note, so Iron Forest needs no staleness comparison. Iron Forest never reads a Host's review or check state.
 
-A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. Host mode records `preparing` before the Projection can exist and upgrades it to `pending` after the durable winning Verdict.
-With `auto_merge: false`, the Verifier never requests a merge. An exact Host merge advances `preparing` or `pending` to `observed` before approval-note read; a read failure retains `observed`, and recovery lands it only after approval and passing Checks.
+A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. Host mode publishes the Builder comment before `preparing` can suppress branch selection. The retirement fact records that completed Effect and upgrades to `pending` after the durable winning Verdict.
+With `auto_merge: false`, the Verifier never requests a merge. A Host merge advances `preparing` or `pending` to `observed` before approval-note read. A merge found without prior intent first records `observed`, then recovers any missing Builder comment. A Verifier-confirmed request advances `pending` directly to `landed`. A read failure retains `observed`. Recovery lands it only after approval and passing Checks.
 Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
 Projected Checks and Verdicts use a `COMMENT` review whose `commit_id` is the exact Revision.
+Host merge acceptance is recorded separately from its write claim. Recovery observes an accepted request without issuing it again.
+Completed retirement removes its fact, attempt record, Subject brakes, and Effect claims in one atomic compare-and-delete transaction.
 
 If branch loss hides a Projection before approval is readable, `preparing`, `pending`, or `observed` retirement blocks duplicate Builder work until exact Host state and durable approval join.
 
@@ -148,7 +153,19 @@ Building the wrong thing is worse than not building: Iron Forest does not guess 
 stack. If a `checks:` command's tool is missing, the check fails and the note
 names the command that could not start.
 
-`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` makes an approved, passing branch eligible for Verifier merge when attempts remain; when false, a native merge remains disabled, while Host mode first records `preparing` before the Projection and upgrades it to `pending` after durable approval without requesting a merge. An exact Host merge advances that fact to `observed` before approval-note read; recovery lands it only after approval and passing Checks. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
+`flows.builder` selects items. Declaring `require_labels` changes selection from opt-out to opt-in. An open Item then needs every declared label.
+
+An enabled Manager requires `require_labels: [forest:ready]`. This label is its assignment signal.
+
+`flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` lets the Verifier merge an approved, passing branch.
+
+When automatic merge is off, a native merge stays disabled. Host mode records `preparing` after the Builder comment and requests no merge.
+
+A Host merge found through inspection advances to `observed` before approval-note read. A Verifier-confirmed merge advances from `pending` to `landed`.
+
+`flows.fixer.attempts` bounds repairs. The Verifier gates branch merges with the same branch attempt record.
+
+Projection keys control the optional human surface.
 
 ## Requirements
 

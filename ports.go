@@ -24,8 +24,9 @@ type Tracker interface {
 	// Comment appends a comment to an item's discussion.
 	Comment(id, body string) error
 	// Close closes one item.
+	// Close returns errTrackerEffectNotApplied only after an exact read proves
+	// that a failed close left the item open. Every other failure is uncertain.
 	Close(id string) error
 	// SetTags adds and removes tags on one item in one call.
 	SetTags(id string, add, remove []string) error
 }
-

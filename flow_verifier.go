@@ -62,10 +62,11 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err := fetchNotes(repoDir); err != nil {
 		return nil, fmt.Errorf("notes: %w", err)
 	}
-	branches, err := forestBranches(repoDir)
+	branchSnapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
 		return nil, err
 	}
+	branches := branchSnapshot.Actionable
 	branchHeads := make(map[string]string, len(branches))
 	for _, branch := range branches {
 		head, err := branchHead(repoDir, branch)
@@ -101,17 +102,27 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			retiring[record.Branch] = true
 			s = Subject{Key: retirementSubjectKey(record.Branch), Kind: subjectRetirement,
 				Revision: record.Revision, Label: "retire " + record.Branch,
-				ID: record.ItemID, Branch: record.Branch, Item: Item{ID: record.ItemID, Title: record.Title}}
+				ID: record.ItemID, Branch: record.Branch,
+				Item: Item{ID: record.ItemID, Title: record.Title}}
 		}
-		stalled, err := stalledOn(repoDir, "verifier", s.Key, s.Revision)
+		s, include, err := subjectAfterBrake(repoDir, "verifier", s)
 		if err != nil {
 			return nil, fmt.Errorf("stalled %s: %w", s.Key, err)
 		}
-		if !stalled {
+		if include {
 			recoveries = append(recoveries, s)
 		}
 	}
-	var fresh, mergeable []Subject
+	var fresh, mergeable, failures []Subject
+	for _, failure := range branchSnapshot.Failures {
+		failure, include, err := subjectAfterBrake(repoDir, "verifier", failure)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", failure.Key, err)
+		}
+		if include {
+			failures = append(failures, failure)
+		}
+	}
 	for _, branch := range branches {
 		head := branchHeads[branch]
 		if retiring[branch] {
@@ -123,11 +134,11 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			Label:    branch,
 			ID:       itemIDFromBranch(branch),
 			Branch:   branch}
-		stalled, err := stalledOn(repoDir, "verifier", s.Key, head)
+		s, include, err := subjectAfterBrake(repoDir, "verifier", s)
 		if err != nil {
 			return nil, fmt.Errorf("stalled %s: %w", s.Key, err)
 		}
-		if stalled {
+		if !include {
 			continue
 		}
 		v, found, err := readVerdict(repoDir, head)
@@ -195,44 +206,68 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		}
 		mergeable = append(mergeable, s)
 	}
-	recoveries = append(recoveries, fresh...)
-	recoveries = append(recoveries, mergeable...)
-	return recoveries, nil
+	mergeable = append(mergeable, fresh...)
+	mergeable = append(mergeable, recoveries...)
+	mergeable = append(mergeable, failures...)
+	return mergeable, nil
 }
 
-func hasCommentMarker(comments []comment, marker string) bool {
-	for _, c := range comments {
-		if strings.Contains(c.Body, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func publishMergeBlocked(t Tracker, it Item, revision string, cause error) error {
-	marker := "<!-- iron-forest:merge-blocked revision=" + revision + " -->"
-	if hasCommentMarker(it.Comments, marker) {
-		return nil
-	}
-	current, readErr := validatedTrackerItem(t, it.ID)
-	if readErr != nil {
-		return fmt.Errorf("reconcile handoff comment: %w", readErr)
-	}
-	if hasCommentMarker(current.Comments, marker) {
-		return nil
-	}
-	body := "Merge blocked: " + redactSecretShaped(cause.Error()) + "\n\n" + marker
-	if err := t.Comment(it.ID, body); err != nil {
-		current, readErr := validatedTrackerItem(t, it.ID)
-		if readErr != nil {
-			return fmt.Errorf("comment: %v; reconcile: %w", err, readErr)
-		}
-		if hasCommentMarker(current.Comments, marker) {
-			return nil
-		}
+func recordMergeBlocked(
+	cfg Config,
+	repoDir, subjectKey, revision string,
+	it Item,
+	cause error,
+) error {
+	tracker := trackerFor(cfg.Repo)
+	tagClaim, err := readAttempts(repoDir, effectAttemptKey("Tracker-tag", it.ID, revision))
+	if err != nil {
 		return err
 	}
-	return nil
+	current, err := validatedTrackerItem(tracker, it.ID)
+	if err != nil {
+		return err
+	}
+	marker := "<!-- iron-forest:merge-blocked revision=" + revision + " -->"
+	if !current.hasTag(failedLabel) {
+		if tagClaim != 0 {
+			return fmt.Errorf("%w: prior Tracker tag attempt for Item %q is not visible",
+				errHostMergeUnavailable, it.ID)
+		}
+		if err := claimEffect(repoDir, "Tracker-tag", it.ID, revision); err != nil {
+			return err
+		}
+		if tagErr := tracker.SetTags(it.ID, []string{failedLabel}, nil); tagErr != nil {
+			current, readErr := validatedTrackerItem(tracker, it.ID)
+			if readErr != nil {
+				if errors.Is(readErr, errTrackerEvidenceInvalid) {
+					return readErr
+				}
+				return fmt.Errorf("%w: set failed tag: %v; reconcile: %v",
+					errHostMergeUnavailable, tagErr, readErr)
+			}
+			if !current.hasTag(failedLabel) {
+				return fmt.Errorf("%w: set failed tag: %v",
+					errHostMergeUnavailable, tagErr)
+			}
+		}
+	}
+	commentErr := publishTrackerComment(
+		repoDir,
+		tracker,
+		current,
+		"Tracker-comment",
+		revision,
+		"Merge blocked: "+redactSecretShaped(cause.Error()),
+		marker,
+	)
+	if commentErr != nil &&
+		(errors.Is(commentErr, errFlowRetryable) || errors.Is(commentErr, errTrackerUnavailable)) {
+		return commentErr
+	}
+	if err := recordTerminalStall(repoDir, (verifierFlow{}).Name(), subjectKey, revision); err != nil {
+		return fmt.Errorf("record durable merge brake: %w", err)
+	}
+	return commentErr
 }
 
 // mergeBlocked names why an approved, green branch cannot complete a merge,
@@ -269,6 +304,12 @@ func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (
 			Branch: s.Branch, BaseSHA: s.Revision,
 			Agent: record.Agent, Model: record.Model, DefSHA: record.DefSHA,
 		}
+		fact, err = recoverRetirementBuiltComment(cfg, repoDir, fact, s.Item)
+		if err != nil {
+			out.Status = "comment_failed"
+			return out, fmt.Errorf("comment: %w", err)
+		}
+		record = fact.Record
 		if record.State == "preparing" {
 			head, present, headErr := lookupBranchHead(repoDir, record.Branch)
 			if headErr != nil {
@@ -380,6 +421,10 @@ func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (
 
 func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
 	out := Outcome{Branch: s.Branch, BaseSHA: s.Revision}
+	if err := requalifyForestBranch(repoDir, s.Branch); err != nil {
+		out.Status = "branch_failed"
+		return out, err
+	}
 	stalled, err := stalledOn(repoDir, "verifier", s.Key, s.Revision)
 	if err != nil {
 		out.Status = "notes_failed"
@@ -393,12 +438,6 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 	if err != nil {
 		out.Status = "item_failed"
 		return out, fmt.Errorf("item: %w", err)
-	}
-	if cfg.Projection.MergeViaHost {
-		if _, err := recordPreparingHostRetirement(cfg, repoDir, s.Branch, s.Revision, it); err != nil {
-			out.Status = "projection_failed"
-			return out, fmt.Errorf("projection preparation: %w", retryableHostError(cfg, err))
-		}
 	}
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
@@ -420,6 +459,16 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 	defer cleanupWorktree(repoDir, wtDir)
 	if err := checkSubjectRevision(s, baseSHA); err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: baseSHA, Status: "stale"}, err
+	}
+	if err := publishBuiltComment(cfg, repoDir, it, s.Branch, baseSHA); err != nil {
+		out.Status = "comment_failed"
+		return out, fmt.Errorf("comment: %w", err)
+	}
+	if cfg.Projection.MergeViaHost {
+		if _, err := recordPreparingHostRetirement(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
+			out.Status = "projection_failed"
+			return out, fmt.Errorf("projection preparation: %w", retryableHostError(cfg, err))
+		}
 	}
 	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
 	if err != nil {
@@ -468,7 +517,7 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 			}
 			note = winner
 		}
-		if err := projectChecks(cfg, s.Branch, baseSHA, note); err != nil {
+		if err := projectChecks(cfg, repoDir, s.Branch, baseSHA, note); err != nil {
 			return out, fmt.Errorf("rebase: %v (projection: %w)", rebaseErr, retryableHostError(cfg, err))
 		}
 		return out, fmt.Errorf("rebase: %w", rebaseErr)
@@ -534,7 +583,7 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 	}
 	if checkErr != nil {
 		out.Status = "checks_failed"
-		if err := projectChecks(cfg, s.Branch, baseSHA, checks); err != nil {
+		if err := projectChecks(cfg, repoDir, s.Branch, baseSHA, checks); err != nil {
 			return out, fmt.Errorf("checks: %v (projection: %w)", checkErr, retryableHostError(cfg, err))
 		}
 		return out, fmt.Errorf("checks: %w", checkErr)
@@ -544,7 +593,7 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 	// let the Fixer repair the head, so no reviewer is paid to read broken code.
 	if checks.Status != "pass" {
 		out.Status = "checks_failed"
-		if err := projectChecks(cfg, s.Branch, baseSHA, checks); err != nil {
+		if err := projectChecks(cfg, repoDir, s.Branch, baseSHA, checks); err != nil {
 			return out, fmt.Errorf("projection: %w", retryableHostError(cfg, err))
 		}
 		return out, nil
@@ -595,7 +644,7 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 			return out, fmt.Errorf("merge: record Host retirement: %w",
 				retirementProjectionError(cfg, err))
 		}
-	} else if err := projectVerdict(cfg, s.Branch, baseSHA, verdict, checks); err != nil {
+	} else if err := projectVerdict(cfg, repoDir, s.Branch, baseSHA, verdict, checks); err != nil {
 		out.Status = "projection_failed"
 		return out, fmt.Errorf("projection: %w", retirementProjectionError(cfg, err))
 	}
@@ -637,21 +686,12 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 			out.Status = "merge_failed"
 			return out, err
 		}
-		// A branch that cannot land needs a human, not repeated external effects.
-		// Publish the exact-Revision signal before the attempt fact, then reconcile
-		// accepted-response loss through the Tracker read.
+		// A branch that cannot land needs one durable operator handoff.
 		out.Status = "merge_failed"
-		tracker := trackerFor(cfg.Repo)
-		if tagErr := tracker.SetTags(it.ID, []string{failedLabel}, nil); tagErr != nil {
-			return out, fmt.Errorf("%w: merge failed: %v; set failed tag: %v",
-				errFlowRetryable, err, tagErr)
-		}
-		if commentErr := publishMergeBlocked(tracker, it, baseSHA, err); commentErr != nil {
-			return out, fmt.Errorf("%w: merge failed: %v; publish blocked comment: %v",
-				errFlowRetryable, err, commentErr)
-		}
-		if _, berr := bumpAttempts(repoDir, attemptKey); berr != nil {
-			return out, fmt.Errorf("merge: %w (attempt record failed: %v)", err, berr)
+		if handoffErr := recordMergeBlocked(
+			cfg, repoDir, s.Key, baseSHA, it, err,
+		); handoffErr != nil {
+			return out, fmt.Errorf("merge failed: %v; handoff: %w", err, handoffErr)
 		}
 		return out, err
 	}

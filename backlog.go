@@ -89,10 +89,17 @@ func (t githubTracker) Close(id string) error {
 	if err := json.Unmarshal(out, &state); err != nil {
 		return fmt.Errorf("%w: decode closed Item state: %v", errTrackerEvidenceInvalid, err)
 	}
-	if strings.EqualFold(state.State, "closed") {
+	switch strings.ToLower(strings.TrimSpace(state.State)) {
+	case "closed":
 		return nil
+	case "open":
+		return fmt.Errorf("%w: %w: close item: %v",
+			errTrackerUnavailable, errTrackerEffectNotApplied, closeErr)
+	case "":
+		return fmt.Errorf("%w: closed Item response has no state", errTrackerEvidenceInvalid)
+	default:
+		return fmt.Errorf("%w: closed Item response has invalid state", errTrackerEvidenceInvalid)
 	}
-	return fmt.Errorf("%w: close item: %v", errTrackerUnavailable, closeErr)
 }
 
 // SetTags adds and removes labels on one item in one call.
@@ -149,6 +156,7 @@ var trackerFor = func(repo string) Tracker { return githubTracker{repo: repo} }
 var (
 	errTrackerUnavailable           = errors.New("Tracker is unavailable")
 	errTrackerEvidenceInvalid       = errors.New("Tracker evidence is invalid")
+	errTrackerEffectNotApplied      = errors.New("Tracker Effect was not applied")
 	errTrackerItemIDEmpty           = errors.New("Tracker Item ID is empty")
 	errTrackerItemIDCredential      = errors.New("Tracker Item ID is credential-shaped")
 	errTrackerItemIDMismatch        = errors.New("Tracker Item ID does not match requested identity")
@@ -183,36 +191,110 @@ func validateTrackerItem(item Item, expectedID string) error {
 	return nil
 }
 
-func validatedTrackerItems(t Tracker) ([]Item, error) {
+type trackerSnapshot struct {
+	Items    []Item
+	Failures []Subject
+}
+
+func readTrackerSnapshot(t Tracker) (trackerSnapshot, error) {
 	items, err := t.ListOpen()
 	if err != nil {
-		return nil, err
+		return trackerSnapshot{}, err
 	}
-	seen := make(map[string]struct{}, len(items))
+	counts := make(map[string]int, len(items))
 	for _, item := range items {
-		if err := validateTrackerItem(item, ""); err != nil {
-			return nil, err
-		}
-		if _, exists := seen[item.ID]; exists {
-			return nil, errTrackerItemIdentityDuplicate
-		}
-		seen[item.ID] = struct{}{}
+		counts[item.ID]++
 	}
-	return items, nil
+	snapshot := trackerSnapshot{Items: make([]Item, 0, len(items))}
+	for i, item := range items {
+		cause := validateTrackerItem(item, "")
+		if counts[item.ID] > 1 {
+			cause = errors.Join(cause, errTrackerItemIdentityDuplicate)
+		}
+		if cause == nil {
+			snapshot.Items = append(snapshot.Items, item)
+			continue
+		}
+		material, _ := json.Marshal(item)
+		revision := blobSHA(strconv.Itoa(i) + "\x00" + string(material))
+		subject := Subject{
+			Key:      "tracker-evidence-" + revision,
+			Kind:     subjectItem,
+			Revision: revision,
+			Label:    "invalid Tracker evidence",
+			Failure:  fmt.Errorf("%w: %w", errTrackerEvidenceInvalid, cause),
+		}
+		if validateTrackerItemID(item.ID) == nil && counts[item.ID] == 1 {
+			subject.ID = item.ID
+		}
+		snapshot.Failures = append(snapshot.Failures, subject)
+	}
+	return snapshot, nil
 }
 
 func validatedTrackerItem(t Tracker, id string) (Item, error) {
 	if err := validateTrackerItemID(id); err != nil {
-		return Item{}, err
+		return Item{}, fmt.Errorf("%w: requested Item identity: %w",
+			errTrackerEvidenceInvalid, err)
 	}
 	item, err := t.Get(id)
 	if err != nil {
 		return Item{}, err
 	}
 	if err := validateTrackerItem(item, id); err != nil {
-		return Item{}, err
+		return Item{}, fmt.Errorf("%w: %w", errTrackerEvidenceInvalid, err)
 	}
 	return item, nil
+}
+func hasCommentMarker(comments []comment, marker string) bool {
+	for _, c := range comments {
+		if strings.Contains(c.Body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func publishTrackerComment(
+	repoDir string,
+	t Tracker,
+	it Item,
+	kind, revision, body, marker string,
+) error {
+	claim, err := readAttempts(repoDir, effectAttemptKey(kind, it.ID, revision))
+	if err != nil {
+		return err
+	}
+	current, err := validatedTrackerItem(t, it.ID)
+	if err != nil {
+		return err
+	}
+	if hasCommentMarker(current.Comments, marker) {
+		return nil
+	}
+	if claim != 0 {
+		return fmt.Errorf("%w: prior Tracker comment attempt for Item %q is not visible",
+			errHostMergeUnavailable, it.ID)
+	}
+	if err := claimEffect(repoDir, kind, it.ID, revision); err != nil {
+		return err
+	}
+	if err := t.Comment(it.ID, body+"\n\n"+marker); err != nil {
+		current, readErr := validatedTrackerItem(t, it.ID)
+		if readErr != nil {
+			if errors.Is(readErr, errTrackerEvidenceInvalid) {
+				return readErr
+			}
+			return fmt.Errorf("%w: comment: %v; reconcile: %v",
+				errHostMergeUnavailable, err, readErr)
+		}
+		if hasCommentMarker(current.Comments, marker) {
+			return nil
+		}
+		return fmt.Errorf("%w: publish Tracker comment: %v",
+			errHostMergeUnavailable, err)
+	}
+	return nil
 }
 
 // hasTag reports whether an item carries one tag.
@@ -225,21 +307,31 @@ func (it Item) hasTag(name string) bool {
 	return false
 }
 
-func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
-	items, err := validatedTrackerItems(trackerFor(cfg.Repo))
+func eligibleItemsAndFailures(cfg Config, repoDir string) ([]Item, []Subject, error) {
+	snapshot, err := readTrackerSnapshot(trackerFor(cfg.Repo))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	branches, err := forestBranches(repoDir)
+	branchSnapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	failures := append(snapshot.Failures, branchSnapshot.Failures...)
+	if len(snapshot.Items) == 0 {
+		return nil, failures, nil
 	}
 	retiring, err := retirementItemIDs(repoDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return eligibleFrom(items, branches, retiring,
-		cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels), nil
+	items := eligibleFrom(snapshot.Items, branchSnapshot.Covered, retiring,
+		cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels)
+	return items, failures, nil
+}
+
+func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
+	items, _, err := eligibleItemsAndFailures(cfg, repoDir)
+	return items, err
 }
 
 func eligibleFrom(items []Item, branches, retiring, excluded, required []string) []Item {
@@ -287,32 +379,125 @@ func hasExcludedLabel(item Item, excluded []string) bool {
 	return false
 }
 
-func forestBranches(repoDir string) ([]string, error) {
+// A branch snapshot keeps safe work moving without treating damaged evidence as
+// absent. Covered includes every ref with a recoverable Item identity, while
+// Actionable contains only unique canonical branches.
+type forestBranchSnapshot struct {
+	Covered    []string
+	Actionable []string
+	Failures   []Subject
+}
+
+type forestBranchEvidence struct {
+	raw      string
+	revision string
+	branch   string
+	id       string
+	cause    error
+}
+
+func readForestBranchSnapshot(repoDir string) (forestBranchSnapshot, error) {
 	out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/forest/*")
+	if err != nil {
+		return forestBranchSnapshot{}, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return forestBranchSnapshot{}, nil
+	}
+	var entries []forestBranchEvidence
+	counts := make(map[string]int)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		entry := forestBranchEvidence{raw: line, revision: blobSHA(line)}
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !strings.HasPrefix(fields[1], "refs/heads/"+BranchPrefix) {
+			entry.cause = errors.New("forest branch listing has invalid remote evidence")
+			entries = append(entries, entry)
+			continue
+		}
+		entry.branch = strings.TrimPrefix(fields[1], "refs/heads/")
+		if validHex(fields[0], 20) {
+			entry.revision = fields[0]
+		} else {
+			entry.cause = errors.New("forest branch has an invalid Revision")
+		}
+		name := strings.TrimPrefix(entry.branch, BranchPrefix)
+		delimiter := strings.IndexByte(name, '-')
+		if delimiter >= 1 {
+			candidate := decodeBranchID(name[:delimiter])
+			if validateTrackerItemID(candidate) == nil {
+				entry.id = candidate
+			}
+		}
+		if entry.id == "" || delimiter < 1 ||
+			encodeBranchID(entry.id) != name[:delimiter] ||
+			secretShaped(entry.branch) {
+			entry.cause = errors.Join(entry.cause,
+				errors.New("forest branch has invalid Tracker Item identity"))
+		}
+		if entry.id != "" {
+			counts[entry.id]++
+		}
+		entries = append(entries, entry)
+	}
+	snapshot := forestBranchSnapshot{}
+	for _, entry := range entries {
+		if entry.id != "" {
+			snapshot.Covered = append(snapshot.Covered, entry.branch)
+		}
+		if entry.cause == nil && counts[entry.id] == 1 {
+			snapshot.Actionable = append(snapshot.Actionable, entry.branch)
+			continue
+		}
+		if entry.cause == nil {
+			entry.cause = fmt.Errorf("multiple forest branches claim Tracker Item %q", entry.id)
+		}
+		subject := Subject{
+			Key:      "branch-evidence-" + blobSHA(entry.raw),
+			Kind:     subjectBranch,
+			Revision: entry.revision,
+			Label:    "invalid forest branch evidence",
+			Failure:  fmt.Errorf("%w: %w", errTrackerEvidenceInvalid, entry.cause),
+		}
+		if !secretShaped(entry.branch) {
+			subject.Branch = entry.branch
+		}
+		if entry.id != "" {
+			subject.ID = entry.id
+			subject.Item = Item{ID: entry.id}
+		}
+		snapshot.Failures = append(snapshot.Failures, subject)
+	}
+	return snapshot, nil
+}
+
+func forestBranches(repoDir string) ([]string, error) {
+	snapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(out) == "" {
-		return nil, nil
+	if len(snapshot.Failures) != 0 {
+		return nil, snapshot.Failures[0].Failure
 	}
-	var branches []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || !validHex(fields[0], 20) ||
-			!strings.HasPrefix(fields[1], "refs/heads/"+BranchPrefix) {
-			return nil, errors.New("forest branch listing has invalid remote evidence")
-		}
-		branch := strings.TrimPrefix(fields[1], "refs/heads/")
-		name := strings.TrimPrefix(branch, BranchPrefix)
-		delimiter := strings.IndexByte(name, '-')
-		id := itemIDFromBranch(branch)
-		if delimiter < 1 || encodeBranchID(id) != name[:delimiter] ||
-			secretShaped(branch) || validateTrackerItemID(id) != nil {
-			return nil, errors.New("forest branch has invalid Tracker Item identity")
-		}
-		branches = append(branches, branch)
+	return snapshot.Actionable, nil
+}
+
+func requalifyForestBranch(repoDir, branch string) error {
+	snapshot, err := readForestBranchSnapshot(repoDir)
+	if err != nil {
+		return err
 	}
-	return branches, nil
+	for _, current := range snapshot.Actionable {
+		if current == branch {
+			return nil
+		}
+	}
+	for _, failure := range snapshot.Failures {
+		if failure.Branch == branch {
+			return failure.Failure
+		}
+	}
+	return fmt.Errorf("%w: branch %q is no longer a canonical remote branch",
+		errSubjectRevisionStale, branch)
 }
 
 func lookupBranchHead(repoDir, branch string) (string, bool, error) {

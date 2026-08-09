@@ -376,3 +376,49 @@ func dropAttempts(repoDir, key string) error {
 	}
 	return nil
 }
+func effectAttemptKey(kind, subject, revision string) string {
+	return "effect-" + blobSHA(subject) + "-" + blobSHA(kind+"\x00"+revision)
+}
+func listEffectRefs(repoDir, subject string) ([]string, error) {
+	prefix := "refs/forest/attempt/effect-" + blobSHA(subject) + "-"
+	out, err := gitCommand(repoDir, "ls-remote", "origin", prefix+"*")
+	if err != nil {
+		return nil, fmt.Errorf("%w: list Effect claims: %v", errFlowRetryable, err)
+	}
+	var refs []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !validHex(fields[0], 20) ||
+			!strings.HasPrefix(fields[1], prefix) ||
+			!validHex(strings.TrimPrefix(fields[1], prefix), 20) {
+			return nil, fmt.Errorf("%w: invalid Effect claim ref listing", errAttemptsInvalid)
+		}
+		refs = append(refs, fields[1])
+	}
+	return refs, nil
+}
+
+func claimEffect(repoDir, kind, subject, revision string) error {
+	key := effectAttemptKey(kind, subject, revision)
+	attempts, err := readAttempts(repoDir, key)
+	if err != nil {
+		return err
+	}
+	if attempts != 0 {
+		return fmt.Errorf("%w: prior %s attempt for %q at Revision %s has no visible response",
+			errHostMergeUnavailable, kind, subject, revision)
+	}
+	attempts, err = bumpAttempts(repoDir, key)
+	if err != nil {
+		return fmt.Errorf("%w: persist %s attempt for %q: %v",
+			errHostMergePending, kind, subject, err)
+	}
+	if attempts != 1 {
+		return fmt.Errorf("%w: concurrent %s attempt already owns %q at Revision %s",
+			errHostMergeUnavailable, kind, subject, revision)
+	}
+	return nil
+}

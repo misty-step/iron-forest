@@ -22,36 +22,44 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	defer updateGate.RUnlock()
 	// eligibleItems already drops items covered by a forest branch, so this
 	// selector must not repeat that rule and drift from it.
-	items, err := eligibleItems(cfg, repoDir)
+	items, failures, err := eligibleItemsAndFailures(cfg, repoDir)
 	if err != nil {
 		return nil, err
 	}
-	var subjects []Subject
+	subjects := make([]Subject, 0, len(items)+len(failures))
 	for _, it := range items {
-		// An unchanged situation that reached the failure limit is not work. The
-		// key keeps its numeric shape for GitHub ids so the durable brake ref and
-		// the subject key are unchanged.
-		key := "item-" + it.ID
-		stalled, err := stalledOn(repoDir, "builder", key, it.UpdatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("stalled %s: %w", key, err)
-		}
-		if stalled {
-			continue
-		}
-		subjects = append(subjects, Subject{
-			Key:      key,
+		subject := Subject{
+			Key:      "item-" + it.ID,
 			Kind:     subjectItem,
 			Revision: it.UpdatedAt,
 			Label:    fmt.Sprintf("#%s %s", it.ID, it.Title),
 			ID:       it.ID,
 			Item:     it,
-		})
+		}
+		subject, include, err := subjectAfterBrake(repoDir, "builder", subject)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", subject.Key, err)
+		}
+		if include {
+			subjects = append(subjects, subject)
+		}
+	}
+	for _, failure := range failures {
+		failure, include, err := subjectAfterBrake(repoDir, "builder", failure)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", failure.Key, err)
+		}
+		if include {
+			subjects = append(subjects, failure)
+		}
 	}
 	return subjects, nil
 }
 
 func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
+	if s.Failure != nil {
+		return Outcome{Status: "evidence_failed", BaseSHA: s.Revision}, s.Failure
+	}
 	// The caller holds the canonical Item admission. Re-run the complete
 	// Selector now so a Tracker or durable-fact change after Select cannot start
 	// an agent on stale work.
@@ -136,16 +144,18 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
+	body := builderProjectionBody(it, rep, changed)
+	if err := publishBuiltComment(
+		cfg, repoDir, it, branch, publishedHead,
+	); err != nil {
+		out.Status = "comment_failed"
+		return out, fmt.Errorf("comment: %w", err)
+	}
 	if cfg.Projection.MergeViaHost {
 		if _, err := recordPreparingHostRetirement(cfg, repoDir, branch, publishedHead, it); err != nil {
 			out.Status = "projection_failed"
 			return out, fmt.Errorf("projection preparation: %w", err)
 		}
-	}
-	body := builderProjectionBody(it, rep, changed)
-	if err := trackerFor(cfg.Repo).Comment(it.ID, fmt.Sprintf("Built branch `%s`.", branch)); err != nil {
-		out.Status = "comment_failed"
-		return out, fmt.Errorf("comment: %w", err)
 	}
 	url, _, err := projectBranch(cfg, repoDir, it, branch, body, publishedHead)
 	if err != nil {
@@ -155,6 +165,17 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	out.Status = "built"
 	out.PRURL = url
 	return out, nil
+}
+func publishBuiltComment(cfg Config, repoDir string, it Item, branch, revision string) error {
+	return publishTrackerComment(
+		repoDir,
+		trackerFor(cfg.Repo),
+		it,
+		"Tracker-builder-comment",
+		revision,
+		fmt.Sprintf("Built branch `%s`.", branch),
+		"<!-- iron-forest:built revision="+revision+" -->",
+	)
 }
 
 func builderProjectionBody(it Item, rep report, changed []string) string {

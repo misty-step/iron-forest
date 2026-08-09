@@ -243,7 +243,7 @@ func TestMergeGitPathPinsReviewedRevision(t *testing.T) {
 			if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
 				return nil, errors.New("tracker unavailable")
 			}
-			return []byte(`{}`), nil
+			return []byte(`{"state":"OPEN"}`), nil
 		}
 		t.Cleanup(func() { ghJSON = successGH })
 		if err := mergeGitPath(cfg, repo, branch, reviewed, it, agent); err == nil ||
@@ -305,8 +305,8 @@ func TestMergeGitPathPinsReviewedRevision(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := mergeGitPath(cfg, repo, branch, reviewed, it, agent); err == nil ||
-			!strings.Contains(err.Error(), "drop attempt") {
-			t.Fatalf("post-close cleanup failure = %v, want attempt cleanup error", err)
+			!strings.Contains(err.Error(), "retire durable refs") {
+			t.Fatalf("post-close cleanup failure = %v, want atomic ref cleanup error", err)
 		}
 		if got := remoteBranchHead(t, repo, "master"); got == masterBefore {
 			t.Fatal("cleanup failure prevented the durable merge")
@@ -318,6 +318,9 @@ func TestMergeGitPathPinsReviewedRevision(t *testing.T) {
 		if facts, err := listRetirements(repo); err != nil || len(facts) != 1 ||
 			facts[0].Record.State != "landed" {
 			t.Fatalf("cleanup failure facts = (%#v, %v), want landed recovery fact", facts, err)
+		}
+		if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 1 {
+			t.Fatalf("atomic cleanup failure attempts = (%d, %v), want retained", attempts, err)
 		}
 		if err := os.Remove(hook); err != nil {
 			t.Fatal(err)
@@ -478,7 +481,7 @@ func (t retirementTransientTracker) ListOpen() ([]Item, error)    { return []Ite
 func (t retirementTransientTracker) Get(string) (Item, error)     { return t.item, nil }
 func (t retirementTransientTracker) Comment(string, string) error { return nil }
 func (t retirementTransientTracker) Close(string) error {
-	return errors.New("Tracker transient failure")
+	return errTrackerEffectNotApplied
 }
 func (t retirementTransientTracker) SetTags(string, []string, []string) error { return nil }
 
@@ -592,25 +595,6 @@ func TestStaleHostRetirementRetainsFact(t *testing.T) {
 	}
 }
 
-func TestDropRetirementAcceptsAlreadyRemovedFact(t *testing.T) {
-	repo := newRefGitRepo(t)
-	fact, err := recordRetirement(repo, retirementRecord{
-		Branch: "forest/42-clean", Revision: strings.Repeat("a", 40),
-		ItemID: "42", Transport: "git", Strategy: "squash",
-		Title: "clean", State: "landed",
-		Agent: "verifier", Model: "model", DefSHA: strings.Repeat("b", 16),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := deleteRef(repo, fact.Ref, fact.SHA); err != nil {
-		t.Fatal(err)
-	}
-	if err := dropRetirement(repo, fact); err != nil {
-		t.Fatalf("repeat retirement cleanup = %v, want idempotent success", err)
-	}
-}
-
 func TestRepeatedHostObservationPreservesLandedAttribution(t *testing.T) {
 	repo := newRefGitRepo(t)
 	record := retirementRecord{
@@ -629,7 +613,7 @@ func TestRepeatedHostObservationPreservesLandedAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.SHA != fact.SHA || got.Record != record {
+	if got.SHA != fact.SHA || got.Record != fact.Record {
 		t.Fatalf("repeated Host observation = %#v, want unchanged landed fact %#v", got, fact)
 	}
 }

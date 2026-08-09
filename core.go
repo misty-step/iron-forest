@@ -229,11 +229,13 @@ func (c *coreImpl) Items() ([]core.Item, error) {
 	}
 	items := make([]Item, 0, len(subjects))
 	for _, s := range subjects {
+		if s.Failure != nil {
+			continue
+		}
 		items = append(items, s.Item)
 	}
 	return toCoreItems(items), nil
 }
-
 
 // EligibleItems returns the tracker backlog without the builder's stalled-item
 // filtering: every open item that is not already covered by a forest branch and

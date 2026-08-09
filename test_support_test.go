@@ -235,3 +235,15 @@ func (m *memoryTracker) SetTags(id string, add, remove []string) error {
 	m.items[id] = it
 	return nil
 }
+func listRetirements(repoDir string) ([]retirementFact, error) {
+	facts, err := scanRetirements(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, fact := range facts {
+		if fact.ReadErr != nil {
+			return nil, fact.ReadErr
+		}
+	}
+	return facts, nil
+}

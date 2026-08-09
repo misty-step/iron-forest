@@ -2,9 +2,11 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -950,7 +952,7 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 				return nil, errors.New("tracker unavailable")
 			}
 		}
-		return []byte(`{}`), nil
+		return []byte(`{"state":"OPEN"}`), nil
 	}
 
 	cfg := defaultConfig()
@@ -1002,6 +1004,11 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 	}
 	if facts, err := listRetirements(restarted); err != nil || len(facts) != 0 {
 		t.Fatalf("retirement facts after recovery = (%#v, %v), want none", facts, err)
+	}
+	for _, subject := range []string{branch, item.ID} {
+		if refs, err := listEffectRefs(restarted, subject); err != nil || len(refs) != 0 {
+			t.Fatalf("retired Effect refs for %q = (%v, %v), want none", subject, refs, err)
+		}
 	}
 }
 
@@ -1076,9 +1083,9 @@ func TestPendingHostRetirementRecoversAfterBranchAutoDelete(t *testing.T) {
 	}
 }
 
-// TestPendingHostRetirementObservesRecordedStrategy proves recovery uses the
-// recorded merge strategy and exact reviewed head on a retry.
-func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
+// A queued Host merge records its accepted request and observes it without
+// issuing another request for the same reviewed Revision.
+func TestQueuedHostMergeIsRequestedOnce(t *testing.T) {
 	branch := "forest/11-strategy"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -1102,7 +1109,7 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			mergeArgs = append([]string(nil), args...)
-			return nil, errors.New("Host merge queued")
+			return nil, nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
 			listCalls++
 			return []byte(`[{"number":11,"url":"https://github.com/owner/repo/pull/11","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
@@ -1115,19 +1122,32 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Merge = "ff"
 	cfg.Flows.Verifier.AutoMerge = true
-	err = recoverRetirementFact(cfg, repo, fact, Item{ID: "11", Title: "strategy"})
+	item := Item{ID: "11", Title: "strategy"}
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	err = recoverRetirementFact(cfg, repo, fact, item)
 	if !errors.Is(err, errHostMergePending) {
 		t.Fatalf("pending retirement retry = %v, want merge pending", err)
 	}
+	if err = recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("queued Host merge retry = %v, want observation without a repeated request", err)
+	}
 	if mergeCalls != 1 || listCalls == 0 {
-		t.Fatalf("recovery effects: merge=%d list=%d, want one merge and observation", mergeCalls, listCalls)
+		t.Fatalf("recovery effects: merge=%d list=%d, want one merge request and observation", mergeCalls, listCalls)
+	}
+	if attempts, err := readAttempts(repo,
+		effectAttemptKey("Host-merge-request", branch, reviewed)); err != nil || attempts != 1 {
+		t.Fatalf("Host merge attempts = (%d, %v), want one", attempts, err)
 	}
 	if !hasArgumentPair(mergeArgs, "--match-head-commit", reviewed) {
 		t.Fatalf("queued Host merge args %v do not pin reviewed Revision %s", mergeArgs, reviewed)
 	}
 }
 
-func TestHostMergeCommandFailureReachesBoundedHandoff(t *testing.T) {
+func TestHostMergeCommandFailureGetsSingleRequestHandoff(t *testing.T) {
 	branch := "forest/11-host-refusal"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -1160,6 +1180,10 @@ func TestHostMergeCommandFailureReachesBoundedHandoff(t *testing.T) {
 				`","baseRefName":"master","isCrossRepository":false}]`), nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
+			if attempts, err := readAttempts(repo,
+				effectAttemptKey("Host-merge-request", branch, reviewed)); err != nil || attempts != 1 {
+				t.Fatalf("Host merge began before its durable claim: attempts=(%d, %v)", attempts, err)
+			}
 			return nil, errors.New("required approval is missing")
 		default:
 			return nil, errors.New("unexpected Host command")
@@ -1169,22 +1193,19 @@ func TestHostMergeCommandFailureReachesBoundedHandoff(t *testing.T) {
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.AutoMerge = true
-	cfg.Flows.Fixer.Attempts = 2
 
-	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errHostMergePending) {
-		t.Fatalf("first Host refusal = %v, want preserved pending intent", err)
+	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errRetirementRecoveryHard) {
+		t.Fatalf("Host refusal = %v, want immediate recovery handoff", err)
 	}
 	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errRetirementRecoveryHard) {
-		t.Fatalf("second Host refusal = %v, want bounded recovery handoff", err)
+		t.Fatalf("repeated Host refusal = %v, want retained handoff", err)
 	}
-	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errRetirementRecoveryHard) {
-		t.Fatalf("exhausted Host refusal = %v, want retained handoff", err)
+	if mergeCalls != 1 {
+		t.Fatalf("Host merge calls = %d, want exactly one", mergeCalls)
 	}
-	if mergeCalls != 2 {
-		t.Fatalf("Host merge calls = %d, want bounded two", mergeCalls)
-	}
-	if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 2 {
-		t.Fatalf("Host merge attempts = (%d, %v), want two", attempts, err)
+	if attempts, err := readAttempts(repo,
+		effectAttemptKey("Host-merge-request", branch, reviewed)); err != nil || attempts != 1 {
+		t.Fatalf("Host merge attempts = (%d, %v), want one", attempts, err)
 	}
 	if stalled, err := stalledOn(repo, (verifierFlow{}).Name(),
 		retirementSubjectKey(branch), reviewed); err != nil || !stalled {
@@ -1197,33 +1218,42 @@ func TestHostMergeCommandFailureReachesBoundedHandoff(t *testing.T) {
 	}
 }
 
-type hostHandoffFailureTracker struct{ *memoryTracker }
+type hostHandoffFailureTracker struct {
+	*memoryTracker
+	setCalls int
+}
 
-func (hostHandoffFailureTracker) SetTags(string, []string, []string) error {
+func (t *hostHandoffFailureTracker) SetTags(string, []string, []string) error {
+	t.setCalls++
 	return errTrackerUnavailable
 }
 
-func TestHostMergeHandoffTrackerFailureKeepsDurableBrake(t *testing.T) {
+func TestHostMergeHandoffUncertainTrackerTagDoesNotRepeat(t *testing.T) {
 	_, repo, revision := notesTestRepository(t)
 	const branch = "forest/11-host-handoff"
 	item := Item{ID: "11", Title: "host handoff"}
-	tk := newMemoryTracker()
-	tk.seed(item)
+	memory := newMemoryTracker()
+	memory.seed(item)
+	tk := &hostHandoffFailureTracker{memoryTracker: memory}
 	oldTracker := trackerFor
-	trackerFor = func(string) Tracker { return hostHandoffFailureTracker{tk} }
+	trackerFor = func(string) Tracker { return tk }
 	defer func() { trackerFor = oldTracker }()
 
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
-	cfg.Flows.Fixer.Attempts = 1
 	record := retirementRecord{Branch: branch, Revision: revision, ItemID: item.ID}
-	if err := recordHostMergeRequestFailure(cfg, repo, record, item,
-		errors.New("Host refused merge")); !errors.Is(err, errRetirementRecoveryHard) {
-		t.Fatalf("Tracker handoff failure = %v, want hard recovery handoff", err)
+	for _, observed := range []Item{item, {ID: item.ID, Title: item.Title}} {
+		if err := recordHostMergeHandoff(cfg, repo, record, observed,
+			errors.New("Host refused merge")); !errors.Is(err, errRetirementRecoveryHard) {
+			t.Fatalf("Tracker handoff failure = %v, want terminal uncertainty", err)
+		}
 	}
-	if stalled, err := stalledOn(repo, (verifierFlow{}).Name(),
-		retirementSubjectKey(branch), revision); err != nil || !stalled {
-		t.Fatalf("Tracker handoff brake = (%v, %v), want durable terminal handoff", stalled, err)
+	if tk.setCalls != 1 {
+		t.Fatalf("Tracker tag calls = %d, want one across reconstructed Item", tk.setCalls)
+	}
+	if attempts, err := readAttempts(repo,
+		effectAttemptKey("Tracker-tag", item.ID, revision)); err != nil || attempts != 1 {
+		t.Fatalf("Tracker tag claim = (%d, %v), want one", attempts, err)
 	}
 }
 
@@ -1322,7 +1352,7 @@ func TestRetirementRecoveryRejectsMismatchedItem(t *testing.T) {
 	}
 }
 
-func TestPendingHostRetirementRetriesVisibleOpenMerge(t *testing.T) {
+func TestPendingHostRetirementObservesVisibleOpenMergeWithoutRepeating(t *testing.T) {
 	branch := "forest/13-queued"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -1387,18 +1417,18 @@ func TestPendingHostRetirementRetriesVisibleOpenMerge(t *testing.T) {
 			t.Fatalf("queued recovery pass %d = %v, want pending", pass+1, err)
 		}
 	}
-	if mergeCalls != 2 {
-		t.Fatalf("queued recovery merge effects = %d, want one exact merge per pass", mergeCalls)
+	if mergeCalls != 1 {
+		t.Fatalf("queued recovery merge effects = %d, want one request", mergeCalls)
 	}
 	if len(mergeHeads) != mergeCalls {
-		t.Fatalf("queued merge heads = %v, want reviewed head on every attempt", mergeHeads)
+		t.Fatalf("queued merge heads = %v, want one reviewed head", mergeHeads)
 	}
 
 	merged = true
 	if err := recoverRetirementFact(cfg, repo, fact, item); err != nil {
 		t.Fatalf("observed queued merge recovery: %v", err)
 	}
-	if mergeCalls != 2 {
+	if mergeCalls != 1 {
 		t.Fatalf("observed recovery repeated %d merge effects", mergeCalls)
 	}
 	if _, err := tk.Get(item.ID); err == nil {
@@ -1613,6 +1643,58 @@ func TestVerifierRetirementTrackerCloseRetriesExactItem(t *testing.T) {
 	}
 }
 
+func TestMalformedTrackerCloseEvidenceRemainsTerminal(t *testing.T) {
+	for i, body := range []string{`malformed`, `{}`, `null`} {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			branch := fmt.Sprintf("forest/53-malformed-close-%d", i)
+			repo, _, reviewed, _ := newVerifierBranch(t, branch)
+			agent := testVerifierAgent()
+			item := Item{ID: "53", Title: "malformed close"}
+			if _, err := recordRetirement(repo, retirementRecord{
+				Branch: branch, Revision: reviewed, ItemID: item.ID, Transport: "git",
+				Strategy: "squash", Title: item.Title, State: "landed",
+				Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			oldTracker := trackerFor
+			trackerFor = func(repo string) Tracker { return githubTracker{repo: repo} }
+			defer func() { trackerFor = oldTracker }()
+			oldGH := ghJSON
+			defer func() { ghJSON = oldGH }()
+			var calls int
+			ghJSON = func(args ...string) ([]byte, error) {
+				if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
+					calls++
+					return nil, errors.New("Tracker close response lost")
+				}
+				if len(args) >= 2 && args[0] == "issue" && args[1] == "view" {
+					calls++
+					return []byte(body), nil
+				}
+				return nil, errors.New("unexpected Tracker command")
+			}
+			cfg := defaultConfig()
+			cfg.Repo = "owner/repo"
+			subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement,
+				Revision: reviewed, ID: item.ID, Branch: branch, Item: item}
+			if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+				t.Fatalf("malformed Tracker close code = %d, want failure", code)
+			}
+			if stalled, err := stalledOn(repo, (verifierFlow{}).Name(),
+				subject.Key, reviewed); err != nil || !stalled {
+				t.Fatalf("malformed Tracker close brake = (%v, %v), want terminal", stalled, err)
+			}
+			if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+				t.Fatalf("braked Tracker close code = %d, want failure", code)
+			}
+			if calls != 2 {
+				t.Fatalf("Tracker close calls = %d, want no retry after malformed evidence", calls)
+			}
+		})
+	}
+}
+
 // TestVerifierRetirementRetriesFinalRefDeletion drives Verifier Act through a
 // failed final retirement-ref delete after every earlier effect succeeded.
 func TestVerifierRetirementRetriesFinalRefDeletion(t *testing.T) {
@@ -1630,6 +1712,23 @@ func TestVerifierRetirementRetriesFinalRefDeletion(t *testing.T) {
 	}
 	if _, err := bumpAttempts(repo, "branch-"+branch); err != nil {
 		t.Fatal(err)
+	}
+	for _, effect := range []struct{ kind, subject string }{
+		{"Projection-comment", branch},
+		{"Tracker-builder-comment", item.ID},
+	} {
+		if err := claimEffect(repo, effect.kind, effect.subject, reviewed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stalls := []struct{ flow, key string }{
+		{"builder", "item-" + item.ID},
+		{"fixer", "branch-" + branch},
+	}
+	for _, stall := range stalls {
+		if err := recordStalled(repo, stall.flow, stall.key, reviewed); err != nil {
+			t.Fatal(err)
+		}
 	}
 	toggle := filepath.Join(t.TempDir(), "allow-final-ref-delete")
 	origin := runGitTest(t, repo, "remote", "get-url", "origin")
@@ -1659,11 +1758,23 @@ func TestVerifierRetirementRetriesFinalRefDeletion(t *testing.T) {
 	if _, err := tk.Get(item.ID); err == nil {
 		t.Fatal("first final-ref retry left the Tracker Item open")
 	}
-	if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 0 {
-		t.Fatalf("first final-ref retry attempts = (%d, %v), want removed", attempts, err)
+	if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 1 {
+		t.Fatalf("first final-ref retry attempts = (%d, %v), want retained atomically", attempts, err)
 	}
 	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || !found {
 		t.Fatalf("first final-ref retry fact = (found=%v, err=%v), want retained recovery evidence", found, err)
+	}
+	if refs, err := listEffectRefs(repo, item.ID); err != nil || len(refs) != 3 {
+		t.Fatalf("atomic failure Item Effect refs = (%v, %v), want three retained", refs, err)
+	}
+	if refs, err := listEffectRefs(repo, branch); err != nil || len(refs) != 1 {
+		t.Fatalf("atomic failure branch Effect refs = (%v, %v), want one retained", refs, err)
+	}
+	for _, stall := range stalls {
+		if sha, _, err := getBlobRef(repo, stalledRef(stall.flow, stall.key)); err != nil || sha == "" {
+			t.Fatalf("atomic failure stall %s/%s = (%q, %v), want retained",
+				stall.flow, stall.key, sha, err)
+		}
 	}
 
 	subjects, err := (verifierFlow{}).Select(cfg, repo)
@@ -1676,5 +1787,17 @@ func TestVerifierRetirementRetriesFinalRefDeletion(t *testing.T) {
 	}
 	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
 		t.Fatalf("final-ref retry fact = (found=%v, err=%v), want removed", found, err)
+	}
+	if refs, err := listEffectRefs(repo, item.ID); err != nil || len(refs) != 0 {
+		t.Fatalf("final-ref retry Effect refs = (%v, %v), want none", refs, err)
+	}
+	if refs, err := listEffectRefs(repo, branch); err != nil || len(refs) != 0 {
+		t.Fatalf("final-ref retry branch Effect refs = (%v, %v), want none", refs, err)
+	}
+	for _, stall := range stalls {
+		if sha, _, err := getBlobRef(repo, stalledRef(stall.flow, stall.key)); err != nil || sha != "" {
+			t.Fatalf("retired stall %s/%s = (%q, %v), want removed",
+				stall.flow, stall.key, sha, err)
+		}
 	}
 }

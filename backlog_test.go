@@ -52,6 +52,23 @@ func TestAppendRunRedactsError(t *testing.T) {
 	}
 }
 
+func TestLedgerWritesReviewVerdictUnderReviewKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := appendRun(dir, runRecord{
+		Flow: "verifier", Status: "reviewed", ReviewVerdict: "approve",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "runs.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := string(body)
+	if !strings.Contains(row, `"review":"approve"`) || strings.Contains(row, `"verdict"`) {
+		t.Fatalf("Ledger row = %s, want review key without verdict alias", row)
+	}
+}
+
 func TestGitHubTrackerCloseAcceptsAlreadyClosedItem(t *testing.T) {
 	closeErr := errors.New("Host reported already closed")
 	old := ghJSON
@@ -106,6 +123,40 @@ func TestGitHubTrackerClassifiesTransportAndMalformedEvidence(t *testing.T) {
 	}
 	if _, err := (githubTracker{repo: "owner/repo"}).ListOpen(); !errors.Is(err, errTrackerEvidenceInvalid) {
 		t.Fatalf("malformed response = %v, want invalid Tracker evidence", err)
+	}
+}
+func TestGitHubTrackerCloseRequiresExactStateEvidence(t *testing.T) {
+	old := ghJSON
+	defer func() { ghJSON = old }()
+	for _, body := range []string{`malformed`, `{}`, `null`, `{"state":"unknown"}`} {
+		ghJSON = func(args ...string) ([]byte, error) {
+			if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
+				return nil, errors.New("response lost")
+			}
+			return []byte(body), nil
+		}
+		if err := (githubTracker{repo: "owner/repo"}).Close("9"); !errors.Is(err, errTrackerEvidenceInvalid) {
+			t.Fatalf("close evidence %q = %v, want invalid evidence", body, err)
+		}
+	}
+	ghJSON = func(args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
+			return nil, errors.New("response lost")
+		}
+		return []byte(`{"state":"OPEN"}`), nil
+	}
+	err := (githubTracker{repo: "owner/repo"}).Close("9")
+	if !errors.Is(err, errTrackerEffectNotApplied) || !errors.Is(err, errTrackerUnavailable) {
+		t.Fatalf("open close evidence = %v, want known-unapplied retry classification", err)
+	}
+	ghJSON = func(args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
+			return nil, errors.New("response lost")
+		}
+		return []byte(`{"state":"CLOSED"}`), nil
+	}
+	if err := (githubTracker{repo: "owner/repo"}).Close("9"); err != nil {
+		t.Fatalf("closed reconciliation = %v, want success", err)
 	}
 }
 
@@ -229,7 +280,7 @@ func TestForestBranchesRejectsNonCanonicalOpaqueIdentity(t *testing.T) {
 	}
 }
 
-func TestBuilderSelectRejectsInvalidIdentity(t *testing.T) {
+func TestBuilderSelectCarriesInvalidIdentityAsOneFailure(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	for _, tc := range []struct {
 		name string
@@ -246,23 +297,51 @@ func TestBuilderSelectRejectsInvalidIdentity(t *testing.T) {
 			trackerFor = func(string) Tracker { return trackerStub{items: []Item{tc.item}} }
 			defer func() { trackerFor = old }()
 
-			_, err := (builderFlow{}).Select(defaultConfig(), t.TempDir())
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("invalid %s was accepted: %v", tc.name, err)
+			_, repo, _ := notesTestRepository(t)
+			subjects, err := (builderFlow{}).Select(defaultConfig(), repo)
+			if err != nil || len(subjects) != 1 || subjects[0].Failure == nil ||
+				!strings.Contains(subjects[0].Failure.Error(), tc.want) {
+				t.Fatalf("invalid %s selection = (%#v, %v), want one named failure", tc.name, subjects, err)
 			}
-			if strings.Contains(err.Error(), secret) {
-				t.Fatalf("selection error echoed rejected identity: %v", err)
+			if strings.Contains(subjects[0].Failure.Error(), secret) {
+				t.Fatalf("selection failure echoed rejected identity: %v", subjects[0].Failure)
+			}
+			out, actErr := (builderFlow{}).Act(defaultConfig(), t.TempDir(), subjects[0], "run")
+			if out.Status != "evidence_failed" || actErr == nil {
+				t.Fatalf("invalid %s Act = (%#v, %v), want terminal evidence failure", tc.name, out, actErr)
 			}
 		})
 	}
 }
-func TestValidatedTrackerItemsRejectsDuplicateIdentity(t *testing.T) {
-	_, err := validatedTrackerItems(trackerStub{items: []Item{
-		{ID: "9", UpdatedAt: "r1"},
-		{ID: "9", UpdatedAt: "r2"},
-	}})
-	if !errors.Is(err, errTrackerItemIdentityDuplicate) {
-		t.Fatalf("duplicate Tracker identity = %v, want refusal", err)
+
+func TestBuilderSelectKeepsHealthyItemBesideDuplicateEvidence(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	old := trackerFor
+	trackerFor = func(string) Tracker {
+		return trackerStub{items: []Item{
+			{ID: "9", Title: "duplicate one", UpdatedAt: "r1"},
+			{ID: "9", Title: "duplicate two", UpdatedAt: "r2"},
+			{ID: "10", Title: "healthy", UpdatedAt: "r3"},
+		}}
+	}
+	defer func() { trackerFor = old }()
+
+	subjects, err := (builderFlow{}).Select(defaultConfig(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failures := 0
+	healthy := 0
+	for _, subject := range subjects {
+		if subject.Failure != nil {
+			failures++
+		}
+		if subject.ID == "10" && subject.Failure == nil {
+			healthy++
+		}
+	}
+	if failures != 2 || healthy != 1 {
+		t.Fatalf("Builder Subjects = %#v, want two quarantined duplicates and one healthy Item", subjects)
 	}
 }
 
@@ -280,12 +359,14 @@ func TestTrackerGetMismatchStopsBeforeSinks(t *testing.T) {
 	if err := writeChecks(repo, revision, checksNote{Status: "fail"}); err != nil {
 		t.Fatal(err)
 	}
+	runGitTest(t, repo, "branch", "forest/9-change", revision)
+	runGitTest(t, repo, "push", "-q", "origin", "forest/9-change")
 	old := trackerFor
 	trackerFor = func(string) Tracker { return tk }
 	defer func() { trackerFor = old }()
 
 	out, err := (fixerFlow{}).Act(defaultConfig(), repo, Subject{
-		Key: "branch-forest/9", ID: "9", Branch: "forest/9", Revision: revision,
+		Key: "branch-forest/9-change", ID: "9", Branch: "forest/9-change", Revision: revision,
 	}, "mismatch")
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("mismatched Tracker Item was accepted: %#v, %v", out, err)
@@ -327,5 +408,57 @@ func TestBranchSelectRecoversOpaqueID(t *testing.T) {
 	// The branch encodes the hyphen so the id stays round-trippable.
 	if subjects[0].ID != id {
 		t.Fatalf("verifier subject ID = %q, want %q", subjects[0].ID, id)
+	}
+}
+
+func TestDuplicateBranchItemIdentityIsRejectedDuringAct(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	if err := writeChecks(repo, revision, checksNote{Status: "fail"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, branch := range []string{"forest/9-a", "forest/9-b"} {
+		runGitTest(t, repo, "branch", branch, revision)
+		runGitTest(t, repo, "push", "-q", "origin", branch)
+	}
+	if _, err := forestBranches(repo); !errors.Is(err, errTrackerEvidenceInvalid) {
+		t.Fatalf("duplicate branch identity = %v, want invalid Tracker evidence", err)
+	}
+	_, err := (fixerFlow{}).Act(defaultConfig(), repo, Subject{
+		Key: "branch-forest/9-a", ID: "9", Branch: "forest/9-a", Revision: revision,
+	}, "duplicate")
+	if !errors.Is(err, errTrackerEvidenceInvalid) {
+		t.Fatalf("Act accepted duplicate branch identity: %v", err)
+	}
+}
+
+func TestBranchSnapshotQuarantinesDuplicatesWithoutSuppressingHealthyBranch(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	for _, branch := range []string{"forest/9-a", "forest/9-b", "forest/10-good"} {
+		runGitTest(t, repo, "branch", branch, revision)
+		runGitTest(t, repo, "push", "-q", "origin", branch)
+	}
+	snapshot, err := readForestBranchSnapshot(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Covered) != 3 || len(snapshot.Actionable) != 1 ||
+		snapshot.Actionable[0] != "forest/10-good" || len(snapshot.Failures) != 2 {
+		t.Fatalf("branch snapshot = %#v, want one healthy branch and two quarantined duplicates", snapshot)
+	}
+	subjects, err := (verifierFlow{}).Select(defaultConfig(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy, failures := 0, 0
+	for _, subject := range subjects {
+		if subject.Branch == "forest/10-good" && subject.Failure == nil {
+			healthy++
+		}
+		if subject.ID == "9" && subject.Failure != nil {
+			failures++
+		}
+	}
+	if healthy != 1 || failures != 2 {
+		t.Fatalf("Verifier Subjects = %#v, want one healthy and two quarantined duplicates", subjects)
 	}
 }

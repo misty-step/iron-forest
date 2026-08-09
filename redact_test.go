@@ -71,6 +71,7 @@ func TestRedactSecretShapedOutboundSinks(t *testing.T) {
 
 	oldProjectionCommand := projectionCommand
 	defer func() { projectionCommand = oldProjectionCommand }()
+	_, repo, _ := notesTestRepository(t)
 	var commentArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
@@ -83,7 +84,7 @@ func TestRedactSecretShapedOutboundSinks(t *testing.T) {
 		return nil, nil
 	}
 	err := projectVerdict(
-		Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}},
+		Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}, repo,
 		"forest/7-change",
 		projectionTestHead,
 		verdictNote{Verdict: "changes", Notes: "see sk-AAAAAAAAAAAAAAAA"},

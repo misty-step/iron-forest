@@ -18,16 +18,17 @@ var errRetirementRecoveryHard = errors.New("retirement recovery requires operato
 const retirementRefPrefix = "refs/forest/retirement/"
 
 type retirementRecord struct {
-	Branch    string `json:"branch"`
-	Revision  string `json:"revision"`
-	ItemID    string `json:"item_id"`
-	Transport string `json:"transport"`
-	Strategy  string `json:"strategy"`
-	Title     string `json:"title"`
-	State     string `json:"state"`
-	Agent     string `json:"agent"`
-	Model     string `json:"model"`
-	DefSHA    string `json:"def_sha"`
+	Branch       string `json:"branch"`
+	Revision     string `json:"revision"`
+	ItemID       string `json:"item_id"`
+	Transport    string `json:"transport"`
+	Strategy     string `json:"strategy"`
+	Title        string `json:"title"`
+	State        string `json:"state"`
+	Agent        string `json:"agent"`
+	Model        string `json:"model"`
+	DefSHA       string `json:"def_sha"`
+	BuiltComment bool   `json:"built_comment,omitempty"`
 }
 
 type retirementFact struct {
@@ -61,19 +62,6 @@ func retirementPayload(record retirementRecord) (string, error) {
 		return "", errors.New("encode retirement: credential-shaped text remains")
 	}
 	return body, nil
-}
-
-func validHex(value string, bytes int) bool {
-	decoded, err := hex.DecodeString(value)
-	if err != nil || len(decoded) != bytes {
-		return false
-	}
-	for _, b := range decoded {
-		if b != 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func validateRetirementRecord(ref string, record retirementRecord) error {
@@ -163,7 +151,15 @@ func readRetirement(repoDir, branch, revision string) (retirementFact, bool, err
 	return retirementFact{Ref: ref, SHA: sha, Record: record}, true, nil
 }
 
+// recordRetirement stores facts created after the Builder comment completed.
+// Pre-comment observation uses recordRetirementExact so recovery cannot lose
+// its Builder exclusion while the Tracker is unavailable.
 func recordRetirement(repoDir string, record retirementRecord) (retirementFact, error) {
+	record.BuiltComment = true
+	return recordRetirementExact(repoDir, record)
+}
+
+func recordRetirementExact(repoDir string, record retirementRecord) (retirementFact, error) {
 	fact, payload, err := retirementMaterial(record, "")
 	if err != nil {
 		return retirementFact{}, err
@@ -314,19 +310,6 @@ func scanRetirements(repoDir string) ([]retirementFact, error) {
 	return facts, nil
 }
 
-func listRetirements(repoDir string) ([]retirementFact, error) {
-	facts, err := scanRetirements(repoDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, fact := range facts {
-		if fact.ReadErr != nil {
-			return nil, fact.ReadErr
-		}
-	}
-	return facts, nil
-}
-
 func retirementRefIdentity(ref string) (branch, id string, ok bool) {
 	encoded := strings.TrimPrefix(ref, retirementRefPrefix)
 	branchHex, _, found := strings.Cut(encoded, "/")
@@ -351,32 +334,23 @@ func retirementRefIdentity(ref string) (branch, id string, ok bool) {
 }
 
 func retirementItemIDs(repoDir string) ([]string, error) {
-	facts, err := listRetirements(repoDir)
+	facts, err := scanRetirements(repoDir)
 	if err != nil {
 		return nil, err
 	}
 	ids := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		ids = append(ids, fact.Record.ItemID)
+		if fact.ReadErr == nil {
+			ids = append(ids, fact.Record.ItemID)
+			continue
+		}
+		_, id, ok := retirementRefIdentity(fact.Ref)
+		if !ok {
+			continue
+		}
+		ids = append(ids, id)
 	}
 	return ids, nil
-}
-
-func dropRetirement(repoDir string, fact retirementFact) error {
-	sha, _, err := getBlobRef(repoDir, fact.Ref)
-	if err != nil {
-		return fmt.Errorf("%w: inspect retirement deletion: %v", errFlowRetryable, err)
-	}
-	if sha == "" {
-		return nil
-	}
-	if sha != fact.SHA {
-		return fmt.Errorf("%w: retirement changed before deletion", errFlowRetryable)
-	}
-	if err := deleteRef(repoDir, fact.Ref, fact.SHA); err != nil {
-		return fmt.Errorf("%w: delete retirement: %v", errFlowRetryable, err)
-	}
-	return nil
 }
 
 // recordPreparingHostRetirement publishes the recovery identity before any Host
@@ -386,6 +360,7 @@ func recordPreparingHostRetirement(cfg Config, repoDir, branch, reviewed string,
 	next := retirementRecord{
 		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
 		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "preparing",
+		BuiltComment: true,
 	}
 	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
 		return retirementFact{}, err
@@ -402,7 +377,8 @@ func recordPreparingHostRetirement(cfg Config, repoDir, branch, reviewed string,
 	}
 	for _, fact := range facts {
 		if fact.ReadErr != nil {
-			if _, id, ok := retirementRefIdentity(fact.Ref); ok && id == it.ID {
+			badBranch, badID, ok := retirementRefIdentity(fact.Ref)
+			if !ok || badBranch == branch || badID == it.ID {
 				return retirementFact{}, fact.ReadErr
 			}
 			continue
@@ -525,9 +501,9 @@ func observeHostRetirement(repoDir string, fact retirementFact) (retirementFact,
 	return replaceRetirement(repoDir, fact, observed)
 }
 
-// recordObservedHostRetirement preserves an exact Host merge that arrived
-// before durable approval was readable. The fact blocks duplicate Builder work
-// until recovery can join the merge observation with its Verdict and Checks.
+// recordObservedHostRetirement preserves an exact Host merge before missing
+// Builder-comment or approval evidence is recovered. The fact blocks duplicate
+// Builder work until recovery joins every required Effect.
 func recordObservedHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item) (retirementFact, error) {
 	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
 		return retirementFact{}, err
@@ -541,7 +517,7 @@ func recordObservedHostRetirement(cfg Config, repoDir, branch, reviewed string, 
 		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
 		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "observed",
 	}
-	fact, err := recordRetirement(repoDir, record)
+	fact, err := recordRetirementExact(repoDir, record)
 	if err == nil {
 		return fact, nil
 	}
@@ -551,6 +527,28 @@ func recordObservedHostRetirement(cfg Config, repoDir, branch, reviewed string, 
 		return observeHostRetirement(repoDir, winner)
 	}
 	return retirementFact{}, err
+}
+func recoverRetirementBuiltComment(
+	cfg Config,
+	repoDir string,
+	fact retirementFact,
+	it Item,
+) (retirementFact, error) {
+	if fact.Record.BuiltComment {
+		return fact, nil
+	}
+	if err := publishBuiltComment(
+		cfg, repoDir, it, fact.Record.Branch, fact.Record.Revision,
+	); err != nil {
+		return retirementFact{}, err
+	}
+	next := fact.Record
+	next.BuiltComment = true
+	recovered, err := replaceRetirement(repoDir, fact, next)
+	if err != nil {
+		return retirementFact{}, fmt.Errorf("record completion: %w", err)
+	}
+	return recovered, nil
 }
 
 func landObservedRetirement(repoDir string, fact retirementFact, verdict verdictNote) (retirementFact, error) {
@@ -583,7 +581,7 @@ func recordHostRetirement(
 		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), reviewed); err != nil {
 		return err
 	}
-	if err := projectVerdict(cfg, branch, reviewed, verdict, checks); err != nil {
+	if err := projectVerdict(cfg, repoDir, branch, reviewed, verdict, checks); err != nil {
 		return err
 	}
 	_, err = pendingHostRetirement(repoDir, fact, verdict)
@@ -595,6 +593,11 @@ func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, i
 	if err != nil {
 		out.Status = "merge_failed"
 		return out, err
+	}
+	fact, err = recoverRetirementBuiltComment(cfg, repoDir, fact, it)
+	if err != nil {
+		out.Status = "comment_failed"
+		return out, fmt.Errorf("comment: %w", err)
 	}
 	record, err := recoverRetirement(cfg, repoDir, fact, it)
 	if err != nil {
@@ -702,7 +705,7 @@ func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agen
 	fact, err := prepareRetirement(repoDir, retirementRecord{
 		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "git",
 		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "landed",
-		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
+		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, BuiltComment: true,
 	})
 	if err != nil {
 		return err
@@ -752,13 +755,6 @@ func readRetirementApproval(repoDir, revision string) (verdictNote, checksNote, 
 	return verdict, checks, nil
 }
 
-func hostMergeAttemptLimit(cfg Config) int {
-	if cfg.Flows.Fixer.Attempts < 1 {
-		return 1
-	}
-	return cfg.Flows.Fixer.Attempts
-}
-
 func recordHostMergeHandoff(
 	cfg Config,
 	repoDir string,
@@ -766,43 +762,17 @@ func recordHostMergeHandoff(
 	it Item,
 	handoff error,
 ) error {
-	if err := recordTerminalStall(repoDir, (verifierFlow{}).Name(),
-		retirementSubjectKey(record.Branch), record.Revision); err != nil {
-		return fmt.Errorf("%w: %v; record durable Host merge brake: %v",
-			errRetirementRecoveryHard, handoff, err)
-	}
-	tracker := trackerFor(cfg.Repo)
-	if err := tracker.SetTags(it.ID, []string{failedLabel}, nil); err != nil {
-		return fmt.Errorf("%w: %v; publish Host merge handoff tag: %v",
-			errRetirementRecoveryHard, handoff, err)
-	}
-	if err := publishMergeBlocked(tracker, it, record.Revision, handoff); err != nil {
+	if err := recordMergeBlocked(
+		cfg, repoDir, retirementSubjectKey(record.Branch), record.Revision, it, handoff,
+	); err != nil {
+		if errors.Is(err, errFlowRetryable) || errors.Is(err, errTrackerUnavailable) {
+			return fmt.Errorf("%w: %v; publish Host merge handoff: %v",
+				errHostMergePending, handoff, err)
+		}
 		return fmt.Errorf("%w: %v; publish Host merge handoff: %v",
 			errRetirementRecoveryHard, handoff, err)
 	}
 	return fmt.Errorf("%w: %v", errRetirementRecoveryHard, handoff)
-}
-
-func recordHostMergeRequestFailure(
-	cfg Config,
-	repoDir string,
-	record retirementRecord,
-	it Item,
-	cause error,
-) error {
-	attempts, err := bumpAttempts(repoDir, "branch-"+record.Branch)
-	if err != nil {
-		handoff := fmt.Errorf("Host merge request for Revision %s failed before its attempt became durable",
-			record.Revision)
-		return fmt.Errorf("%w; attempt record: %v",
-			recordHostMergeHandoff(cfg, repoDir, record, it, handoff), err)
-	}
-	if attempts < hostMergeAttemptLimit(cfg) {
-		return fmt.Errorf("%w: %v", errHostMergePending, cause)
-	}
-	handoff := fmt.Errorf("Host merge request for Revision %s failed after %d attempts",
-		record.Revision, attempts)
-	return recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
 }
 
 func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it Item) error {
@@ -916,21 +886,73 @@ func recoverRetirement(cfg Config, repoDir string, fact retirementFact, it Item)
 			if !cfg.Flows.Verifier.AutoMerge {
 				return record, errHostMergePending
 			}
-			attempts, attemptsErr := readAttempts(repoDir, "branch-"+record.Branch)
+			attemptKey := effectAttemptKey("Host-merge-request", record.Branch, record.Revision)
+			acceptedKey := effectAttemptKey("Host-merge-accepted", record.Branch, record.Revision)
+			attempts, attemptsErr := readAttempts(repoDir, attemptKey)
 			if attemptsErr != nil {
 				return record, attemptsErr
 			}
-			if attempts >= hostMergeAttemptLimit(cfg) {
-				handoff := fmt.Errorf("Host merge request for Revision %s failed after %d attempts",
-					record.Revision, attempts)
+			accepted, acceptedErr := readAttempts(repoDir, acceptedKey)
+			if acceptedErr != nil {
+				return record, acceptedErr
+			}
+			if attempts != 0 {
+				if attempts == 1 && accepted == 1 {
+					return record, errHostMergePending
+				}
+				handoff := fmt.Errorf(
+					"Host merge request for Revision %s has an uncertain durable request outcome",
+					record.Revision,
+				)
+				return record, recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
+			}
+			if accepted != 0 {
+				return record, fmt.Errorf("%w: Host merge acceptance exists without its request claim",
+					errAttemptsInvalid)
+			}
+			attempts, attemptsErr = bumpAttempts(repoDir, attemptKey)
+			if attemptsErr != nil {
+				return record, attemptsErr
+			}
+			if attempts != 1 {
+				handoff := fmt.Errorf(
+					"Host merge request for Revision %s has concurrent durable request claims",
+					record.Revision,
+				)
 				return record, recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
 			}
 			if err := projectMerge(cfg, record.Branch, record.Strategy, record.Revision); err != nil {
+				if errors.Is(err, errHostMergeAccepted) {
+					accepted, acceptedErr = bumpAttempts(repoDir, acceptedKey)
+					if acceptedErr != nil {
+						return record, fmt.Errorf("%w: persist accepted Host merge request: %v",
+							errHostMergePending, acceptedErr)
+					}
+					if accepted != 1 {
+						handoff := fmt.Errorf(
+							"Host merge request for Revision %s has concurrent acceptance claims",
+							record.Revision,
+						)
+						return record, recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
+					}
+					if errors.Is(err, errHostMergeUnavailable) {
+						handoff := fmt.Errorf(
+							"accepted Host merge request for Revision %s lost its exact Host identity",
+							record.Revision,
+						)
+						return record, recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
+					}
+					return record, errHostMergePending
+				}
 				if errors.Is(err, errHostMergeUnavailable) {
 					return record, err
 				}
 				if errors.Is(err, errHostMergeRequestFailed) {
-					return record, recordHostMergeRequestFailure(cfg, repoDir, record, it, err)
+					handoff := fmt.Errorf(
+						"Host merge request for Revision %s failed during its single durable request",
+						record.Revision,
+					)
+					return record, recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
 				}
 				return record, fmt.Errorf("%w: %v", errHostMergePending, err)
 			}
@@ -969,16 +991,70 @@ func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) 
 		}
 		return fmt.Errorf("%w: %v", errFlowRetryable, err)
 	}
-	// The marker excludes the item from Builder selection until both Tracker
-	// retirement and its attempt cleanup finish.
-	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
-		return fmt.Errorf("%w: merge: close item: %v", errFlowRetryable, err)
+	// A request claim exists before the Tracker close. An acceptance claim
+	// records the successful return before later cleanup can retry.
+	closeKey := effectAttemptKey("Tracker-close", it.ID, record.Revision)
+	acceptedCloseKey := effectAttemptKey("Tracker-close-accepted", it.ID, record.Revision)
+	closeClaim, err := readAttempts(repoDir, closeKey)
+	if err != nil {
+		return err
 	}
-	if err := dropAttempts(repoDir, "branch-"+record.Branch); err != nil {
-		return fmt.Errorf("%w: merge: drop attempt record: %v", errFlowRetryable, err)
+	acceptedClose, err := readAttempts(repoDir, acceptedCloseKey)
+	if err != nil {
+		return err
 	}
-	if err := dropRetirement(repoDir, fact); err != nil {
-		return fmt.Errorf("%w: merge: drop retirement: %v", errFlowRetryable, err)
+	if acceptedClose != 0 {
+		if closeClaim != 1 || acceptedClose != 1 {
+			return fmt.Errorf("%w: Tracker close acceptance has no single request claim",
+				errAttemptsInvalid)
+		}
+	} else {
+		if closeClaim != 0 {
+			return fmt.Errorf("%w: Tracker close for Item %q has an uncertain outcome",
+				errHostMergeUnavailable, it.ID)
+		}
+		if err := claimEffect(repoDir, "Tracker-close", it.ID, record.Revision); err != nil {
+			return err
+		}
+		if closeErr := trackerFor(cfg.Repo).Close(it.ID); closeErr != nil {
+			if errors.Is(closeErr, errTrackerEffectNotApplied) {
+				if err := dropAttempts(repoDir, closeKey); err != nil {
+					return fmt.Errorf("%w: reset unapplied Tracker close: %v",
+						errHostMergeUnavailable, err)
+				}
+				return fmt.Errorf("merge: close item: %w", closeErr)
+			}
+			if errors.Is(closeErr, errTrackerEvidenceInvalid) {
+				return closeErr
+			}
+			return fmt.Errorf("%w: Tracker close outcome for Item %q is uncertain: %v",
+				errHostMergeUnavailable, it.ID, closeErr)
+		}
+		if err := claimEffect(repoDir, "Tracker-close-accepted", it.ID, record.Revision); err != nil {
+			return fmt.Errorf("%w: persist accepted Tracker close: %v",
+				errHostMergeUnavailable, err)
+		}
+	}
+	branchEffects, err := listEffectRefs(repoDir, record.Branch)
+	if err != nil {
+		return err
+	}
+	itemEffects, err := listEffectRefs(repoDir, it.ID)
+	if err != nil {
+		return err
+	}
+	optionalRefs := []string{
+		"refs/forest/attempt/branch-" + record.Branch,
+		stalledRef("builder", "item-"+it.ID),
+		stalledRef("fixer", "branch-"+record.Branch),
+		stalledRef("verifier", "branch-"+record.Branch),
+		stalledRef("verifier", retirementSubjectKey(record.Branch)),
+		stalledRef("verifier", retirementAgentSubjectKey(record.Branch)),
+	}
+	optionalRefs = append(optionalRefs, branchEffects...)
+	optionalRefs = append(optionalRefs, itemEffects...)
+	if err := deleteRefsAtomically(repoDir, fact.Ref, fact.SHA, optionalRefs...); err != nil {
+		return fmt.Errorf("%w: merge: retire durable refs: %v", errFlowRetryable, err)
 	}
 	return nil
 }

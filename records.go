@@ -197,6 +197,17 @@ func stalledOn(repoDir, flow, subject, revision string) (bool, error) {
 	}
 	return record.Revision == revision && record.Count >= stalledRunLimit, nil
 }
+func subjectAfterBrake(repoDir, flow string, subject Subject) (Subject, bool, error) {
+	stalled, err := stalledOn(repoDir, flow, subject.Key, subject.Revision)
+	if err != nil {
+		if errors.Is(err, errControlEvidenceInvalid) {
+			subject.Failure = errors.Join(subject.Failure, err)
+			return subject, true, nil
+		}
+		return Subject{}, false, err
+	}
+	return subject, !stalled, nil
+}
 
 // recordStalled increments the durable failure count with compare-and-swap.
 func recordStalled(repoDir, flow, subject, revision string) error {

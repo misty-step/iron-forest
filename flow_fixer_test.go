@@ -7,6 +7,19 @@ import (
 	"testing"
 )
 
+type failOnceTagTracker struct {
+	*memoryTracker
+	failures int
+}
+
+func (t *failOnceTagTracker) SetTags(id string, add, remove []string) error {
+	if t.failures > 0 {
+		t.failures--
+		return errors.New("injected Tracker handoff failure")
+	}
+	return t.memoryTracker.SetTags(id, add, remove)
+}
+
 func fixerBranch(t *testing.T) (string, string, string) {
 	t.Helper()
 	repo := setupTestRepo(t)
@@ -138,8 +151,8 @@ func TestFixerSelectCarriesMalformedEvidenceToRevisionFailure(t *testing.T) {
 			defer func() { trackerFor = oldTracker }()
 
 			out, actErr := (fixerFlow{}).Act(cfg, repo, subject, "run-malformed-"+tc.name)
-			if !errors.Is(actErr, errRetirementEvidenceInvalid) || out.Status != "notes_failed" {
-				t.Fatalf("malformed %s Act = (%#v, %v), want hard notes failure", tc.name, out, actErr)
+			if !errors.Is(actErr, errRetirementEvidenceInvalid) || out.Status != "evidence_failed" {
+				t.Fatalf("malformed %s Act = (%#v, %v), want hard evidence failure", tc.name, out, actErr)
 			}
 			if trackerCalls != 0 {
 				t.Fatalf("malformed %s called Tracker %d times before failing", tc.name, trackerCalls)
@@ -153,5 +166,171 @@ func TestFixerSelectCarriesMalformedEvidenceToRevisionFailure(t *testing.T) {
 				t.Fatalf("malformed %s Revision stalled = (%v, %v), want hard brake", tc.name, stalled, stallErr)
 			}
 		})
+	}
+}
+
+func TestFixerPublicationAtomicallyAdvancesBranchAndAttempt(t *testing.T) {
+	for _, rejectAttempt := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "rejected"}[rejectAttempt], func(t *testing.T) {
+			repo, branch, oldHead := fixerBranch(t)
+			runGitTest(t, repo, "checkout", "-q", "master")
+			wtDir, baseSHA, err := createWorktreeAtBranch(repo, workspaceDir(repo), branch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanupWorktree(repo, wtDir)
+			if baseSHA != oldHead {
+				t.Fatalf("worktree base = %s, want %s", baseSHA, oldHead)
+			}
+			if err := os.WriteFile(filepath.Join(wtDir, "repair.txt"), []byte("repair\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			const key = "branch-forest/9-fixer"
+			if rejectAttempt {
+				remote, err := gitOut(repo, "remote", "get-url", "origin")
+				if err != nil {
+					t.Fatal(err)
+				}
+				hook := filepath.Join(remote, "hooks", "pre-receive")
+				script := "#!/bin/sh\nwhile read old new ref; do\n" +
+					"  [ \"$ref\" = \"refs/forest/attempt/" + key + "\" ] && exit 1\n" +
+					"done\nexit 0\n"
+				if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			head, count, publishErr := commitFixAndPush(
+				repo, wtDir, branch, oldHead, key, 0,
+				testVerifierAgent().Commit,
+				Item{ID: "9", Title: "fixer"},
+			)
+			remoteHead, present, headErr := lookupBranchHead(repo, branch)
+			if headErr != nil || !present {
+				t.Fatalf("remote branch = (%s, %v, %v)", remoteHead, present, headErr)
+			}
+			attempts, attemptsErr := readAttempts(repo, key)
+			if attemptsErr != nil {
+				t.Fatal(attemptsErr)
+			}
+			if rejectAttempt {
+				if publishErr == nil || remoteHead != oldHead || attempts != 0 {
+					t.Fatalf("rejected atomic push = (head=%s count=%d err=%v), want unchanged branch and attempts", remoteHead, attempts, publishErr)
+				}
+				return
+			}
+			if publishErr != nil || head == oldHead || remoteHead != head || count != 1 || attempts != 1 {
+				t.Fatalf("atomic push = (head=%s remote=%s count=%d stored=%d err=%v), want both refs advanced once", head, remoteHead, count, attempts, publishErr)
+			}
+		})
+	}
+}
+
+func TestFixerRecoversChecksProjectionAndFailedHandoff(t *testing.T) {
+	repo, branch, head := fixerBranch(t)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	writeFixerNote(t, repo, checksNotesRef, head,
+		`{"status":"fail","results":[],"run_id":"prior"}`)
+	key := "branch-" + branch
+	if count, err := bumpAttempts(repo, key); err != nil || count != 1 {
+		t.Fatalf("seed attempts = (%d, %v)", count, err)
+	}
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "9", Title: "fixer"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	posts := 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "list" {
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` +
+				head + `","headRefName":"` + branch +
+				`","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		if args[0] == "api" && hasArgumentPair(args, "--method", "GET") {
+			return []byte(`[[]]`), nil
+		}
+		if args[0] == "api" && hasArgumentPair(args, "--method", "POST") {
+			posts++
+			return nil, nil
+		}
+		return nil, errors.New("unexpected host command")
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection.Enabled = true
+	cfg.Flows.Fixer.Attempts = 1
+	out, actErr := (fixerFlow{}).Act(cfg, repo, Subject{
+		Key: key, Kind: subjectBranch, Revision: head,
+		Label: branch, ID: "9", Branch: branch,
+	}, "recover-handoff")
+	if actErr != nil || out.Status != "exhausted" || posts != 1 {
+		t.Fatalf("Fixer recovery = (%#v, %v, posts=%d), want projected Checks and exhausted handoff", out, actErr, posts)
+	}
+	item, err := tk.Get("9")
+	if err != nil || !item.hasTag(failedLabel) || len(item.Comments) != 1 {
+		t.Fatalf("failed handoff Item = (%#v, %v), want tag and one comment", item, err)
+	}
+	stalled, err := stalledOn(repo, "fixer", key, head)
+	if err != nil || !stalled {
+		t.Fatalf("failed handoff brake = (%v, %v), want terminal", stalled, err)
+	}
+}
+
+func TestFixerRestartCompletesFailedHandoffAfterLastAtomicPublish(t *testing.T) {
+	repo, branch, oldHead := fixerBranch(t)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	wtDir, _, err := createWorktreeAtBranch(repo, workspaceDir(repo), branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "repair.txt"), []byte("last repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key := "branch-" + branch
+	newHead, count, err := commitFixAndPush(
+		repo, wtDir, branch, oldHead, key, 0,
+		testVerifierAgent().Commit,
+		Item{ID: "9", Title: "fixer"},
+	)
+	cleanupWorktree(repo, wtDir)
+	if err != nil || count != 1 || newHead == oldHead {
+		t.Fatalf("last atomic publish = (%s, %d, %v)", newHead, count, err)
+	}
+
+	tk := &failOnceTagTracker{memoryTracker: newMemoryTracker(), failures: 1}
+	tk.seed(Item{ID: "9", Title: "fixer"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	item, err := tk.Get("9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := markFixerFailed("owner/repo", repo, newHead, item); err == nil {
+		t.Fatal("injected first handoff did not fail")
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Flows.Fixer.Attempts = 1
+	subjects, err := (fixerFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Revision != newHead {
+		t.Fatalf("restart selection = (%#v, %v), want exhausted new head", subjects, err)
+	}
+	out, actErr := (fixerFlow{}).Act(cfg, repo, subjects[0], "recover-handoff")
+	if actErr != nil || out.Status != "exhausted" {
+		t.Fatalf("restart handoff = (%#v, %v), want exhausted", out, actErr)
+	}
+	got, err := tk.Get("9")
+	if err != nil || !got.hasTag(failedLabel) || len(got.Comments) != 1 {
+		t.Fatalf("recovered failed handoff = (%#v, %v), want tag and one comment", got, err)
+	}
+	stalled, err := stalledOn(repo, "fixer", key, newHead)
+	if err != nil || !stalled {
+		t.Fatalf("recovered handoff brake = (%v, %v), want terminal", stalled, err)
 	}
 }

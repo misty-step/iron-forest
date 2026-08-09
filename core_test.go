@@ -333,6 +333,7 @@ func TestCoreItemsReturnsBuilderSelectorBacklog(t *testing.T) {
 	old := trackerFor
 	trackerFor = func(repo string) Tracker {
 		return trackerStub{items: []Item{
+			{ID: "", Title: "malformed", UpdatedAt: "bad"},
 			{
 				ID: "hab_01J9X", Title: "opaque", UpdatedAt: "r",
 				Comments: []comment{{Body: "a note", CreatedAt: "t"}},

@@ -46,12 +46,11 @@ func (managerFlow) Enabled(cfg Config) bool { return cfg.Flows.Manager.Enabled }
 func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
-	tk := trackerFor(cfg.Repo)
-	items, err := validatedTrackerItems(tk)
+	snapshot, err := readTrackerSnapshot(trackerFor(cfg.Repo))
 	if err != nil {
 		return nil, fmt.Errorf("items: %w", err)
 	}
-	branches, err := forestBranches(repoDir)
+	branchSnapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
 		return nil, err
 	}
@@ -59,25 +58,42 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err != nil {
 		return nil, err
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches, retiring)
+	plan, err := buildManagerPlan(
+		cfg.Flows.Manager, repoDir, snapshot.Items, branchSnapshot.Covered, retiring,
+	)
 	if err != nil {
 		return nil, err
 	}
-	if !plan.hasWork() {
-		return nil, nil
+	failures := append(snapshot.Failures, branchSnapshot.Failures...)
+	failures = append(failures, plan.failures...)
+	if plan.failure != nil {
+		failures = append(failures, Subject{
+			Key:      "manager-control-evidence-" + blobSHA(plan.revision),
+			Kind:     subjectManager,
+			Revision: plan.revision,
+			Label:    "invalid Manager control evidence",
+			Failure:  plan.failure,
+		})
 	}
-	if plan.braked && len(plan.reap) == 0 {
-		// The only work left is the braked promote judgement; retrying it on
-		// unchanged input is forbidden. A deterministic reap, in contrast, is
-		// free and always surfaces the subject so Act can free the slot.
-		return nil, nil
+	subjects := make([]Subject, 0, len(failures)+1)
+	if plan.hasWork() && (!plan.braked || len(plan.reap) != 0) {
+		subjects = append(subjects, Subject{
+			Key:      managerSubject,
+			Kind:     subjectManager,
+			Revision: plan.revision,
+			Label:    plan.label,
+		})
 	}
-	return []Subject{{
-		Key:      managerSubject,
-		Kind:     subjectManager,
-		Revision: plan.revision,
-		Label:    plan.label,
-	}}, nil
+	for _, failure := range failures {
+		failure, include, err := subjectAfterBrake(repoDir, "manager", failure)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", failure.Key, err)
+		}
+		if include {
+			subjects = append(subjects, failure)
+		}
+	}
+	return subjects, nil
 }
 
 // Act executes a Manager pass on the singleton subject: it reaps any dead
@@ -85,12 +101,15 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 // and lays readyTag on that pick. Reaping is a write, which is why it lives in
 // Act and never in Select.
 func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
+	if s.Failure != nil {
+		return Outcome{Status: "evidence_failed"}, s.Failure
+	}
 	tk := trackerFor(cfg.Repo)
-	items, err := validatedTrackerItems(tk)
+	snapshot, err := readTrackerSnapshot(tk)
 	if err != nil {
 		return Outcome{Status: "item_failed"}, fmt.Errorf("items: %w", err)
 	}
-	branches, err := forestBranches(repoDir)
+	branchSnapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
 		return Outcome{Status: "branch_failed"}, fmt.Errorf("branches: %w", err)
 	}
@@ -98,7 +117,9 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	if err != nil {
 		return Outcome{Status: "branch_failed"}, fmt.Errorf("retirements: %w", err)
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches, retiring)
+	plan, err := buildManagerPlan(
+		cfg.Flows.Manager, repoDir, snapshot.Items, branchSnapshot.Covered, retiring,
+	)
 	if err != nil {
 		return Outcome{Status: "flow_failed"}, err
 	}
@@ -208,11 +229,13 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	}
 	defer release()
 
-	items, err := validatedTrackerItems(tk)
+	// Admission is the durable intent for this tag Effect. Repeating the exact
+	// add/remove operation is safe because SetTags is idempotent.
+	snapshot, err := readTrackerSnapshot(tk)
 	if err != nil {
 		return false, err
 	}
-	branches, err := forestBranches(repoDir)
+	branchSnapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
 		return false, err
 	}
@@ -220,7 +243,9 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	if err != nil {
 		return false, err
 	}
-	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches, retiring)
+	plan, err := buildManagerPlan(
+		cfg.Flows.Manager, repoDir, snapshot.Items, branchSnapshot.Covered, retiring,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -268,9 +293,11 @@ type managerPlan struct {
 	label     string
 	needModel bool
 	braked    bool   // the promote judgement on the current candidate set is braked
+	failure   error  // invalid Manager control evidence for this exact plan
 	reap      []Item // assigned items to withdraw
 	failed    []Item // withdrawn items that also receive forest:failed
 	cands     []Item // unblocked candidates the model may judge
+	failures  []Subject
 }
 
 // hasWork reports whether the plan produced anything for Act to do.
@@ -319,6 +346,10 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 			var err error
 			withdraw, err = managerWithdraw(repoDir, it, open)
 			if err != nil {
+				if errors.Is(err, errControlEvidenceInvalid) {
+					plan.failures = append(plan.failures, managerBuilderFailure(it, err))
+					continue
+				}
 				return managerPlan{}, err
 			}
 		}
@@ -348,6 +379,10 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 		}
 		stalled, err := stalledOn(repoDir, "builder", "item-"+it.ID, it.UpdatedAt)
 		if err != nil {
+			if errors.Is(err, errControlEvidenceInvalid) {
+				plan.failures = append(plan.failures, managerBuilderFailure(it, err))
+				continue
+			}
 			return managerPlan{}, err
 		}
 		if stalled {
@@ -382,9 +417,15 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 		// it is never gated by this brake.
 		braked, err := stalledOn(repoDir, "manager", managerSubject, plan.revision)
 		if err != nil {
-			return managerPlan{}, err
+			if errors.Is(err, errControlEvidenceInvalid) {
+				plan.failure = err
+				plan.braked = true
+			} else {
+				return managerPlan{}, err
+			}
+		} else {
+			plan.braked = braked
 		}
-		plan.braked = braked
 	} else {
 		plan.revision = itemSetStamp(reap)
 		if len(reap) > 0 {
@@ -394,6 +435,17 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 		}
 	}
 	return plan, nil
+}
+func managerBuilderFailure(it Item, cause error) Subject {
+	return Subject{
+		Key:      "manager-builder-evidence-" + blobSHA("item-"+it.ID),
+		Kind:     subjectItem,
+		Revision: it.UpdatedAt,
+		Label:    "invalid Builder control evidence for Item " + it.ID,
+		ID:       it.ID,
+		Item:     it,
+		Failure:  cause,
+	}
 }
 
 // managerWithdraw reports whether an assigned item is a dead assignment that

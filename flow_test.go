@@ -104,6 +104,25 @@ func (*reloadConfigFlow) Act(Config, string, Subject, string) (Outcome, error) {
 	panic("reloadConfigFlow has no Subjects")
 }
 
+type pendingLoopFlow struct {
+	acted    chan string
+	interval time.Duration
+}
+
+func (*pendingLoopFlow) Name() string                    { return "pending-loop" }
+func (f *pendingLoopFlow) Interval(Config) time.Duration { return f.interval }
+func (*pendingLoopFlow) Enabled(Config) bool             { return true }
+func (*pendingLoopFlow) Select(Config, string) ([]Subject, error) {
+	return []Subject{
+		{Key: "pending-a", Kind: subjectBranch, Revision: "r1", Label: "pending A"},
+		{Key: "pending-b", Kind: subjectBranch, Revision: "r1", Label: "pending B"},
+	}, nil
+}
+func (f *pendingLoopFlow) Act(_ Config, _ string, s Subject, _ string) (Outcome, error) {
+	f.acted <- s.Key
+	return Outcome{Status: "merge_pending"}, nil
+}
+
 type gateHoldingFlow struct {
 	ready    chan string
 	releases map[string]chan struct{}
@@ -510,6 +529,7 @@ func TestRunFlowLoopReloadsConfigBeforeNextPass(t *testing.T) {
 		if first {
 			t.Fatal("first pass observed auto_merge=true")
 		}
+
 	case <-time.After(5 * time.Second):
 		t.Fatal("first Flow pass did not start")
 	}
@@ -527,6 +547,66 @@ func TestRunFlowLoopReloadsConfigBeforeNextPass(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Flow loop did not stop after the reload proof")
+	}
+}
+func TestRunFlowLoopPacesAndRotatesPendingSubjects(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	body := "repo: " + admissionTestRepo + "\n" +
+		"checks:\n  - name: test\n    run: \"true\"\n"
+	if err := os.WriteFile(configPath(repo), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "add", "forest.yaml")
+	runGitTest(t, repo, "commit", "-m", "test config")
+	cfg, err := loadConfig(configPath(repo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flow := &pendingLoopFlow{
+		acted:    make(chan string, 4),
+		interval: 150 * time.Millisecond,
+	}
+	drainNow := make(chan struct{})
+	var drain int32
+	done := make(chan struct{})
+	go func() {
+		runFlowLoop(flow, cfg, repo, &drain, drainNow)
+		close(done)
+	}()
+	closed := false
+	defer func() {
+		if !closed {
+			close(drainNow)
+		}
+	}()
+
+	select {
+	case key := <-flow.acted:
+		if key != "pending-a" {
+			t.Fatalf("first pending Subject = %q, want pending-a", key)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first pending Subject did not act")
+	}
+	select {
+	case key := <-flow.acted:
+		t.Fatalf("pending loop acted %q before its interval", key)
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case key := <-flow.acted:
+		if key != "pending-b" {
+			t.Fatalf("second pending Subject = %q, want pending-b", key)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second pending Subject did not act after its interval")
+	}
+	close(drainNow)
+	closed = true
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending loop did not stop")
 	}
 }
 

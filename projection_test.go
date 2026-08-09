@@ -35,7 +35,7 @@ func TestProjectionDisabledPerformsNoHostCall(t *testing.T) {
 	if got, _, err := projectBranch(cfg, "", Item{ID: "7", Title: "change"}, "forest/7-change", "body", ""); err != nil || got != "" {
 		t.Fatalf("disabled projectBranch = (%q, %v), want (empty, nil)", got, err)
 	}
-	if err := projectVerdict(cfg, "forest/7-change", projectionTestHead, verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
+	if err := projectVerdict(cfg, "", "forest/7-change", projectionTestHead, verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
 		t.Fatalf("disabled projectVerdict: %v", err)
 	}
 	if calls != 0 {
@@ -251,6 +251,38 @@ func TestProjectBranchCreatesMissingRequest(t *testing.T) {
 	}
 }
 
+func TestProjectBranchDoesNotRepeatUncertainCreate(t *testing.T) {
+	const branch = "forest/39-uncertain-create"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	createCalls := 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[]`), nil
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			createCalls++
+			return []byte("https://github.com/owner/repo/pull/39"), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	item := Item{ID: "39", Title: "uncertain create"}
+	if _, _, err := projectBranch(cfg, repo, item, branch, "body", reviewed); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("first uncertain create = %v, want pending observation", err)
+	}
+	if _, _, err := projectBranch(cfg, repo, item, branch, "body", reviewed); !errors.Is(err, errHostMergeUnavailable) {
+		t.Fatalf("repeated uncertain create = %v, want hard handoff", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("Projection create calls = %d, want exactly one", createCalls)
+	}
+}
+
 func TestProjectBranchRejectsMoveBeforeCreate(t *testing.T) {
 	const branch = "forest/36-create-race"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
@@ -355,6 +387,7 @@ func TestProjectBranchHardBrakesMalformedPostCreateReconciliation(t *testing.T) 
 func TestProjectVerdictCommentContainsDecisionAndChecks(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
+	_, repo, _ := notesTestRepository(t)
 	var commentArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
 		if args[0] == "pr" && args[1] == "list" {
@@ -370,7 +403,7 @@ func TestProjectVerdictCommentContainsDecisionAndChecks(t *testing.T) {
 		return nil, errors.New("unexpected host command")
 	}
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	err := projectVerdict(cfg, "forest/7-change", projectionTestHead, verdictNote{Verdict: "changes", Notes: "repair the parser"}, checksNote{
+	err := projectVerdict(cfg, repo, "forest/7-change", projectionTestHead, verdictNote{Verdict: "changes", Notes: "repair the parser"}, checksNote{
 		Status:  "fail",
 		Results: []checkResult{{Name: "test", Code: 1, Seconds: 2.5, Output: "assertion failed"}},
 	})
@@ -391,9 +424,42 @@ func TestProjectVerdictCommentContainsDecisionAndChecks(t *testing.T) {
 	}
 }
 
+func TestProjectCommentDoesNotRepeatInvisibleResponseLoss(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	postCalls := 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` +
+				projectionTestHead +
+				`","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "GET"):
+			return []byte(`[[]]`), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "POST"):
+			postCalls++
+			return nil, errors.New("response lost before visibility")
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	for range 2 {
+		err := projectVerdict(cfg, repo, "forest/7-change", projectionTestHead,
+			verdictNote{Verdict: "approve"}, checksNote{Status: "pass"})
+		if !errors.Is(err, errHostMergeUnavailable) {
+			t.Fatalf("invisible comment response = %v, want hard handoff", err)
+		}
+	}
+	if postCalls != 1 {
+		t.Fatalf("Projection comment posts = %d, want exactly one", postCalls)
+	}
+}
 func TestProjectCommentReconcilesAcceptedResponseLoss(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
+	_, repo, _ := notesTestRepository(t)
 	accepted := false
 	postCalls := 0
 	publishedBody := ""
@@ -426,7 +492,7 @@ func TestProjectCommentReconcilesAcceptedResponseLoss(t *testing.T) {
 
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
 	for range 2 {
-		if err := projectVerdict(cfg, "forest/7-change", projectionTestHead,
+		if err := projectVerdict(cfg, repo, "forest/7-change", projectionTestHead,
 			verdictNote{Verdict: "changes", Notes: "repair"},
 			checksNote{Status: "pass"}); err != nil {
 			t.Fatalf("reconciled Projection comment: %v", err)
@@ -440,6 +506,7 @@ func TestProjectCommentReconcilesAcceptedResponseLoss(t *testing.T) {
 func TestProjectCommentHardBrakesMalformedReconciliation(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
+	_, repo, _ := notesTestRepository(t)
 	reads := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
 		switch {
@@ -461,7 +528,7 @@ func TestProjectCommentHardBrakesMalformedReconciliation(t *testing.T) {
 	}
 
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	err := projectVerdict(cfg, "forest/7-change", projectionTestHead,
+	err := projectVerdict(cfg, repo, "forest/7-change", projectionTestHead,
 		verdictNote{Verdict: "approve"}, checksNote{Status: "pass"})
 	if !errors.Is(err, errHostMergeUnavailable) || errors.Is(err, errHostMergePending) {
 		t.Fatalf("malformed reconciliation error = %v, want unavailable hard brake", err)
@@ -513,6 +580,7 @@ func TestProjectionRejectsNullOrNonArrayResponses(t *testing.T) {
 func TestProjectChecksRedactsSecretShapedCheckName(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
+	_, repo, _ := notesTestRepository(t)
 	var commentArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
 		if args[0] == "pr" && args[1] == "list" {
@@ -530,7 +598,7 @@ func TestProjectChecksRedactsSecretShapedCheckName(t *testing.T) {
 
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	err := projectChecks(cfg, "forest/7-change", projectionTestHead, checksNote{
+	err := projectChecks(cfg, repo, "forest/7-change", projectionTestHead, checksNote{
 		Status:  "fail",
 		Results: []checkResult{{Name: "lint-" + secret, Code: 1, Output: "failed"}},
 	})
@@ -555,7 +623,7 @@ func TestProjectVerdictMissingRequestIsNoop(t *testing.T) {
 	}
 
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	if err := projectVerdict(cfg, "forest/7-change", projectionTestHead, verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
+	if err := projectVerdict(cfg, "", "forest/7-change", projectionTestHead, verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
 		t.Fatalf("missing pull request: %v", err)
 	}
 	if comments != 0 {

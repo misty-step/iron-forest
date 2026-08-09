@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -15,6 +16,18 @@ var errRefMoved = errors.New("ref moved")
 
 func encodeRefComponent(value string) string {
 	return hex.EncodeToString([]byte(value))
+}
+func validHex(value string, bytes int) bool {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != bytes {
+		return false
+	}
+	for _, b := range decoded {
+		if b != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func gitCommand(repoDir string, args ...string) (string, error) {
@@ -74,6 +87,54 @@ func deleteRef(repoDir, ref, expectSHA string) error {
 	args = append(args, cas, "origin", ":"+ref)
 	_, err := gitCommand(repoDir, args...)
 	return refWriteError(err)
+}
+
+// deleteRefsAtomically removes one required ref and any present optional refs
+// in one compare-and-delete transaction. A lost response is reconciled by
+// checking that every selected ref is absent.
+func deleteRefsAtomically(repoDir, requiredRef, requiredSHA string, optionalRefs ...string) error {
+	leases := map[string]string{requiredRef: requiredSHA}
+	for _, ref := range optionalRefs {
+		sha, _, err := getBlobRef(repoDir, ref)
+		if err != nil {
+			return err
+		}
+		if sha != "" {
+			leases[ref] = sha
+		}
+	}
+	current, _, err := getBlobRef(repoDir, requiredRef)
+	if err != nil {
+		return err
+	}
+	if current != requiredSHA {
+		return fmt.Errorf("%w: ref %s is %s, want %s",
+			errRefMoved, requiredRef, current, requiredSHA)
+	}
+	refs := make([]string, 0, len(leases))
+	for ref := range leases {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	args := []string{"push", "--no-verify", "--atomic"}
+	for _, ref := range refs {
+		args = append(args, fmt.Sprintf("--force-with-lease=%s:%s", ref, leases[ref]))
+	}
+	args = append(args, "origin")
+	for _, ref := range refs {
+		args = append(args, ":"+ref)
+	}
+	if _, err := gitCommand(repoDir, args...); err == nil {
+		return nil
+	} else {
+		for _, ref := range refs {
+			sha, _, readErr := getBlobRef(repoDir, ref)
+			if readErr != nil || sha != "" {
+				return refWriteError(err)
+			}
+		}
+		return nil
+	}
 }
 
 func getBlobRef(repoDir, ref string) (sha, content string, err error) {
