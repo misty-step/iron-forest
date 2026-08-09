@@ -110,20 +110,17 @@ func committerIdentityEnv(id CommitIdentity) []string {
 }
 
 func gitAsIdentity(repo string, id CommitIdentity, args ...string) error {
-	cmdArgs := []string{"-C", repo}
-	cmd := exec.Command("git", append(cmdArgs, args...)...)
-	cmd.Env = commitIdentityEnv(id)
-	out, err := runCombinedOutput(cmd)
-	if err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return gitWithIdentityEnv(repo, commitIdentityEnv(id), args...)
 }
 
 func gitAsCommitter(repo string, id CommitIdentity, args ...string) error {
+	return gitWithIdentityEnv(repo, committerIdentityEnv(id), args...)
+}
+
+func gitWithIdentityEnv(repo string, env []string, args ...string) error {
 	cmdArgs := []string{"-C", repo}
 	cmd := exec.Command("git", append(cmdArgs, args...)...)
-	cmd.Env = committerIdentityEnv(id)
+	cmd.Env = env
 	out, err := runCombinedOutput(cmd)
 	if err != nil {
 		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

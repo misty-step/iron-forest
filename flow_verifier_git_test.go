@@ -239,7 +239,7 @@ func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
 	runGitTest(t, work, "checkout", "-q", branch)
 	runGitTest(t, work, "rebase", "-q", "master")
 
-	id := CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
+	id := testCommitIdentity()
 	it := Item{ID: "9", Title: "rewrite"}
 	// Each attempt needs its own change: a failed push leaves its commit behind,
 	// and a run that has nothing to commit is a different failure.
