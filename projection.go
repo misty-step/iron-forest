@@ -134,7 +134,6 @@ func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (stri
 				return pr.URL, cfg.Projection.MergeViaHost, nil
 			}
 		}
-		}
 		if len(merged) > 0 {
 			return "", false, fmt.Errorf("%w: merged pull request for branch %q does not match reviewed Revision %s", errHostMergeUnavailable, branch, expectedHead)
 		}
@@ -160,13 +159,11 @@ func verdictBody(v verdictNote, c checksNote) string {
 			fmt.Fprintf(&b, "  %s\n", result.Output)
 		}
 	}
-	// The comment mirrors verdict notes and check output, agent-authored text
-	// that lands verbatim; redact it so no credential crosses to the host.
-	return redactSecretShaped(b.String())
+	return b.String()
 }
 
-// projectVerdict mirrors a git verdict and its checks as one pull-request comment.
-func projectVerdict(cfg Config, branch string, v verdictNote, c checksNote) error {
+// Projection comment bodies cross the Host boundary through one redacted sink.
+func projectComment(cfg Config, branch, body string) error {
 	if !cfg.Projection.Enabled {
 		return nil
 	}
@@ -178,28 +175,20 @@ func projectVerdict(cfg Config, branch string, v verdictNote, c checksNote) erro
 		return nil
 	}
 	_, err = projectionCommand("pr", "comment", strconv.Itoa(prs[0].Number),
-		"-R", cfg.Repo, "--body", verdictBody(v, c))
+		"-R", cfg.Repo, "--body", redactSecretShaped(body))
 	return err
+}
+
+// projectVerdict mirrors a git verdict and its checks as one pull-request comment.
+func projectVerdict(cfg Config, branch string, v verdictNote, c checksNote) error {
+	return projectComment(cfg, branch, verdictBody(v, c))
 }
 
 // projectChecks mirrors a failing check result on the human surface. The
 // Verifier stops before review when a check fails, so this is the only signal
 // an operator would otherwise get for that head.
 func projectChecks(cfg Config, branch string, c checksNote) error {
-	if !cfg.Projection.Enabled {
-		return nil
-	}
-	prs, err := openProjectionPR(cfg, branch)
-	if err != nil {
-		return err
-	}
-	if len(prs) == 0 {
-		return nil
-	}
-	body := redactSecretShaped(checksSummary(c) + "\n\n" + verdictBody(verdictNote{Verdict: "pending"}, c))
-	_, err = projectionCommand("pr", "comment", strconv.Itoa(prs[0].Number),
-		"-R", cfg.Repo, "--body", body)
-	return err
+	return projectComment(cfg, branch, checksSummary(c)+"\n\n"+verdictBody(verdictNote{Verdict: "pending"}, c))
 }
 
 // projectMerge asks the host to merge a pull request when it owns the target
