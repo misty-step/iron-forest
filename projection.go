@@ -24,8 +24,8 @@ type projectionPullRequest struct {
 	IsCrossRepository bool   `json:"isCrossRepository"`
 }
 
-func projectionPRs(cfg Config, branch, state string) ([]projectionPullRequest, error) {
-	out, err := projectionCommand("pr", "list", "-R", cfg.Repo, "--state", state,
+func projectionPRs(cfg Config, branch string) ([]projectionPullRequest, error) {
+	out, err := projectionCommand("pr", "list", "-R", cfg.Repo, "--state", "open",
 		"--head", branch, "--json", "number,url,headRefOid,headRefName,baseRefName,isCrossRepository")
 	if err != nil {
 		return nil, err
@@ -43,8 +43,60 @@ func projectionPRs(cfg Config, branch, state string) ([]projectionPullRequest, e
 	return prs, nil
 }
 
+type projectionRESTPullRequest struct {
+	Number   int     `json:"number"`
+	URL      string  `json:"html_url"`
+	MergedAt *string `json:"merged_at"`
+	Head     struct {
+		SHA  string `json:"sha"`
+		Ref  string `json:"ref"`
+		Repo *struct {
+			FullName string `json:"full_name"`
+		} `json:"repo"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+}
+
+func mergedProjectionPRs(cfg Config, branch string) ([]projectionPullRequest, error) {
+	owner := strings.SplitN(cfg.Repo, "/", 2)[0]
+	out, err := projectionCommand("api", "--method", "GET", "--paginate", "--slurp",
+		"repos/"+cfg.Repo+"/pulls", "--field", "state=closed",
+		"--field", "head="+owner+":"+branch, "--field", "base=master", "--field", "per_page=100")
+	if err != nil {
+		return nil, err
+	}
+	var pages [][]projectionRESTPullRequest
+	if err := json.Unmarshal(out, &pages); err != nil {
+		return nil, err
+	}
+	var prs []projectionPullRequest
+	for _, page := range pages {
+		for _, raw := range page {
+			pr := projectionPullRequest{
+				Number:            raw.Number,
+				URL:               raw.URL,
+				HeadRefOID:        raw.Head.SHA,
+				HeadRefName:       raw.Head.Ref,
+				BaseRefName:       raw.Base.Ref,
+				IsCrossRepository: raw.Head.Repo == nil || raw.Head.Repo.FullName != cfg.Repo,
+			}
+			if pr.IsCrossRepository || pr.HeadRefName != branch || pr.BaseRefName != "master" {
+				return nil, fmt.Errorf("pull request %d does not originate from %s branch %q and target master",
+					pr.Number, cfg.Repo, branch)
+			}
+			if raw.MergedAt == nil || *raw.MergedAt == "" {
+				continue
+			}
+			prs = append(prs, pr)
+		}
+	}
+	return prs, nil
+}
+
 func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error) {
-	prs, err := projectionPRs(cfg, branch, "open")
+	prs, err := projectionPRs(cfg, branch)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +124,7 @@ func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (stri
 		return prs[0].URL, false, nil
 	}
 	if expectedHead != "" {
-		merged, err := projectionPRs(cfg, branch, "merged")
+		merged, err := mergedProjectionPRs(cfg, branch)
 		if err != nil {
 			return "", false, err
 		}
@@ -187,7 +239,7 @@ func inspectProjectMerge(cfg Config, branch, strategy, expectedHead string) (boo
 	if strategy != "squash" {
 		return false, projectionPullRequest{}, fmt.Errorf("Host projection supports only squash merge, got %q", strategy)
 	}
-	merged, err := projectionPRs(cfg, branch, "merged")
+	merged, err := mergedProjectionPRs(cfg, branch)
 	if err != nil {
 		return false, projectionPullRequest{}, err
 	}

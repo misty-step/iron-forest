@@ -15,6 +15,10 @@ func hasArgumentPair(args []string, key, value string) bool {
 	return false
 }
 
+func mergedProjectionPage(body string) []byte {
+	return []byte("[[" + body + "]]")
+}
+
 func TestProjectionDisabledPerformsNoHostCall(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
@@ -72,18 +76,12 @@ func TestProjectBranchRecognizesAlreadyMergedReviewedHead(t *testing.T) {
 	const reviewed = "0123456789abcdef0123456789abcdef01234567"
 	createCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
-		state := ""
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "--state" {
-				state = args[i+1]
-			}
-		}
 		switch {
-		case args[1] == "list" && state == "open":
+		case args[0] == "pr" && args[1] == "list":
 			return []byte(`[]`), nil
-		case args[1] == "list" && state == "merged":
-			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + reviewed + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-		case args[1] == "create":
+		case args[0] == "api":
+			return []byte(`[[{"number":22,"html_url":"https://github.com/owner/repo/pull/22","merged_at":"2026-08-07T00:00:00Z","head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}],[{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}]]`), nil
+		case args[0] == "pr" && args[1] == "create":
 			createCalls++
 			return nil, errors.New("duplicate create")
 		default:
@@ -220,24 +218,41 @@ func TestProjectVerdictMissingRequestIsNoop(t *testing.T) {
 }
 
 func TestProjectionRejectsForeignSource(t *testing.T) {
-	tests := map[string]string{
-		"cross repository": `[{"number":23,"url":"https://github.com/fork/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":true}]`,
-		"wrong branch":     `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/8-change","baseRefName":"master","isCrossRepository":false}]`,
-		"wrong target":     `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"release","isCrossRepository":false}]`,
+	tests := map[string]struct {
+		open   string
+		merged string
+	}{
+		"cross repository": {
+			open:   `[{"number":23,"url":"https://github.com/fork/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":true}]`,
+			merged: `[[{"number":23,"html_url":"https://github.com/fork/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"0123456789abcdef0123456789abcdef01234567","ref":"forest/7-change","repo":{"full_name":"fork/repo"}},"base":{"ref":"master"}}]]`,
+		},
+		"wrong branch": {
+			open:   `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/8-change","baseRefName":"master","isCrossRepository":false}]`,
+			merged: `[[{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"0123456789abcdef0123456789abcdef01234567","ref":"forest/8-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}]]`,
+		},
+		"wrong target": {
+			open:   `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"release","isCrossRepository":false}]`,
+			merged: `[[{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"0123456789abcdef0123456789abcdef01234567","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"release"}}]]`,
+		},
 	}
-	for name, body := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			old := projectionCommand
 			defer func() { projectionCommand = old }()
 			projectionCommand = func(args ...string) ([]byte, error) {
-				return []byte(body), nil
+				if args[0] == "api" {
+					return []byte(tc.merged), nil
+				}
+				return []byte(tc.open), nil
 			}
 			cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-			for _, state := range []string{"open", "merged"} {
-				if _, err := projectionPRs(cfg, "forest/7-change", state); err == nil ||
-					!strings.Contains(err.Error(), "does not originate") {
-					t.Fatalf("%s foreign request = %v, want refusal", state, err)
-				}
+			if _, err := projectionPRs(cfg, "forest/7-change"); err == nil ||
+				!strings.Contains(err.Error(), "does not originate") {
+				t.Fatalf("open foreign request = %v, want refusal", err)
+			}
+			if _, err := mergedProjectionPRs(cfg, "forest/7-change"); err == nil ||
+				!strings.Contains(err.Error(), "does not originate") {
+				t.Fatalf("merged foreign request = %v, want refusal", err)
 			}
 		})
 	}
@@ -256,6 +271,58 @@ func TestOpenProjectionRejectsMultipleRequests(t *testing.T) {
 	if _, err := openProjectionPR(cfg, "forest/7-change"); err == nil ||
 		!strings.Contains(err.Error(), "multiple open") {
 		t.Fatalf("ambiguous open requests = %v, want refusal", err)
+	}
+}
+
+func TestMergedProjectionUsesPaginatedExactAPIQuery(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	var got []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		got = append([]string(nil), args...)
+		return []byte(`[]`), nil
+	}
+
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if _, err := mergedProjectionPRs(cfg, "forest/7-change"); err != nil {
+		t.Fatalf("merged Projection lookup: %v", err)
+	}
+	if len(got) == 0 || got[0] != "api" {
+		t.Fatalf("merged Projection command = %v, want gh api", got)
+	}
+	for _, flag := range []string{"--paginate", "--slurp"} {
+		found := false
+		for _, arg := range got {
+			if arg == flag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("merged Projection command = %v, missing %s", got, flag)
+		}
+	}
+	for _, arg := range got {
+		if arg == "--limit" {
+			t.Fatalf("merged Projection command reintroduced fixed gh pr list limit: %v", got)
+		}
+	}
+	if !hasArgumentPair(got, "--method", "GET") ||
+		!hasArgumentPair(got, "--field", "state=closed") ||
+		!hasArgumentPair(got, "--field", "head=owner:forest/7-change") ||
+		!hasArgumentPair(got, "--field", "base=master") ||
+		!hasArgumentPair(got, "--field", "per_page=100") {
+		t.Fatalf("merged Projection command = %v, missing exact paginated query", got)
+	}
+	endpoint := false
+	for _, arg := range got {
+		if arg == "repos/owner/repo/pulls" {
+			endpoint = true
+			break
+		}
+	}
+	if !endpoint {
+		t.Fatalf("merged Projection command = %v, missing exact repository endpoint", got)
 	}
 }
 
@@ -289,20 +356,14 @@ func TestProjectMergePinsExpectedHead(t *testing.T) {
 		var mergeArgs []string
 		merged := false
 		projectionCommand = func(args ...string) ([]byte, error) {
-			state := ""
-			for i := 0; i+1 < len(args); i++ {
-				if args[i] == "--state" {
-					state = args[i+1]
-				}
-			}
 			switch {
-			case args[1] == "list" && state == "merged" && merged:
-				return []byte(`[{"number":23,"headRefOid":"` + expectedHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-			case args[1] == "list" && state == "merged":
+			case args[0] == "api" && merged:
+				return mergedProjectionPage(`{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + expectedHead + `","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+			case args[0] == "api":
 				return []byte(`[]`), nil
-			case args[1] == "list":
+			case args[0] == "pr" && args[1] == "list":
 				return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + expectedHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-			case args[1] == "merge":
+			case args[0] == "pr" && args[1] == "merge":
 				mergeArgs = append([]string(nil), args...)
 				merged = true
 				return nil, nil
@@ -342,25 +403,18 @@ func TestProjectMergeRecoversAnAlreadyMergedReviewedHead(t *testing.T) {
 	const reviewed = "0123456789abcdef0123456789abcdef01234567"
 	mergeCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
-		state := ""
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "--state" {
-				state = args[i+1]
-			}
-		}
 		switch {
-		case len(args) >= 2 && args[1] == "list" && state == "open":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
 			return []byte(`[]`), nil
-		case len(args) >= 2 && args[1] == "list" && state == "merged":
-			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + reviewed + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-		case len(args) >= 2 && args[1] == "merge":
+		case args[0] == "api":
+			return mergedProjectionPage(`{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			return nil, nil
 		default:
 			return nil, errors.New("unexpected host command")
 		}
 	}
-
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
 	if err := projectMerge(cfg, "forest/7-change", "squash", reviewed); err != nil {
 		t.Fatalf("recover merged request: %v", err)
@@ -380,21 +434,16 @@ func TestProjectMergeWaitsForQueuedHostConfirmation(t *testing.T) {
 	hostMerged := false
 	mergeCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
-		state := ""
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "--state" {
-				state = args[i+1]
-			}
-		}
 		switch {
-		case args[1] == "list" && state == "merged" && hostMerged:
-			return []byte(`[{"number":23,"headRefOid":"` + reviewed + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-		case args[1] == "list" && state == "merged":
+		case args[0] == "api" && hostMerged:
+			return mergedProjectionPage(`{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		case args[0] == "api":
 			return []byte(`[]`), nil
-		case args[1] == "list":
+		case args[0] == "pr" && args[1] == "list":
 			return []byte(`[{"number":23,"headRefOid":"` + reviewed + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-		case args[1] == "merge":
+		case args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
+			hostMerged = true
 			return nil, nil
 		default:
 			return nil, errors.New("unexpected host command")
