@@ -485,6 +485,58 @@ func (t retirementTransientTracker) Close(string) error {
 }
 func (t retirementTransientTracker) SetTags(string, []string, []string) error { return nil }
 
+func TestRetirementUnappliedCloseResetFailureRemainsRetryable(t *testing.T) {
+	branch := "forest/13-close-reset"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	item := Item{ID: "13", Title: "close reset"}
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: item.ID, Transport: "git",
+		Strategy: "squash", Title: item.Title, State: "landed",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return retirementTransientTracker{item: item} }
+	defer func() { trackerFor = oldTracker }()
+
+	closeKey := effectAttemptKey("Tracker-close", item.ID, reviewed)
+	if err := claimEffect(repo, "Tracker-close", item.ID, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	hook := filepath.Join(origin, "hooks", "update")
+	closeRef := "refs/forest/attempt/" + closeKey
+	script := "#!/bin/sh\nif [ \"$1\" = '" + closeRef + "' ]; then exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement,
+		Revision: reviewed, ID: item.ID, Branch: branch, Item: item}
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+		t.Fatalf("unapplied close reset failure code = %d, want retryable failure", code)
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || stalled {
+		t.Fatalf("unapplied close reset brake = (%v, %v), want retryable", stalled, err)
+	}
+	if attempts, err := readAttempts(repo, closeKey); err != nil || attempts != 1 {
+		t.Fatalf("failed close reset claim = (%d, %v), want retained request", attempts, err)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+		t.Fatalf("unapplied close reset retry code = %d, want known-unapplied failure", code)
+	}
+	if attempts, err := readAttempts(repo, closeKey); err != nil || attempts != 0 {
+		t.Fatalf("recovered close reset claim = (%d, %v), want removed", attempts, err)
+	}
+}
+
 func TestRetirementTransientFailuresRemainSelectable(t *testing.T) {
 	branch := "forest/14-transient"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)

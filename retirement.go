@@ -516,8 +516,7 @@ func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) 
 		if closeErr := trackerFor(cfg.Repo).Close(it.ID); closeErr != nil {
 			if errors.Is(closeErr, errTrackerEffectNotApplied) {
 				if err := dropAttempts(repoDir, closeKey); err != nil {
-					return fmt.Errorf("%w: reset unapplied Tracker close: %v",
-						errHostMergeUnavailable, err)
+					return fmt.Errorf("reset unapplied Tracker close: %w", err)
 				}
 				return fmt.Errorf("merge: close item: %w", closeErr)
 			}
