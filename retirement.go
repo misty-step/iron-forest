@@ -638,19 +638,12 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item, a *Age
 }
 
 func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, _ *Agent) error {
-	verdict, approved, err := readRetirementApproval(repoDir, reviewed)
+	verdict, checks, err := readRetirementApproval(repoDir, reviewed)
 	if err != nil {
 		return err
 	}
-	if !approved {
+	if verdict.Verdict != "approve" || checks.Status != "pass" {
 		return fmt.Errorf("%w: Host merge requires durable approval", errRetirementEvidenceInvalid)
-	}
-	checks, found, err := readChecks(repoDir, reviewed)
-	if err != nil {
-		return retirementEvidenceReadError("Checks", err)
-	}
-	if !found {
-		return fmt.Errorf("%w: Host merge lacks durable Checks", errRetirementEvidenceInvalid)
 	}
 	if err := recordHostRetirement(cfg, repoDir, branch, reviewed, it, verdict, checks); err != nil {
 		return err
@@ -747,20 +740,50 @@ func retirementEvidenceReadError(kind string, err error) error {
 	return fmt.Errorf("%w: read durable %s: %v", errHostMergePending, kind, err)
 }
 
-func readRetirementApproval(repoDir, revision string) (verdictNote, bool, error) {
+func readRetirementApproval(repoDir, revision string) (verdictNote, checksNote, error) {
 	if err := fetchNotes(repoDir); err != nil {
-		return verdictNote{}, false, fmt.Errorf("%w: refresh durable notes: %v", errHostMergePending, err)
+		return verdictNote{}, checksNote{}, fmt.Errorf("%w: refresh durable notes: %v", errHostMergePending, err)
 	}
-	verdict, hasVerdict, err := readVerdict(repoDir, revision)
+	verdict, _, err := readVerdict(repoDir, revision)
 	if err != nil {
-		return verdictNote{}, false, retirementEvidenceReadError("Verdict", err)
+		return verdictNote{}, checksNote{}, retirementEvidenceReadError("Verdict", err)
 	}
-	checks, hasChecks, err := readChecks(repoDir, revision)
+	checks, _, err := readChecks(repoDir, revision)
 	if err != nil {
-		return verdictNote{}, false, retirementEvidenceReadError("Checks", err)
+		return verdictNote{}, checksNote{}, retirementEvidenceReadError("Checks", err)
 	}
-	approved := hasVerdict && verdict.Verdict == "approve" && hasChecks && checks.Status == "pass"
-	return verdict, approved, nil
+	return verdict, checks, nil
+}
+
+func hostMergeAttemptLimit(cfg Config) int {
+	if cfg.Flows.Fixer.Attempts < 1 {
+		return 1
+	}
+	return cfg.Flows.Fixer.Attempts
+}
+
+func recordHostMergeHandoff(
+	cfg Config,
+	repoDir string,
+	record retirementRecord,
+	it Item,
+	handoff error,
+) error {
+	if err := recordTerminalStall(repoDir, (verifierFlow{}).Name(),
+		retirementSubjectKey(record.Branch), record.Revision); err != nil {
+		return fmt.Errorf("%w: %v; record durable Host merge brake: %v",
+			errRetirementRecoveryHard, handoff, err)
+	}
+	tracker := trackerFor(cfg.Repo)
+	if err := tracker.SetTags(it.ID, []string{failedLabel}, nil); err != nil {
+		return fmt.Errorf("%w: %v; publish Host merge handoff tag: %v",
+			errRetirementRecoveryHard, handoff, err)
+	}
+	if err := publishMergeBlocked(tracker, it, record.Revision, handoff); err != nil {
+		return fmt.Errorf("%w: %v; publish Host merge handoff: %v",
+			errRetirementRecoveryHard, handoff, err)
+	}
+	return fmt.Errorf("%w: %v", errRetirementRecoveryHard, handoff)
 }
 
 func recordHostMergeRequestFailure(
@@ -772,25 +795,17 @@ func recordHostMergeRequestFailure(
 ) error {
 	attempts, err := bumpAttempts(repoDir, "branch-"+record.Branch)
 	if err != nil {
-		return err
+		handoff := fmt.Errorf("Host merge request for Revision %s failed before its attempt became durable",
+			record.Revision)
+		return fmt.Errorf("%w; attempt record: %v",
+			recordHostMergeHandoff(cfg, repoDir, record, it, handoff), err)
 	}
-	limit := cfg.Flows.Fixer.Attempts
-	if limit < 1 {
-		limit = 1
-	}
-	if attempts < limit {
+	if attempts < hostMergeAttemptLimit(cfg) {
 		return fmt.Errorf("%w: %v", errHostMergePending, cause)
 	}
 	handoff := fmt.Errorf("Host merge request for Revision %s failed after %d attempts",
 		record.Revision, attempts)
-	tracker := trackerFor(cfg.Repo)
-	if err := tracker.SetTags(it.ID, []string{failedLabel}, nil); err != nil {
-		return fmt.Errorf("%w: publish Host merge handoff tag: %v", errFlowRetryable, err)
-	}
-	if err := publishMergeBlocked(tracker, it, record.Revision, handoff); err != nil {
-		return fmt.Errorf("%w: publish Host merge handoff: %v", errFlowRetryable, err)
-	}
-	return fmt.Errorf("%w: %v", errRetirementRecoveryHard, handoff)
+	return recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
 }
 
 func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it Item) error {
@@ -869,10 +884,11 @@ func recoverRetirement(cfg Config, repoDir string, fact retirementFact, it Item)
 			fact = observed
 			record = fact.Record
 		}
-		verdict, approved, err := readRetirementApproval(repoDir, record.Revision)
+		verdict, checks, err := readRetirementApproval(repoDir, record.Revision)
 		if err != nil {
 			return record, fmt.Errorf("retirement %s: %w", fact.Ref, err)
 		}
+		approved := verdict.Verdict == "approve" && checks.Status == "pass"
 		matches := starting == "preparing" || record.Agent == verdict.Reviewer &&
 			record.Model == verdict.Model && record.DefSHA == verdict.DefSHA
 		if hostMerged {
@@ -903,6 +919,15 @@ func recoverRetirement(cfg Config, repoDir string, fact retirementFact, it Item)
 			if !cfg.Flows.Verifier.AutoMerge {
 				return record, errHostMergePending
 			}
+			attempts, attemptsErr := readAttempts(repoDir, "branch-"+record.Branch)
+			if attemptsErr != nil {
+				return record, attemptsErr
+			}
+			if attempts >= hostMergeAttemptLimit(cfg) {
+				handoff := fmt.Errorf("Host merge request for Revision %s failed after %d attempts",
+					record.Revision, attempts)
+				return record, recordHostMergeHandoff(cfg, repoDir, record, it, handoff)
+			}
 			if err := projectMerge(cfg, record.Branch, record.Strategy, record.Revision); err != nil {
 				if errors.Is(err, errHostMergeUnavailable) {
 					return record, err
@@ -920,10 +945,11 @@ func recoverRetirement(cfg Config, repoDir string, fact retirementFact, it Item)
 		}
 	}
 	if record.State == "observed" {
-		verdict, approved, err := readRetirementApproval(repoDir, record.Revision)
+		verdict, checks, err := readRetirementApproval(repoDir, record.Revision)
 		if err != nil {
 			return record, fmt.Errorf("retirement %s: %w", fact.Ref, err)
 		}
+		approved := verdict.Verdict == "approve" && checks.Status == "pass"
 		if !approved {
 			return record, errHostMergePending
 		}

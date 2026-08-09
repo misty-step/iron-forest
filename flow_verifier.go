@@ -41,27 +41,6 @@ func retirementProjectionError(cfg Config, err error) error {
 	return err
 }
 
-func terminalHostRevision(repoDir, revision string) (status, decision string, terminal bool, err error) {
-	if err := fetchNotes(repoDir); err != nil {
-		return "", "", false, fmt.Errorf("%w: refresh durable notes: %v", errHostMergePending, err)
-	}
-	verdict, hasVerdict, err := readVerdict(repoDir, revision)
-	if err != nil {
-		return "", "", false, retirementEvidenceReadError("Verdict", err)
-	}
-	checks, hasChecks, err := readChecks(repoDir, revision)
-	if err != nil {
-		return "", "", false, retirementEvidenceReadError("Checks", err)
-	}
-	if hasChecks && checks.Status == "fail" {
-		return "checks_failed", verdict.Verdict, true, nil
-	}
-	if hasVerdict && verdict.Verdict == "changes" {
-		return "reviewed", verdict.Verdict, true, nil
-	}
-	return "", "", false, nil
-}
-
 func flowNoteError(err error) error {
 	if errors.Is(err, errNoteInvalid) {
 		return fmt.Errorf("%w: %v", errRetirementEvidenceInvalid, err)
@@ -235,6 +214,13 @@ func publishMergeBlocked(t Tracker, it Item, revision string, cause error) error
 	if hasCommentMarker(it.Comments, marker) {
 		return nil
 	}
+	current, readErr := validatedTrackerItem(t, it.ID)
+	if readErr != nil {
+		return fmt.Errorf("reconcile handoff comment: %w", readErr)
+	}
+	if hasCommentMarker(current.Comments, marker) {
+		return nil
+	}
 	body := "Merge blocked: " + redactSecretShaped(cause.Error()) + "\n\n" + marker
 	if err := t.Comment(it.ID, body); err != nil {
 		current, readErr := validatedTrackerItem(t, it.ID)
@@ -311,7 +297,7 @@ func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (
 					out.Status = "skipped"
 					return out, nil
 				}
-				status, decision, terminal, evidenceErr := terminalHostRevision(repoDir, record.Revision)
+				verdict, checks, evidenceErr := readRetirementApproval(repoDir, record.Revision)
 				if evidenceErr != nil {
 					if errors.Is(evidenceErr, errHostMergePending) {
 						out.Status = "merge_pending"
@@ -320,6 +306,7 @@ func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (
 					out.Status = "merge_failed"
 					return out, evidenceErr
 				}
+				terminal := checks.Status == "fail" || verdict.Verdict == "changes"
 				if terminal {
 					merged, _, inspectErr := inspectProjectMerge(
 						cfg, record.Branch, record.Strategy, record.Revision)
@@ -333,8 +320,11 @@ func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (
 						return out, inspectErr
 					}
 					if !merged {
-						out.Status = status
-						out.Verdict = decision
+						out.Status = "reviewed"
+						if checks.Status == "fail" {
+							out.Status = "checks_failed"
+						}
+						out.Verdict = verdict.Verdict
 						return out, nil
 					}
 				} else {

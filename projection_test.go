@@ -149,6 +149,19 @@ func TestProjectionRejectsMalformedHeadRefOID(t *testing.T) {
 	}
 }
 
+func TestMergedProjectionRejectsMalformedTimestamp(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return mergedProjectionPage(`{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"not-a-timestamp","head":{"sha":"` +
+			projectionTestHead + `","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if _, err := mergedProjectionPRs(cfg, "forest/7-change"); !errors.Is(err, errHostMergeUnavailable) {
+		t.Fatalf("malformed merged timestamp = %v, want unavailable", err)
+	}
+}
+
 func TestInspectProjectMergeRejectsOpenRequestWithoutExpectedHead(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()

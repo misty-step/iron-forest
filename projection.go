@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // projectionCommand is the host boundary. Projection effects remain optional,
@@ -27,34 +28,12 @@ type projectionPullRequest struct {
 	IsCrossRepository *bool  `json:"isCrossRepository"`
 }
 
-func validProjectionHeadRefOID(oid string) bool {
-	if len(oid) != 40 {
-		return false
-	}
-	nonzero := false
-	for i := range oid {
-		c := oid[i]
-		if c >= '0' && c <= '9' {
-			if c != '0' {
-				nonzero = true
-			}
-			continue
-		}
-		if c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' {
-			nonzero = true
-			continue
-		}
-		return false
-	}
-	return nonzero
-}
-
 func validateProjectionPR(repo, branch string, pr projectionPullRequest) error {
 	if pr.Number <= 0 || strings.TrimSpace(pr.URL) == "" {
 		return fmt.Errorf("%w: pull request for branch %q has an incomplete number or URL",
 			errHostMergeUnavailable, branch)
 	}
-	if !validProjectionHeadRefOID(pr.HeadRefOID) {
+	if !validHex(pr.HeadRefOID, 20) {
 		return fmt.Errorf("%w: pull request for branch %q has an invalid head Revision",
 			errHostMergeUnavailable, branch)
 	}
@@ -133,7 +112,7 @@ func projectionCommentExists(cfg Config, number int, revision, body string) (boo
 				errHostMergeUnavailable)
 		}
 		for _, review := range page {
-			if review == nil || !validProjectionHeadRefOID(review.CommitID) {
+			if review == nil || !validHex(review.CommitID, 20) {
 				return false, fmt.Errorf("%w: decode Projection review response: invalid review identity",
 					errHostMergeUnavailable)
 			}
@@ -182,6 +161,10 @@ func mergedProjectionPRs(cfg Config, branch string) ([]projectionPullRequest, er
 			}
 			if raw.MergedAt == nil || *raw.MergedAt == "" {
 				continue
+			}
+			if _, err := time.Parse(time.RFC3339, *raw.MergedAt); err != nil {
+				return nil, fmt.Errorf("%w: decode merged Projection response: invalid merged timestamp",
+					errHostMergeUnavailable)
 			}
 			prs = append(prs, pr)
 		}

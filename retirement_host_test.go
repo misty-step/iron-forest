@@ -881,7 +881,8 @@ func TestPendingHostRetirementReconcilesDurableApproval(t *testing.T) {
 				if !errors.Is(err, errHostMergePending) || current.Record.State != "pending" {
 					t.Fatalf("winning approval recovery = (state=%q, err=%v), want pending", current.Record.State, err)
 				}
-				verdict, approved, approvalErr := readRetirementApproval(repo, reviewed)
+				verdict, checks, approvalErr := readRetirementApproval(repo, reviewed)
+				approved := verdict.Verdict == "approve" && checks.Status == "pass"
 				if approvalErr != nil || !approved ||
 					current.Record.Agent != verdict.Reviewer ||
 					current.Record.Model != verdict.Model ||
@@ -1176,16 +1177,53 @@ func TestHostMergeCommandFailureReachesBoundedHandoff(t *testing.T) {
 	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errRetirementRecoveryHard) {
 		t.Fatalf("second Host refusal = %v, want bounded recovery handoff", err)
 	}
+	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errRetirementRecoveryHard) {
+		t.Fatalf("exhausted Host refusal = %v, want retained handoff", err)
+	}
 	if mergeCalls != 2 {
 		t.Fatalf("Host merge calls = %d, want bounded two", mergeCalls)
 	}
 	if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 2 {
 		t.Fatalf("Host merge attempts = (%d, %v), want two", attempts, err)
 	}
+	if stalled, err := stalledOn(repo, (verifierFlow{}).Name(),
+		retirementSubjectKey(branch), reviewed); err != nil || !stalled {
+		t.Fatalf("Host refusal brake = (%v, %v), want durable terminal handoff", stalled, err)
+	}
 	got, err := tk.Get(item.ID)
 	if err != nil || !got.hasTag(failedLabel) || len(got.Comments) != 1 ||
 		!strings.Contains(got.Comments[0].Body, "revision="+reviewed+" -->") {
 		t.Fatalf("Host refusal handoff = (%#v, %v), want failed tag and exact marker", got, err)
+	}
+}
+
+type hostHandoffFailureTracker struct{ *memoryTracker }
+
+func (hostHandoffFailureTracker) SetTags(string, []string, []string) error {
+	return errTrackerUnavailable
+}
+
+func TestHostMergeHandoffTrackerFailureKeepsDurableBrake(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	const branch = "forest/11-host-handoff"
+	item := Item{ID: "11", Title: "host handoff"}
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return hostHandoffFailureTracker{tk} }
+	defer func() { trackerFor = oldTracker }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Flows.Fixer.Attempts = 1
+	record := retirementRecord{Branch: branch, Revision: revision, ItemID: item.ID}
+	if err := recordHostMergeRequestFailure(cfg, repo, record, item,
+		errors.New("Host refused merge")); !errors.Is(err, errRetirementRecoveryHard) {
+		t.Fatalf("Tracker handoff failure = %v, want hard recovery handoff", err)
+	}
+	if stalled, err := stalledOn(repo, (verifierFlow{}).Name(),
+		retirementSubjectKey(branch), revision); err != nil || !stalled {
+		t.Fatalf("Tracker handoff brake = (%v, %v), want durable terminal handoff", stalled, err)
 	}
 }
 
