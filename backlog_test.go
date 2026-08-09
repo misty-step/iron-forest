@@ -431,6 +431,26 @@ func TestDuplicateBranchItemIdentityIsRejectedDuringAct(t *testing.T) {
 	}
 }
 
+func TestMalformedBranchCoversRecoverableItemIdentity(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	branch := "forest/foo"
+	runGitTest(t, repo, "branch", branch, revision)
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+
+	snapshot, err := readForestBranchSnapshot(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Covered) != 1 || snapshot.Covered[0] != branch ||
+		len(snapshot.Actionable) != 0 || len(snapshot.Failures) != 1 ||
+		snapshot.Failures[0].ID != "foo" {
+		t.Fatalf("malformed branch snapshot = %#v, want quarantined Item foo", snapshot)
+	}
+	if eligible := eligibleFrom([]Item{{ID: "foo"}}, snapshot.Covered, nil, nil, nil); len(eligible) != 0 {
+		t.Fatalf("malformed branch left duplicate Item eligible: %#v", eligible)
+	}
+}
+
 func TestBranchSnapshotQuarantinesDuplicatesWithoutSuppressingHealthyBranch(t *testing.T) {
 	_, repo, revision := notesTestRepository(t)
 	for _, branch := range []string{"forest/9-a", "forest/9-b", "forest/10-good"} {

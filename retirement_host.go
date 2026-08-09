@@ -50,7 +50,8 @@ func recordPreparingHostRetirement(cfg Config, repoDir, branch, reviewed string,
 		}
 		merged, err := mergedProjectionPRs(cfg, branch)
 		if err != nil {
-			return retirementFact{}, fmt.Errorf("inspect prior Host Revision: %w", err)
+			return retirementFact{}, retryableHostError(cfg,
+				fmt.Errorf("inspect prior Host Revision: %w", err))
 		}
 		for _, pr := range merged {
 			if pr.HeadRefOID != fact.Record.Revision {
@@ -65,7 +66,8 @@ func recordPreparingHostRetirement(cfg Config, repoDir, branch, reviewed string,
 		}
 		prs, err := openProjectionPR(cfg, branch)
 		if err != nil {
-			return retirementFact{}, fmt.Errorf("inspect advanced Host Projection: %w", err)
+			return retirementFact{}, retryableHostError(cfg,
+				fmt.Errorf("inspect advanced Host Projection: %w", err))
 		}
 		if len(prs) == 0 {
 			return moveRetirement(repoDir, fact, next)
@@ -121,7 +123,8 @@ func moveAdvancedHostRetirement(cfg Config, repoDir string, fact retirementFact)
 	}
 	prs, err := openProjectionPR(cfg, fact.Record.Branch)
 	if err != nil {
-		return fact, false, err
+		return fact, false, retryableHostError(cfg,
+			fmt.Errorf("inspect advanced Host Projection: %w", err))
 	}
 	if len(prs) != 1 || prs[0].HeadRefOID != head {
 		return fact, false, nil

@@ -422,14 +422,20 @@ func readForestBranchSnapshot(repoDir string) (forestBranchSnapshot, error) {
 		}
 		name := strings.TrimPrefix(entry.branch, BranchPrefix)
 		delimiter := strings.IndexByte(name, '-')
+		segment := ""
 		if delimiter >= 1 {
-			candidate := decodeBranchID(name[:delimiter])
-			if validateTrackerItemID(candidate) == nil {
-				entry.id = candidate
-			}
+			segment = name[:delimiter]
+		} else if delimiter == -1 {
+			// A missing slug is malformed, but the full segment still identifies
+			// the Item whose duplicate Builder work must remain blocked.
+			segment = name
+		}
+		candidate := decodeBranchID(segment)
+		if validateTrackerItemID(candidate) == nil && encodeBranchID(candidate) == segment {
+			entry.id = candidate
 		}
 		if entry.id == "" || delimiter < 1 ||
-			encodeBranchID(entry.id) != name[:delimiter] ||
+			encodeBranchID(entry.id) != segment ||
 			secretShaped(entry.branch) {
 			entry.cause = errors.Join(entry.cause,
 				errors.New("forest branch has invalid Tracker Item identity"))

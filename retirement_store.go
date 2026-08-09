@@ -312,11 +312,15 @@ func retirementRefIdentity(ref string) (branch, id string, ok bool) {
 	branch = string(raw)
 	name := strings.TrimPrefix(branch, BranchPrefix)
 	dash := strings.IndexByte(name, '-')
-	if !strings.HasPrefix(branch, BranchPrefix) || dash <= 0 || secretShaped(branch) {
+	if !strings.HasPrefix(branch, BranchPrefix) || dash == 0 || secretShaped(branch) {
 		return "", "", false
 	}
-	id = decodeBranchID(name[:dash])
-	if id == "" || secretShaped(id) {
+	segment := name
+	if dash > 0 {
+		segment = name[:dash]
+	}
+	id = decodeBranchID(segment)
+	if validateTrackerItemID(id) != nil || encodeBranchID(id) != segment || secretShaped(id) {
 		return "", "", false
 	}
 	return branch, id, true

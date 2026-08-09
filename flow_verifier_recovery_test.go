@@ -156,7 +156,7 @@ func TestVerifierSelectionDoesNotLetRetirementRecoveryStarveBranchWork(t *testin
 func TestMalformedRetirementDoesNotStarveUnrelatedBranchOrReopenItem(t *testing.T) {
 	const freshBranch = "forest/2-fresh"
 	repo, _, freshRevision, _ := newVerifierBranch(t, freshBranch)
-	badBranch := "forest/1-bad"
+	badBranch := "forest/1"
 	badRevision := strings.Repeat("b", 40)
 	if err := putBlobRef(repo, retirementRef(badBranch, badRevision), "{", ""); err != nil {
 		t.Fatal(err)
@@ -305,48 +305,109 @@ func TestVerifierHostPreparationRetriesWithoutStall(t *testing.T) {
 }
 
 func TestVerifierPreparationMigrationRetriesTransientHostQuery(t *testing.T) {
-	branch := "forest/43-migration-retry"
-	repo, _, reviewed, _ := newVerifierBranch(t, branch)
-	cfg := defaultConfig()
-	cfg.Repo = "owner/repo"
-	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
-	cfg.Flows.Verifier.Agent = "verifier"
-	item := Item{ID: "43", Title: "migration retry"}
-	if _, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name, id, state string
+		command         func(string, string) func(...string) ([]byte, error)
+	}{
+		{
+			name: "merged query", id: "43", state: "preparing",
+			command: func(_, _ string) func(...string) ([]byte, error) {
+				return func(...string) ([]byte, error) {
+					return nil, errors.New("transient merged Host query failure")
+				}
+			},
+		},
+		{
+			name: "open query", id: "44", state: "preparing",
+			command: func(_, _ string) func(...string) ([]byte, error) {
+				return func(args ...string) ([]byte, error) {
+					if args[0] == "api" {
+						return []byte(`[[]]`), nil
+					}
+					return nil, errors.New("transient open Host query failure")
+				}
+			},
+		},
+		{
+			name: "advanced target query", id: "45", state: "pending",
+			command: func(branch, advanced string) func(...string) ([]byte, error) {
+				prCalls := 0
+				return func(args ...string) ([]byte, error) {
+					if args[0] == "api" {
+						return []byte(`[[]]`), nil
+					}
+					if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+						prCalls++
+						if prCalls%2 == 1 {
+							return []byte(`[{"number":45,"url":"https://github.com/owner/repo/pull/45","headRefOid":"` +
+								advanced + `","headRefName":"` + branch +
+								`","baseRefName":"master","isCrossRepository":false}]`), nil
+						}
+					}
+					return nil, errors.New("transient advanced Host query failure")
+				}
+			},
+		},
 	}
-	runGitTest(t, repo, "checkout", "-q", branch)
-	rebaseTestWriteFile(t, filepath.Join(repo, "advanced.txt"), "advanced\n")
-	runGitTest(t, repo, "add", "advanced.txt")
-	runGitTest(t, repo, "commit", "-q", "-m", "advance before Host query")
-	runGitTest(t, repo, "push", "-q", "origin", branch)
-	advanced := remoteBranchHead(t, repo, branch)
-	runGitTest(t, repo, "checkout", "-q", "master")
-	writeAgentFixture(t, repo, "verifier", "verifier-model")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			branch := "forest/" + tc.id + "-migration-retry"
+			repo, _, reviewed, _ := newVerifierBranch(t, branch)
+			cfg := defaultConfig()
+			cfg.Repo = "owner/repo"
+			cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+			item := Item{ID: tc.id, Title: "migration retry"}
+			if tc.state == "preparing" {
+				if _, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				agent := testVerifierAgent()
+				if _, err := recordRetirement(repo, retirementRecord{
+					Branch: branch, Revision: reviewed, ItemID: item.ID, Transport: "host",
+					Strategy: "squash", Title: item.Title, State: tc.state,
+					Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runGitTest(t, repo, "checkout", "-q", branch)
+			rebaseTestWriteFile(t, filepath.Join(repo, "advanced.txt"), "advanced\n")
+			runGitTest(t, repo, "add", "advanced.txt")
+			runGitTest(t, repo, "commit", "-q", "-m", "advance before Host query")
+			runGitTest(t, repo, "push", "-q", "origin", branch)
+			advanced := remoteBranchHead(t, repo, branch)
 
-	tk := newMemoryTracker()
-	tk.seed(item)
-	oldTracker := trackerFor
-	trackerFor = func(string) Tracker { return tk }
-	defer func() { trackerFor = oldTracker }()
-	oldProjection := projectionCommand
-	defer func() { projectionCommand = oldProjection }()
-	projectionCommand = func(args ...string) ([]byte, error) {
-		return nil, errors.New("transient Host query failure")
-	}
-	subject := Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: advanced,
-		ID: "43", Branch: branch}
-	for range stalledRunLimit {
-		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
-			t.Fatalf("preparation migration pass code = %d, want retryable failure", code)
-		}
-	}
-	if stalled, err := stalledOn(repo, "verifier", subject.Key, advanced); err != nil || stalled {
-		t.Fatalf("transient migration query stalled = (%v, %v), want retryable", stalled, err)
-	}
-	oldFact, found, err := readRetirement(repo, branch, reviewed)
-	if err != nil || !found || oldFact.Record.State != "preparing" {
-		t.Fatalf("transient migration retained preparation = (%#v, found=%v, err=%v)", oldFact, found, err)
+			tk := newMemoryTracker()
+			tk.seed(item)
+			oldTracker := trackerFor
+			trackerFor = func(string) Tracker { return tk }
+			defer func() { trackerFor = oldTracker }()
+			oldProjection := projectionCommand
+			projectionCommand = tc.command(branch, advanced)
+			defer func() { projectionCommand = oldProjection }()
+			subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement,
+				Revision: reviewed, ID: item.ID, Branch: branch, Item: item}
+			for range stalledRunLimit {
+				if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 0 {
+					t.Fatalf("preparation migration pass code = %d, want pending retry", code)
+				}
+			}
+			for _, key := range []string{subject.Key, retirementAgentSubjectKey(branch)} {
+				if stalled, err := stalledOn(repo, "verifier", key, reviewed); err != nil || stalled {
+					t.Fatalf("transient migration query stalled %s = (%v, %v), want retryable",
+						key, stalled, err)
+				}
+			}
+			fact, found, err := readRetirement(repo, branch, reviewed)
+			if err != nil || !found || fact.Record.State != tc.state {
+				t.Fatalf("transient migration retained fact = (%#v, found=%v, err=%v)", fact, found, err)
+			}
+			subjects, err := (verifierFlow{}).Select(cfg, repo)
+			if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+				t.Fatalf("post-transient Select = (%#v, %v), want durable retirement retry", subjects, err)
+			}
+		})
 	}
 }
 
