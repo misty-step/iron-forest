@@ -121,7 +121,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 			add = []string{failedLabel}
 		}
 		changed, err := mutateManagerItem(cfg, repoDir, tk, it,
-			add, []string{readyTag})
+			add, []string{readyTag}, "")
 		if err != nil {
 			return Outcome{Status: "tracker_failed"}, fmt.Errorf("reap item %s: %w", it.ID, err)
 		}
@@ -189,7 +189,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "refused"
 		return out, fmt.Errorf("refused: pick %q is outside the candidate set", rep.Pick)
 	}
-	promoted, err := mutateManagerItem(cfg, repoDir, tk, picked, []string{readyTag}, nil)
+	promoted, err := mutateManagerItem(cfg, repoDir, tk, picked, []string{readyTag}, nil, plan.revision)
 	if err != nil {
 		out.Status = "tracker_failed"
 		return out, fmt.Errorf("promote item %s: %w", rep.Pick, err)
@@ -203,9 +203,9 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 }
 
 // mutateManagerItem shares the canonical Item claim with code-producing Flows.
-// It rechecks durable coverage and the current Tracker Revision under that
+// It rechecks branches, retirements, and the current plan under exactly one
 // admission immediately before the tag Effect.
-func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, remove []string) (bool, error) {
+func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, remove []string, expectedRevision string) (bool, error) {
 	release, err := claimAdmission(repoDir, cfg.Repo, "manager", Subject{
 		Key: "item-" + it.ID, Kind: subjectItem, ID: it.ID, Revision: it.UpdatedAt,
 	})
@@ -217,6 +217,10 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	}
 	defer release()
 
+	items, err := tk.ListOpen()
+	if err != nil {
+		return false, err
+	}
 	branches, err := forestBranches(repoDir)
 	if err != nil {
 		return false, err
@@ -225,28 +229,29 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	if err != nil {
 		return false, err
 	}
-	for _, branch := range branches {
-		if itemIDFromBranch(branch) == it.ID {
-			return false, nil
-		}
-	}
-	for _, id := range retiring {
-		if id == it.ID {
-			return false, nil
-		}
-	}
-	items, err := tk.ListOpen()
+	plan, err := buildManagerPlan(cfg.Flows.Manager, repoDir, items, branches, retiring)
 	if err != nil {
 		return false, err
 	}
-	current := false
-	for _, candidate := range items {
-		if candidate.ID == it.ID && candidate.UpdatedAt == it.UpdatedAt {
-			current = true
-			break
+	if expectedRevision != "" {
+		// A judged promotion must still match the plan the model saw: same
+		// Revision, a judgement still wanted, and the pick still a candidate.
+		if plan.revision != expectedRevision || !plan.needModel {
+			return false, nil
 		}
+		for _, fresh := range plan.cands {
+			if fresh.ID == it.ID {
+				if err := tk.SetTags(it.ID, add, remove); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+		}
+		return false, nil
 	}
-	if !current {
+	// A deterministic reap only needs the slot still open (plan is a stamp over
+	// the fresh reap set), and it changes no plan the model judged.
+	if plan.revision == "" {
 		return false, nil
 	}
 	if err := tk.SetTags(it.ID, add, remove); err != nil {
@@ -434,16 +439,14 @@ type managerReport struct {
 // driving a real agent, matching how trackerFor and ghJSON are injectable.
 var managerJudge = runManagerJudge
 
-// runManagerJudge runs the model in a throwaway directory, asks it to pick one
-// candidate, and reads its report. The run directory is not a checkout, so the
-// lane has no repository to touch; the Manager's whole effect on the world is
-// the tags Act applies afterward.
+// runManagerJudge runs the model in an empty directory outside the checkout.
 func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (managerReport, runStats, error) {
-	runDir, cleanup, err := createManagerRunDir()
+	// Keep the Manager cwd outside the checkout so its agent cannot modify repository state.
+	runDir, err := os.MkdirTemp("", "forest-manager-")
 	if err != nil {
 		return managerReport{}, runStats{}, err
 	}
-	defer cleanup()
+	defer func() { _ = os.RemoveAll(runDir) }()
 
 	prompt, err := renderManagerPrompt(a, cands)
 	if err != nil {
@@ -484,10 +487,7 @@ func renderManagerPrompt(a *Agent, cands []Item) (string, error) {
 		}
 		fmt.Fprintf(&b, "- %s %s (updated %s, tags %s)\n%s\n", it.ID, it.Title, it.UpdatedAt, tags, strings.TrimSpace(content))
 	}
-	return renderUserPrompt(a, map[string]any{
-		"Task":  b.String(),
-		"Items": strings.TrimSpace(b.String()),
-	})
+	return renderUserPrompt(a, map[string]any{"Task": b.String()})
 }
 
 // readManagerReportFile requires valid JSON with one non-empty pick. Candidate
@@ -505,20 +505,6 @@ func readManagerReportFile(wtDir string) (managerReport, error) {
 		return rep, fmt.Errorf("report.json must name one candidate (field \"pick\")")
 	}
 	return rep, nil
-}
-
-// createManagerRunDir makes a throwaway empty directory for the Manager's agent
-// to run in. It lives outside the checkout, in system temp, following #174's
-// pattern for the agent config root: with bash allowed the agent's cwd is not
-// under any enclosing git checkout, so a lane that claims no repository
-// authority cannot discover and modify the managed repository or its refs. The
-// lane reads the Tracker and writes one report; it needs no repository at all.
-func createManagerRunDir() (string, func(), error) {
-	dir, err := os.MkdirTemp("", "forest-manager-")
-	if err != nil {
-		return "", nil, err
-	}
-	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // hasOpenBlocker reports whether an item's Blocked by references name an open

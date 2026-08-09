@@ -74,7 +74,7 @@ func TestManagerPlanOrderDoesNotDependOnTrackerOrder(t *testing.T) {
 }
 
 func TestManagerPromptOrderDoesNotDependOnTrackerLabelOrder(t *testing.T) {
-	a := &Agent{PromptTmpl: "{{.Items}}"}
+	a := &Agent{PromptTmpl: "{{.Task}}"}
 	first, err := renderManagerPrompt(a, []Item{{ID: "1", UpdatedAt: "u1", Tags: []string{"z", "a"}}})
 	if err != nil {
 		t.Fatal(err)
@@ -695,6 +695,68 @@ func TestManagerDoesNotPromoteItemChangedDuringJudgement(t *testing.T) {
 	}
 	if tk.items["1"].hasTag(readyTag) {
 		t.Fatal("Manager promoted an Item changed during judgement")
+	}
+}
+
+func TestManagerDoesNotPromoteWhenBlockerOpensDuringJudgement(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	picked := Item{ID: "1", Title: "alpha", UpdatedAt: "u1", Body: "Blocked by: 2"}
+	tk.seed(picked)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		tk.seed(Item{ID: "2", Title: "blocker", UpdatedAt: "u2"})
+		return managerReport{Pick: "1"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	cfg := managerFlowConfig(repo)
+	out, err := (managerFlow{}).Act(cfg, repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{picked}),
+	}, "r1")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("opened blocker promotion = (%q, %v), want stale", out.Status, err)
+	}
+	if tk.items["1"].UpdatedAt != "u1" {
+		t.Fatalf("blocker test changed the picked stamp to %q, state must move, not the item", tk.items["1"].UpdatedAt)
+	}
+	if tk.items["1"].hasTag(readyTag) {
+		t.Fatal("Manager promoted an Item after its blocker opened")
+	}
+}
+
+func TestManagerDoesNotPromoteWhenReadyDepthFillsDuringJudgement(t *testing.T) {
+	repo := newRefGitRepo(t)
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	tk := newMemoryTracker()
+	picked := Item{ID: "1", Title: "alpha", UpdatedAt: "u1"}
+	tk.seed(picked)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		tk.seed(Item{ID: "2", Title: "already ready", UpdatedAt: "u2", Tags: []string{readyTag}})
+		return managerReport{Pick: "1"}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+
+	cfg := managerFlowConfig(repo)
+	out, err := (managerFlow{}).Act(cfg, repo, Subject{
+		Key: managerSubject, Revision: itemSetStamp([]Item{picked}),
+	}, "r1")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("filled ready depth promotion = (%q, %v), want stale", out.Status, err)
+	}
+	if !tk.items["2"].hasTag(readyTag) {
+		t.Fatal("the ready item that filled the slot lost its ready tag")
+	}
+	if tk.items["1"].hasTag(readyTag) {
+		t.Fatal("Manager promoted an Item after ready depth filled")
 	}
 }
 
