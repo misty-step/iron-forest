@@ -351,15 +351,12 @@ func retirementRefIdentity(ref string) (branch, id string, ok bool) {
 }
 
 func retirementItemIDs(repoDir string) ([]string, error) {
-	facts, err := scanRetirements(repoDir)
+	facts, err := listRetirements(repoDir)
 	if err != nil {
 		return nil, err
 	}
 	ids := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		if fact.ReadErr != nil {
-			return nil, fmt.Errorf("%w: %v", errRetirementEvidenceInvalid, fact.ReadErr)
-		}
 		ids = append(ids, fact.Record.ItemID)
 	}
 	return ids, nil
