@@ -47,11 +47,9 @@ func (m *memoryTracker) Comment(id, body string) error {
 	return nil
 }
 
-// Close implements Tracker.
+// Close implements Tracker. Closing an absent item is idempotent because a
+// recovery can retry cleanup after an earlier Host close succeeded.
 func (m *memoryTracker) Close(id string) error {
-	if _, ok := m.items[id]; !ok {
-		return fmt.Errorf("item %q not found", id)
-	}
 	delete(m.items, id)
 	return nil
 }

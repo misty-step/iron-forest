@@ -40,7 +40,7 @@ A Verdict or Checks note is keyed to the exact reviewed commit and written once;
 Attempts and the repeat-failure brake are compare-and-set refs. Branch publication carries the
 observed remote tip, so a lost race fails cleanly.
 Admission uses a durable claim ref for each canonical Subject and a per-owner
-lock keyed by repository and item. It excludes concurrent actions across
+lock keyed by repository and Item. It excludes concurrent Effects across
 checkouts on one host and refuses claims held by another Host. The daemon lock
 keeps one `serve` process per checkout; `forest run` bypasses that lock but uses
 Subject admission.
@@ -54,8 +54,10 @@ repository requires GitHub today.
 Iron Forest runs its own checks in the worktree and writes their results as
 notes. It never reads a Host's checks or reviews as factory state. Projection
 is optional. It publishes branches, mirrors decisions, and reads pull-request
-identity for idempotent publication. When the Host owns merge, it reads the
-exact merged head only to recover a pending retirement.
+identity for idempotent publication. Host recovery covers `preparing`,
+`pending`, and `observed` retirements. An exact merged head first advances
+`preparing` or `pending` to `observed` before approval-note read; a read failure
+retains `observed`.
 
 Agents run through opencode. Credentials are Mint markers in the opencode
 configuration. No `.env` adapter ships. An agent run carries no credential of

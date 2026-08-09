@@ -57,9 +57,8 @@ func TestRedactSecretShapedLeavesBenignText(t *testing.T) {
 	}
 }
 
-// TestRedactSecretShapedBuildsNotesVerdictsEndToEnd proves the redaction reaches
-// the exact outbound sinks the item names: the pull-request body, the verdict
-// note object, and the comment projection body.
+// TestRedactSecretShapedOutboundSinks proves redaction reaches the pull-request
+// body and the Host review body. TestGitCommitRedactsMessage covers Git commits.
 func TestRedactSecretShapedOutboundSinks(t *testing.T) {
 	rep := report{
 		Summary: "sk-AAAAAAAAAAAAAAAA in here",
@@ -75,7 +74,10 @@ func TestRedactSecretShapedOutboundSinks(t *testing.T) {
 	var commentArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
-			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + projectionTestHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		if args[0] == "api" && hasArgumentPair(args, "--method", "GET") {
+			return []byte(`[[]]`), nil
 		}
 		commentArgs = append([]string(nil), args...)
 		return nil, nil
@@ -83,6 +85,7 @@ func TestRedactSecretShapedOutboundSinks(t *testing.T) {
 	err := projectVerdict(
 		Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}},
 		"forest/7-change",
+		projectionTestHead,
 		verdictNote{Verdict: "changes", Notes: "see sk-AAAAAAAAAAAAAAAA"},
 		checksNote{Status: "fail", Results: []checkResult{{Name: "test", Code: 1, Output: "got sk-AAAAAAAAAAAAAAAA"}}},
 	)
@@ -101,7 +104,8 @@ func TestRedactSecretShapedOutboundSinks(t *testing.T) {
 func TestRedactSecretShapedNotePersistence(t *testing.T) {
 	_, work, sha := notesTestRepository(t)
 	if err := writeVerdict(work, sha, verdictNote{
-		Verdict: "approve", Notes: "key is sk-AAAAAAAAAAAAAAAA", Reviewer: "r", RunID: "run-x",
+		Verdict: "approve", Notes: "key is sk-AAAAAAAAAAAAAAAA", Reviewer: "reviewer",
+		Model: "model", DefSHA: strings.Repeat("a", 16), RunID: "run-x",
 	}); err != nil {
 		t.Fatal(err)
 	}

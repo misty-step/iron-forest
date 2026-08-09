@@ -315,7 +315,10 @@ func TestCmdShowEmitsNoteLackingTimeAndRunID(t *testing.T) {
 	api, work, sha := coreFixture(t)
 	// writeNote bypasses writeVerdict's time stamp, leaving both Time and RunID
 	// empty in the stored note.
-	if err := writeNote(work, verdictNotesRef, sha, verdictNote{Verdict: "approve"}); err != nil {
+	if err := writeNote(work, verdictNotesRef, sha, verdictNote{
+		Verdict: "approve", Reviewer: "reviewer", Model: "model",
+		DefSHA: strings.Repeat("a", 16),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	code := 0

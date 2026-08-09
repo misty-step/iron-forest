@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -66,10 +67,24 @@ func (t githubTracker) Comment(id, body string) error {
 	return err
 }
 
-// Close closes one item.
+// Close idempotently closes one item. If the close command fails after the Host
+// accepted it, an exact state read makes a recovery retry safe.
 func (t githubTracker) Close(id string) error {
-	_, err := ghJSON("issue", "close", "-R", t.repo, id)
-	return err
+	_, closeErr := ghJSON("issue", "close", "-R", t.repo, id)
+	if closeErr == nil {
+		return nil
+	}
+	out, viewErr := ghJSON("issue", "view", id, "-R", t.repo, "--json", "state")
+	if viewErr != nil {
+		return closeErr
+	}
+	var state struct {
+		State string `json:"state"`
+	}
+	if json.Unmarshal(out, &state) == nil && strings.EqualFold(state.State, "closed") {
+		return nil
+	}
+	return closeErr
 }
 
 // SetTags adds and removes labels on one item in one call.
@@ -123,6 +138,63 @@ func (i issueJSON) asItem() Item {
 // constructor. Tests replace the var to drive the controller with a fake.
 var trackerFor = func(repo string) Tracker { return githubTracker{repo: repo} }
 
+var (
+	errTrackerItemIDEmpty        = errors.New("Tracker Item ID is empty")
+	errTrackerItemIDCredential   = errors.New("Tracker Item ID is credential-shaped")
+	errTrackerItemIDMismatch     = errors.New("Tracker Item ID does not match requested identity")
+	errTrackerRevisionCredential = errors.New("Tracker Item Revision is credential-shaped")
+)
+
+func validateTrackerItemID(id string) error {
+	if id == "" {
+		return errTrackerItemIDEmpty
+	}
+	if secretShaped(id) {
+		return errTrackerItemIDCredential
+	}
+	return nil
+}
+
+func validateTrackerItem(item Item, expectedID string) error {
+	if err := validateTrackerItemID(item.ID); err != nil {
+		return err
+	}
+	if expectedID != "" && item.ID != expectedID {
+		return errTrackerItemIDMismatch
+	}
+	if secretShaped(item.UpdatedAt) {
+		return errTrackerRevisionCredential
+	}
+	return nil
+}
+
+func validatedTrackerItems(t Tracker) ([]Item, error) {
+	items, err := t.ListOpen()
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if err := validateTrackerItem(item, ""); err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+func validatedTrackerItem(t Tracker, id string) (Item, error) {
+	if err := validateTrackerItemID(id); err != nil {
+		return Item{}, err
+	}
+	item, err := t.Get(id)
+	if err != nil {
+		return Item{}, err
+	}
+	if err := validateTrackerItem(item, id); err != nil {
+		return Item{}, err
+	}
+	return item, nil
+}
+
 // hasTag reports whether an item carries one tag.
 func (it Item) hasTag(name string) bool {
 	for _, tag := range it.Tags {
@@ -134,7 +206,7 @@ func (it Item) hasTag(name string) bool {
 }
 
 func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
-	items, err := trackerFor(cfg.Repo).ListOpen()
+	items, err := validatedTrackerItems(trackerFor(cfg.Repo))
 	if err != nil {
 		return nil, err
 	}
@@ -206,25 +278,40 @@ func forestBranches(repoDir string) ([]string, error) {
 		if len(fields) < 2 || !strings.HasPrefix(fields[1], "refs/heads/") {
 			continue
 		}
-		branches = append(branches, strings.TrimPrefix(fields[1], "refs/heads/"))
+		branch := strings.TrimPrefix(fields[1], "refs/heads/")
+		if secretShaped(branch) || validateTrackerItemID(itemIDFromBranch(branch)) != nil {
+			return nil, errors.New("forest branch has invalid Tracker Item identity")
+		}
+		branches = append(branches, branch)
 	}
 	return branches, nil
 }
 
-func branchHead(repoDir, branch string) (string, error) {
+func lookupBranchHead(repoDir, branch string) (string, bool, error) {
 	ref := branch
 	if !strings.HasPrefix(ref, "refs/") {
 		ref = "refs/heads/" + ref
 	}
 	out, err := gitCommand(repoDir, "ls-remote", "origin", ref)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	fields := strings.Fields(out)
 	if len(fields) == 0 {
+		return "", false, nil
+	}
+	return fields[0], true, nil
+}
+
+func branchHead(repoDir, branch string) (string, error) {
+	head, found, err := lookupBranchHead(repoDir, branch)
+	if err != nil {
+		return "", err
+	}
+	if !found {
 		return "", fmt.Errorf("branch %s not found", branch)
 	}
-	return fields[0], nil
+	return head, nil
 }
 
 func slug(s string) string {

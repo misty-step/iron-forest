@@ -173,10 +173,9 @@ func TestManagerReportPreservesOpaquePick(t *testing.T) {
 }
 
 // TestManagerInProgressBuildKeepsSlotOccupied pins the load-bearing constraint:
-// an item that carries readyTag yet has no remote forest branch occupies the
-// slot for the whole of a build, with no liveness probe or lease. It is healthy
-// (not stalled, not failed, unblocked), so it is counted and no promotion or
-// model call happens.
+// an Item that carries readyTag yet has no remote forest branch occupies the
+// slot for the whole build. It is healthy and counted, so no promotion or model
+// call occurs.
 func TestManagerInProgressBuildKeepsSlotOccupied(t *testing.T) {
 	tk := newMemoryTracker()
 	tk.seed(Item{ID: "1", Title: "building", UpdatedAt: "u1", Tags: []string{readyTag}})
@@ -200,24 +199,40 @@ func TestManagerInProgressBuildKeepsSlotOccupied(t *testing.T) {
 	}
 }
 
-// TestManagerNeverPromotesOpenBlocker proves that an item blocked by another
-// open item never reaches the candidate set.
+// TestManagerNeverPromotesOpenBlocker drives the production Select and Act
+// boundaries with an opaque blocker identity.
 func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 	repo := newRefGitRepo(t)
-	items := []Item{
-		{ID: "tracker/item.7", Title: "still open", UpdatedAt: "u1"},
-		{ID: "70", Title: "waiting", UpdatedAt: "u2", Body: "Blocked by: #tracker/item.7"},
-	}
-	plan, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range plan.cands {
-		if c.ID == "70" {
-			t.Fatal("a blocked item must be filtered out of the candidate set")
-		}
-	}
+	writeAgentFixture(t, repo, "manager", "manager-model")
+	blocker := Item{ID: "tracker/item.7", Title: "still open", UpdatedAt: "u1"}
+	blocked := Item{ID: "70", Title: "waiting", UpdatedAt: "u2", Body: "Blocked by: #tracker/item.7"}
+	leaf := Item{ID: "80", Title: "clear", UpdatedAt: "u3"}
+	tk := newMemoryTracker()
+	tk.seed(blocker)
+	tk.seed(blocked)
+	tk.seed(leaf)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	cfg := managerFlowConfig(repo)
 
+	subjects, err := (managerFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 {
+		t.Fatalf("Manager Select = (%#v, %v), want one judgement", subjects, err)
+	}
+	if got, want := subjects[0].Revision, itemSetStamp([]Item{blocker, leaf}); got != want {
+		t.Fatalf("Manager candidate Revision = %q, want opaque blocker excluded from %q", got, want)
+	}
+	oldJudge := managerJudge
+	managerJudge = func(_ string, _ []Item, _ *Agent, _ string) (managerReport, runStats, error) {
+		return managerReport{Pick: blocked.ID}, runStats{}, nil
+	}
+	defer func() { managerJudge = oldJudge }()
+	out, err := (managerFlow{}).Act(cfg, repo, subjects[0], "opaque-blocker")
+	if err == nil || out.Status != "refused" || tk.items[blocked.ID].hasTag(readyTag) {
+		t.Fatalf("Manager blocked pick = (status=%q, ready=%v, err=%v), want refused without ready",
+			out.Status, tk.items[blocked.ID].hasTag(readyTag), err)
+	}
 }
 
 func TestManagerBlockerPreservesOpaqueIdentity(t *testing.T) {

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,10 +69,8 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	if selectErr != nil || len(selected) != 1 || selected[0].Kind != subjectBranch {
 		t.Fatalf("manual Host Select before intent = (subjects=%#v, err=%v), want one branch subject", selected, selectErr)
 	}
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: "branch", Revision: reviewed,
-		ID: "9", Branch: branch, Head: reviewed,
-	}, "intent")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: reviewed,
+		ID: "9", Branch: branch}, "intent")
 	if err != nil || out.Status != "reviewed" {
 		t.Fatalf("initial Host intent = (status=%q, err=%v)", out.Status, err)
 	}
@@ -156,24 +155,35 @@ func TestNewHostApprovalPreparesBeforeProjectedVerdict(t *testing.T) {
 	defer func() { runPhase = oldRun }()
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
+	created := false
 	projectionCommand = func(args ...string) ([]byte, error) {
-		if len(args) >= 2 && args[1] == "list" {
+		switch {
+		case args[0] == "pr" && args[1] == "list" && !created:
+			return []byte(`[]`), nil
+		case args[0] == "pr" && args[1] == "list":
 			return []byte(`[{"number":19,"url":"https://github.com/owner/repo/pull/19","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-		}
-		if len(args) >= 2 && args[1] == "comment" {
+		case args[0] == "api" && hasArgumentPair(args, "--method", "GET"):
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			fact, found, err := readRetirement(repo, branch, reviewed)
+			if err != nil || !found || fact.Record.State != "preparing" {
+				t.Fatalf("Host create preparation = (%#v, %v, %v), want durable preparing fact", fact, found, err)
+			}
+			created = true
+			return []byte("https://github.com/owner/repo/pull/19"), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "POST"):
 			return nil, nil
+		default:
+			return nil, errors.New("unexpected Host command")
 		}
-		return nil, errors.New("unexpected Host command")
 	}
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Agent = "verifier"
 	cfg.Flows.Verifier.AutoMerge = false
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: subjectBranch, Revision: reviewed,
-		ID: "19", Branch: branch, Head: reviewed,
-	}, "new-approval")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: reviewed,
+		ID: "19", Branch: branch}, "new-approval")
 	if err != nil || out.Status != "reviewed" {
 		t.Fatalf("new Host approval = (status=%q, err=%v), want reviewed", out.Status, err)
 	}
@@ -241,44 +251,359 @@ func TestPendingHostRetirementWaitsForOperatorMerge(t *testing.T) {
 		t.Fatalf("pending manual recovery issued %d Host merge calls", mergeCalls)
 	}
 }
-func TestPendingHostRetirementWithoutApprovalReleasesFact(t *testing.T) {
-	branch := "forest/17-unapproved-pending"
+func TestPreparingHostRetirementPreservesMergedPriorRevision(t *testing.T) {
+	branch := "forest/33-prior-merged"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	item := Item{ID: "33", Title: "prior merged"}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	if _, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "advanced.txt"), "advanced\n")
+	runGitTest(t, repo, "add", "advanced.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "advance")
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+	advanced := remoteBranchHead(t, repo, branch)
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "api" {
+			return mergedProjectionPage(`{"number":33,"html_url":"https://github.com/owner/repo/pull/33","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` +
+				reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		}
+		return nil, errors.New("unexpected Host command")
+	}
+	if _, err := recordPreparingHostRetirement(cfg, repo, branch, advanced, item); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("advance over merged preparation = %v, want retained merge observation", err)
+	}
+	oldFact, found, err := readRetirement(repo, branch, reviewed)
+	if err != nil || !found || oldFact.Record.State != "observed" {
+		t.Fatalf("prior merged fact = (%#v, %v, %v), want observed", oldFact, found, err)
+	}
+	if _, found, err := readRetirement(repo, branch, advanced); err != nil || found {
+		t.Fatalf("advanced preparation = (found=%v, err=%v), want none", found, err)
+	}
+}
+
+func TestPreparingHostRetirementMovesRevisionAtomically(t *testing.T) {
+	branch := "forest/34-atomic-move"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	item := Item{ID: "34", Title: "atomic move"}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	if _, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "advanced.txt"), "advanced\n")
+	runGitTest(t, repo, "add", "advanced.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "advance")
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+	advanced := remoteBranchHead(t, repo, branch)
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":34,"url":"https://github.com/owner/repo/pull/34","headRefOid":"` +
+				advanced + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	hook := filepath.Join(origin, "hooks", "update")
+	newRef := retirementRef(branch, advanced)
+	script := "#!/bin/sh\nif [ \"$1\" = '" + newRef + "' ]; then exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordPreparingHostRetirement(cfg, repo, branch, advanced, item); err == nil {
+		t.Fatal("rejected atomic migration returned success")
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || !found {
+		t.Fatalf("rejected migration lost old fact = (found=%v, err=%v)", found, err)
+	}
+	if _, found, err := readRetirement(repo, branch, advanced); err != nil || found {
+		t.Fatalf("rejected migration published new fact = (found=%v, err=%v)", found, err)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	if fact, err := recordPreparingHostRetirement(cfg, repo, branch, advanced, item); err != nil ||
+		fact.Record.Revision != advanced {
+		t.Fatalf("atomic migration retry = (%#v, %v)", fact, err)
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
+		t.Fatalf("atomic migration retained old fact = (found=%v, err=%v)", found, err)
+	}
+}
+
+func TestPreparingHostRetirementMovesBeforeFirstProjection(t *testing.T) {
+	branch := "forest/39-pre-projection-move"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	item := Item{ID: "39", Title: "move before Projection"}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	fact, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "advanced.txt"), "advanced\n")
+	runGitTest(t, repo, "add", "advanced.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "advance before Projection")
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+	advanced := remoteBranchHead(t, repo, branch)
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	record, err := recoverRetirement(cfg, repo, fact, item)
+	if !errors.Is(err, errRetirementPreparation) ||
+		record.Revision != advanced || record.State != "preparing" {
+		t.Fatalf("pre-Projection preparation recovery = (%#v, %v)", record, err)
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
+		t.Fatalf("pre-Projection move retained old fact = (found=%v, err=%v)", found, err)
+	}
+}
+
+func TestPreparingHostRetirementRecreatesMissingProjection(t *testing.T) {
+	branch := "forest/42-recreate-projection"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	item := Item{ID: "42", Title: "recreate Projection"}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	fact, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	created := false
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "list":
+			if !created {
+				return []byte(`[]`), nil
+			}
+			return []byte(`[{"number":42,"url":"https://github.com/owner/repo/pull/42","headRefOid":"` +
+				reviewed + `","headRefName":"` + branch +
+				`","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			if created {
+				return nil, errors.New("duplicate Projection")
+			}
+			created = true
+			return []byte("https://github.com/owner/repo/pull/42"), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+
+	record, err := recoverRetirement(cfg, repo, fact, item)
+	if !errors.Is(err, errRetirementPreparation) || !created ||
+		record.Revision != reviewed || record.State != "preparing" {
+		t.Fatalf("missing Projection recovery = (%#v, created=%v, err=%v)", record, created, err)
+	}
+	retained, found, readErr := readRetirement(repo, branch, reviewed)
+	if readErr != nil || !found || retained.Record.State != "preparing" {
+		t.Fatalf("recreated Projection fact = (%#v, found=%v, err=%v)", retained, found, readErr)
+	}
+}
+
+func TestPreparingHostRetirementRetriesTransientBranchLookup(t *testing.T) {
+	branch := "forest/45-transient-branch"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	item := Item{ID: "45", Title: "transient branch"}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	fact, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := t.TempDir()
+	wrapper := filepath.Join(wrapperDir, "git")
+	if err := os.WriteFile(wrapper, []byte(`#!/bin/sh
+case " $* " in
+  *" ls-remote "*) echo "transient branch lookup failure" >&2; exit 1 ;;
+esac
+exec "$FOREST_REAL_GIT" "$@"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREST_REAL_GIT", realGit)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	record, err := recoverRetirement(cfg, repo, fact, item)
+	if !errors.Is(err, errHostMergePending) ||
+		record.Revision != reviewed || record.State != "preparing" {
+		t.Fatalf("transient branch lookup recovery = (%#v, %v), want pending preparation", record, err)
+	}
+}
+
+func TestPendingHostRetirementMovesToAdvancedProjectionForFreshReview(t *testing.T) {
+	branch := "forest/40-pending-drift"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
 	if _, err := recordRetirement(repo, retirementRecord{
-		Branch: branch, Revision: reviewed, ItemID: "17", Transport: "host",
-		Strategy: "squash", Title: "unapproved pending", State: "pending",
+		Branch: branch, Revision: reviewed, ItemID: "40", Transport: "host",
+		Strategy: "squash", Title: "pending drift", State: "pending",
 		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
 	}); err != nil {
 		t.Fatal(err)
 	}
+	runGitTest(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "advanced.txt"), "advanced\n")
+	runGitTest(t, repo, "add", "advanced.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "advance pending Projection")
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+	advanced := remoteBranchHead(t, repo, branch)
+
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
-	hostCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
-		hostCalls++
-		return nil, errors.New("unexpected Host call")
+		switch {
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":40,"url":"https://github.com/owner/repo/pull/40","headRefOid":"` +
+				advanced + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
 	}
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
-	subject := Subject{
-		Key: "branch-" + branch, Kind: subjectRetirement, Revision: reviewed,
-		ID: "17", Branch: branch, Head: reviewed,
-		Item: Item{ID: "17", Title: "unapproved pending"},
-	}
-	out, err := (verifierFlow{}).Act(cfg, repo, subject, "preparation-recovery")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+		ID: "40", Branch: branch, Item: Item{ID: "40", Title: "pending drift"}}, "pending-drift")
 	if err != nil || out.Status != "skipped" {
-		t.Fatalf("unapproved pending recovery = (status=%q, err=%v), want skipped success", out.Status, err)
+		t.Fatalf("pending drift Act = (status=%q, err=%v), want preparation handoff", out.Status, err)
 	}
-	if hostCalls != 0 {
-		t.Fatalf("unapproved pending recovery made %d Host calls", hostCalls)
+	fact, found, err := readRetirement(repo, branch, advanced)
+	if err != nil || !found || fact.Record.State != "preparing" ||
+		fact.Record.Agent != "" || fact.Record.Model != "" || fact.Record.DefSHA != "" {
+		t.Fatalf("advanced preparation = (%#v, found=%v, err=%v)", fact, found, err)
 	}
-	if stalled, stallErr := stalledOn(repo, "verifier", subject.Key, reviewed); stallErr != nil || stalled {
-		t.Fatalf("preparation recovery brake = (%v, %v), want no terminal brake", stalled, stallErr)
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement ||
+		subjects[0].Revision != advanced {
+		t.Fatalf("advanced review Select = (%#v, %v), want fresh retirement Revision", subjects, err)
 	}
-	if facts, listErr := listRetirements(repo); listErr != nil || len(facts) != 0 {
-		t.Fatalf("released pending facts = (%#v, %v), want none", facts, listErr)
+}
+
+func TestPendingHostRetirementIncompleteApprovalRetainsPreparation(t *testing.T) {
+	tests := map[string]func(*testing.T, string, string, *Agent){
+		"no notes": nil,
+		"Verdict only": func(t *testing.T, repo, reviewed string, agent *Agent) {
+			if err := writeVerdict(repo, reviewed, verdictNote{
+				Verdict: "approve", Reviewer: agent.Name, Model: agent.Model,
+				DefSHA: agent.DefSHA, RunID: "verdict-only",
+			}); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"Checks only": func(t *testing.T, repo, reviewed string, _ *Agent) {
+			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "checks-only"}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, prepare := range tests {
+		t.Run(name, func(t *testing.T) {
+			branch := "forest/17-" + slug(name)
+			repo, _, reviewed, _ := newVerifierBranch(t, branch)
+			agent := testVerifierAgent()
+			if _, err := recordRetirement(repo, retirementRecord{
+				Branch: branch, Revision: reviewed, ItemID: "17", Transport: "host",
+				Strategy: "squash", Title: name, State: "pending",
+				Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if prepare != nil {
+				prepare(t, repo, reviewed, agent)
+			}
+			oldProjection := projectionCommand
+			defer func() { projectionCommand = oldProjection }()
+			mergeCalls := 0
+			projectionCommand = func(args ...string) ([]byte, error) {
+				switch {
+				case args[0] == "api":
+					return []byte(`[]`), nil
+				case args[0] == "pr" && args[1] == "list":
+					return []byte(`[{"number":17,"url":"https://github.com/owner/repo/pull/17","headRefOid":"` +
+						reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+				case args[0] == "pr" && args[1] == "merge":
+					mergeCalls++
+					return nil, errors.New("unexpected Host merge")
+				default:
+					return nil, errors.New("unexpected Host call")
+				}
+			}
+			cfg := defaultConfig()
+			cfg.Repo = "owner/repo"
+			cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+			subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+				ID: "17", Branch: branch, Item: Item{ID: "17", Title: name}}
+			out, err := (verifierFlow{}).Act(cfg, repo, subject, "preparation-recovery")
+			if err != nil || out.Status != "skipped" {
+				t.Fatalf("incomplete approval recovery = (status=%q, err=%v), want skipped success", out.Status, err)
+			}
+			if mergeCalls != 0 {
+				t.Fatalf("incomplete approval issued %d Host merges", mergeCalls)
+			}
+			facts, listErr := listRetirements(repo)
+			if listErr != nil || len(facts) != 1 || facts[0].Record.State != "preparing" ||
+				facts[0].Record.Agent != "" || facts[0].Record.Model != "" || facts[0].Record.DefSHA != "" {
+				t.Fatalf("retained preparation = (%#v, %v), want one unattributed preparing fact", facts, listErr)
+			}
+			subjects, selectErr := (verifierFlow{}).Select(cfg, repo)
+			if selectErr != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+				t.Fatalf("preparing retirement Select = (%#v, %v), want durable retirement work", subjects, selectErr)
+			}
+		})
 	}
 }
 
@@ -334,11 +659,79 @@ func TestPendingHostRetirementRefreshesNotesAfterSelect(t *testing.T) {
 	}
 }
 
-func TestPendingHostRetirementNoteReadFailureRetainsFact(t *testing.T) {
+func TestPendingHostRetirementTransientNoteReadDoesNotBrake(t *testing.T) {
+	branch := "forest/23-transient-note"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "23", Transport: "host",
+		Strategy: "squash", Title: "transient note", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "23", Title: "transient note"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "api":
+			return []byte(`[]`), nil
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` +
+				reviewed + `","headRefName":"` + branch +
+				`","baseRefName":"master","isCrossRepository":false}]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := t.TempDir()
+	wrapper := filepath.Join(wrapperDir, "git")
+	if err := os.WriteFile(wrapper, []byte(`#!/bin/sh
+case " $* " in
+  *" notes "*" show "*) echo "transient notes read failure" >&2; exit 1 ;;
+esac
+exec "$FOREST_REAL_GIT" "$@"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREST_REAL_GIT", realGit)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+		ID: "23", Branch: branch, Item: Item{ID: "23", Title: "transient note"}}
+	for range stalledRunLimit {
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 0 {
+			t.Fatalf("transient note-read pass code = %d, want pending success", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || stalled {
+		t.Fatalf("transient note read stalled = (%v, %v), want retryable", stalled, err)
+	}
+	facts, err := listRetirements(repo)
+	if err != nil || len(facts) != 1 || facts[0].Record.State != "pending" {
+		t.Fatalf("transient note read retirement = (%#v, %v), want pending fact", facts, err)
+	}
+}
+
+func TestMergedHostRetirementNoteReadFailureRecordsObservation(t *testing.T) {
 	branch := "forest/22-bad-note"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
-	fact, err := recordRetirement(repo, retirementRecord{
+	_, err := recordRetirement(repo, retirementRecord{
 		Branch: branch, Revision: reviewed, ItemID: "22", Transport: "host",
 		Strategy: "squash", Title: "bad note", State: "pending",
 		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
@@ -353,23 +746,48 @@ func TestPendingHostRetirementNoteReadFailureRetainsFact(t *testing.T) {
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "api" {
+			mergedAt := "2026-08-08T00:00:00Z"
+			return []byte(`[[{"number":22,"html_url":"https://github.com/owner/repo/pull/22","merged_at":"` +
+				mergedAt + `","head":{"sha":"` + reviewed + `","ref":"` + branch +
+				`","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}]]`), nil
+		}
+		if args[0] == "pr" && args[1] == "list" {
+			return []byte(`[{"number":22,"url":"https://github.com/owner/repo/pull/22","headRefOid":"` +
+				reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
 		return nil, errors.New("unexpected Host command")
 	}
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
-	err = recoverRetirementFact(cfg, repo, fact, Item{ID: "22", Title: "bad note"})
-	if err == nil || !strings.Contains(err.Error(), "decode verdict note") {
-		t.Fatalf("malformed durable Verdict recovery = %v, want read failure", err)
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+		ID: "22", Branch: branch, Item: Item{ID: "22", Title: "bad note"}}
+	out, err := (verifierFlow{}).Act(cfg, repo, subject, "malformed-note")
+	if err == nil || out.Status != "merge_failed" || !strings.Contains(err.Error(), "decode verdict note") {
+		t.Fatalf("malformed durable Verdict Act = (status=%q, err=%v), want merge_failed read failure", out.Status, err)
 	}
-	if facts, listErr := listRetirements(repo); listErr != nil || len(facts) != 1 {
-		t.Fatalf("read-failed retirement facts = (%#v, %v), want retained fact", facts, listErr)
+	facts, listErr := listRetirements(repo)
+	if listErr != nil || len(facts) != 1 || facts[0].Record.State != "observed" ||
+		facts[0].Record.Agent != "" || facts[0].Record.Model != "" || facts[0].Record.DefSHA != "" {
+		t.Fatalf("read-failed retirement facts = (%#v, %v), want unattributed observed fact", facts, listErr)
+	}
+	for range stalledRunLimit {
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+			t.Fatalf("malformed evidence pass code = %d, want failure", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || !stalled {
+		t.Fatalf("malformed evidence brake = (%v, %v), want hard brake", stalled, err)
 	}
 }
 
-func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
-	tests := map[string]func(*testing.T, string, string, *Agent){
-		"rejected Verdict": func(t *testing.T, repo, reviewed string, agent *Agent) {
+func TestPendingHostRetirementReconcilesDurableApproval(t *testing.T) {
+	tests := map[string]struct {
+		approved bool
+		prepare  func(*testing.T, string, string, *Agent)
+	}{
+		"rejected Verdict": {prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
 			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "rejected"}); err != nil {
 				t.Fatal(err)
 			}
@@ -379,8 +797,8 @@ func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-		},
-		"failing Checks": func(t *testing.T, repo, reviewed string, agent *Agent) {
+		}},
+		"failing Checks": {prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
 			if err := writeChecks(repo, reviewed, checksNote{Status: "fail", RunID: "failed"}); err != nil {
 				t.Fatal(err)
 			}
@@ -390,8 +808,8 @@ func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-		},
-		"Agent mismatch": func(t *testing.T, repo, reviewed string, agent *Agent) {
+		}},
+		"Agent mismatch": {approved: true, prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
 			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}); err != nil {
 				t.Fatal(err)
 			}
@@ -401,8 +819,8 @@ func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-		},
-		"Model mismatch": func(t *testing.T, repo, reviewed string, agent *Agent) {
+		}},
+		"Model mismatch": {approved: true, prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
 			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}); err != nil {
 				t.Fatal(err)
 			}
@@ -412,8 +830,8 @@ func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-		},
-		"DefSHA mismatch": func(t *testing.T, repo, reviewed string, agent *Agent) {
+		}},
+		"DefSHA mismatch": {approved: true, prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
 			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}); err != nil {
 				t.Fatal(err)
 			}
@@ -423,9 +841,9 @@ func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-		},
+		}},
 	}
-	for name, prepareNotes := range tests {
+	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			branch := "forest/18-" + strings.ToLower(strings.ReplaceAll(name, " ", "-"))
 			repo, _, reviewed, _ := newVerifierBranch(t, branch)
@@ -438,26 +856,40 @@ func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			prepareNotes(t, repo, reviewed, agent)
+			test.prepare(t, repo, reviewed, agent)
 			oldProjection := projectionCommand
 			defer func() { projectionCommand = oldProjection }()
-			hostCalls := 0
 			projectionCommand = func(args ...string) ([]byte, error) {
-				hostCalls++
+				if args[0] == "api" {
+					return []byte(`[]`), nil
+				}
+				if args[0] == "pr" && args[1] == "list" {
+					return []byte(`[{"number":18,"url":"https://github.com/owner/repo/pull/18","headRefOid":"` +
+						reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+				}
 				return nil, errors.New("unexpected Host call")
 			}
 			cfg := defaultConfig()
 			cfg.Repo = "owner/repo"
 			cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 			err = recoverRetirementFact(cfg, repo, fact, Item{ID: "18", Title: "approval"})
-			if !errors.Is(err, errRetirementPreparation) {
-				t.Fatalf("non-matching approval recovery = %v, want preparation sentinel", err)
+			current, found, readErr := readRetirement(repo, branch, reviewed)
+			if readErr != nil || !found {
+				t.Fatalf("reconciled fact = (%#v, %v, %v), want retained", current, found, readErr)
 			}
-			if hostCalls != 0 {
-				t.Fatalf("non-matching approval recovery made %d Host calls", hostCalls)
-			}
-			if facts, listErr := listRetirements(repo); listErr != nil || len(facts) != 0 {
-				t.Fatalf("non-matching approval facts = (%#v, %v), want none", facts, listErr)
+			if test.approved {
+				if !errors.Is(err, errHostMergePending) || current.Record.State != "pending" {
+					t.Fatalf("winning approval recovery = (state=%q, err=%v), want pending", current.Record.State, err)
+				}
+				verdict, approved, approvalErr := readRetirementApproval(repo, reviewed)
+				if approvalErr != nil || !approved ||
+					current.Record.Agent != verdict.Reviewer ||
+					current.Record.Model != verdict.Model ||
+					current.Record.DefSHA != verdict.DefSHA {
+					t.Fatalf("winning attribution = (%#v, approved=%v, err=%v), want durable Verdict", current.Record, approved, approvalErr)
+				}
+			} else if !errors.Is(err, errRetirementPreparation) || current.Record.State != "preparing" {
+				t.Fatalf("rejected preparation = (state=%q, err=%v), want preparing reset", current.Record.State, err)
 			}
 		})
 	}
@@ -740,7 +1172,7 @@ func TestRetirementFactBlocksAdvancedBranch(t *testing.T) {
 		t.Fatalf("advanced branch = %s, want %s intact", got, advanced)
 	}
 	for range stalledRunLimit {
-		if err := recordStalled(repo, "verifier", "branch-"+branch, reviewed); err != nil {
+		if err := recordStalled(repo, "verifier", retirementSubjectKey(branch), reviewed); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -927,7 +1359,9 @@ func TestPendingHostRetirementNoViewAfterAcceptedMergeRetainsIntent(t *testing.T
 	cfg.Flows.Verifier.Merge = "squash"
 	cfg.Flows.Verifier.AutoMerge = true
 	verdict := verdictNote{Verdict: "approve", Reviewer: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA}
-	if err := recordHostRetirement(cfg, repo, branch, reviewed, item, verdict); err != nil {
+	if err := recordHostRetirement(
+		cfg, repo, branch, reviewed, item, verdict, checksNote{Status: "pass"},
+	); err != nil {
 		t.Fatalf("initial Host retirement preparation: %v", err)
 	}
 	if createCalls != 1 {
@@ -945,10 +1379,8 @@ func TestPendingHostRetirementNoViewAfterAcceptedMergeRetainsIntent(t *testing.T
 		t.Fatalf("post-request no-view effects = create %d, merge %d; want one each", createCalls, mergeCalls)
 	}
 
-	subject := Subject{
-		Key: "branch-" + branch, Kind: subjectRetirement, Revision: reviewed,
-		ID: item.ID, Branch: branch, Head: reviewed, Item: item,
-	}
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+		ID: item.ID, Branch: branch, Item: item}
 	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 0 {
 		t.Fatalf("next no-view retirement retry code = %d, want success", code)
 	}
@@ -985,5 +1417,129 @@ func TestPendingHostRetirementNoViewAfterAcceptedMergeRetainsIntent(t *testing.T
 	}
 	if facts, err := listRetirements(repo); err != nil || len(facts) != 0 {
 		t.Fatalf("exact merged retirement facts = (%#v, %v), want none", facts, err)
+	}
+}
+
+// TestVerifierRetirementTrackerCloseRetriesExactItem drives Verifier Act through
+// final retirement cleanup and proves Tracker Close's recovery view stays bound
+// to the same Item and repository as the close request.
+func TestVerifierRetirementTrackerCloseRetriesExactItem(t *testing.T) {
+	branch := "forest/52-tracker-close"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	item := Item{ID: "52", Title: "tracker close"}
+	_, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: item.ID, Transport: "git",
+		Strategy: "squash", Title: item.Title, State: "landed",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldTracker := trackerFor
+	trackerFor = func(repo string) Tracker { return githubTracker{repo: repo} }
+	defer func() { trackerFor = oldTracker }()
+	oldGH := ghJSON
+	defer func() { ghJSON = oldGH }()
+	var calls [][]string
+	ghJSON = func(args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
+			return nil, errors.New("Tracker close response lost")
+		}
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "view" {
+			return []byte(`{"state":"CLOSED"}`), nil
+		}
+		return nil, errors.New("unexpected Tracker command")
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+		ID: item.ID, Branch: branch, Item: item}
+	out, err := (verifierFlow{}).Act(cfg, repo, subject, "tracker-close-retry")
+	if err != nil || out.Status != "merged" {
+		t.Fatalf("Verifier retirement Act = (%#v, %v), want merged recovery", out, err)
+	}
+	if len(calls) != 2 || calls[0][0] != "issue" || calls[0][1] != "close" ||
+		calls[1][0] != "issue" || calls[1][1] != "view" {
+		t.Fatalf("Tracker close recovery calls = %v, want close then view", calls)
+	}
+	if !hasArgumentPair(calls[0], "-R", cfg.Repo) || !hasArgumentPair(calls[1], "-R", cfg.Repo) ||
+		calls[0][len(calls[0])-1] != item.ID || calls[1][2] != item.ID {
+		t.Fatalf("Tracker recovery calls = %v, want Item %q in repository %q", calls, item.ID, cfg.Repo)
+	}
+	if !hasArgumentPair(calls[1], "--json", "state") {
+		t.Fatalf("Tracker recovery view = %v, want exact state read", calls[1])
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
+		t.Fatalf("retirement fact after exact Tracker retry = (found=%v, err=%v), want removed", found, err)
+	}
+}
+
+// TestVerifierRetirementRetriesFinalRefDeletion drives Verifier Act through a
+// failed final retirement-ref delete after every earlier effect succeeded.
+func TestVerifierRetirementRetriesFinalRefDeletion(t *testing.T) {
+	branch := "forest/53-final-ref"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	item := Item{ID: "53", Title: "final ref"}
+	fact, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: item.ID, Transport: "git",
+		Strategy: "squash", Title: item.Title, State: "landed",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bumpAttempts(repo, "branch-"+branch); err != nil {
+		t.Fatal(err)
+	}
+	toggle := filepath.Join(t.TempDir(), "allow-final-ref-delete")
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	hook := filepath.Join(origin, "hooks", "update")
+	script := "#!/bin/sh\nif [ \"$1\" = '" + fact.Ref + "' ] && [ ! -e '" + toggle + "' ]; then touch '" + toggle + "'; exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(hook) })
+
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+		ID: item.ID, Branch: branch, Item: item}
+	out, err := (verifierFlow{}).Act(cfg, repo, subject, "final-ref-first")
+	if err == nil || out.Status != "merge_failed" {
+		t.Fatalf("first final-ref retirement Act = (%#v, %v), want retryable merge failure", out, err)
+	}
+	if got := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/"+branch); got != "" {
+		t.Fatalf("first final-ref retry branch = %q, want deleted", got)
+	}
+	if _, err := tk.Get(item.ID); err == nil {
+		t.Fatal("first final-ref retry left the Tracker Item open")
+	}
+	if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 0 {
+		t.Fatalf("first final-ref retry attempts = (%d, %v), want removed", attempts, err)
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || !found {
+		t.Fatalf("first final-ref retry fact = (found=%v, err=%v), want retained recovery evidence", found, err)
+	}
+
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("final-ref retry Select = (%#v, %v), want one retirement Subject", subjects, err)
+	}
+	out, err = (verifierFlow{}).Act(cfg, repo, subjects[0], "final-ref-retry")
+	if err != nil || out.Status != "merged" {
+		t.Fatalf("final-ref retry Act = (%#v, %v), want merged cleanup", out, err)
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
+		t.Fatalf("final-ref retry fact = (found=%v, err=%v), want removed", found, err)
 	}
 }

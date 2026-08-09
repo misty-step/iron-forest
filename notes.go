@@ -48,7 +48,11 @@ const (
 	checksNotesRef  = "forest/checks"
 )
 
-var errNoteExists = errors.New("note already exists")
+var (
+	errNoteExists      = errors.New("note already exists")
+	errNoteInvalid     = errors.New("durable note is invalid")
+	errAttemptsInvalid = errors.New("durable attempt record is invalid")
+)
 
 func notesRef(ref string) string {
 	return "refs/notes/" + ref
@@ -110,7 +114,13 @@ func readVerdict(repoDir, sha string) (verdictNote, bool, error) {
 	}
 	var v verdictNote
 	if err := json.Unmarshal([]byte(body), &v); err != nil {
-		return verdictNote{}, false, fmt.Errorf("decode verdict note: %w", err)
+		return verdictNote{}, false, fmt.Errorf("%w: decode verdict note: %v", errNoteInvalid, err)
+	}
+	if v.Verdict != "approve" && v.Verdict != "changes" {
+		return verdictNote{}, false, fmt.Errorf("%w: Verdict note has an invalid decision", errNoteInvalid)
+	}
+	if strings.TrimSpace(v.Reviewer) == "" || strings.TrimSpace(v.Model) == "" || !validHex(v.DefSHA, 8) {
+		return verdictNote{}, false, fmt.Errorf("%w: Verdict note has invalid attribution", errNoteInvalid)
 	}
 	return v, true, nil
 }
@@ -126,7 +136,18 @@ func readChecks(repoDir, sha string) (checksNote, bool, error) {
 	}
 	var c checksNote
 	if err := json.Unmarshal([]byte(body), &c); err != nil {
-		return checksNote{}, false, fmt.Errorf("decode checks note: %w", err)
+		return checksNote{}, false, fmt.Errorf("%w: decode checks note: %v", errNoteInvalid, err)
+	}
+	if c.Status != "pass" && c.Status != "fail" {
+		return checksNote{}, false, fmt.Errorf("%w: Checks note has an invalid status", errNoteInvalid)
+	}
+	if c.Status == "pass" {
+		for _, result := range c.Results {
+			if result.Code != 0 {
+				return checksNote{}, false, fmt.Errorf(
+					"%w: passing Checks note contains a failed result", errNoteInvalid)
+			}
+		}
 	}
 	return c, true, nil
 }
@@ -190,7 +211,7 @@ func writeNote(repoDir, ref, sha string, value any) error {
 			if err != nil {
 				return fmt.Errorf("resolve %s note update: %w", ref, err)
 			}
-			pushErr = git(repoDir, "push", "origin", noteHead+":"+notesRef(ref))
+			pushErr = git(repoDir, "push", "--no-verify", "origin", noteHead+":"+notesRef(ref))
 			if pushErr == nil {
 				if err := git(repoDir, "update-ref", durableNotesRef(ref), noteHead); err != nil {
 					return fmt.Errorf("record durable %s note snapshot: %w", ref, err)
@@ -285,14 +306,14 @@ func fetchNoteRef(repoDir, ref string) error {
 func readAttempts(repoDir, key string) (int, error) {
 	_, body, err := getBlobRef(repoDir, "refs/forest/attempt/"+key)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("%w: read attempt record: %v", errFlowRetryable, err)
 	}
 	if strings.TrimSpace(body) == "" {
 		return 0, nil
 	}
 	var a attemptsNote
 	if err := json.Unmarshal([]byte(body), &a); err != nil {
-		return 0, fmt.Errorf("decode attempt record: %w", err)
+		return 0, fmt.Errorf("%w: decode attempt record: %v", errAttemptsInvalid, err)
 	}
 	return a.Count, nil
 }
@@ -303,13 +324,13 @@ func bumpAttempts(repoDir, key string) (int, error) {
 	for range 5 {
 		sha, body, err := getBlobRef(repoDir, ref)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("%w: read attempt record: %v", errFlowRetryable, err)
 		}
 		count := 0
 		if strings.TrimSpace(body) != "" {
 			var a attemptsNote
 			if err := json.Unmarshal([]byte(body), &a); err != nil {
-				return 0, fmt.Errorf("decode attempt record: %w", err)
+				return 0, fmt.Errorf("%w: decode attempt record: %v", errAttemptsInvalid, err)
 			}
 			count = a.Count
 		}
@@ -321,12 +342,12 @@ func bumpAttempts(repoDir, key string) (int, error) {
 		if err := putBlobRef(repoDir, ref, string(payload), sha); err == nil {
 			return count, nil
 		} else if !errors.Is(err, errRefMoved) {
-			return 0, err
+			return 0, fmt.Errorf("%w: write attempt record: %v", errFlowRetryable, err)
 		} else {
 			casErr = err
 		}
 	}
-	return 0, fmt.Errorf("bump attempts after five attempts: %w", casErr)
+	return 0, fmt.Errorf("%w: bump attempts after five attempts: %v", errFlowRetryable, casErr)
 }
 
 // dropAttempts removes a subject's attempt record. A retired subject must not
@@ -336,10 +357,13 @@ func dropAttempts(repoDir, key string) error {
 	ref := "refs/forest/attempt/" + key
 	sha, _, err := getBlobRef(repoDir, ref)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: read attempt record: %v", errFlowRetryable, err)
 	}
 	if sha == "" {
 		return nil
 	}
-	return git(repoDir, "push", "--force-with-lease="+ref+":"+sha, "origin", ":"+ref)
+	if err := deleteRef(repoDir, ref, sha); err != nil {
+		return fmt.Errorf("%w: delete attempt record: %v", errFlowRetryable, err)
+	}
+	return nil
 }

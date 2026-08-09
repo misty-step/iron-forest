@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,31 @@ func TestAppendRunRedactsError(t *testing.T) {
 	}
 }
 
+func TestGitHubTrackerCloseAcceptsAlreadyClosedItem(t *testing.T) {
+	closeErr := errors.New("Host reported already closed")
+	old := ghJSON
+	defer func() { ghJSON = old }()
+	var calls [][]string
+	ghJSON = func(args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch {
+		case len(args) > 1 && args[1] == "close":
+			return nil, closeErr
+		case len(args) > 1 && args[1] == "view":
+			return []byte(`{"state":"CLOSED"}`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	if err := (githubTracker{repo: "owner/repo"}).Close("9"); err != nil {
+		t.Fatalf("retry close of closed Item = %v, want success", err)
+	}
+	if len(calls) != 2 ||
+		!hasArgumentPair(calls[1], "--json", "state") {
+		t.Fatalf("close recovery calls = %v, want close then exact state read", calls)
+	}
+}
+
 func TestEligibleItemsExcludesLabelsAndCoveredBranches(t *testing.T) {
 	labelled := Item{ID: "2"}
 	labelled.Tags = append(labelled.Tags, "parked")
@@ -89,6 +115,29 @@ func (trackerStub) Get(id string) (Item, error)                   { return Item{
 func (trackerStub) Comment(id, body string) error                 { return nil }
 func (trackerStub) Close(id string) error                         { return nil }
 func (trackerStub) SetTags(id string, add, remove []string) error { return nil }
+
+type mismatchTracker struct {
+	gets   int
+	writes int
+}
+
+func (t *mismatchTracker) ListOpen() ([]Item, error) { return nil, nil }
+func (t *mismatchTracker) Get(string) (Item, error) {
+	t.gets++
+	return Item{ID: "other", UpdatedAt: "revision"}, nil
+}
+func (t *mismatchTracker) Comment(string, string) error {
+	t.writes++
+	return nil
+}
+func (t *mismatchTracker) Close(string) error {
+	t.writes++
+	return nil
+}
+func (t *mismatchTracker) SetTags(string, []string, []string) error {
+	t.writes++
+	return nil
+}
 
 // TestBuilderSelectCarriesOpaqueID proves the controller path — not just the
 // worktree helpers — carries a non-numeric tracker id: builderFlow.Select reads
@@ -134,6 +183,64 @@ func TestBuilderSelectCarriesOpaqueID(t *testing.T) {
 	subjects, err = builderFlow{}.Select(cfg, work)
 	if err != nil || len(subjects) != 0 {
 		t.Fatalf("builder selected stalled Subject = (%#v, %v), want none", subjects, err)
+	}
+}
+
+func TestBuilderSelectRejectsInvalidIdentity(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	for _, tc := range []struct {
+		name string
+		item Item
+		want string
+	}{
+		{name: "empty id", item: Item{UpdatedAt: "revision"}, want: "empty"},
+		{name: "credential-shaped id", item: Item{ID: secret, UpdatedAt: "revision"}, want: "credential-shaped"},
+		{name: "credential-shaped revision", item: Item{ID: "9", UpdatedAt: secret}, want: "credential-shaped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := trackerFor
+			trackerFor = func(string) Tracker { return trackerStub{items: []Item{tc.item}} }
+			defer func() { trackerFor = old }()
+
+			_, err := (builderFlow{}).Select(defaultConfig(), t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("invalid %s was accepted: %v", tc.name, err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("selection error echoed rejected identity: %v", err)
+			}
+		})
+	}
+}
+
+func TestTrackerGetMismatchStopsBeforeSinks(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	tk := &mismatchTracker{}
+	if _, err := validatedTrackerItem(tk, secret); err == nil || !strings.Contains(err.Error(), "credential-shaped") {
+		t.Fatalf("credential-shaped Tracker Get ID was accepted: %v", err)
+	}
+	if tk.gets != 0 {
+		t.Fatalf("credential-shaped Tracker Get reached %d source reads", tk.gets)
+	}
+
+	old := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = old }()
+
+	out, err := (fixerFlow{}).Act(defaultConfig(), t.TempDir(), Subject{
+		ID: "9", Branch: "forest/9", Revision: "revision",
+	}, "mismatch")
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched Tracker Item was accepted: %#v, %v", out, err)
+	}
+	if strings.Contains(err.Error(), "other") {
+		t.Fatalf("mismatch error echoed returned identity: %v", err)
+	}
+	if tk.gets != 1 {
+		t.Fatalf("Tracker Get calls = %d, want 1", tk.gets)
+	}
+	if tk.writes != 0 {
+		t.Fatalf("mismatched Tracker Item reached %d Tracker writes", tk.writes)
 	}
 }
 

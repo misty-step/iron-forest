@@ -306,7 +306,7 @@ func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 	}
 	if err := writeVerdict(work, sha, verdictNote{
 		Verdict: "approve", Notes: "looks good", Reviewer: "reviewer-a",
-		Model: "model-a", DefSHA: "def-a", RunID: "run-a",
+		Model: "model-a", DefSHA: "aaaaaaaaaaaaaaaa", RunID: "run-a",
 	}); err != nil {
 		t.Fatalf("writeVerdict: %v", err)
 	}

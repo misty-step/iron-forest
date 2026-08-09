@@ -6,7 +6,7 @@ Status: accepted, 2026-08-08
 
 A daemon can receive a termination signal while its updater prepares an executable handoff. An in-process `exec` can consume that signal in the old image, replace the signal handler, and lose the shutdown request.
 
-The updater already takes the update gate only while every Flow action is idle. Deployed services use `Restart=always` and start the binary from each managed repository.
+The updater already takes the update gate only while every Flow Effect is idle. Deployed services use `Restart=always` and start the binary from each managed repository.
 
 ## Decision
 

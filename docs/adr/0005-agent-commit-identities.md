@@ -16,7 +16,7 @@ Builder and Fixer branch commits use the acting agent's declared identity. A Ver
 
 `forest agents` shows the declared commit author. The definition digest covers `agent.yaml`. Each agent Run records that digest, and retirement facts retain the initiating Verifier attribution across restarts.
 
-Do not imply that commit authorship creates a Host identity. Pull requests and pushes remain attributed to the credential that performs the Host action. A deployment that needs separate Host actors must provision accounts or application credentials separately.
+Do not imply that commit authorship creates a Host identity. Pull requests and pushes remain attributed to the credential that performs the Host Effect. A deployment that needs separate Host actors must provision accounts or application credentials separately.
 
 ## Consequences
 

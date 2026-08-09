@@ -1,6 +1,6 @@
 # 0002 — Write-once facts replace leases
 
-Status: accepted, 2026-08-07
+Status: accepted, 2026-08-07; amended, 2026-08-08
 
 ## Context
 
@@ -14,47 +14,44 @@ every declared check needs a deadline. That in turn forces a third: a stale leas
 needs recovery, alerting, and a forced-stop path. Three backlog cards existed only
 to serve the guess.
 
-The lease bought one property that nothing else provided: two hosts working one
-repository would not duplicate work. `VISION.md` promised that capability. No
-operator ran it. ADR 0001 makes one installation per organization, one process per
-checkout, so it never will.
+The original decision assumed one process per checkout. Manual runs and separate
+checkouts later proved that one repository can have concurrent participants.
+Coordination is required, but a clock-based takeover is still unsafe.
 
 ## Decision
 
-Delete the remote lease layer. Coordinate with facts instead of locks.
+Delete the timed remote lease layer. Use untimed admission for active Effects and
+durable facts for completed decisions.
 
-- Exclusion inside one process is an in-process subject set. `.forest/daemon.lock`
-  already guarantees one process per checkout.
+- Effect admission takes a non-blocking, per-owner file lock and creates
+  `refs/forest/claim/<key>` with compare-and-set. One canonical Item key joins
+  Builder, Verifier, Fixer, and retirement Subjects across processes and
+  checkouts. A same-Host stale claim is replaced only while holding the lock.
+  A foreign-Host claim fails closed.
 - A verdict on an exact commit is written once. `git notes add` runs without `-f`,
   so a second writer is refused by git itself. The loser reads the winning note
   and continues from it, because a verdict about the identical commit is equally
   valid.
 - Branch publication keeps `--force-with-lease` on the observed remote tip. That
   is git's own flag and still correct: it makes a lost race fail cleanly.
-- Pull requests stay idempotent by listing before creating. Merges are already
-  idempotent.
+- Pull-request publication validates one exact Projection before creation.
+  Ambiguous or foreign Projection identity is refused.
 - The repeat-failure brake moved from the host-local ledger to
   `refs/forest/stalled/<flow>/<key>`, so selection no longer depends on one host's
   files.
 
-Check timeouts survive as cost knobs. They carry no correctness weight,
-because no lease can expire. `budget_seconds` was later deleted with the step
-ceiling in `99b3b74`; nothing now bounds a run's length.
+Agent deadlines and check timeouts are resource and shutdown bounds. They do not
+expire admission because an admission has no time to live.
 
 ## Consequences
 
-Measured erasure: 7 types, 13 functions, 2 config fields, and roughly 530 lines
-including tests. Backlog cards for lease exclusivity under concurrency, bounding
-every act below the lease time to live, and forced-stop lease recovery became
-moot and were closed.
+The initial change erased 7 types, 13 functions, 2 configuration fields, and
+roughly 530 lines including tests. It removed every clock-based ownership guess.
 
-An immutability rule replaced a mutual-exclusion rule. It is smaller, and it holds
-without any liveness estimate.
+Later admission added one smaller boundary when concurrent processes and
+checkouts became real. A process crash releases its operating-system lock. The
+next same-Host participant can replace the stale claim. A foreign-Host claim
+requires operator repair, which prefers stopped work to split ownership.
 
-What is genuinely given up: duplicate agent work becomes possible if two processes
-ever share a repository, costing about $0.0072 per item; and the human-facing
-comments on issues and pull requests are not idempotent, so a duplicate process
-could post a duplicate comment. Local issue/PR comment idempotency is card #148. Remote runner replay under cloud packaging remains #82.
-
-`VISION.md` no longer promises two hosts on one repository. Any future need for it
-must re-derive coordination from write-once facts, not reintroduce a timed lock.
+Decision facts remain immutable. Active ownership is explicit and has no expiry
+or takeover clock.

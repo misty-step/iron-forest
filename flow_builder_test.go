@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,6 +105,67 @@ func TestBuilderCommitUsesDeclaredIdentity(t *testing.T) {
 	author := runGitTest(t, repo, "show", "-s", "--format=%an <%ae>", head)
 	if author != "builder <builder@example.invalid>" {
 		t.Fatalf("builder commit author = %q, want declared identity", author)
+	}
+}
+
+func TestBuilderPublishesHostPreparationBeforeProjection(t *testing.T) {
+	repo := setupTestRepo(t)
+	writeAgentFixture(t, repo, "builder", "builder-model")
+	tk := newMemoryTracker()
+	it := Item{ID: "9", Title: "prepared change", UpdatedAt: "u1"}
+	tk.seed(it)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldRun := runPhase
+	runPhase = func(_ string, wtDir string, _ *Agent, _, _ string) (runStats, error) {
+		if err := os.WriteFile(filepath.Join(wtDir, "prepared.txt"), []byte("prepared\n"), 0o644); err != nil {
+			return runStats{}, err
+		}
+		body := `{"summary":"prepare projection","changed_files":["prepared.txt"],"notes":""}`
+		return runStats{}, os.WriteFile(filepath.Join(wtDir, "report.json"), []byte(body), 0o644)
+	}
+	defer func() { runPhase = oldRun }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	preparedBeforeCreate := false
+	created, createdBranch, createdHead := false, "", ""
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "list" {
+			if !created {
+				return []byte(`[]`), nil
+			}
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` +
+				createdHead + `","headRefName":"` + createdBranch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		if args[0] == "api" {
+			return []byte(`[[]]`), nil
+		}
+		if args[0] == "pr" && args[1] == "create" {
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--head" {
+					createdBranch = args[i+1]
+				}
+			}
+			createdHead = remoteBranchHead(t, repo, createdBranch)
+			fact, found, err := readRetirement(repo, createdBranch, createdHead)
+			if err != nil || !found || fact.Record.State != "preparing" {
+				t.Fatalf("pre-Projection retirement = (%#v, %v, %v), want preparing", fact, found, err)
+			}
+			preparedBeforeCreate = true
+			created = true
+			return []byte("https://github.com/owner/repo/pull/9"), nil
+		}
+		return nil, errors.New("unexpected Host command")
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	out, err := (builderFlow{}).Act(cfg, repo, Subject{
+		Key: "item-9", Kind: subjectItem, Revision: "u1", ID: "9", Item: it,
+	}, "run-prepared")
+	if err != nil || out.Status != "built" || !preparedBeforeCreate {
+		t.Fatalf("prepared Builder Act = (%#v, prepared=%v, err=%v)", out, preparedBeforeCreate, err)
 	}
 }
 

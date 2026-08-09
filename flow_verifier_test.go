@@ -8,6 +8,19 @@ import (
 	"testing"
 )
 
+type responseLossCommentTracker struct {
+	*memoryTracker
+	commentCalls int
+}
+
+func (t *responseLossCommentTracker) Comment(id, body string) error {
+	t.commentCalls++
+	if err := t.memoryTracker.Comment(id, body); err != nil {
+		return err
+	}
+	return errors.New("response lost after acceptance")
+}
+
 // TestRebaseOntoMasterRebasesBehindBranch proves a branch behind master by a
 // non-conflicting commit is rebased onto origin/master and its new head pushed
 // with force, and that Act writes the checks note at the post-rebase head and
@@ -42,7 +55,7 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	originalAuthor := runGitTest(t, wtDir, "show", "-s", "--format=%an <%ae>", oldHead)
 	t.Setenv("GIT_COMMITTER_NAME", "ambient committer")
 	t.Setenv("GIT_COMMITTER_EMAIL", "ambient@example.invalid")
-	newHead, err := rebaseOntoMaster(wtDir, "forest/9-change", id)
+	newHead, err := rebaseOntoMaster(wtDir, "forest/9-change", oldHead, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +80,7 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	// signal under test.
 	if err := writeVerdict(repo, newHead, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
-		DefSHA: "def", RunID: "seed",
+		DefSHA: strings.Repeat("a", 16), RunID: "seed",
 	}); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
@@ -89,10 +102,8 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	cfg.Flows.Verifier.AutoMerge = false
 	cfg.Projection = ProjectionConfig{}
 
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-forest/9-change", Kind: "branch", Revision: oldHead,
-		Label: "forest/9-change", ID: "9", Branch: "forest/9-change", Head: oldHead,
-	}, "run-1")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-forest/9-change", Kind: "branch", Revision: newHead,
+		Label: "forest/9-change", ID: "9", Branch: "forest/9-change"}, "run-1")
 	if err != nil {
 		t.Fatalf("Act: %v", err)
 	}
@@ -104,6 +115,33 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	}
 	if _, ok, err := readChecks(repo, oldHead); err != nil || ok {
 		t.Fatalf("checks on pre-rebase head = (found=%v, err=%v), want not found", ok, err)
+	}
+}
+
+func TestPublishMergeBlockedIsIdempotentAfterResponseLoss(t *testing.T) {
+	memory := newMemoryTracker()
+	memory.seed(Item{ID: "9", Title: "change"})
+	tracker := &responseLossCommentTracker{memoryTracker: memory}
+	revision := strings.Repeat("a", 40)
+
+	it, err := tracker.Get("9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishMergeBlocked(tracker, it, revision, errors.New("merge failed")); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	it, err = tracker.Get("9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishMergeBlocked(tracker, it, revision, errors.New("merge failed")); err != nil {
+		t.Fatalf("retry publish: %v", err)
+	}
+	if tracker.commentCalls != 1 || len(it.Comments) != 1 ||
+		!strings.Contains(it.Comments[0].Body, "<!-- iron-forest:merge-blocked revision="+revision+" -->") {
+		t.Fatalf("comments = (%d calls, %#v), want one exact-Revision effect",
+			tracker.commentCalls, it.Comments)
 	}
 }
 
@@ -126,13 +164,13 @@ func TestRebaseOntoMasterConflictNamesPaths(t *testing.T) {
 	runGitTest(t, repo, "commit", "-q", "-m", "master edit")
 	runGitTest(t, repo, "push", "-q", "origin", "master")
 
-	wtDir, _, err := createWorktreeAtBranch(repo, workspace, "forest/9-conflict")
+	wtDir, oldHead, err := createWorktreeAtBranch(repo, workspace, "forest/9-conflict")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer removeWorktree(repo, wtDir)
 
-	_, err = rebaseOntoMaster(wtDir, "forest/9-conflict", testVerifierAgent().Commit)
+	_, err = rebaseOntoMaster(wtDir, "forest/9-conflict", oldHead, testVerifierAgent().Commit)
 	if err == nil {
 		t.Fatal("conflicting rebase returned no error")
 	}
@@ -163,7 +201,7 @@ func TestRebaseOntoMasterLeavesCurrentBranchUntouched(t *testing.T) {
 	}
 	defer removeWorktree(repo, wtDir)
 
-	newHead, err := rebaseOntoMaster(wtDir, "forest/9-current", testVerifierAgent().Commit)
+	newHead, err := rebaseOntoMaster(wtDir, "forest/9-current", oldHead, testVerifierAgent().Commit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +210,45 @@ func TestRebaseOntoMasterLeavesCurrentBranchUntouched(t *testing.T) {
 	}
 	if remoteHead := remoteBranchHead(t, repo, "forest/9-current"); remoteHead != oldHead {
 		t.Fatalf("origin branch changed to %q, want unchanged %q", remoteHead, oldHead)
+	}
+}
+
+func TestRebaseOntoMasterFencesReviewedRemoteHead(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-lease"
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "reviewed\n")
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "reviewed branch")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	rebaseTestWriteFile(t, filepath.Join(repo, "master.txt"), "master\n")
+	runGitTest(t, repo, "add", "master.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "advance master")
+	runGitTest(t, repo, "push", "-q", "origin", "master")
+
+	wtDir, reviewed, err := createWorktreeAtBranch(repo, filepath.Join(repo, WorkspaceDir), branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeWorktree(repo, wtDir)
+
+	attacker := filepath.Join(t.TempDir(), "attacker")
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	runGitTest(t, "", "clone", "-q", origin, attacker)
+	runGitTest(t, attacker, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(attacker, "advanced.txt"), "advanced\n")
+	runGitTest(t, attacker, "add", "advanced.txt")
+	runGitTest(t, attacker, "commit", "-q", "-m", "advance branch")
+	runGitTest(t, attacker, "push", "-q", "origin", branch)
+	advanced := remoteBranchHead(t, repo, branch)
+	runGitTest(t, repo, "fetch", "-q", "origin", branch)
+
+	if _, err := rebaseOntoMaster(wtDir, branch, reviewed, testVerifierAgent().Commit); err == nil {
+		t.Fatal("stale rebase push returned success")
+	}
+	if got := remoteBranchHead(t, repo, branch); got != advanced {
+		t.Fatalf("stale rebase overwrote remote branch: got %s, want %s", got, advanced)
 	}
 }
 
@@ -204,7 +281,7 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subjects) != 1 || subjects[0].Head != head || subjects[0].ID != "9" ||
+	if len(subjects) != 1 || subjects[0].Revision != head || subjects[0].ID != "9" ||
 		canonicalAdmissionKey(subjects[0]) != "item-9" {
 		t.Fatalf("fresh head = %#v, want item-9 at %s", subjects, head)
 	}
@@ -230,7 +307,7 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repairs) != 1 || repairs[0].Head != head || repairs[0].ID != "9" ||
+	if len(repairs) != 1 || repairs[0].Revision != head || repairs[0].ID != "9" ||
 		canonicalAdmissionKey(repairs[0]) != "item-9" {
 		t.Fatalf("fixer subjects = %#v, want item-9 at %s", repairs, head)
 	}
@@ -255,11 +332,11 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subjects) != 1 || subjects[0].Head != newHead || subjects[0].ID != "9" ||
+	if len(subjects) != 1 || subjects[0].Revision != newHead || subjects[0].ID != "9" ||
 		canonicalAdmissionKey(subjects[0]) != "item-9" {
 		t.Fatalf("repaired head = %#v, want item-9 at %s", subjects, newHead)
 	}
-	if err := writeVerdict(work, newHead, verdictNote{Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: "d"}); err != nil {
+	if err := writeVerdict(work, newHead, verdictNote{Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeChecks(work, newHead, checksNote{Status: "pass"}); err != nil {
@@ -323,16 +400,14 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 		if verdict != "" {
 			if err := writeVerdict(repo, head, verdictNote{
 				Verdict: verdict, Reviewer: "verifier", Model: "verifier-model",
-				DefSHA: "def", RunID: "seed",
+				DefSHA: strings.Repeat("a", 16), RunID: "seed",
 			}); err != nil {
 				t.Fatalf("seed verdict: %v", err)
 			}
 		}
 
-		out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-			Key: "branch-" + branch, Kind: "branch", Revision: head,
-			Label: branch, ID: "9", Branch: branch, Head: head,
-		}, "run-1")
+		out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+			Label: branch, ID: "9", Branch: branch}, "run-1")
 		if err != nil {
 			t.Fatalf("Act: %v", err)
 		}
@@ -405,7 +480,7 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	// trustworthy checks note may admit; a preflight failure must never pass it.
 	if err := writeVerdict(repo, head, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
-		DefSHA: "def", RunID: "seed",
+		DefSHA: strings.Repeat("a", 16), RunID: "seed",
 	}); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
@@ -429,10 +504,8 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	cfg.Flows.Verifier.AutoMerge = true
 	cfg.Projection = ProjectionConfig{}
 
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: "branch", Revision: head,
-		Label: branch, ID: "9", Branch: branch, Head: head,
-	}, "run-1")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch}, "run-1")
 	if err == nil {
 		t.Fatalf("preflight failure returned no error: %#v", out)
 	}
@@ -486,7 +559,7 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 
 	if err := writeVerdict(repo, head, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
-		DefSHA: "def", RunID: "seed",
+		DefSHA: strings.Repeat("a", 16), RunID: "seed",
 	}); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
@@ -514,10 +587,8 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 	cfg.Flows.Verifier.AutoMerge = true
 	cfg.Projection = ProjectionConfig{}
 
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: "branch", Revision: head,
-		Label: branch, ID: "9", Branch: branch, Head: head,
-	}, "run-2")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch}, "run-2")
 	if err == nil {
 		t.Fatalf("retry over an existing note returned no error: %#v", out)
 	}
@@ -585,10 +656,8 @@ func TestVerifierRefusesPassNoteWhenCheckMutatesTree(t *testing.T) {
 			cfg.Flows.Verifier.AutoMerge = true
 			cfg.Projection = ProjectionConfig{}
 
-			out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-				Key: "branch-" + branch, Kind: "branch", Revision: head,
-				Label: branch, ID: "9", Branch: branch, Head: head,
-			}, "run-1")
+			out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+				Label: branch, ID: "9", Branch: branch}, "run-1")
 			if err == nil {
 				t.Fatalf("a check that tainted the tree returned no error: %#v", out)
 			}
@@ -662,10 +731,8 @@ func TestVerifierReviewNamesMutationWhenPhaseErrors(t *testing.T) {
 	cfg.Flows.Verifier.AutoMerge = true
 	cfg.Projection = ProjectionConfig{}
 
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: "branch", Revision: head,
-		Label: branch, ID: "9", Branch: branch, Head: head,
-	}, "run-1")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch}, "run-1")
 	if err == nil {
 		t.Fatalf("a review that mutated the tree and crashed returned no error: %#v", out)
 	}
@@ -764,13 +831,13 @@ func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, "stale.txt"), []byte("stale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAndPush(work, work, branch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", id, it); err == nil {
+	if _, err := commitAndPush(work, work, branch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", id, it); err == nil {
 		t.Fatal("a stale observed ref must lose the push")
 	}
 	if err := os.WriteFile(filepath.Join(work, "fix.txt"), []byte("repair\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAndPush(work, work, branch, observed, id, it); err != nil {
+	if _, err := commitAndPush(work, work, branch, observed, id, it); err != nil {
 		t.Fatalf("rebased branch with the observed ref = %v, want nil", err)
 	}
 	remote := runGitTest(t, work, "rev-parse", "refs/remotes/origin/"+branch)
@@ -798,7 +865,7 @@ func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 	runGitTest(t, repo, "checkout", "-q", "master")
 
 	if err := writeVerdict(repo, head, verdictNote{
-		Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: "def", RunID: "seed",
+		Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16), RunID: "seed",
 	}); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
@@ -829,6 +896,223 @@ func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 	}
 }
 
+func TestVerifierActRefreshesWinningVerdictBeforeReview(t *testing.T) {
+	branch := "forest/32-winning-verdict"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "32", Title: "winning verdict", UpdatedAt: "u1"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "test", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = false
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 {
+		t.Fatalf("stale Verdict Select = (%#v, %v), want one branch", subjects, err)
+	}
+
+	root := t.TempDir()
+	writer := filepath.Join(root, "writer")
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	runGitTest(t, root, "clone", "-q", origin, writer)
+	if err := writeChecks(writer, reviewed, checksNote{Status: "pass", RunID: "winner"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVerdict(writer, reviewed, verdictNote{
+		Verdict: "changes", Notes: "winning rejection", Reviewer: "other-verifier",
+		Model: "other-model", DefSHA: strings.Repeat("b", 16), RunID: "winner",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := runPhase
+	runPhase = func(string, string, *Agent, string, string) (runStats, error) {
+		t.Fatal("stale checkout paid for a duplicate Verifier review")
+		return runStats{}, nil
+	}
+	defer func() { runPhase = oldRun }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	listCalls, commentCalls := 0, 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "list" {
+			listCalls++
+			head := reviewed
+			if listCalls > 1 {
+				head = strings.Repeat("a", 40)
+			}
+			return []byte(`[{"number":32,"url":"https://github.com/owner/repo/pull/32","headRefOid":"` +
+				head + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		if args[0] == "api" {
+			commentCalls++
+			return nil, nil
+		}
+		return nil, errors.New("unexpected Host command")
+	}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, subjects[0], "stale-winner")
+	if !errors.Is(err, errHostMergeUnavailable) || out.Status != "projection_failed" || out.Verdict != "changes" {
+		t.Fatalf("stale winning Verdict Act = (%#v, %v), want fenced winning rejection", out, err)
+	}
+	if commentCalls != 0 {
+		t.Fatalf("head-drifted winning Verdict issued %d Host comments", commentCalls)
+	}
+	fact, found, err := readRetirement(repo, branch, reviewed)
+	if err != nil || !found || fact.Record.State != "preparing" {
+		t.Fatalf("stale winning Verdict preparation = (%#v, %v, %v), want no pending intent", fact, found, err)
+	}
+}
+
+func TestVerifierHostPreparationRetriesWithoutStall(t *testing.T) {
+	branch := "forest/35-host-retry"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "35", Title: "host retry"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return nil, errors.Join(errHostMergeUnavailable, errHostRevisionMoved)
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Agent = "verifier"
+	subject := Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: reviewed,
+		ID: "35", Branch: branch}
+	for range stalledRunLimit {
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+			t.Fatalf("transient Host pass code = %d, want retryable failure", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || stalled {
+		t.Fatalf("transient Host preparation stalled = (%v, %v), want retryable", stalled, err)
+	}
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("post-transient Select = (%#v, %v), want durable retirement retry", subjects, err)
+	}
+}
+
+func TestVerifierPreparationMigrationRetriesTransientHostQuery(t *testing.T) {
+	branch := "forest/43-migration-retry"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Agent = "verifier"
+	item := Item{ID: "43", Title: "migration retry"}
+	if _, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "checkout", "-q", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "advanced.txt"), "advanced\n")
+	runGitTest(t, repo, "add", "advanced.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "advance before Host query")
+	runGitTest(t, repo, "push", "-q", "origin", branch)
+	advanced := remoteBranchHead(t, repo, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return nil, errors.New("transient Host query failure")
+	}
+	subject := Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: advanced,
+		ID: "43", Branch: branch}
+	for range stalledRunLimit {
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+			t.Fatalf("preparation migration pass code = %d, want retryable failure", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, advanced); err != nil || stalled {
+		t.Fatalf("transient migration query stalled = (%v, %v), want retryable", stalled, err)
+	}
+	oldFact, found, err := readRetirement(repo, branch, reviewed)
+	if err != nil || !found || oldFact.Record.State != "preparing" {
+		t.Fatalf("transient migration retained preparation = (%#v, found=%v, err=%v)", oldFact, found, err)
+	}
+}
+
+func TestVerifierMalformedHostProjectionUsesFailureBrake(t *testing.T) {
+	branch := "forest/41-malformed-projection"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "41", Title: "malformed Projection"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "list" {
+			return []byte(`[{"number":0,"url":"","headRefOid":"` + reviewed +
+				`","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		return nil, errors.New("unexpected Host command")
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Agent = "verifier"
+	subject := Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: reviewed,
+		ID: "41", Branch: branch}
+	for range stalledRunLimit {
+		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+			t.Fatalf("malformed Host pass code = %d, want failure", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || !stalled {
+		t.Fatalf("malformed Host Projection stalled = (%v, %v), want hard brake", stalled, err)
+	}
+}
+
+func TestVerifierRetirementIgnoresBranchFailureBrake(t *testing.T) {
+	branch := "forest/38-pending-braked"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	writeApprovalNotes(t, repo, reviewed, agent)
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "38", Transport: "host",
+		Strategy: "squash", Title: "pending", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "verifier", "branch-"+branch, reviewed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("braked branch retirement Select = (%#v, %v), want recovery", subjects, err)
+	}
+}
+
 func TestVerifierBranchLossRetainsObservedHostMergeUntilApproval(t *testing.T) {
 	branch := "forest/31-branch-loss"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
@@ -844,9 +1128,13 @@ func TestVerifierBranchLossRetainsObservedHostMergeUntilApproval(t *testing.T) {
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.AutoMerge = false
+	if _, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed,
+		Item{ID: "31", Title: "branch loss"}); err != nil {
+		t.Fatal(err)
+	}
 	subjects, err := (verifierFlow{}).Select(cfg, repo)
-	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectBranch {
-		t.Fatalf("branch-loss Select = (%#v, %v), want one branch", subjects, err)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("branch-loss Select = (%#v, %v), want one durable retirement", subjects, err)
 	}
 
 	runGitTest(t, repo, "branch", "-D", branch)
@@ -872,7 +1160,11 @@ func TestVerifierBranchLossRetainsObservedHostMergeUntilApproval(t *testing.T) {
 		}
 	}
 
-	out, err := (verifierFlow{}).Act(cfg, repo, subjects[0], "observe-merge")
+	recoveries, selectErr := (verifierFlow{}).Select(cfg, repo)
+	if selectErr != nil || len(recoveries) != 1 || recoveries[0].Kind != subjectRetirement {
+		t.Fatalf("fresh branch-loss Select = (%#v, %v), want durable retirement", recoveries, selectErr)
+	}
+	out, err := (verifierFlow{}).Act(cfg, repo, recoveries[0], "observe-merge")
 	if err != nil || out.Status != "merge_pending" {
 		t.Fatalf("branch-loss Act = (status=%q, err=%v), want retained merge_pending", out.Status, err)
 	}
@@ -886,7 +1178,7 @@ func TestVerifierBranchLossRetainsObservedHostMergeUntilApproval(t *testing.T) {
 
 	agent := testVerifierAgent()
 	writeApprovalNotes(t, repo, reviewed, agent)
-	recoveries, err := (verifierFlow{}).Select(cfg, repo)
+	recoveries, err = (verifierFlow{}).Select(cfg, repo)
 	if err != nil || len(recoveries) != 1 || recoveries[0].Kind != subjectRetirement {
 		t.Fatalf("observed recovery Select = (%#v, %v), want one retirement", recoveries, err)
 	}
@@ -925,5 +1217,267 @@ func TestMergeBlockedNamesEveryReason(t *testing.T) {
 	cfg.Flows.Verifier.AutoMerge = false
 	if why := mergeBlocked(cfg, 0); why == "" {
 		t.Error("auto_merge off does not block the merge")
+	}
+}
+
+func TestBranchFlowsRejectRevisionThatMovedAfterSelect(t *testing.T) {
+	t.Run("Verifier", func(t *testing.T) {
+		branch := "forest/36-stale-verifier"
+		repo, _, selected, _ := newVerifierBranch(t, branch)
+		tk := newMemoryTracker()
+		tk.seed(Item{ID: "36", Title: "stale verifier", UpdatedAt: "u1"})
+		oldTracker := trackerFor
+		trackerFor = func(string) Tracker { return tk }
+		defer func() { trackerFor = oldTracker }()
+
+		rebaseTestWriteFile(t, filepath.Join(repo, "after-select.txt"), "new Revision\n")
+		runGitTest(t, repo, "add", "after-select.txt")
+		runGitTest(t, repo, "commit", "-q", "-m", "advance after Select")
+		runGitTest(t, repo, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
+		current := remoteBranchHead(t, repo, branch)
+		runGitTest(t, repo, "checkout", "-q", "master")
+
+		oldRun := runPhase
+		runPhase = func(string, string, *Agent, string, string) (runStats, error) {
+			t.Fatal("Verifier spent a model run on a stale Subject")
+			return runStats{}, nil
+		}
+		defer func() { runPhase = oldRun }()
+
+		cfg := defaultConfig()
+		cfg.Repo = "owner/repo"
+		cfg.Projection = ProjectionConfig{}
+		out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: selected,
+			Label: branch, ID: "36", Branch: branch}, "stale-verifier")
+		if !errors.Is(err, errSubjectRevisionStale) || out.Status != "stale" {
+			t.Fatalf("Verifier stale Act = (status=%q, err=%v), want stale Revision refusal", out.Status, err)
+		}
+		if out.BaseSHA != current {
+			t.Fatalf("Verifier stale Act observed %s, want current Revision %s", out.BaseSHA, current)
+		}
+	})
+
+	t.Run("Fixer", func(t *testing.T) {
+		branch := "forest/37-stale-fixer"
+		repo, _, selected, _ := newVerifierBranch(t, branch)
+		if err := writeChecks(repo, selected, checksNote{
+			Status: "fail", RunID: "selected",
+			Results: []checkResult{{Name: "test", Code: 1, Output: "failed"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		writeAgentFixture(t, repo, "fixer", "fixer-model")
+		tk := newMemoryTracker()
+		tk.seed(Item{ID: "37", Title: "stale fixer", UpdatedAt: "u1"})
+		oldTracker := trackerFor
+		trackerFor = func(string) Tracker { return tk }
+		defer func() { trackerFor = oldTracker }()
+
+		rebaseTestWriteFile(t, filepath.Join(repo, "after-select.txt"), "new Revision\n")
+		runGitTest(t, repo, "add", "after-select.txt")
+		runGitTest(t, repo, "commit", "-q", "-m", "advance after Select")
+		runGitTest(t, repo, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
+		current := remoteBranchHead(t, repo, branch)
+		runGitTest(t, repo, "checkout", "-q", "master")
+
+		oldRun := runPhase
+		runPhase = func(string, string, *Agent, string, string) (runStats, error) {
+			t.Fatal("Fixer spent a model run on a stale Subject")
+			return runStats{}, nil
+		}
+		defer func() { runPhase = oldRun }()
+
+		cfg := defaultConfig()
+		cfg.Repo = "owner/repo"
+		cfg.Flows.Fixer.Agent = "fixer"
+		out, err := (fixerFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: selected,
+			Label: branch, ID: "37", Branch: branch}, "stale-fixer")
+		if !errors.Is(err, errSubjectRevisionStale) || out.Status != "stale" {
+			t.Fatalf("Fixer stale Act = (status=%q, err=%v), want stale Revision refusal", out.Status, err)
+		}
+		if out.BaseSHA != current {
+			t.Fatalf("Fixer stale Act observed %s, want current Revision %s", out.BaseSHA, current)
+		}
+		if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 0 {
+			t.Fatalf("Fixer stale Act attempts = (%d, %v), want zero", attempts, err)
+		}
+	})
+}
+
+// TestVerifierActMigratesHostPreparationAndPinsPostRebaseEvidence drives the
+// full Verifier Act path through Host preparation, rebase, Checks, and Verdict.
+func TestVerifierActMigratesHostPreparationAndPinsPostRebaseEvidence(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/54-host-rebase"
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	oldHead := remoteBranchHead(t, repo, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	rebaseTestWriteFile(t, filepath.Join(repo, "master.txt"), "master\n")
+	runGitTest(t, repo, "add", "master.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "master work")
+	runGitTest(t, repo, "push", "-q", "origin", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	item := Item{ID: "54", Title: "Host rebase"}
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	created := false
+	var commitIDs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if !created {
+			fact, found, err := readRetirement(repo, branch, oldHead)
+			if err != nil || !found || fact.Record.State != "preparing" {
+				t.Fatalf("first Host sink preparation = (%#v, %v, %v), want preparing fact", fact, found, err)
+			}
+		}
+		switch {
+		case args[0] == "pr" && args[1] == "list":
+			if !created {
+				return []byte(`[]`), nil
+			}
+			head := remoteBranchHead(t, repo, branch)
+			return []byte(`[{"number":54,"url":"https://github.com/owner/repo/pull/54","headRefOid":"` + head +
+				`","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "GET"):
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			created = true
+			return []byte("https://github.com/owner/repo/pull/54"), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "POST"):
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--field" && strings.HasPrefix(args[i+1], "commit_id=") {
+					commitIDs = append(commitIDs, strings.TrimPrefix(args[i+1], "commit_id="))
+				}
+			}
+			return nil, nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	oldRun := runPhase
+	runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string) (runStats, error) {
+		if err := os.WriteFile(filepath.Join(wtDir, "review.json"), []byte(`{"verdict":"approve","summary":"approved","notes":""}`), 0o644); err != nil {
+			return runStats{}, err
+		}
+		return runStats{}, nil
+	}
+	defer func() { runPhase = oldRun }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "true", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = false
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: oldHead,
+		ID: item.ID, Branch: branch}, "host-rebase")
+	if err != nil || out.Status != "reviewed" {
+		t.Fatalf("Host rebase Verifier Act = (%#v, %v), want reviewed", out, err)
+	}
+	newHead := remoteBranchHead(t, repo, branch)
+	if newHead == oldHead || out.BaseSHA != newHead {
+		t.Fatalf("Host rebase heads = (old=%s, new=%s, outcome=%s), want post-rebase outcome", oldHead, newHead, out.BaseSHA)
+	}
+	if len(commitIDs) != 1 || commitIDs[0] != newHead {
+		t.Fatalf("Host Verdict/Checks commit ID = %v, want %s", commitIDs, newHead)
+	}
+	if _, found, err := readRetirement(repo, branch, oldHead); err != nil || found {
+		t.Fatalf("pre-rebase preparation = (found=%v, err=%v), want migrated away", found, err)
+	}
+	fact, found, err := readRetirement(repo, branch, newHead)
+	if err != nil || !found || fact.Record.State != "pending" {
+		t.Fatalf("post-rebase preparation = (%#v, found=%v, err=%v), want pending fact", fact, found, err)
+	}
+}
+
+// TestVerifierActProjectsChecksAtPostRebaseHead drives the full Verifier Act
+// failure path and pins the Host Checks comment to the rebased Revision.
+func TestVerifierActProjectsChecksAtPostRebaseHead(t *testing.T) {
+	branch := "forest/55-host-checks"
+	repo, _, oldHead, _ := newVerifierBranch(t, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	rebaseTestWriteFile(t, filepath.Join(repo, "master.txt"), "master\n")
+	runGitTest(t, repo, "add", "master.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "master work")
+	runGitTest(t, repo, "push", "-q", "origin", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
+	item := Item{ID: "55", Title: "Host Checks"}
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	created := false
+	var commitIDs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "pr" && args[1] == "list":
+			if !created {
+				return []byte(`[]`), nil
+			}
+			head := remoteBranchHead(t, repo, branch)
+			return []byte(`[{"number":55,"url":"https://github.com/owner/repo/pull/55","headRefOid":"` + head +
+				`","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "GET"):
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			created = true
+			return []byte("https://github.com/owner/repo/pull/55"), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "POST"):
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--field" && strings.HasPrefix(args[i+1], "commit_id=") {
+					commitIDs = append(commitIDs, strings.TrimPrefix(args[i+1], "commit_id="))
+				}
+			}
+			return nil, nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "failing", Run: "false"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: oldHead,
+		ID: item.ID, Branch: branch}, "host-checks")
+	if err != nil || out.Status != "checks_failed" {
+		t.Fatalf("Host Checks Verifier Act = (%#v, %v), want checks_failed", out, err)
+	}
+	newHead := remoteBranchHead(t, repo, branch)
+	if newHead == oldHead || out.BaseSHA != newHead {
+		t.Fatalf("Host Checks heads = (old=%s, new=%s, outcome=%s), want post-rebase outcome", oldHead, newHead, out.BaseSHA)
+	}
+	if len(commitIDs) != 1 || commitIDs[0] != newHead {
+		t.Fatalf("Host Checks commit ID = %v, want %s", commitIDs, newHead)
+	}
+	fact, found, err := readRetirement(repo, branch, newHead)
+	if err != nil || !found || fact.Record.State != "preparing" {
+		t.Fatalf("failed Checks preparation = (%#v, found=%v, err=%v), want retained", fact, found, err)
+	}
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("failed Checks Verifier Select = (%#v, %v), want retained retirement", subjects, err)
+	}
+	retry, err := (verifierFlow{}).Act(cfg, repo, subjects[0], "host-checks-retry")
+	if err != nil || retry.Status != "checks_failed" || len(commitIDs) != 1 {
+		t.Fatalf("failed Checks retry = (%#v, comments=%v, err=%v), want no repeated work", retry, commitIDs, err)
+	}
+	if subjects, err := (fixerFlow{}).Select(cfg, repo); err != nil ||
+		len(subjects) != 1 || subjects[0].Branch != branch {
+		t.Fatalf("failed Checks Fixer Select = (%#v, %v), want repair branch", subjects, err)
 	}
 }

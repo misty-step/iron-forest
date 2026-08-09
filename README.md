@@ -6,29 +6,33 @@ Four independent Flows run in one process and coordinate through git facts and T
 ## Flows
 
 Each Flow selects a Subject, performs its Effect, and records a Run.
-Each lane uses its own interval. The process excludes duplicate work on one Subject.
+Each lane uses its own interval. Admission excludes duplicate work on one Subject across processes and checkouts.
 
 | Flow | Selector | Effects |
 | --- | --- | --- |
-| Builder | Open Tracker items with every required label, without a forest branch, pending retirement, exclude label, or Builder stall at the current Revision. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It may create a Projection. |
-| Verifier | Pending retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and attempts remain, or one Host-preparation pass when Host merge is enabled and `auto_merge` is disabled. | Runs the configured Checks, writes the Checks note, obtains an independent Verdict, records pending Host retirement intent, recovers exact operator Host merges, and merges approved branches only when `auto_merge` is enabled. |
+| Builder | Open Tracker items with every required label, without a forest branch, retirement fact, exclude label, or Builder stall at the current Revision. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. Host mode records `preparing` recovery state before creating a Projection. |
+| Verifier | Recovery retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and attempts remain, or one Host-preparation pass when Host merge is enabled and `auto_merge` is disabled. | Runs the configured Checks, refreshes durable notes, obtains an independent Verdict, upgrades Host retirement intent, recovers exact operator Host merges, and merges approved branches only when `auto_merge` is enabled. |
 | Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit. | Runs the Builder on the branch, passes the Gate, pushes the repair, and records the attempt. An exhausted branch gets `forest:failed` for a human. |
-| Manager | Open Tracker items without a forest branch, pending retirement, ready label, configured exclude label, open blocker, or Builder stall. | Fills the configured ready depth one candidate per pass. It withdraws branchless ready items that become excluded, blocked, failed, or stalled. |
+| Manager | Open Tracker items without a forest branch, retirement fact, ready label, configured exclude label, open blocker, or Builder stall. | Fills the configured ready depth one candidate per pass. It withdraws branchless ready items that become excluded, blocked, failed, or stalled. |
 
 ## State
 
 Git stores durable decisions. One installation can run any Flow, and each
 checkout has one daemon process.
+- **Admission:** `refs/forest/claim/` and a per-owner file lock serialize one canonical Subject across processes and checkouts.
 - **Verdict:** `refs/notes/forest/verdict` stores a Verdict on the exact Revision reviewed.
 - **Checks:** `refs/notes/forest/checks` stores the result of Iron Forest's own `checks:` commands on that exact Revision.
-- **Retirement:** `refs/forest/retirement/` stores resumable merge effects until the Tracker item and source branch are retired.
+- **Retirement:** `refs/forest/retirement/` stores `preparing`, `pending`, `observed`, or `landed` merge recovery until the Tracker Item and branch retire.
 - **Ledger:** `.forest/runs.jsonl` is host telemetry outside git. It records each Run's Flow, Subject, Revision, Status, Verdict, and measured `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning` classes. It never records or computes money.
 
 A new commit has no Verdict or Checks note, so Iron Forest needs no staleness comparison. Iron Forest never reads a Host's review or check state.
 
-A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. With Host mode and `auto_merge: false`, the Verifier makes one preparation pass, records pending retirement, and never requests a merge. After an operator merges the exact reviewed revision, the next pass observes that merge for recovery. Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
+A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. Host mode records `preparing` before the Projection can exist and upgrades it to `pending` after the durable winning Verdict.
+With `auto_merge: false`, the Verifier never requests a merge. An exact Host merge advances `preparing` or `pending` to `observed` before approval-note read; a read failure retains `observed`, and recovery lands it only after approval and passing Checks.
+Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
+Projected Checks and Verdicts use a `COMMENT` review whose `commit_id` is the exact Revision.
 
-If branch loss hides a merged Projection before approval is readable, an `observed` retirement blocks duplicate Builder work until durable approval arrives.
+If branch loss hides a Projection before approval is readable, `preparing`, `pending`, or `observed` retirement blocks duplicate Builder work until exact Host state and durable approval join.
 
 ## Commands
 
@@ -103,7 +107,6 @@ account or application credential.
 Attaching a second repository to a running installation is
 `docs/onboarding-managed-repo.md`.
 
-Iron Forest runs each command in `checks:` and writes one Checks note.
 It never reads a Host check or review.
 Labels such as `exclude_labels` are Tracker inputs, not factory state.
 
@@ -145,7 +148,7 @@ Building the wrong thing is worse than not building: Iron Forest does not guess 
 stack. If a `checks:` command's tool is missing, the check fails and the note
 names the command that could not start.
 
-`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` makes an approved, passing branch eligible for Verifier merge when attempts remain; when false, a native merge remains disabled, while Host mode gets one preparation pass that records pending retirement and never requests a merge. The next pass observes the exact operator merge and completes retirement. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
+`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` makes an approved, passing branch eligible for Verifier merge when attempts remain; when false, a native merge remains disabled, while Host mode first records `preparing` before the Projection and upgrades it to `pending` after durable approval without requesting a merge. An exact Host merge advances that fact to `observed` before approval-note read; recovery lands it only after approval and passing Checks. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
 
 ## Requirements
 
@@ -166,9 +169,9 @@ Omit `--factory-dir` to disable self-update.
 
 `forest serve` reads `forest.yaml` before each Flow pass. A committed configuration change takes effect without a process restart.
 
-The first termination signal stops new actions and lets current actions finish. A second signal kills managed process groups and exits without waiting for repository I/O. The next startup reaps linked worktrees before any Flow starts.
+The first termination signal stops new Effects and lets current Effects finish. A second signal kills managed process groups and exits without waiting for repository I/O. The next startup reaps linked worktrees before any Flow starts.
 
-Self-update waits until every Flow action is idle. It installs the tested binary and exits so the service supervisor can restart it. Deployed instances also serialize access to their shared factory source checkout.
+Self-update waits until every Flow Effect is idle. It installs the tested binary and exits so the service supervisor can restart it. Deployed instances also serialize access to their shared factory source checkout.
 
 ## Ledger and board
 

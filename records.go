@@ -172,14 +172,14 @@ func stalledOn(repoDir, flow, subject, revision string) (bool, error) {
 	}
 	_, body, err := getBlobRef(repoDir, stalledRef(flow, subject))
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("%w: read stalled record: %v", errFlowRetryable, err)
 	}
 	if strings.TrimSpace(body) == "" {
 		return false, nil
 	}
 	var record stalledRecord
 	if err := json.Unmarshal([]byte(body), &record); err != nil {
-		return false, fmt.Errorf("decode stalled record: %w", err)
+		return false, fmt.Errorf("%w: decode stalled record: %v", errControlEvidenceInvalid, err)
 	}
 	return record.Revision == revision && record.Count >= stalledRunLimit, nil
 }

@@ -16,11 +16,9 @@ Three shapes were measured against the shipped code.
 
 - **Many units, one per checkout.** The shipped shape. Costs a hand-written unit,
   a log, and an update path per repository.
-- **One process over many checkouts.** Costs roughly 80 lines: three `os.Getwd`
-  call sites, a checkout list, a supervisor, worktree ownership, and a
-  repository-qualified in-process subject set, whose key is currently the bare
-  subject key and would collide across repositories. It loses per-repository
-  failure and update isolation.
+- **One process over many checkouts.** This needs a checkout list, a supervisor,
+  repository-qualified admission, and shared worktree ownership. It also loses
+  per-repository failure and update isolation.
 - **Many instances of one template unit.** Costs six lines of unit file and no Go
   code.
 

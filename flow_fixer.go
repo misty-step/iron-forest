@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -34,19 +35,60 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			return nil, fmt.Errorf("branch %s: %w", branch, err)
 		}
 		key := "branch-" + branch
+		subject := Subject{Key: key,
+			Kind:     subjectBranch,
+			Revision: head,
+			Label:    branch,
+			ID:       itemIDFromBranch(branch),
+			Branch:   branch}
 		v, hasVerdict, err := readVerdict(repoDir, head)
 		if err != nil {
+			if errors.Is(err, errNoteInvalid) {
+				stalled, stallErr := stalledOn(repoDir, "fixer", key, head)
+				if stallErr != nil {
+					return nil, fmt.Errorf("stalled %s: %w", key, stallErr)
+				}
+				if stalled {
+					continue
+				}
+				subject.Failure = flowNoteError(err)
+				subjects = append(subjects, subject)
+				continue
+			}
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)
 		}
 		checks, hasChecks, err := readChecks(repoDir, head)
 		if err != nil {
+			if errors.Is(err, errNoteInvalid) {
+				stalled, stallErr := stalledOn(repoDir, "fixer", key, head)
+				if stallErr != nil {
+					return nil, fmt.Errorf("stalled %s: %w", key, stallErr)
+				}
+				if stalled {
+					continue
+				}
+				subject.Failure = flowNoteError(err)
+				subjects = append(subjects, subject)
+				continue
+			}
 			return nil, fmt.Errorf("checks %s: %w", branch, err)
 		}
-		if !(hasVerdict && v.Verdict == "changes") && !(hasChecks && checks.Status == "fail") {
+		if !fixerNeedsRepair(v, hasVerdict, checks, hasChecks) {
 			continue
 		}
 		attempts, err := readAttempts(repoDir, key)
 		if err != nil {
+			if errors.Is(err, errAttemptsInvalid) {
+				stalled, stallErr := stalledOn(repoDir, "fixer", key, head)
+				if stallErr != nil {
+					return nil, fmt.Errorf("stalled %s: %w", key, stallErr)
+				}
+				if !stalled {
+					subject.Failure = err
+					subjects = append(subjects, subject)
+				}
+				continue
+			}
 			return nil, fmt.Errorf("attempts %s: %w", branch, err)
 		}
 		if attempts >= cfg.Flows.Fixer.Attempts {
@@ -62,45 +104,62 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if stalled {
 			continue
 		}
-		subjects = append(subjects, Subject{
-			Key:      key,
-			Kind:     subjectBranch,
-			Revision: head,
-			Label:    branch,
-			ID:       itemIDFromBranch(branch),
-			Branch:   branch,
-			Head:     head,
-		})
+		subjects = append(subjects, subject)
 	}
 	return subjects, nil
 }
 
 func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it, err := trackerFor(cfg.Repo).Get(s.ID)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
+	out := Outcome{Branch: s.Branch, BaseSHA: s.Revision}
+	if s.Failure != nil {
+		out.Status = "notes_failed"
+		return out, s.Failure
 	}
+	it, err := validatedTrackerItem(trackerFor(cfg.Repo), s.ID)
+	if err != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("item: %w", err)
+	}
+	if err := fetchNotes(repoDir); err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: refresh before repair: %w", flowNoteError(err))
+	}
+	v, hasVerdict, err := readVerdict(repoDir, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: %w", flowNoteError(err))
+	}
+	checks, hasChecks, err := readChecks(repoDir, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: %w", flowNoteError(err))
+	}
+	if !fixerNeedsRepair(v, hasVerdict, checks, hasChecks) {
+		out.Status = "skipped"
+		return out, nil
+	}
+
 	a, err := loadAgent(repoDir, cfg.Flows.Fixer.Agent)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
-	}
-	v, _, err := readVerdict(repoDir, s.Head)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("notes: %w", err)
-	}
-	checks, _, err := readChecks(repoDir, s.Head)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("notes: %w", err)
+		out.Status = "agent_failed"
+		return out, fmt.Errorf("agent: %w", err)
 	}
 	request := fixerRevision(v, checks)
 
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
+		out.Status = "worktree_failed"
+		return out, fmt.Errorf("worktree: %w", err)
 	}
 	defer cleanupWorktree(repoDir, wtDir)
-	out := Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
+	if err := checkSubjectRevision(s, baseSHA); err != nil {
+		return Outcome{
+			Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model,
+			DefSHA: a.DefSHA, Status: "stale",
+		}, err
+	}
+	out.Agent, out.Model, out.DefSHA = a.Name, a.Model, a.DefSHA
 	prompt, err := renderUserPrompt(a, issueData(it, request))
 	if err != nil {
 		out.Status = "prompt_failed"
@@ -130,7 +189,7 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, a.Commit, it); err != nil {
+	if _, err := commitAndPush(repoDir, wtDir, s.Branch, s.Revision, a.Commit, it); err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
@@ -147,6 +206,10 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	}
 	out.Status = "fixed"
 	return out, nil
+}
+
+func fixerNeedsRepair(v verdictNote, hasVerdict bool, c checksNote, hasChecks bool) bool {
+	return hasVerdict && v.Verdict == "changes" || hasChecks && c.Status == "fail"
 }
 
 func fixerRevision(v verdictNote, c checksNote) string {

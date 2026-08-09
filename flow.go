@@ -21,6 +21,12 @@ const (
 	subjectManager    subjectKind = "manager"
 )
 
+var (
+	errSubjectRevisionStale   = errors.New("Subject Revision is stale")
+	errFlowRetryable          = errors.New("Flow operation is retryable")
+	errControlEvidenceInvalid = errors.New("durable control evidence is invalid")
+)
+
 // A Subject is the one thing a Flow acts on in a pass. Key stays stable across
 // revisions of the same work. Revision is the decision stamp for its Kind: an
 // item update stamp, a branch head commit, a retirement's reviewed commit, or
@@ -31,10 +37,18 @@ type Subject struct {
 	Kind     subjectKind
 	Revision string // Kind-specific decision stamp described above
 	Label    string // one line for the operator
-	ID       string // tracker item identity, opaque to the controller
+	ID       string // Tracker Item identity, opaque to the controller
 	Item     Item   // subjectItem or subjectRetirement
 	Branch   string // subjectBranch or subjectRetirement
-	Head     string // branch head commit
+	Failure  error  // malformed durable evidence carried to Act for a bounded brake
+}
+
+func checkSubjectRevision(s Subject, actual string) error {
+	if s.Revision == actual {
+		return nil
+	}
+	return fmt.Errorf("%w: branch %s moved from %s to %s before Act",
+		errSubjectRevisionStale, s.Branch, s.Revision, actual)
 }
 
 // An Outcome is what one Act call did. It becomes one ledger row. Status is a
@@ -196,7 +210,7 @@ func serveSelected(cfg Config, repoDir string, names []string, selected []Flow) 
 	}
 
 	fmt.Printf("forest v%s: %s on %s\n", version, flowNames(live), cfg.Repo)
-	// The updater takes the write gate only between Subject actions.
+	// The updater takes the write gate only between Subject Effects.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -259,7 +273,7 @@ func verifyHostConfig(repoDir string) error {
 // The immediate re-select after productive work exists so a lane can pick up
 // sibling work its own write unblocked. It is only valid for *different* work:
 // if a pass acts on the same subject it just acted on, the lane is not making
-// progress and must wait. Without that rule any action that succeeds while
+// progress and must wait. Without that rule any Effect that succeeds while
 // changing nothing becomes a hot loop, which is what 217 identical verifier
 // passes on one branch were.
 func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32, drainNow <-chan struct{}) {
@@ -397,9 +411,31 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 		} else {
 			var brakeErr error
 			switch {
-			case errors.Is(err, errRetirementStale):
+			case s.Kind == subjectRetirement && errors.Is(err, errSubjectRevisionStale):
+				// A live preparing branch moved. The next retirement pass moves
+				// the durable fact before it retries the branch path.
+			case errors.Is(err, errRetirementStale) || errors.Is(err, errSubjectRevisionStale):
 				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
-			case s.Kind != subjectRetirement:
+			case errors.Is(err, errRetirementEvidenceInvalid) ||
+				errors.Is(err, errAttemptsInvalid) ||
+				errors.Is(err, errControlEvidenceInvalid):
+				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			case errors.Is(err, errRetirementRecoveryHard):
+				brakeErr = recordTerminalStall(repoDir, f.Name(),
+					retirementSubjectKey(s.Branch), s.Revision)
+			case errors.Is(err, errHostMergeUnavailable) &&
+				!errors.Is(err, errHostRevisionMoved):
+				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			case s.Kind == subjectRetirement:
+				switch {
+				case errors.Is(err, errHostMergePending),
+					errors.Is(err, errFlowRetryable),
+					errors.Is(err, errHostRevisionMoved):
+				default:
+					brakeErr = recordStalled(repoDir, f.Name(),
+						retirementAgentSubjectKey(s.Branch), s.Revision)
+				}
+			case !errors.Is(err, errHostMergePending) && !errors.Is(err, errFlowRetryable):
 				brakeErr = recordStalled(repoDir, f.Name(), s.Key, s.Revision)
 			}
 			if brakeErr != nil {

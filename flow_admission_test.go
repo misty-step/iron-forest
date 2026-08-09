@@ -65,7 +65,7 @@ func TestActOnSubjectAdmissionHelper(t *testing.T) {
 	if code := actOnSubject(admissionProcessFlow{
 		name: "builder", ready: ready, release: release,
 	}, Config{Repo: admissionTestRepo}, repo, subject, nil); code != 0 {
-		t.Fatalf("holder action code = %d, want success", code)
+		t.Fatalf("holder Effect code = %d, want success", code)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestActOnSubjectAdmissionClaimsAcrossItemAndBranch(t *testing.T) {
 		name: "verifier", ready: &contenderActed, release: bytes.NewReader([]byte{1}),
 	}, cfg, repoB, branches[0], nil)
 	if code != codeBusy {
-		t.Fatalf("contender action code = %d, want %d", code, codeBusy)
+		t.Fatalf("contender Effect code = %d, want %d", code, codeBusy)
 	}
 	if contenderActed.Len() != 0 {
 		t.Fatal("busy contender entered Act")

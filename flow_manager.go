@@ -47,7 +47,7 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
 	tk := trackerFor(cfg.Repo)
-	items, err := tk.ListOpen()
+	items, err := validatedTrackerItems(tk)
 	if err != nil {
 		return nil, fmt.Errorf("items: %w", err)
 	}
@@ -86,7 +86,7 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 // Act and never in Select.
 func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
 	tk := trackerFor(cfg.Repo)
-	items, err := tk.ListOpen()
+	items, err := validatedTrackerItems(tk)
 	if err != nil {
 		return Outcome{Status: "item_failed"}, fmt.Errorf("items: %w", err)
 	}
@@ -208,7 +208,7 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	}
 	defer release()
 
-	items, err := tk.ListOpen()
+	items, err := validatedTrackerItems(tk)
 	if err != nil {
 		return false, err
 	}

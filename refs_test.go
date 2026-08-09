@@ -2,6 +2,9 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +84,43 @@ func TestBlobRefMissingAndDeleteCompareAndSet(t *testing.T) {
 	sha, content, err = getBlobRef(repo, ref)
 	if err != nil || sha != "" || content != "" {
 		t.Fatalf("deleted ref = %q %q %v, want empty", sha, content, err)
+	}
+}
+
+func TestInternalEvidenceRefsBypassPrePushButSourcePushDoesNot(t *testing.T) {
+	_, repo, sha := notesTestRepository(t)
+	hook := filepath.Join(repo, ".git", "hooks", "pre-push")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const key = "stalled-hook"
+	if count, err := bumpAttempts(repo, key); err != nil || count != 1 {
+		t.Fatalf("bumpAttempts = (%d, %v), want (1, nil)", count, err)
+	}
+	attemptRef := "refs/forest/attempt/" + key
+	if out, err := gitOut(repo, "ls-remote", "origin", attemptRef); err != nil || strings.TrimSpace(out) == "" {
+		t.Fatalf("attempt ref after bump = (%q, %v), want present", out, err)
+	}
+	if err := dropAttempts(repo, key); err != nil {
+		t.Fatalf("dropAttempts = %v, want internal deletion to bypass pre-push", err)
+	}
+	if out, err := gitOut(repo, "ls-remote", "origin", attemptRef); err != nil || strings.TrimSpace(out) != "" {
+		t.Fatalf("attempt ref after drop = (%q, %v), want absent", out, err)
+	}
+
+	if err := writeVerdict(repo, sha, verdictNote{Verdict: "approve", Reviewer: "hook-test"}); err != nil {
+		t.Fatalf("writeVerdict = %v, want notes publication to bypass pre-push", err)
+	}
+	noteRef := "refs/notes/forest/verdict"
+	if out, err := gitOut(repo, "ls-remote", "origin", noteRef); err != nil || strings.TrimSpace(out) == "" {
+		t.Fatalf("notes ref after write = (%q, %v), want present", out, err)
+	}
+
+	if err := git(repo, "push", "origin", "HEAD:refs/heads/source"); err == nil {
+		t.Fatal("source push succeeded despite the failing pre-push hook")
+	}
+	if out, err := gitOut(repo, "ls-remote", "origin", "refs/heads/source"); err != nil || strings.TrimSpace(out) != "" {
+		t.Fatalf("source ref after blocked push = (%q, %v), want absent", out, err)
 	}
 }

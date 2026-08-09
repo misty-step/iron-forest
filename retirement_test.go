@@ -127,7 +127,7 @@ func TestRetirementFactsRejectConflictingItemBranches(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := listRetirements(repo); err == nil || !strings.Contains(err.Error(), "retirement item 9 has conflicting facts") {
+	if _, err := listRetirements(repo); err == nil || !strings.Contains(err.Error(), "retirement Item 9 has conflicting facts") {
 		t.Fatalf("conflicting retirement item list = %v, want named refusal", err)
 	}
 }
@@ -287,6 +287,63 @@ func TestMergeGitPathPinsReviewedRevision(t *testing.T) {
 		}
 	})
 
+	t.Run("post-close cleanup failure remains resumable", func(t *testing.T) {
+		repo, branch, reviewed, masterBefore := newVerifierBranch(t, "forest/9-cleanup")
+		if _, err := bumpAttempts(repo, "branch-"+branch); err != nil {
+			t.Fatal(err)
+		}
+		tk := newMemoryTracker()
+		tk.seed(it)
+		oldTracker := trackerFor
+		trackerFor = func(string) Tracker { return tk }
+		defer func() { trackerFor = oldTracker }()
+		origin := runGitTest(t, repo, "remote", "get-url", "origin")
+		hook := filepath.Join(origin, "hooks", "update")
+		attemptRef := "refs/forest/attempt/branch-" + branch
+		script := "#!/bin/sh\nif [ \"$1\" = '" + attemptRef + "' ]; then exit 1; fi\nexit 0\n"
+		if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := mergeGitPath(cfg, repo, branch, reviewed, it, agent); err == nil ||
+			!strings.Contains(err.Error(), "drop attempt") {
+			t.Fatalf("post-close cleanup failure = %v, want attempt cleanup error", err)
+		}
+		if got := remoteBranchHead(t, repo, "master"); got == masterBefore {
+			t.Fatal("cleanup failure prevented the durable merge")
+		}
+		masterAfter := remoteBranchHead(t, repo, "master")
+		if _, err := tk.Get(it.ID); err == nil {
+			t.Fatal("cleanup failure did not preserve the successful Tracker close")
+		}
+		if facts, err := listRetirements(repo); err != nil || len(facts) != 1 ||
+			facts[0].Record.State != "landed" {
+			t.Fatalf("cleanup failure facts = (%#v, %v), want landed recovery fact", facts, err)
+		}
+		if err := os.Remove(hook); err != nil {
+			t.Fatal(err)
+		}
+		restartRoot := t.TempDir()
+		restarted := filepath.Join(restartRoot, "restart")
+		runGitTest(t, restartRoot, "clone", "-q", origin, restarted)
+		subjects, err := (verifierFlow{}).Select(cfg, restarted)
+		if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+			t.Fatalf("cleanup restart Select = (%#v, %v), want one retirement", subjects, err)
+		}
+		out, err := (verifierFlow{}).Act(cfg, restarted, subjects[0], "cleanup-restart")
+		if err != nil || out.Status != "merged" {
+			t.Fatalf("cleanup restart Act = (%#v, %v), want merged cleanup", out, err)
+		}
+		if got := remoteBranchHead(t, restarted, "master"); got != masterAfter {
+			t.Fatalf("cleanup retry duplicated merge: got %s, want %s", got, masterAfter)
+		}
+		if facts, err := listRetirements(restarted); err != nil || len(facts) != 0 {
+			t.Fatalf("cleanup retry facts = (%#v, %v), want none", facts, err)
+		}
+		if attempts, err := readAttempts(restarted, "branch-"+branch); err != nil || attempts != 0 {
+			t.Fatalf("cleanup retry attempts = (%d, %v), want removed", attempts, err)
+		}
+	})
+
 	t.Run("advanced branch is refused and survives", func(t *testing.T) {
 		repo, branch, reviewed, masterBefore := newVerifierBranch(t, "forest/9-change")
 		// The operator pushes newer, unreviewed work after the Verdict and after
@@ -443,9 +500,7 @@ func TestRetirementTransientFailuresRemainSelectable(t *testing.T) {
 	defer func() { trackerFor = oldTracker }()
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
-	subject := Subject{Key: "branch-" + branch, Kind: subjectRetirement,
-		Revision: reviewed, ID: "14", Branch: branch, Head: reviewed,
-		Item: Item{ID: "14", Title: "transient"}}
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed, ID: "14", Branch: branch, Item: Item{ID: "14", Title: "transient"}}
 	for pass := range stalledRunLimit + 2 {
 		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
 			t.Fatalf("transient retirement pass %d code = %d, want failure", pass+1, code)
@@ -484,9 +539,7 @@ func TestRetirementStaleAdvancedBranchRecordsTerminalBrake(t *testing.T) {
 	defer func() { trackerFor = oldTracker }()
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
-	subject := Subject{Key: "branch-" + branch, Kind: subjectRetirement,
-		Revision: reviewed, ID: "15", Branch: branch, Head: reviewed,
-		Item: Item{ID: "15", Title: "advanced"}}
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed, ID: "15", Branch: branch, Item: Item{ID: "15", Title: "advanced"}}
 	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
 		t.Fatalf("advanced retirement code = %d, want failure", code)
 	}
@@ -495,10 +548,15 @@ func TestRetirementStaleAdvancedBranchRecordsTerminalBrake(t *testing.T) {
 	}
 }
 
-func TestStaleHostRetirementDropFailureRemainsRetryable(t *testing.T) {
+func TestStaleHostRetirementRetainsFact(t *testing.T) {
 	branch := "forest/16-stale-host"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "16", Title: "stale host", UpdatedAt: "u1"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
 	if _, err := recordRetirement(repo, retirementRecord{
 		Branch: branch, Revision: reviewed, ItemID: "16", Transport: "host",
 		Strategy: "squash", Title: "stale host", State: "pending",
@@ -507,13 +565,6 @@ func TestStaleHostRetirementDropFailureRemainsRetryable(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeApprovalNotes(t, repo, reviewed, agent)
-	origin := runGitTest(t, repo, "remote", "get-url", "origin")
-	hook := filepath.Join(origin, "hooks", "update")
-	script := "#!/bin/sh\ncase \"$1\" in\n  refs/forest/retirement/*) exit 1 ;;\nesac\nexit 0\n"
-	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	projectionCommand = func(args ...string) ([]byte, error) {
@@ -527,31 +578,58 @@ func TestStaleHostRetirementDropFailureRemainsRetryable(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
-	subject := Subject{
-		Key: "branch-" + branch, Kind: subjectRetirement, Revision: reviewed,
-		ID: "16", Branch: branch, Head: reviewed, Item: Item{ID: "16", Title: "stale host"},
-	}
-	out, err := (verifierFlow{}).Act(cfg, repo, subject, "stale-drop-rejected")
-	if err == nil || errors.Is(err, errRetirementStale) || out.Status != "merge_failed" {
-		t.Fatalf("stale Host drop rejection = (status=%q, err=%v), want retryable failure", out.Status, err)
-	}
-	if stalled, stallErr := stalledOn(repo, "verifier", subject.Key, reviewed); stallErr != nil || stalled {
-		t.Fatalf("stale Host drop rejection brake = (%v, %v), want no terminal brake", stalled, stallErr)
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement, Revision: reviewed,
+		ID: "16", Branch: branch, Item: Item{ID: "16", Title: "stale host"}}
+	out, err := (verifierFlow{}).Act(cfg, repo, subject, "stale-host")
+	if !errors.Is(err, errHostMergeUnavailable) || out.Status != "merge_failed" {
+		t.Fatalf("stale Host recovery = (status=%q, err=%v), want retained failure", out.Status, err)
 	}
 	if facts, err := listRetirements(repo); err != nil || len(facts) != 1 {
-		t.Fatalf("stale Host fact after rejected drop = (%#v, %v), want retained intent", facts, err)
+		t.Fatalf("stale Host fact = (%#v, %v), want retained intent", facts, err)
 	}
-	if err := os.Remove(hook); err != nil {
+	if candidates, err := (builderFlow{}).Select(cfg, repo); err != nil || len(candidates) != 0 {
+		t.Fatalf("stale Host fact re-exposed Builder work = (%#v, %v)", candidates, err)
+	}
+}
+
+func TestDropRetirementAcceptsAlreadyRemovedFact(t *testing.T) {
+	repo := newRefGitRepo(t)
+	fact, err := recordRetirement(repo, retirementRecord{
+		Branch: "forest/42-clean", Revision: strings.Repeat("a", 40),
+		ItemID: "42", Transport: "git", Strategy: "squash",
+		Title: "clean", State: "landed",
+		Agent: "verifier", Model: "model", DefSHA: strings.Repeat("b", 16),
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := deleteRef(repo, fact.Ref, fact.SHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := dropRetirement(repo, fact); err != nil {
+		t.Fatalf("repeat retirement cleanup = %v, want idempotent success", err)
+	}
+}
 
-	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
-		t.Fatalf("stale Host retry code = %d, want failure", code)
+func TestRepeatedHostObservationPreservesLandedAttribution(t *testing.T) {
+	repo := newRefGitRepo(t)
+	record := retirementRecord{
+		Branch: "forest/44-landed", Revision: strings.Repeat("a", 40),
+		ItemID: "44", Transport: "host", Strategy: "squash",
+		Title: "landed", State: "landed",
+		Agent: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("b", 16),
 	}
-	if facts, err := listRetirements(repo); err != nil || len(facts) != 0 {
-		t.Fatalf("stale Host fact after successful drop = (%#v, %v), want none", facts, err)
+	fact, err := recordRetirement(repo, record)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if stalled, stallErr := stalledOn(repo, "verifier", subject.Key, reviewed); stallErr != nil || !stalled {
-		t.Fatalf("stale Host retry brake = (%v, %v), want terminal stale classification", stalled, stallErr)
+	got, err := recordObservedHostRetirement(
+		Config{Flows: Flows{Verifier: VerifierFlowCfg{Merge: "squash"}}},
+		repo, record.Branch, record.Revision, Item{ID: record.ItemID, Title: record.Title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SHA != fact.SHA || got.Record != record {
+		t.Fatalf("repeated Host observation = %#v, want unchanged landed fact %#v", got, fact)
 	}
 }

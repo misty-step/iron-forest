@@ -28,7 +28,7 @@ func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 		Notes:    "first decision",
 		Reviewer: "reviewer-a",
 		Model:    "model-a",
-		DefSHA:   "def-a",
+		DefSHA:   strings.Repeat("a", 16),
 		RunID:    "run-a",
 	}
 	if err := writeVerdict(work, sha, first); err != nil {
@@ -105,6 +105,58 @@ func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 	}
 }
 
+func TestDurableNoteReadersRejectInvalidSemantics(t *testing.T) {
+	tests := []struct {
+		name    string
+		ref     string
+		body    string
+		verdict bool
+	}{
+		{
+			name:    "Verdict decision",
+			ref:     verdictNotesRef,
+			body:    `{"verdict":"bogus","reviewer":"reviewer","model":"model","def_sha":"aaaaaaaaaaaaaaaa"}`,
+			verdict: true,
+		},
+		{
+			name:    "Verdict attribution",
+			ref:     verdictNotesRef,
+			body:    `{"verdict":"approve","reviewer":"","model":"model","def_sha":"aaaaaaaaaaaaaaaa"}`,
+			verdict: true,
+		},
+		{
+			name:    "Verdict definition",
+			ref:     verdictNotesRef,
+			body:    `{"verdict":"approve","reviewer":"reviewer","model":"model","def_sha":"not-a-digest"}`,
+			verdict: true,
+		},
+		{
+			name: "Checks status",
+			ref:  checksNotesRef,
+			body: `{"status":"unknown"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, work, sha := notesTestRepository(t)
+			runGitTest(t, work, "notes", "--ref="+tc.ref, "add", "-m", tc.body, sha)
+			runGitTest(t, work, "push", "-q", "origin", notesRef(tc.ref))
+			if err := fetchNotes(work); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if tc.verdict {
+				_, _, err = readVerdict(work, sha)
+			} else {
+				_, _, err = readChecks(work, sha)
+			}
+			if !errors.Is(err, errNoteInvalid) {
+				t.Fatalf("invalid durable %s = %v, want errNoteInvalid", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestFetchNotesLockHelper(t *testing.T) {
 	repo := os.Getenv("FOREST_NOTES_LOCK_HELPER")
 	if repo == "" {
@@ -140,7 +192,8 @@ func TestFetchNotesConcurrentReconcile(t *testing.T) {
 	runGitTest(t, source, "config", "user.email", "notes-source@example.com")
 
 	if err := writeVerdict(source, sha, verdictNote{
-		Verdict: "approve", Notes: "remote verdict", Reviewer: "reviewer-a", RunID: "run-verdict",
+		Verdict: "approve", Notes: "remote verdict", Reviewer: "reviewer-a",
+		Model: "model-a", DefSHA: strings.Repeat("a", 16), RunID: "run-verdict",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -320,8 +373,8 @@ func TestNotesAttemptsCASRetriesAreBounded(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if err == nil || !errors.Is(err, errRefMoved) {
-			t.Fatalf("bounded CAS result = %v, want ref-moved error", err)
+		if err == nil || !errors.Is(err, errFlowRetryable) {
+			t.Fatalf("bounded CAS result = %v, want retryable error", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("bumpAttempts exceeded its retry bound")
@@ -426,8 +479,10 @@ func TestConcurrentCloneNoteWritersConvergeOnRemoteWinner(t *testing.T) {
 	second := filepath.Join(t.TempDir(), "second")
 	runGitTest(t, "", "clone", remote, second)
 	notes := []verdictNote{
-		{Verdict: "approve", Notes: "first", Reviewer: "reviewer-a", RunID: "run-a"},
-		{Verdict: "reject", Notes: "second", Reviewer: "reviewer-b", RunID: "run-b"},
+		{Verdict: "approve", Notes: "first", Reviewer: "reviewer-a",
+			Model: "model-a", DefSHA: strings.Repeat("a", 16), RunID: "run-a"},
+		{Verdict: "changes", Notes: "second", Reviewer: "reviewer-b",
+			Model: "model-b", DefSHA: strings.Repeat("b", 16), RunID: "run-b"},
 	}
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -472,7 +527,8 @@ func TestConcurrentCloneNoteWritersConvergeOnRemoteWinner(t *testing.T) {
 func TestNotesPreExistingLocalSecretIsDiscarded(t *testing.T) {
 	remote, work, sha := notesTestRepository(t)
 	local := verdictNote{
-		Verdict: "approve", Notes: "token sk-live-local-only-secret", Reviewer: "reviewer-a", RunID: "run-local",
+		Verdict: "approve", Notes: "token sk-live-local-only-secret", Reviewer: "reviewer-a",
+		Model: "model-a", DefSHA: strings.Repeat("a", 16), RunID: "run-local",
 	}
 	body, err := json.Marshal(local)
 	if err != nil {
@@ -488,7 +544,10 @@ func TestNotesPreExistingLocalSecretIsDiscarded(t *testing.T) {
 	otherSHA := runGitTest(t, work, "rev-parse", "HEAD")
 	runGitTest(t, work, "notes", "--ref=forest/verdict", "add", "-m", string(body), otherSHA)
 
-	proposed := verdictNote{Verdict: "reject", Notes: "proposed", Reviewer: "reviewer-b", RunID: "run-b"}
+	proposed := verdictNote{
+		Verdict: "changes", Notes: "proposed", Reviewer: "reviewer-b",
+		Model: "model-b", DefSHA: strings.Repeat("b", 16), RunID: "run-b",
+	}
 	if err := writeVerdict(work, sha, proposed); err != nil {
 		t.Fatalf("writeVerdict after local-only secret: %v", err)
 	}

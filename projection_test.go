@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -14,6 +15,8 @@ func hasArgumentPair(args []string, key, value string) bool {
 	}
 	return false
 }
+
+const projectionTestHead = "0123456789abcdef0123456789abcdef01234567"
 
 func mergedProjectionPage(body string) []byte {
 	return []byte("[[" + body + "]]")
@@ -29,10 +32,10 @@ func TestProjectionDisabledPerformsNoHostCall(t *testing.T) {
 	}
 
 	cfg := Config{Repo: "owner/repo"}
-	if got, _, err := projectBranch(cfg, Item{ID: "7", Title: "change"}, "forest/7-change", "body", ""); err != nil || got != "" {
+	if got, _, err := projectBranch(cfg, "", Item{ID: "7", Title: "change"}, "forest/7-change", "body", ""); err != nil || got != "" {
 		t.Fatalf("disabled projectBranch = (%q, %v), want (empty, nil)", got, err)
 	}
-	if err := projectVerdict(cfg, "forest/7-change", verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
+	if err := projectVerdict(cfg, "forest/7-change", projectionTestHead, verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
 		t.Fatalf("disabled projectVerdict: %v", err)
 	}
 	if calls != 0 {
@@ -48,11 +51,11 @@ func TestProjectBranchReusesExistingOpenRequest(t *testing.T) {
 	projectionCommand = func(args ...string) ([]byte, error) {
 		calls++
 		listArgs = append([]string(nil), args...)
-		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + projectionTestHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
 	}
 
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	got, _, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", "")
+	got, _, err := projectBranch(cfg, "", Item{Title: "change"}, "forest/7-change", "body", projectionTestHead)
 	if err != nil {
 		t.Fatalf("projectBranch: %v", err)
 	}
@@ -79,15 +82,15 @@ func TestProjectBranchRejectsOpenRequestWithoutExpectedHead(t *testing.T) {
 	}
 	const reviewed = "0123456789abcdef0123456789abcdef01234567"
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	if _, _, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", reviewed); !errors.Is(err, errHostMergeUnavailable) {
+	if _, _, err := projectBranch(cfg, "", Item{Title: "change"}, "forest/7-change", "body", reviewed); !errors.Is(err, errHostMergeUnavailable) {
 		t.Fatalf("open Projection without head = %v, want exact-Revision refusal", err)
 	}
 }
 
 func TestProjectBranchRejectsIncompleteOpenRequestIdentity(t *testing.T) {
 	tests := map[string]string{
-		"number": `[{"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`,
-		"URL":    `[{"number":23,"headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`,
+		"number": `[{"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + projectionTestHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`,
+		"URL":    `[{"number":23,"headRefOid":"` + projectionTestHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`,
 	}
 	for name, response := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -97,8 +100,50 @@ func TestProjectBranchRejectsIncompleteOpenRequestIdentity(t *testing.T) {
 				return []byte(response), nil
 			}
 			cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-			if _, _, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", ""); !errors.Is(err, errHostMergeUnavailable) {
+			if _, _, err := projectBranch(cfg, "", Item{Title: "change"}, "forest/7-change", "body", projectionTestHead); !errors.Is(err, errHostMergeUnavailable) {
 				t.Fatalf("open Projection without %s = %v, want refusal", name, err)
+			}
+		})
+	}
+}
+
+func TestProjectionRejectsMissingCrossRepositoryIdentity(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return []byte(`[{
+			"number":23,
+			"url":"https://github.com/owner/repo/pull/23",
+			"headRefOid":"` + projectionTestHead + `",
+			"headRefName":"forest/7-change",
+			"baseRefName":"master"
+		}]`), nil
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if _, _, err := projectBranch(cfg, "", Item{Title: "change"}, "forest/7-change", "body", projectionTestHead); !errors.Is(err, errHostMergeUnavailable) {
+		t.Fatalf("Projection without cross-repository identity = %v, want refusal", err)
+	}
+}
+
+func TestProjectionRejectsMalformedHeadRefOID(t *testing.T) {
+	tests := map[string]string{
+		"empty":   "",
+		"short":   strings.Repeat("a", 39),
+		"long":    strings.Repeat("a", 41),
+		"non-hex": "g" + strings.Repeat("a", 39),
+		"zero":    strings.Repeat("0", 40),
+	}
+	for name, oid := range tests {
+		t.Run(name, func(t *testing.T) {
+			old := projectionCommand
+			defer func() { projectionCommand = old }()
+			projectionCommand = func(args ...string) ([]byte, error) {
+				return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` +
+					oid + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+			}
+			cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+			if _, err := projectionPRs(cfg, "forest/7-change"); !errors.Is(err, errHostMergeUnavailable) {
+				t.Fatalf("malformed HeadRefOID %q = %v, want unavailable", oid, err)
 			}
 		})
 	}
@@ -138,12 +183,12 @@ func TestProjectBranchRecognizesAlreadyMergedReviewedHead(t *testing.T) {
 		}
 	}
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true, MergeViaHost: true}}
-	url, merged, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", reviewed)
+	url, merged, err := projectBranch(cfg, "", Item{Title: "change"}, "forest/7-change", "body", reviewed)
 	if err != nil || !merged || url != "https://github.com/owner/repo/pull/23" {
 		t.Fatalf("merged Projection recovery = (%q, %v, %v)", url, merged, err)
 	}
 	cfg.Projection.MergeViaHost = false
-	url, merged, err = projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", reviewed)
+	url, merged, err = projectBranch(cfg, "", Item{Title: "change"}, "forest/7-change", "body", reviewed)
 	if err != nil || merged || url != "https://github.com/owner/repo/pull/23" {
 		t.Fatalf("one-way Projection recovery = (%q, %v, %v)", url, merged, err)
 	}
@@ -153,15 +198,24 @@ func TestProjectBranchRecognizesAlreadyMergedReviewedHead(t *testing.T) {
 }
 
 func TestProjectBranchCreatesMissingRequest(t *testing.T) {
+	const branch = "forest/7-change"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
 	var createArgs []string
+	created := false
 	projectionCommand = func(args ...string) ([]byte, error) {
-		switch args[1] {
-		case "list":
+		switch {
+		case args[0] == "pr" && args[1] == "list" && !created:
 			return []byte(`[]`), nil
-		case "create":
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":24,"url":"https://github.com/owner/repo/pull/24","headRefOid":"` +
+				reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
 			createArgs = append([]string(nil), args...)
+			created = true
 			return []byte("https://github.com/owner/repo/pull/24\n"), nil
 		default:
 			return nil, errors.New("unexpected host command")
@@ -169,13 +223,13 @@ func TestProjectBranchCreatesMissingRequest(t *testing.T) {
 	}
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
 	const secret = "AKIA1234567890ABCDEF"
-	got, _, err := projectBranch(cfg, Item{Title: "change " + secret},
-		"forest/7-change", "body "+secret, "")
+	got, _, err := projectBranch(cfg, repo, Item{Title: "change " + secret},
+		branch, "body "+secret, reviewed)
 	if err != nil || got != "https://github.com/owner/repo/pull/24" {
 		t.Fatalf("projectBranch create = (%q, %v)", got, err)
 	}
 	if !hasArgumentPair(createArgs, "--base", "master") ||
-		!hasArgumentPair(createArgs, "--head", "forest/7-change") {
+		!hasArgumentPair(createArgs, "--head", branch) {
 		t.Fatalf("projection create args = %v, want master target and exact source", createArgs)
 	}
 	if !hasArgumentPair(createArgs, "--title", "forest: change "+secretRedacted) ||
@@ -184,56 +238,284 @@ func TestProjectBranchCreatesMissingRequest(t *testing.T) {
 	}
 }
 
-func TestProjectVerdictCommentContainsDecisionAndChecks(t *testing.T) {
+func TestProjectBranchRejectsMoveBeforeCreate(t *testing.T) {
+	const branch = "forest/36-create-race"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
-	var commentArgs []string
+	createCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
-		switch args[1] {
-		case "list":
-			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-		case "comment":
-			commentArgs = append([]string(nil), args...)
+		switch {
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[]`), nil
+		case args[0] == "api":
+			rebaseTestWriteFile(t, repo+"/moved.txt", "moved\n")
+			runGitTest(t, repo, "add", "moved.txt")
+			runGitTest(t, repo, "commit", "-q", "-m", "move before create")
+			runGitTest(t, repo, "push", "-q", "origin", branch)
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			createCalls++
 			return nil, nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if _, _, err := projectBranch(cfg, repo, Item{Title: "change"}, branch, "body", reviewed); !errors.Is(err, errHostMergeUnavailable) {
+		t.Fatalf("Projection create after branch move = %v, want exact-Revision refusal", err)
+	}
+	if createCalls != 0 {
+		t.Fatalf("branch move issued %d stale Projection creates", createCalls)
+	}
+}
+
+func TestProjectBranchRejectsMoveDuringCreate(t *testing.T) {
+	const branch = "forest/37-create-interleave"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	created := false
+	advanced := ""
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "pr" && args[1] == "list" && !created:
+			return []byte(`[]`), nil
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":37,"url":"https://github.com/owner/repo/pull/37","headRefOid":"` +
+				advanced + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			rebaseTestWriteFile(t, repo+"/moved-during-create.txt", "moved\n")
+			runGitTest(t, repo, "add", "moved-during-create.txt")
+			runGitTest(t, repo, "commit", "-q", "-m", "move during create")
+			runGitTest(t, repo, "push", "-q", "origin", branch)
+			advanced = remoteBranchHead(t, repo, branch)
+			created = true
+			return []byte("https://github.com/owner/repo/pull/37"), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if _, _, err := projectBranch(cfg, repo, Item{Title: "change"}, branch, "body", reviewed); !errors.Is(err, errHostMergeUnavailable) {
+		t.Fatalf("Projection create interleave = %v, want post-create Revision refusal", err)
+	}
+	if !created || advanced == reviewed {
+		t.Fatal("create interleave did not advance the branch")
+	}
+}
+
+func TestProjectBranchHardBrakesMalformedPostCreateReconciliation(t *testing.T) {
+	const branch = "forest/38-malformed-reconciliation"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	created := false
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "pr" && args[1] == "list" && !created:
+			return []byte(`[]`), nil
+		case args[0] == "api":
+			return []byte(`[[]]`), nil
+		case args[0] == "pr" && args[1] == "create":
+			created = true
+			return []byte("https://github.com/owner/repo/pull/38"), nil
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":38,"url":"https://github.com/owner/repo/pull/38","headRefOid":"not-an-oid","headRefName":"` +
+				branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
 		default:
 			return nil, errors.New("unexpected host command")
 		}
 	}
 
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	err := projectVerdict(cfg, "forest/7-change", verdictNote{Verdict: "changes", Notes: "repair the parser"}, checksNote{
+	if _, _, err := projectBranch(cfg, repo, Item{Title: "change"}, branch, "body", reviewed); !errors.Is(err, errHostMergeUnavailable) || errors.Is(err, errHostMergePending) {
+		t.Fatalf("malformed post-create reconciliation = %v, want unavailable hard brake", err)
+	}
+	if !created {
+		t.Fatal("Projection create was not attempted")
+	}
+}
+
+func TestProjectVerdictCommentContainsDecisionAndChecks(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	var commentArgs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "list" {
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + projectionTestHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		if args[0] == "api" && hasArgumentPair(args, "--method", "GET") {
+			return []byte(`[[]]`), nil
+		}
+		if args[0] == "api" && hasArgumentPair(args, "--method", "POST") {
+			commentArgs = append([]string(nil), args...)
+			return nil, nil
+		}
+		return nil, errors.New("unexpected host command")
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	err := projectVerdict(cfg, "forest/7-change", projectionTestHead, verdictNote{Verdict: "changes", Notes: "repair the parser"}, checksNote{
 		Status:  "fail",
 		Results: []checkResult{{Name: "test", Code: 1, Seconds: 2.5, Output: "assertion failed"}},
 	})
 	if err != nil {
 		t.Fatalf("projectVerdict: %v", err)
 	}
+	if !hasArgumentPair(commentArgs, "--field", "event=COMMENT") ||
+		!hasArgumentPair(commentArgs, "--field", "commit_id="+projectionTestHead) {
+		t.Errorf("comment args do not bind COMMENT review to Revision %s: %v", projectionTestHead, commentArgs)
+	}
 	body := strings.Join(commentArgs, "\n")
-	for _, want := range []string{"changes", "repair the parser", "fail", "test", "assertion failed"} {
+	for _, want := range []string{
+		projectionTestHead, "changes", "repair the parser", "fail", "test", "assertion failed",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("comment body missing %q: %s", want, body)
 		}
 	}
 }
-func TestProjectChecksRedactsSecretShapedCheckName(t *testing.T) {
+
+func TestProjectCommentReconcilesAcceptedResponseLoss(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
-	var commentArgs []string
+	accepted := false
+	postCalls := 0
+	publishedBody := ""
 	projectionCommand = func(args ...string) ([]byte, error) {
-		switch args[1] {
-		case "list":
-			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-		case "comment":
-			commentArgs = append([]string(nil), args...)
-			return nil, nil
+		switch {
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` +
+				projectionTestHead +
+				`","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "GET"):
+			if !accepted {
+				return []byte(`[[]]`), nil
+			}
+			return json.Marshal([][]projectionReview{{{
+				Body: publishedBody, CommitID: projectionTestHead,
+			}}})
+		case args[0] == "api" && hasArgumentPair(args, "--method", "POST"):
+			postCalls++
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--field" && strings.HasPrefix(args[i+1], "body=") {
+					publishedBody = strings.TrimPrefix(args[i+1], "body=")
+				}
+			}
+			accepted = true
+			return nil, errors.New("response lost after acceptance")
 		default:
 			return nil, errors.New("unexpected host command")
 		}
 	}
 
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	for range 2 {
+		if err := projectVerdict(cfg, "forest/7-change", projectionTestHead,
+			verdictNote{Verdict: "changes", Notes: "repair"},
+			checksNote{Status: "pass"}); err != nil {
+			t.Fatalf("reconciled Projection comment: %v", err)
+		}
+	}
+	if postCalls != 1 {
+		t.Fatalf("Projection comment posts = %d, want one", postCalls)
+	}
+}
+
+func TestProjectCommentHardBrakesMalformedReconciliation(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	reads := 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` +
+				projectionTestHead +
+				`","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "GET"):
+			reads++
+			if reads == 1 {
+				return []byte(`[[]]`), nil
+			}
+			return []byte(`malformed`), nil
+		case args[0] == "api" && hasArgumentPair(args, "--method", "POST"):
+			return nil, errors.New("response lost")
+		default:
+			return nil, errors.New("unexpected host command")
+		}
+	}
+
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	err := projectVerdict(cfg, "forest/7-change", projectionTestHead,
+		verdictNote{Verdict: "approve"}, checksNote{Status: "pass"})
+	if !errors.Is(err, errHostMergeUnavailable) || errors.Is(err, errHostMergePending) {
+		t.Fatalf("malformed reconciliation error = %v, want unavailable hard brake", err)
+	}
+}
+
+func TestProjectionRejectsNullOrNonArrayResponses(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(Config) error
+	}{
+		{name: "open", call: func(cfg Config) error {
+			_, err := projectionPRs(cfg, "forest/7-change")
+			return err
+		}},
+		{name: "merged", call: func(cfg Config) error {
+			_, err := mergedProjectionPRs(cfg, "forest/7-change")
+			return err
+		}},
+		{name: "comments", call: func(cfg Config) error {
+			_, err := projectionCommentExists(cfg, 23, projectionTestHead, "body")
+			return err
+		}},
+	}
+	responses := map[string]string{
+		"null":      "null",
+		"object":    `{"items":[]}`,
+		"null-page": `[null]`,
+	}
+	for responseName, response := range responses {
+		for _, tc := range cases {
+			t.Run(responseName+"/"+tc.name, func(t *testing.T) {
+				old := projectionCommand
+				defer func() { projectionCommand = old }()
+				projectionCommand = func(args ...string) ([]byte, error) {
+					return []byte(response), nil
+				}
+				cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+				if err := tc.call(cfg); !errors.Is(err, errHostMergeUnavailable) {
+					t.Fatalf("%s %s response = %v, want unavailable", tc.name, responseName, err)
+				}
+			})
+		}
+	}
+}
+
+func TestProjectChecksRedactsSecretShapedCheckName(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	var commentArgs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "pr" && args[1] == "list" {
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + projectionTestHead + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		if args[0] == "api" && hasArgumentPair(args, "--method", "GET") {
+			return []byte(`[[]]`), nil
+		}
+		if args[0] == "api" && hasArgumentPair(args, "--method", "POST") {
+			commentArgs = append([]string(nil), args...)
+			return nil, nil
+		}
+		return nil, errors.New("unexpected host command")
+	}
+
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	err := projectChecks(cfg, "forest/7-change", checksNote{
+	err := projectChecks(cfg, "forest/7-change", projectionTestHead, checksNote{
 		Status:  "fail",
 		Results: []checkResult{{Name: "lint-" + secret, Code: 1, Output: "failed"}},
 	})
@@ -251,14 +533,14 @@ func TestProjectVerdictMissingRequestIsNoop(t *testing.T) {
 	defer func() { projectionCommand = old }()
 	comments := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
-		if args[1] == "comment" {
+		if args[0] == "api" {
 			comments++
 		}
 		return []byte(`[]`), nil
 	}
 
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
-	if err := projectVerdict(cfg, "forest/7-change", verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
+	if err := projectVerdict(cfg, "forest/7-change", projectionTestHead, verdictNote{Verdict: "approve"}, checksNote{Status: "pass"}); err != nil {
 		t.Fatalf("missing pull request: %v", err)
 	}
 	if comments != 0 {
@@ -272,15 +554,15 @@ func TestProjectionRejectsForeignSource(t *testing.T) {
 		merged string
 	}{
 		"cross repository": {
-			open:   `[{"number":23,"url":"https://github.com/fork/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":true}]`,
+			open:   `[{"number":23,"url":"https://github.com/fork/repo/pull/23","headRefOid":"0123456789abcdef0123456789abcdef01234567","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":true}]`,
 			merged: `[[{"number":23,"html_url":"https://github.com/fork/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"0123456789abcdef0123456789abcdef01234567","ref":"forest/7-change","repo":{"full_name":"fork/repo"}},"base":{"ref":"master"}}]]`,
 		},
 		"wrong branch": {
-			open:   `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/8-change","baseRefName":"master","isCrossRepository":false}]`,
+			open:   `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"0123456789abcdef0123456789abcdef01234567","headRefName":"forest/8-change","baseRefName":"master","isCrossRepository":false}]`,
 			merged: `[[{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"0123456789abcdef0123456789abcdef01234567","ref":"forest/8-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}]]`,
 		},
 		"wrong target": {
-			open:   `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"release","isCrossRepository":false}]`,
+			open:   `[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"0123456789abcdef0123456789abcdef01234567","headRefName":"forest/7-change","baseRefName":"release","isCrossRepository":false}]`,
 			merged: `[[{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"0123456789abcdef0123456789abcdef01234567","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"release"}}]]`,
 		},
 	}
@@ -312,8 +594,8 @@ func TestOpenProjectionRejectsMultipleRequests(t *testing.T) {
 	defer func() { projectionCommand = old }()
 	projectionCommand = func(args ...string) ([]byte, error) {
 		return []byte(`[
-			{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false},
-			{"number":24,"url":"https://github.com/owner/repo/pull/24","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}
+			{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"0123456789abcdef0123456789abcdef01234567","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false},
+			{"number":24,"url":"https://github.com/owner/repo/pull/24","headRefOid":"0123456789abcdef0123456789abcdef01234567","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}
 		]`), nil
 	}
 	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
@@ -384,7 +666,7 @@ func TestProjectMergeDisabledReturnsError(t *testing.T) {
 		return nil, nil
 	}
 
-	err := projectMerge(Config{Repo: "owner/repo"}, "forest/7-change", "squash", "")
+	err := projectMerge(Config{Repo: "owner/repo"}, "forest/7-change", "squash", projectionTestHead)
 	if err == nil {
 		t.Fatal("disabled projectMerge returned nil")
 	}
@@ -439,11 +721,6 @@ func TestProjectMergePinsExpectedHead(t *testing.T) {
 		t.Fatalf("projectMerge args %v do not pin the reviewed head %s", args, reviewed)
 	}
 
-	for _, a := range run(t, "") {
-		if a == "--match-head-commit" {
-			t.Fatalf("projectMerge pinned a merge with an empty expected head: %v", args)
-		}
-	}
 }
 
 func TestProjectMergeRecoversAnAlreadyMergedReviewedHead(t *testing.T) {

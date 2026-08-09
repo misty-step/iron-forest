@@ -137,12 +137,9 @@ func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, int, error) {
 func (c *coreImpl) Trace(runID string) ([]byte, error) {
 	runsDir := filepath.Join(c.repoDir, WorkspaceDir, "runs")
 
-	// Verifier and fixer run ids embed the branch ("branch-forest/<branch>"),
-	// and filepath.Join in those flows nests the trace below a subdirectory of
-	// the runs dir (runs/<timestamp>-branch-forest/<branch>.jsonl). Reproduce
-	// the writer's join to reach that nested path, reading the name literally
-	// so a glob metacharacter in an item id never matches a sibling. Refuse any
-	// id whose joined path escapes the runs dir.
+	// Current run ids are flat path segments. Older verifier and fixer traces can
+	// contain branch-shaped ids with slashes, so Trace keeps literal nested-path
+	// compatibility. Refuse any id whose joined path escapes the runs directory.
 	for _, suffix := range []string{".builder.jsonl", ".verifier.jsonl", ".fixer.jsonl", ".manager.jsonl"} {
 		p := filepath.Join(runsDir, filepath.FromSlash(runID)+suffix)
 		rel, err := filepath.Rel(runsDir, p)

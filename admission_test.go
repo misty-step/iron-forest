@@ -668,17 +668,17 @@ func TestActOnSubjectAdmissionBusyWritesNoLedger(t *testing.T) {
 
 	code := actOnSubject(failingFlow{}, Config{Repo: admissionTestRepo}, repo, s, nil)
 	if code != codeBusy {
-		t.Fatalf("busy action code = %d, want %d", code, codeBusy)
+		t.Fatalf("busy Effect code = %d, want %d", code, codeBusy)
 	}
 	rows, _, err := loadLedger(ledgerPath(repo))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 0 {
-		t.Fatalf("busy action wrote %d Ledger rows, want none", len(rows))
+		t.Fatalf("busy Effect wrote %d Ledger rows, want none", len(rows))
 	}
 	if _, err := os.Stat(ledgerPath(repo)); !os.IsNotExist(err) {
-		t.Fatalf("busy action created Ledger at %s: %v", ledgerPath(repo), err)
+		t.Fatalf("busy Effect created Ledger at %s: %v", ledgerPath(repo), err)
 	}
 
 	release()
@@ -686,7 +686,7 @@ func TestActOnSubjectAdmissionBusyWritesNoLedger(t *testing.T) {
 		name: "builder", ready: io.Discard, release: bytes.NewReader([]byte{1}),
 	}, Config{Repo: admissionTestRepo}, repo, s, nil)
 	if code != 0 {
-		t.Fatalf("action after release code = %d, want success", code)
+		t.Fatalf("Effect after release code = %d, want success", code)
 	}
 	rows, _, err = loadLedger(ledgerPath(repo))
 	if err != nil || len(rows) != 1 {

@@ -131,16 +131,23 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.BaseSHA = baseSHA
 		return out, fmt.Errorf("blocked: report carries credential-shaped prose; no branch or pull request published")
 	}
-	if err := commitAndPush(repoDir, wtDir, branch, "", a.Commit, it); err != nil {
+	publishedHead, err := commitAndPush(repoDir, wtDir, branch, "", a.Commit, it)
+	if err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
+	}
+	if cfg.Projection.MergeViaHost {
+		if _, err := recordPreparingHostRetirement(cfg, repoDir, branch, publishedHead, it); err != nil {
+			out.Status = "projection_failed"
+			return out, fmt.Errorf("projection preparation: %w", err)
+		}
 	}
 	body := builderProjectionBody(it, rep, changed)
 	if err := trackerFor(cfg.Repo).Comment(it.ID, fmt.Sprintf("Built branch `%s`.", branch)); err != nil {
 		out.Status = "comment_failed"
 		return out, fmt.Errorf("comment: %w", err)
 	}
-	url, _, err := projectBranch(cfg, it, branch, body, "")
+	url, _, err := projectBranch(cfg, repoDir, it, branch, body, publishedHead)
 	if err != nil {
 		out.Status = "projection_failed"
 		return out, fmt.Errorf("projection: %w", err)

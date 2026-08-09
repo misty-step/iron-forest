@@ -24,14 +24,28 @@ func (failingFlow) Act(Config, string, Subject, string) (Outcome, error) {
 	return Outcome{TokIn: 7}, errAgentCrash
 }
 
-type terminalStaleFlow struct{}
+type terminalStaleFlow struct{ name string }
 
-func (terminalStaleFlow) Name() string                             { return "verifier" }
+func (f terminalStaleFlow) Name() string                           { return f.name }
 func (terminalStaleFlow) Select(Config, string) ([]Subject, error) { return nil, nil }
 func (terminalStaleFlow) Interval(Config) time.Duration            { return 0 }
 func (terminalStaleFlow) Enabled(Config) bool                      { return true }
 func (terminalStaleFlow) Act(Config, string, Subject, string) (Outcome, error) {
-	return Outcome{Status: "stale"}, errRetirementStale
+	return Outcome{Status: "stale"}, errSubjectRevisionStale
+}
+
+type classifiedFailureFlow struct {
+	name   string
+	status string
+	err    error
+}
+
+func (f classifiedFailureFlow) Name() string                           { return f.name }
+func (classifiedFailureFlow) Select(Config, string) ([]Subject, error) { return nil, nil }
+func (classifiedFailureFlow) Interval(Config) time.Duration            { return 0 }
+func (classifiedFailureFlow) Enabled(Config) bool                      { return true }
+func (f classifiedFailureFlow) Act(Config, string, Subject, string) (Outcome, error) {
+	return Outcome{Status: f.status}, f.err
 }
 
 type operatorRedactionFlow struct{ secret string }
@@ -222,20 +236,72 @@ func TestAgentFailureStillCounts(t *testing.T) {
 	}
 }
 
-func TestActOnSubjectImmediatelyBrakesStaleBranchRetirement(t *testing.T) {
+func TestRetryableNoteTransportNeverBrakesRevision(t *testing.T) {
 	_, repo, _ := notesTestRepository(t)
 	revision := strings.Repeat("a", 40)
 	subject := Subject{
-		Key: "branch-forest/17-stale", Kind: subjectBranch, Revision: revision,
-		ID: "17", Branch: "forest/17-stale",
+		Key: "branch-forest/19-notes", Kind: subjectBranch, Revision: revision,
+		ID: "19", Branch: "forest/19-notes",
 	}
-	if code := actOnSubject(terminalStaleFlow{}, Config{}, repo, subject, nil); code != 1 {
-		t.Fatalf("stale branch retirement code = %d, want failure", code)
+	flow := classifiedFailureFlow{
+		name: "verifier", status: "notes_failed",
+		err: flowNoteError(errors.New("temporary remote failure")),
 	}
-	if stalled, err := stalledOn(repo, "verifier", subject.Key, revision); err != nil || !stalled {
-		t.Fatalf("stale branch retirement brake = %v, %v; want immediate terminal brake", stalled, err)
+	for range stalledRunLimit + 1 {
+		if code := actOnSubject(flow, Config{}, repo, subject, nil); code != 1 {
+			t.Fatalf("retryable notes code = %d, want failure", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, flow.Name(), subject.Key, revision); err != nil || stalled {
+		t.Fatalf("retryable notes brake = (%v, %v), want selectable Revision", stalled, err)
 	}
 }
+
+func TestPreparingRetirementReviewFailureReachesBrake(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	revision := strings.Repeat("b", 40)
+	subject := Subject{
+		Key: "retirement-forest/20-review", Kind: subjectRetirement, Revision: revision,
+		ID: "20", Branch: "forest/20-review",
+	}
+	flow := classifiedFailureFlow{
+		name: "verifier", status: "review_failed", err: errAgentCrash,
+	}
+	for range stalledRunLimit {
+		if code := actOnSubject(flow, Config{}, repo, subject, nil); code != 1 {
+			t.Fatalf("prepared review code = %d, want failure", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, flow.Name(),
+		retirementAgentSubjectKey(subject.Branch), revision); err != nil || !stalled {
+		t.Fatalf("prepared agent-work brake = (%v, %v), want durable park", stalled, err)
+	}
+	if stalled, err := stalledOn(repo, flow.Name(), subject.Key, revision); err != nil || stalled {
+		t.Fatalf("retirement recovery brake = (%v, %v), want Host observation selectable", stalled, err)
+	}
+}
+
+// TestActOnSubjectImmediatelyBrakesStaleVerifierAndFixer proves the production
+// admission boundary publishes terminal stale brakes for both branch lanes.
+func TestActOnSubjectImmediatelyBrakesStaleVerifierAndFixer(t *testing.T) {
+	for _, name := range []string{"verifier", "fixer"} {
+		t.Run(name, func(t *testing.T) {
+			_, repo, _ := notesTestRepository(t)
+			revision := strings.Repeat("a", 40)
+			subject := Subject{
+				Key: "branch-forest/17-stale-" + name, Kind: subjectBranch, Revision: revision,
+				ID: "17", Branch: "forest/17-stale-" + name,
+			}
+			if code := actOnSubject(terminalStaleFlow{name: name}, Config{}, repo, subject, nil); code != 1 {
+				t.Fatalf("stale %s code = %d, want failure", name, code)
+			}
+			if stalled, err := stalledOn(repo, name, subject.Key, revision); err != nil || !stalled {
+				t.Fatalf("stale %s brake = %v, %v; want immediate terminal brake", name, stalled, err)
+			}
+		})
+	}
+}
+
 func TestActOnSubjectRedactsOperatorText(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	_, repo, _ := notesTestRepository(t)
@@ -481,7 +547,7 @@ func TestUpdateGateWaitsForEveryActiveFlow(t *testing.T) {
 		select {
 		case <-flow.ready:
 		case <-time.After(5 * time.Second):
-			t.Fatal("Flow action did not acquire the update read gate")
+			t.Fatal("Flow Effect did not acquire the update read gate")
 		}
 	}
 	updateAcquired := make(chan struct{})
@@ -502,7 +568,7 @@ func TestUpdateGateWaitsForEveryActiveFlow(t *testing.T) {
 	ticks <- time.Now()
 	select {
 	case <-updateAcquired:
-		t.Fatal("source update entered while two Flow actions were active")
+		t.Fatal("source update entered while two Flow Effects were active")
 	case <-time.After(100 * time.Millisecond):
 	}
 	flow.releases[first.Key] <- struct{}{}
@@ -512,18 +578,18 @@ func TestUpdateGateWaitsForEveryActiveFlow(t *testing.T) {
 			t.Fatalf("first released result = %#v", result)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("first Flow action did not finish")
+		t.Fatal("first Flow Effect did not finish")
 	}
 	select {
 	case <-updateAcquired:
-		t.Fatal("source update entered while the second Flow action was active")
+		t.Fatal("source update entered while the second Flow Effect was active")
 	case <-time.After(100 * time.Millisecond):
 	}
 	flow.releases[second.Key] <- struct{}{}
 	select {
 	case <-updateAcquired:
 	case <-time.After(5 * time.Second):
-		t.Fatal("source update did not enter after every Flow action finished")
+		t.Fatal("source update did not enter after every Flow Effect finished")
 	}
 	select {
 	case result := <-results:
@@ -531,7 +597,7 @@ func TestUpdateGateWaitsForEveryActiveFlow(t *testing.T) {
 			t.Fatalf("second released result = %#v", result)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("second Flow action did not finish")
+		t.Fatal("second Flow Effect did not finish")
 	}
 	close(ticks)
 	select {
