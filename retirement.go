@@ -11,6 +11,7 @@ import (
 )
 
 var errRetirementStale = errors.New("retirement intent is stale")
+var errRetirementPreparation = errors.New("retirement preparation released")
 
 const retirementRefPrefix = "refs/forest/retirement/"
 
@@ -258,6 +259,13 @@ func dropStaleRetirement(repoDir string, fact retirementFact, cause error) error
 	return fmt.Errorf("%w: %v", errRetirementStale, cause)
 }
 
+func dropPreparationRetirement(repoDir string, fact retirementFact, cause error) error {
+	if err := dropRetirement(repoDir, fact); err != nil {
+		return fmt.Errorf("retirement preparation rejected: %v; drop preparation: %w", cause, err)
+	}
+	return fmt.Errorf("%w: %v", errRetirementPreparation, cause)
+}
+
 // mergeVerified lands only the Revision that carried the approving Verdict.
 // A retirement fact makes the multi-system effect resumable. Git writes its
 // landed fact atomically with master. The host path writes pending intent first,
@@ -364,9 +372,10 @@ func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it I
 		verdict, hasVerdict, verdictErr := readVerdict(repoDir, record.Revision)
 		checks, hasChecks, checksErr := readChecks(repoDir, record.Revision)
 		if verdictErr != nil || checksErr != nil || !hasVerdict || verdict.Verdict != "approve" ||
-			!hasChecks || checks.Status != "pass" {
-			return dropStaleRetirement(repoDir, fact,
-				fmt.Errorf("retirement %s lacks durable approve Verdict and passing Checks", fact.Ref))
+			!hasChecks || checks.Status != "pass" || record.Agent != verdict.Reviewer ||
+			record.Model != verdict.Model || record.DefSHA != verdict.DefSHA {
+			return dropPreparationRetirement(repoDir, fact,
+				fmt.Errorf("retirement %s lacks matching durable approve Verdict and passing Checks", fact.Ref))
 		}
 		_, hostMerged, err := projectBranch(cfg, it, record.Branch,
 			fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), record.Revision)

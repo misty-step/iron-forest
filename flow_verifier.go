@@ -109,14 +109,15 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if !found || checks.Status != "pass" {
 			continue
 		}
-		// An approved, green branch is only a subject when it can actually land.
-		// Every reason it cannot is named by mergeBlocked, so a branch waiting on
-		// an operator is a state to read, not an action to run.
+		// An approved, green branch is a subject when it can land. With Host
+		// projection and AutoMerge disabled, select it once to prepare durable
+		// intent; the resulting retirement fact suppresses later branch work.
 		attempts, err := readAttempts(repoDir, s.Key)
 		if err != nil {
 			return nil, fmt.Errorf("attempts %s: %w", branch, err)
 		}
-		if mergeBlocked(cfg, attempts) != "" {
+		if mergeBlocked(cfg, attempts) != "" &&
+			!(cfg.Projection.MergeViaHost && !cfg.Flows.Verifier.AutoMerge) {
 			continue
 		}
 		mergeable = append(mergeable, s)
@@ -127,17 +128,11 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 
-// mergeBlocked names why an approved, green branch may not land now, or returns
-// "" when it may. It is the single authority for merge policy: Select consults
-// it so a lane never offers a subject whose only possible outcome is a no-op,
-// and Act consults the same function so the two cannot drift apart.
-//
-// Splitting this decision is what produced a live hot loop: Select checked the
-// verdict, the checks and the attempts, Act checked auto_merge, and an approved
-// branch under auto_merge: false was selected, rebased, rechecked and reviewed
-// on every pass forever. 217 passes wrote 217 identical ledger rows and ran
-// build, vet and test 217 times before discovering the merge was never allowed.
-// A precondition that lives in one place cannot cause that.
+// mergeBlocked names why an approved, green branch cannot complete a merge,
+// or returns "" when it may. Select uses it to avoid no-op work, except that a
+// Host branch with AutoMerge disabled gets one pass to record durable intent.
+// Act still consults the same authority after that preparation, so it reports
+// the operator handoff without repeating work.
 func mergeBlocked(cfg Config, attempts int) string {
 	if !cfg.Flows.Verifier.AutoMerge {
 		return "auto_merge is off; an operator merges this branch"
@@ -205,6 +200,9 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			case errors.Is(err, errHostMergePending):
 				out.Status = "merge_pending"
 				return out, nil
+			case errors.Is(err, errRetirementPreparation):
+				out.Status = "skipped"
+				return out, nil
 			case errors.Is(err, errRetirementStale):
 				out.Status = "stale"
 				return out, err
@@ -220,23 +218,23 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	if err != nil {
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
 	}
-	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
-	}
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
 	if err != nil {
 		if cfg.Projection.MergeViaHost && s.Head != "" {
 			merged, pr, inspectErr := inspectProjectMerge(cfg, s.Branch, cfg.Flows.Verifier.Merge, s.Head)
 			if inspectErr == nil && merged && pr.HeadRefOID == s.Head {
-				out := Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, PRURL: pr.URL}
+				out := Outcome{Branch: s.Branch, BaseSHA: s.Head, PRURL: pr.URL}
 				return recoverHostMergedProjection(cfg, repoDir, s.Branch, s.Head, it, out)
 			}
 		}
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
 	}
 	defer cleanupWorktree(repoDir, wtDir)
+	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
+	if err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
+	}
 	out := Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
 	url, hostMerged, err := projectBranch(cfg, it, s.Branch,
 		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), baseSHA)
@@ -358,6 +356,9 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	if !found {
 		var stats runStats
+		// A new approval prepares Host retirement before this Verdict is
+		// persisted. Reusing the callback keeps the preparation before the
+		// projection comment and avoids a duplicate record after review.
 		verdict, stats, err = verifierReview(repoDir, wtDir, it, baseSHA, runID, a,
 			func(v verdictNote) error {
 				return recordHostRetirement(cfg, repoDir, s.Branch, baseSHA, it, v)
@@ -379,7 +380,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			return out, err
 		}
 	}
-	if verdict.Verdict == "approve" {
+	if found && verdict.Verdict == "approve" {
 		if err := recordHostRetirement(cfg, repoDir, s.Branch, baseSHA, it, verdict); err != nil {
 			out.Status = "merge_failed"
 			return out, fmt.Errorf("merge: record Host retirement: %w", err)
@@ -396,21 +397,15 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
-	// A fresh review that lands on approve reaches here; a branch selected for
-	// merge already passed this test in Select. Consulting the same authority
-	// keeps the two from drifting, which is what caused the 217-pass hot loop.
+	// A fresh review callback already prepared Host intent. An existing
+	// approved branch reached this point only after Select admitted its work.
+	// Consulting the same authority keeps the two from drifting apart.
 	attempts, err := readAttempts(repoDir, s.Key)
 	if err != nil {
 		out.Status = "notes_failed"
 		return out, fmt.Errorf("attempts: %w", err)
 	}
 	if why := mergeBlocked(cfg, attempts); why != "" {
-		if cfg.Projection.MergeViaHost && !cfg.Flows.Verifier.AutoMerge {
-			if err := recordHostRetirement(cfg, repoDir, s.Branch, baseSHA, it, verdict); err != nil {
-				out.Status = "merge_failed"
-				return out, fmt.Errorf("merge: record Host retirement: %w", err)
-			}
-		}
 		out.Status = "reviewed"
 		return out, nil
 	}
