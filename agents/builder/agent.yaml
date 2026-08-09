@@ -17,8 +17,10 @@ temperature: 0.2
 deadline_seconds: 3600
 # The shell is bounded to the commands this definition names (see #118). The
 # rendered `bash` permission denies every command whose prefix is not listed
-# here, so curl, a write outside the worktree, or any other unlisted command is
-# refused by the harness and recorded as a denied tool in the run trace. The
+# here, and the run's PATH installs a sandbox `bash` that refuses any command
+# that is not a plain allowlisted command, so an unlisted command (curl) or a
+# shell escape (a write outside the worktree through redirection, chaining,
+# substitution) is refused and recorded as a denied tool in the run trace. The
 # list covers the build tools the builder legitimately runs: git for state and
 # reports, gofmt for the Go style skill, the declared go checks (build, test,
 # vet, fmt), their pinned-toolchain form through mise, and read-only stdout

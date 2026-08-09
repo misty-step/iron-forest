@@ -3,8 +3,11 @@
 # This lane reads the proposed diff and may write only review.json.
 # Built-in web and MCP tools are denied. Bash is bounded to the commands named
 # below, so local review can still inspect the diff and run the declared checks
-# without giving an agent an unbounded shell; the standing instruction, empty
-# child HOME, and absent credentials forbid network use.
+# without giving an agent an unbounded shell: the rendered `bash` permission and
+# the run's sandbox `bash` together refuse any command that is not a plain
+# allowlisted command, so chaining, substitution, redirection, and paths outside
+# the worktree cannot smuggle an unlisted command in. The standing instruction,
+# empty child HOME, and absent credentials forbid network use.
 # The verifier uses a different model family from the Builder.
 description: "The Verifier reviews one change against its item and writes review.json."
 commit:

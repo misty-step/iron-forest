@@ -120,11 +120,18 @@ partway (`99b3b74`).
 Bound the shell with `bash_allow`: list the commands the agent may run (for
 example `git *`, `gofmt *`, `go test *`, or the `mise exec -- go ...` form that
 runs the pinned toolchain). Every command whose prefix is not listed is denied
-by the harness and recorded as a denied tool in the run trace, so an agent
-reaches the host only through commands its definition names. An empty
-`bash_allow: []` denies the whole shell; omit the key only when the agent may
-keep opencode's default. Do not combine `bash_allow` with `permission.bash`:
-the two declarations cannot both describe the same authority.
+both by the rendered `bash` permission and by a sandbox `bash` the run installs
+at the head of the child PATH, and both record a denied tool in the run trace,
+so an agent reaches the host only through commands its definition names. The
+sandbox also refuses any command that is not a plain command: chaining
+(`;`, `&&`, `|`), substitution (`$`, backticks), redirection (`<`, `>`),
+globbing, quoting, and path arguments that escape the worktree are all denied
+even when the prefix matches (`echo *` cannot write `> /tmp/outside`, and
+`git *` cannot run `git status; curl ...`). A declaration entry must end in
+`" *"` and carry no shell punctuation. An empty `bash_allow: []` denies the
+whole shell; omit the key only when the agent may keep opencode's default. Do
+not combine `bash_allow` with `permission.bash`: the two declarations cannot
+both describe the same authority.
 
 ## 4. Keep the factory out of the repository's gates
 

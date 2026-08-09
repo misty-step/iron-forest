@@ -20,6 +20,9 @@ deadline_seconds: 3600
 # supplies no repository context or credentials. Built-in web and MCP tools are
 # denied; bash is bounded to read-only stdout helpers, so a shell reachable from
 # the host only runs commands this definition names, and the instruction forbids network use.
+# The sandbox `bash` the run installs also refuses chaining, substitution,
+# redirection, and paths outside the run directory, so the listed commands are
+# the only reachable ones.
 permission:
   read: allow
   edit: allow

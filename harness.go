@@ -301,7 +301,7 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	}
 	defer cancel()
 
-	env, cleanup, err := childEnvironment()
+	env, cleanup, err := agentEnvironment(a)
 	if err != nil {
 		return stats, err
 	}
@@ -426,7 +426,18 @@ const childSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 // (already on PATH) or the host toolchain mechanism (see checkEnvironment); an
 // agent run gets neither, so host toolchain reach stays scoped to checks.
 func childEnvironment() ([]string, func(), error) {
-	return childBaseEnv(false)
+	return childBaseEnv(false, nil)
+}
+
+// agentEnvironment is childEnvironment for one agent's run. It bounds the shell
+// the agent can reach as well as the rest of the environment: the run's private
+// PATH installs a sandbox `bash` (see installSandboxBash) that refuses any
+// command that is not a plain command the agent's definition allows (#118), so
+// chaining, substitution, redirection, and worktree-escaping path arguments
+// cannot smuggle an unlisted command past the allowlist even though opencode
+// runs the bash tool through a real shell.
+func agentEnvironment(a *Agent) ([]string, func(), error) {
+	return childBaseEnv(false, a.BashAllow)
 }
 
 // checkEnvironment is the child environment for a runChecks run: the common
@@ -440,7 +451,7 @@ func childEnvironment() ([]string, func(), error) {
 // checkHostEnv). It is a variable so a test can force a preflight failure and
 // drive the durable-fact path end to end.
 var checkEnvironment = func() ([]string, func(), error) {
-	return childBaseEnv(true)
+	return childBaseEnv(true, nil)
 }
 
 // childBaseEnv builds the child environment used by every run. When
@@ -448,8 +459,10 @@ var checkEnvironment = func() ([]string, func(), error) {
 // directories and metadata are applied: FOREST_CHECK_PATH directories go on the
 // child PATH ahead of the mise shims so a working host driver resolves before a
 // dead shim, and allowlisted FOREST_CHECK_ENV metadata is appended. Agent runs
-// pass false and get neither.
-func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
+// pass false and get neither. When allow is non-nil (an agent run that declares
+// bash_allow), the sandbox `bash` wrapper is installed at the head of the child
+// PATH so the agent's shell accepts only the allowlisted commands.
+func childBaseEnv(hostToolchain bool, allow []string) ([]string, func(), error) {
 	mise, err := exec.LookPath("mise")
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("locate mise: %w", err)
@@ -467,6 +480,12 @@ func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
 	if err := os.Symlink(mise, filepath.Join(binDir, "mise")); err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("stage mise for child: %w", err)
+	}
+	if allow != nil {
+		if err := installSandboxBash(binDir, allow); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("install sandbox bash: %w", err)
+		}
 	}
 
 	var hostBins []string
@@ -613,6 +632,111 @@ func miseLocations(mise string) (string, string) {
 	}
 	dataDir := filepath.Clean(filepath.Join(filepath.Dir(mise), "..", "share", "mise"))
 	return dataDir, filepath.Join(dataDir, "shims")
+}
+
+// installSandboxBash writes the bounded `bash` wrapper into binDir, the private
+// command directory at the head of an agent run's PATH, so opencode's bash tool
+// (`bash -lc <command>`) resolves to it before any system bash. The wrapper
+// rejects every command that is not a plain command the agent's declaration
+// allows and then execs the real bash, so an agent reaches the host only
+// through the commands its definition names even though the harness cannot
+// change how opencode runs a shell (#118).
+func installSandboxBash(binDir string, allow []string) error {
+	realBash, err := exec.LookPath("bash")
+	if err != nil {
+		return fmt.Errorf("locate real bash: %w", err)
+	}
+	script := sandboxBashScript(realBash, allow)
+	path := filepath.Join(binDir, "bash")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		return fmt.Errorf("write sandbox bash: %w", err)
+	}
+	return nil
+}
+
+// sandboxBashScript renders the bounded `bash` wrapper for one agent: it
+// extracts the command from opencode's invocation, accepts only a plain command
+// made of ordinary characters (so chaining, substitution, redirection, globbing
+// and quote smuggling can never appear), refuses arguments that resolve outside
+// the worktree, requires the command to start with an allowlisted prefix, and
+// only then execs the real bash with the plain command. allow holds the raw
+// `bash_allow` entries ("git *", "go test *", ...), each already validated by
+// loadAgent as a plain prefix ending in `" *"`.
+func sandboxBashScript(realBash string, allow []string) string {
+	arms, ok := allowPrefixArms(allow)
+	if !ok {
+		// With an empty list the wrapper denies the whole shell.
+		arms = "  *)\n    echo 'forest: denied bash command (not allowlisted)' >&2\n    exit 1 ;;\n"
+	}
+	script := `#!/bin/sh
+# forest sandbox bash: one agent run reaches the host only through the commands
+# its agent declaration allows (#118). opencode runs the bash tool as
+# "bash -lc <command>"; this wrapper refuses any command that is not a
+# plain allowlisted command, then execs the real bash so the plain command runs
+# with normal PATH resolution.
+REALBASH=` + realBash + `
+# extract the command from the opencode invocation (bash -lc CMD, bash -c CMD...)
+cmd=
+last=
+prev=
+for a in "$@"; do
+  case "$a" in
+    -c|-lc|-ic|-rc) prev=1 ;;
+    --) prev= ;;
+    -*) prev= ;;
+    *) if [ -n "$prev" ]; then cmd=$a; break; fi; last=$a ;;
+  esac
+done
+[ -n "$cmd" ] || cmd=$last
+[ -n "$cmd" ] || { echo 'forest: denied bash: no command given' >&2; exit 1; }
+# reject every shell metacharacter by construction: a plain command may contain
+# only ASCII letters, digits, and the punctuation below, so ; & | chaining,
+# dollar and backtick substitution, < > redirection, ' " \ quoting, * ? [ ]
+# globbing, # comments, tilde, and control characters (a newline chains) can
+# never reach the shell.
+safe=$(printf '%s' "$cmd" | tr -dc 'A-Za-z0-9._+:/%@=,\t -')
+[ "$safe" = "$cmd" ] || { echo "forest: denied bash command (shell metacharacter): $cmd" >&2; exit 1; }
+set -f
+# with redirection and substitution gone, a path argument is the only remaining
+# way a command can reach outside the worktree; refuse any argument whose path
+# component escapes the worktree (absolute paths are allowed only under it)
+wt=$PWD
+for w in $cmd; do
+  tail=${w##*=}
+  case "$tail" in
+    ..|../*|*/..|*/../*)
+      echo "forest: denied bash command (path escapes the worktree): $cmd" >&2; exit 1 ;;
+  esac
+  case "$tail" in
+    /*) case "$tail" in
+          "$wt"|"$wt"/*) : ;;
+          *) echo "forest: denied bash command (path outside the worktree): $cmd" >&2; exit 1 ;;
+        esac ;;
+  esac
+done
+# the command must start with a prefix the agent's declaration allows
+case "$cmd" in
+` + arms + `
+esac
+exec "$REALBASH" -c "$cmd"
+`
+	return script
+}
+
+// allowPrefixArms renders the case arms of the sandbox wrapper that admit
+// commands starting with an allowlisted prefix, plus the catch-all that denies
+// everything else. It returns ok=false only for an empty allowlist, in which
+// case the caller emits a whole-shell denial (the declared way to delete bash).
+func allowPrefixArms(allow []string) (string, bool) {
+	var b strings.Builder
+	for _, entry := range allow {
+		prefix := strings.TrimSuffix(entry, " *") + " "
+		// loadAgent guarantees prefix is a plain literal (no quote, glob, or
+		// metacharacter), so wrapping it in single quotes is safe and exact.
+		b.WriteString("    '" + prefix + "'*) : ;;\n")
+	}
+	b.WriteString("  *)\n    echo \"forest: denied bash command (not allowlisted): $cmd\" >&2\n    exit 1 ;;\n")
+	return b.String(), len(allow) > 0
 }
 
 type stepTokens struct {

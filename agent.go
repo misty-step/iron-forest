@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,11 +68,16 @@ type Agent struct {
 	// host only through commands its definition names (#118). A declared list
 	// renders the `bash` permission as an allowlist object whose catch-all
 	// pattern denies every command and whose named prefixes allow only the
-	// listed commands; a declaration that omits the key keeps today's default
-	// (opencode's own allow-everything fallback) and an empty list denies the
-	// whole shell. Patterns are opencode command prefixes: `git *` matches any
-	// command that starts with `git `. A plain `bash: deny` in Permission is
-	// still available for a shell denied entirely without a list.
+	// listed commands, and it also prunes the agent's shell to the same commands:
+	// the run's private PATH installs a sandbox `bash` that refuses any command
+	// that is not a plain allowlisted command, so chaining, substitution,
+	// redirection, and worktree-escaping path arguments can never smuggle an
+	// unlisted command past the allowlist. A declaration that omits the key
+	// keeps today's default (opencode's own allow-everything fallback) and an
+	// empty list denies the whole shell. Patterns are opencode command
+	// prefixes: `git *` matches any command that starts with `git `. A plain
+	// `bash: deny` in Permission is still available for a shell denied entirely
+	// without a list.
 	BashAllow []string  `yaml:"bash_allow"`
 	MCP       []McpSpec `yaml:"mcp"`
 
@@ -145,6 +151,16 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if a.BashAllow != nil && a.Permission["bash"] != "" {
 		return nil, fmt.Errorf("agent %s: bash_allow and permission.bash cannot both be declared", name)
 	}
+	// Every bash_allow entry must be a plain command prefix. The entry ends up
+	// in opencode's permission patterns and is embedded in the run's sandbox
+	// `bash` wrapper, so punctuation that the shell or the wrapper treats
+	// specially would either make the allowlist bypassable (chaining,
+	// substitution, redirection, globbing) or corrupt the wrapper script.
+	for _, entry := range a.BashAllow {
+		if err := validBashAllowEntry(entry); err != nil {
+			return nil, fmt.Errorf("agent %s: bash_allow %q: %w", name, entry, err)
+		}
+	}
 	ins, err := os.ReadFile(filepath.Join(dir, "instructions.md"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %s instructions.md: %w", name, err)
@@ -177,6 +193,37 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	a.ReportSchema = string(schema)
 	a.DefSHA = composeDigest(repoDir, name)
 	return a, nil
+}
+
+// bashAllowUnsafeChars are the characters that can never appear in the prefix
+// of a bash_allow entry. Each is either a shell metacharacter that would make a
+// prefix allowlist bypassable — `;`, `&`, `|` chain commands, `<`, `>` redirect,
+// `$` and backticks substitute, `'`, `"`, `\` smuggle the rest — or a globbing
+// or quoting character that opencode's permission patterns and the sandbox
+// wrapper script would each interpret (`*`, `?`, `[`, `]`, `{`, `}`, `(`, `)`,
+// `#`, `~`, `!`), or a character that would corrupt the generated wrapper. The
+// `*` in a name's trailing `" *"` is the only wildcard a entry carries, and it
+// is not part of the prefix.
+const bashAllowUnsafeChars = ";&|<>$`'\"\\(){}[]*?#~!\n"
+
+// validBashAllowEntry checks one bash_allow entry: a plain command prefix that
+// ends with `" *"` (every command starting with the named prefix is allowed).
+// The shape is deliberately narrow so both the rendered opencode permission and
+// the generated sandbox `bash` wrapper can treat the entry as a literal string
+// with no shell punctuation to interpret: `git *` names exactly the commands
+// that start with `git `, and nothing more.
+func validBashAllowEntry(entry string) error {
+	if !strings.HasSuffix(entry, " *") {
+		return errors.New(`bash_allow entries must end with " *" so each names a command prefix`)
+	}
+	prefix := strings.TrimSuffix(entry, " *")
+	if strings.TrimSpace(prefix) == "" {
+		return errors.New(`bash_allow entry must name a command before " *"`)
+	}
+	if strings.ContainsAny(prefix, bashAllowUnsafeChars) {
+		return errors.New("bash_allow command prefix may not contain shell metacharacters")
+	}
+	return nil
 }
 
 // variantSuffix renders the reasoning variant beside the model for operator
@@ -255,14 +302,17 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 	for k, v := range a.Permission {
 		perm[k] = v
 	}
-	// A declared `bash_allow` list bounds the shell to the named commands: the
+	// A declared `bash_allow` list bounds the shell to the named commands. The
 	// rendered `bash` permission becomes an object whose catch-all pattern denies
-	// every command and whose named prefixes allow only the listed ones, so every
-	// deny rule in the map is real authority and an unlisted command (curl, a
-	// write outside the worktree) records a denied tool in the trace instead of
-	// running. An empty list renders only the catch-all and denies the whole
-	// shell, which is the declared way to delete bash. A declaration that omits
-	// the key renders no bash rule, keeping opencode's own default.
+	// every command and whose named prefixes allow only the listed ones, so an
+	// unlisted command (curl, a write outside the worktree) records a denied
+	// tool in the trace instead of running in opencode's own permission layer.
+	// The run's child environment installs a sandbox `bash` that enforces the
+	// same prefixes, so even a command that matches a prefix cannot chain,
+	// substitute, redirect, or name a path outside the worktree (#118). An empty
+	// list renders only the catch-all and denies the whole shell, which is the
+	// declared way to delete bash. A declaration that omits the key renders no
+	// bash rule, keeping opencode's own default.
 	if a.BashAllow != nil {
 		rules := make(map[string]string, len(a.BashAllow)+1)
 		rules["*"] = "deny"
