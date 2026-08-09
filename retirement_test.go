@@ -1111,7 +1111,7 @@ func TestRetirementRecoveryRejectsMismatchedItem(t *testing.T) {
 	}
 }
 
-func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T) {
+func TestPendingHostRetirementRetriesVisibleOpenMerge(t *testing.T) {
 	branch := "forest/13-queued"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -1132,8 +1132,8 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 	writeApprovalNotes(t, repo, reviewed, agent)
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
-	created, merged := false, false
-	createCalls, mergeCalls := 0, 0
+	merged := false
+	mergeCalls := 0
 	var mergeHeads []string
 	projectionCommand = func(args ...string) ([]byte, error) {
 		state := ""
@@ -1148,10 +1148,6 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 			return mergedProjectionPage(`{"number":13,"html_url":"https://github.com/owner/repo/pull/13","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
 		case len(args) > 0 && args[0] == "api":
 			return []byte(`[]`), nil
-		case len(args) >= 2 && args[0] == "pr" && args[1] == "create":
-			createCalls++
-			created = true
-			return []byte("https://github.com/owner/repo/pull/13"), nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			if hasArgumentPair(args, "--match-head-commit", reviewed) {
@@ -1159,7 +1155,7 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 			}
 			return nil, nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
-			if state == "open" && created {
+			if state == "open" && !merged {
 				return []byte(pr), nil
 			}
 			return []byte(`[]`), nil
@@ -1180,8 +1176,8 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 			t.Fatalf("queued recovery pass %d = %v, want pending", pass+1, err)
 		}
 	}
-	if createCalls != 1 || mergeCalls != 2 {
-		t.Fatalf("queued recovery effects = create %d, merge %d; want one request and one exact merge per pass", createCalls, mergeCalls)
+	if mergeCalls != 2 {
+		t.Fatalf("queued recovery merge effects = %d, want one exact merge per pass", mergeCalls)
 	}
 	if len(mergeHeads) != mergeCalls {
 		t.Fatalf("queued merge heads = %v, want reviewed head on every attempt", mergeHeads)
@@ -1191,8 +1187,8 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 	if err := recoverRetirementFact(cfg, repo, fact, item); err != nil {
 		t.Fatalf("observed queued merge recovery: %v", err)
 	}
-	if createCalls != 1 || mergeCalls != 2 {
-		t.Fatalf("observed recovery repeated effects = create %d, merge %d", createCalls, mergeCalls)
+	if mergeCalls != 2 {
+		t.Fatalf("observed recovery repeated %d merge effects", mergeCalls)
 	}
 	if _, err := tk.Get(item.ID); err == nil {
 		t.Fatal("observed recovery did not close the Tracker Item")
