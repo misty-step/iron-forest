@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -130,7 +131,7 @@ func loadWatchSnapshot(api core.API, repo string) watchSnapshot {
 		DrawnAt: time.Now().UTC(),
 		Repo:    repo,
 		Version: version,
-		Flows:   map[string][]runRecord{"builder": nil, "verifier": nil, "fixer": nil},
+		Flows:   groupRuns(nil, 8),
 	}
 	if h, err := api.Head(); err == nil {
 		s.HeadShort = h
@@ -147,14 +148,13 @@ func loadWatchSnapshot(api core.API, repo string) watchSnapshot {
 }
 
 func groupRuns(all []core.RunRecord, n int) map[string][]runRecord {
-	groups := map[string][]runRecord{
-		"builder":  nil,
-		"verifier": nil,
-		"fixer":    nil,
+	groups := make(map[string][]runRecord, len(flowsFor()))
+	for _, flow := range flowsFor() {
+		groups[flow.Name()] = nil
 	}
 	for _, r := range all {
 		name := strings.ToLower(strings.TrimSpace(r.Flow))
-		if name != "builder" && name != "verifier" && name != "fixer" {
+		if _, known := groups[name]; !known {
 			continue
 		}
 		groups[name] = append(groups[name], coreRunRecord(r))
@@ -167,7 +167,7 @@ func groupRuns(all []core.RunRecord, n int) map[string][]runRecord {
 	return groups
 }
 
-func renderWatch(w *os.File, s watchSnapshot) {
+func renderWatch(w io.Writer, s watchSnapshot) {
 	now := s.DrawnAt.Format("15:04:05Z")
 	fmt.Fprintf(w, "iron-forest watch  %s  repo=%s\n", now, s.Repo)
 	fmt.Fprintf(w, "binary=%-10s  HEAD=%-10s  refresh=live  Ctrl-C quit\n", s.Version, orDash(s.HeadShort))
@@ -210,7 +210,8 @@ func renderWatch(w *os.File, s watchSnapshot) {
 	}
 	fmt.Fprintln(w)
 
-	for _, flow := range []string{"builder", "verifier", "fixer"} {
+	for _, lane := range flowsFor() {
+		flow := lane.Name()
 		runs, ok := s.Flows[flow]
 		if !ok {
 			continue

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 func landRetirement(repoDir string, fact retirementFact) (retirementFact, error) {
@@ -546,18 +545,27 @@ func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) 
 }
 
 func deleteReviewedBranch(repoDir, branch, reviewed string) error {
-	out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/"+branch)
+	head, present, err := lookupBranchHead(repoDir, branch)
 	if err != nil {
 		return fmt.Errorf("merge: inspect branch %s: %w", branch, err)
 	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
+	if !present {
 		return nil
 	}
-	if fields[0] != reviewed {
-		return fmt.Errorf("%w: merge: branch %s advanced to %s before retirement of %s", errRetirementStale, branch, fields[0], reviewed)
+	if head != reviewed {
+		return fmt.Errorf("%w: merge: branch %s advanced to %s before retirement of %s", errRetirementStale, branch, head, reviewed)
 	}
 	if err := deleteRef(repoDir, "refs/heads/"+branch, reviewed); err != nil {
+		current, stillPresent, inspectErr := lookupBranchHead(repoDir, branch)
+		if inspectErr != nil {
+			return fmt.Errorf("merge: delete branch %s (wanted %s): %w; reconcile: %v", branch, reviewed, err, inspectErr)
+		}
+		if !stillPresent {
+			return nil
+		}
+		if current != reviewed {
+			return fmt.Errorf("%w: merge: branch %s advanced to %s during retirement of %s", errRetirementStale, branch, current, reviewed)
+		}
 		return fmt.Errorf("merge: delete branch %s (wanted %s): %w", branch, reviewed, err)
 	}
 	return nil

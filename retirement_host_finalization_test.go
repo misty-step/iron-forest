@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -288,6 +289,43 @@ func TestMalformedTrackerCloseEvidenceRemainsTerminal(t *testing.T) {
 				t.Fatalf("Tracker close calls = %d, want no retry after malformed evidence", calls)
 			}
 		})
+	}
+}
+
+// TestDeleteReviewedBranchReconcilesConcurrentAbsence simulates a Host
+// deleting the reviewed branch after inspection but before Forest receives
+// the deletion result. The absent branch already satisfies retirement.
+func TestDeleteReviewedBranchReconcilesConcurrentAbsence(t *testing.T) {
+	branch := "forest/53-concurrent-delete"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := t.TempDir()
+	script := `#!/bin/sh
+case " $* " in
+  *" push "*"refs/heads/$FOREST_DELETE_BRANCH"*)
+    "$FOREST_REAL_GIT" -C "$FOREST_DELETE_REPO" push --no-verify origin ":refs/heads/$FOREST_DELETE_BRANCH" >/dev/null 2>&1 || exit $?
+    echo "simulated lost delete response" >&2
+    exit 1
+    ;;
+esac
+exec "$FOREST_REAL_GIT" "$@"
+`
+	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREST_REAL_GIT", realGit)
+	t.Setenv("FOREST_DELETE_REPO", repo)
+	t.Setenv("FOREST_DELETE_BRANCH", branch)
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := deleteReviewedBranch(repo, branch, reviewed); err != nil {
+		t.Fatalf("reconciled branch deletion = %v, want success", err)
+	}
+	if got := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/"+branch); got != "" {
+		t.Fatalf("reconciled branch = %q, want absent", got)
 	}
 }
 
