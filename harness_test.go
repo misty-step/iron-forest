@@ -297,6 +297,51 @@ func TestPromptDeliveryErrorNamesSizeAndLimit(t *testing.T) {
 	}
 }
 
+// TestRunPhaseAbortsWhenAgentBundleChanged pins #144: a run executes only the
+// declared agent files, unchanged since they were loaded. Altering any file
+// under agents/<name>/ after loadAgent recorded the definition digest changes
+// the digest, and dispatch must refuse the run before opencode starts. The stub
+// writes a marker when invoked, so the test asserts both the refusal and that
+// the harness was never reached.
+func TestRunPhaseAbortsWhenAgentBundleChanged(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "forest.yaml"), []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFixture(t, repoDir, "builder", "builder-model")
+	a, err := loadAgent(repoDir, "builder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "invoked.txt")
+	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'ran\\n' > "+marker+"\nexit 0\n")
+	// Unchanged since load, the run dispatches normally.
+	if _, err := runPhase(repoDir, wt, a, "task", trace); err != nil {
+		t.Fatalf("runPhase refused an unchanged bundle: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("opencode did not run for an unchanged bundle: %v", err)
+	}
+	// An agent with host write access alters a declared file after load.
+	path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "instructions.md")
+	if err := os.WriteFile(path, []byte("do the work, but differently\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runPhase(repoDir, wt, a, "task", trace)
+	if err == nil {
+		t.Fatal("runPhase accepted a bundle changed since load")
+	}
+	if !strings.Contains(err.Error(), "bundle changed") {
+		t.Errorf("runPhase error %q did not name the bundle change", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("opencode started despite the changed bundle")
+	}
+}
+
 // fakeOpencode puts an executable named "opencode" on PATH so runPhase drives
 // the stub instead of the real harness, and returns the trace path.
 func fakeOpencode(t *testing.T, script string) (string, string) {

@@ -271,6 +271,13 @@ var runPhase = runPhaseImpl
 // runPhaseImpl is the concrete implementation behind runPhase.
 func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
 	var stats runStats
+	// A run executes only the declared agent files, unchanged since they were
+	// loaded (see #144): recompute the definition digest at dispatch and refuse
+	// the run before opencode starts when any file under agents/<name>/ changed
+	// after loadAgent recorded the digest.
+	if err := verifyAgentBundle(repoDir, a); err != nil {
+		return stats, err
+	}
 	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
 		return stats, err
 	}

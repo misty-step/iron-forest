@@ -188,6 +188,24 @@ func discoverAgents(repoDir string) ([]string, error) {
 	return names, nil
 }
 
+// verifyAgentBundle recomputes the definition digest for the agent's declared
+// files and compares it with the digest loadAgent recorded, so a run executes
+// only the declared agent files, unchanged since they were loaded. Any file
+// under agents/<name>/ edited after load changes the digest and the run is
+// refused before opencode starts: the digest is a control at dispatch, not just
+// provenance (see #144). An agent carrying no recorded digest has nothing to
+// compare and passes; every production load records one, so the check is active
+// on every real run.
+func verifyAgentBundle(repoDir string, a *Agent) error {
+	if a.DefSHA == "" {
+		return nil
+	}
+	if got := composeDigest(repoDir, a.Name); got != a.DefSHA {
+		return fmt.Errorf("agent %s bundle changed since load: digest %s != recorded %s", a.Name, got, a.DefSHA)
+	}
+	return nil
+}
+
 // composeDigest fingerprints the whole agent definition: every file under
 // agents/<name>/ plus forest.yaml. It is the per-run composition digest that
 // makes a run reproducible and comparable.
