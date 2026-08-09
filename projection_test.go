@@ -461,6 +461,35 @@ func TestProjectMergeWaitsForQueuedHostConfirmation(t *testing.T) {
 	}
 }
 
+func TestProjectMergeNoViewReturnsPendingWithoutWrites(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	const reviewed = "0123456789abcdef0123456789abcdef01234567"
+	createCalls, mergeCalls := 0, 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "api" {
+			return []byte(`[]`), nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+			return []byte(`[]`), nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
+			createCalls++
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "merge" {
+			mergeCalls++
+		}
+		return nil, errors.New("unexpected Host write")
+	}
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true, MergeViaHost: true}}
+	if err := projectMerge(cfg, "forest/7-change", "squash", reviewed); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("no-view projectMerge = %v, want pending", err)
+	}
+	if createCalls != 0 || mergeCalls != 0 {
+		t.Fatalf("no-view projectMerge writes = create %d, merge %d; want zero", createCalls, mergeCalls)
+	}
+}
+
 func TestProjectMergeRejectsHostFastForward(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()

@@ -14,6 +14,7 @@ var projectionCommand = ghJSON
 
 var errHostMergePending = errors.New("Host merge is pending")
 var errHostMergeUnavailable = errors.New("Host merge request is unavailable")
+var errHostMergeNoView = errors.New("Host merge request has no visible view")
 
 type projectionPullRequest struct {
 	Number            int    `json:"number"`
@@ -133,6 +134,10 @@ func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (stri
 				return pr.URL, cfg.Projection.MergeViaHost, nil
 			}
 		}
+		}
+		if len(merged) > 0 {
+			return "", false, fmt.Errorf("%w: merged pull request for branch %q does not match reviewed Revision %s", errHostMergeUnavailable, branch, expectedHead)
+		}
 	}
 	created, err := projectionCommand("pr", "create", "-R", cfg.Repo,
 		"--base", "master", "--head", branch,
@@ -205,6 +210,9 @@ func projectChecks(cfg Config, branch string, c checksNote) error {
 func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	merged, pr, err := inspectProjectMerge(cfg, branch, strategy, expectedHead)
 	if err != nil {
+		if errors.Is(err, errHostMergeNoView) {
+			return errHostMergePending
+		}
 		return err
 	}
 	if merged {
@@ -222,6 +230,9 @@ func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 	}
 	merged, _, err = inspectProjectMerge(cfg, branch, strategy, expectedHead)
 	if err != nil {
+		if errors.Is(err, errHostMergeUnavailable) {
+			return err
+		}
 		// The Host accepted the command. A merge queue can briefly expose
 		// neither view, so keep durable intent and observe it on the next pass.
 		return fmt.Errorf("%w: post-request state: %v", errHostMergePending, err)
@@ -258,7 +269,7 @@ func inspectProjectMerge(cfg Config, branch, strategy, expectedHead string) (boo
 				errHostMergeUnavailable, branch, expectedHead)
 		}
 		return false, projectionPullRequest{}, fmt.Errorf("%w: no open or merged pull request for branch %q",
-			errHostMergeUnavailable, branch)
+			errHostMergeNoView, branch)
 	}
 	pr := prs[0]
 	if pr.Number == 0 {

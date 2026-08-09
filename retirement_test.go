@@ -1202,6 +1202,110 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 	}
 }
 
+func TestPendingHostRetirementNoViewAfterAcceptedMergeRetainsIntent(t *testing.T) {
+	branch := "forest/20-no-view"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	item := Item{ID: "20", Title: "no-view"}
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	writeApprovalNotes(t, repo, reviewed, agent)
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	phase := "initial"
+	createCalls, mergeCalls := 0, 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "api" {
+			if phase == "merged" {
+				return mergedProjectionPage(`{"number":20,"html_url":"https://github.com/owner/repo/pull/20","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+			}
+			return []byte(`[]`), nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
+			createCalls++
+			phase = "open"
+			return []byte("https://github.com/owner/repo/pull/20"), nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "merge" {
+			mergeCalls++
+			if !hasArgumentPair(args, "--match-head-commit", reviewed) {
+				t.Fatalf("Host merge args %v do not pin reviewed Revision %s", args, reviewed)
+			}
+			phase = "no-view"
+			return nil, nil
+		}
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+			if phase == "open" {
+				return []byte(`[{"number":20,"url":"https://github.com/owner/repo/pull/20","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+			}
+			return []byte(`[]`), nil
+		}
+		return nil, errors.New("unexpected Host command")
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.Merge = "squash"
+	cfg.Flows.Verifier.AutoMerge = true
+	verdict := verdictNote{Verdict: "approve", Reviewer: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA}
+	if err := recordHostRetirement(cfg, repo, branch, reviewed, item, verdict); err != nil {
+		t.Fatalf("initial Host retirement preparation: %v", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("initial Host projection creates = %d, want one", createCalls)
+	}
+	fact, found, err := readRetirement(repo, branch, reviewed)
+	if err != nil || !found || fact.Record.State != "pending" {
+		t.Fatalf("initial pending fact = (found=%v, state=%q, err=%v)", found, fact.Record.State, err)
+	}
+
+	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("accepted Host merge with no post-request view = %v, want pending", err)
+	}
+	if createCalls != 1 || mergeCalls != 1 {
+		t.Fatalf("post-request no-view effects = create %d, merge %d; want one each", createCalls, mergeCalls)
+	}
+
+	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("next no-view retirement retry = %v, want pending", err)
+	}
+	if createCalls != 1 || mergeCalls != 1 {
+		t.Fatalf("no-view retry effects = create %d, merge %d; want no new Host writes", createCalls, mergeCalls)
+	}
+	retained, found, err := readRetirement(repo, branch, reviewed)
+	if err != nil || !found || retained.Record.State != "pending" {
+		t.Fatalf("no-view pending fact = (found=%v, state=%q, err=%v)", found, retained.Record.State, err)
+	}
+	if _, err := tk.Get(item.ID); err != nil {
+		t.Fatalf("no-view retry retired Tracker Item: %v", err)
+	}
+	if got := remoteBranchHead(t, repo, branch); got != reviewed {
+		t.Fatalf("no-view retry branch = %s, want reviewed Revision %s", got, reviewed)
+	}
+	if facts, err := listRetirements(repo); err != nil || len(facts) != 1 {
+		t.Fatalf("no-view retirement facts = (%#v, %v), want one retained fact", facts, err)
+	}
+
+	phase = "merged"
+	if err := recoverRetirementFact(cfg, repo, fact, item); err != nil {
+		t.Fatalf("exact merged recovery: %v", err)
+	}
+	if createCalls != 1 || mergeCalls != 1 {
+		t.Fatalf("exact merged recovery effects = create %d, merge %d; want no new Host writes", createCalls, mergeCalls)
+	}
+	if _, err := tk.Get(item.ID); err == nil {
+		t.Fatal("exact merged recovery did not retire Tracker Item")
+	}
+	if facts, err := listRetirements(repo); err != nil || len(facts) != 0 {
+		t.Fatalf("exact merged retirement facts = (%#v, %v), want none", facts, err)
+	}
+}
+
 type retirementTransientTracker struct{ item Item }
 
 func (t retirementTransientTracker) ListOpen() ([]Item, error)    { return []Item{t.item}, nil }
@@ -1304,8 +1408,10 @@ func TestStaleHostRetirementDropFailureRemainsRetryable(t *testing.T) {
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	projectionCommand = func(args ...string) ([]byte, error) {
-		return []byte(`[{
-			"number":16,"url":"https://github.com/owner/repo/pull/16","headRefOid":"` +
+		if len(args) > 0 && args[0] == "api" {
+			return []byte(`[]`), nil
+		}
+		return []byte(`[{"number":16,"url":"https://github.com/owner/repo/pull/16","headRefOid":"` +
 			strings.Repeat("c", 40) + `","headRefName":"` + branch +
 			`","baseRefName":"master","isCrossRepository":false}]`), nil
 	}

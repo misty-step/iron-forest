@@ -275,9 +275,18 @@ func recordPendingHostRetirement(cfg Config, repoDir, branch, reviewed string, i
 	})
 }
 
+func ensureHostProjection(cfg Config, branch, reviewed string, it Item) error {
+	_, _, err := projectBranch(cfg, it, branch,
+		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), reviewed)
+	return err
+}
+
 func recordHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item, verdict verdictNote) error {
 	if !cfg.Projection.MergeViaHost || verdict.Verdict != "approve" {
 		return nil
+	}
+	if err := ensureHostProjection(cfg, branch, reviewed, it); err != nil {
+		return err
 	}
 	_, err := recordPendingHostRetirement(cfg, repoDir, branch, reviewed, it,
 		verdict.Reviewer, verdict.Model, verdict.DefSHA)
@@ -331,6 +340,9 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item, a *Age
 }
 
 func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
+	if err := ensureHostProjection(cfg, branch, reviewed, it); err != nil {
+		return err
+	}
 	fact, err := recordPendingHostRetirement(cfg, repoDir, branch, reviewed, it,
 		a.Name, a.Model, a.DefSHA)
 	if err != nil {
@@ -417,17 +429,22 @@ func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it I
 			return dropPreparationRetirement(repoDir, fact,
 				fmt.Errorf("retirement %s lacks matching durable approve Verdict and passing Checks", fact.Ref))
 		}
-		_, hostMerged, err := projectBranch(cfg, it, record.Branch,
-			fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), record.Revision)
-		if err == nil && !hostMerged {
-			if !cfg.Flows.Verifier.AutoMerge {
+		var err error
+		if cfg.Flows.Verifier.AutoMerge {
+			err = projectMerge(cfg, record.Branch, record.Strategy, record.Revision)
+		} else {
+			var hostMerged bool
+			hostMerged, _, err = inspectProjectMerge(cfg, record.Branch, record.Strategy, record.Revision)
+			if err == nil && !hostMerged {
 				return errHostMergePending
 			}
-			err = projectMerge(cfg, record.Branch, record.Strategy, record.Revision)
 		}
 		if err != nil {
 			if errors.Is(err, errHostMergeUnavailable) {
 				return dropStaleRetirement(repoDir, fact, err)
+			}
+			if errors.Is(err, errHostMergePending) {
+				return err
 			}
 			return fmt.Errorf("%w: %v", errHostMergePending, err)
 		}
