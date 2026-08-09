@@ -1,253 +1,12 @@
 package main
 
 import (
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
-
-var errRetirementStale = errors.New("retirement intent is stale")
-var errRetirementPreparation = errors.New("retirement preparation reset")
-var errRetirementEvidenceInvalid = errors.New("durable retirement evidence is invalid")
-var errRetirementRecoveryHard = errors.New("retirement recovery requires operator repair")
-
-const retirementRefPrefix = "refs/forest/retirement/"
-
-type retirementRecord struct {
-	Branch       string `json:"branch"`
-	Revision     string `json:"revision"`
-	ItemID       string `json:"item_id"`
-	Transport    string `json:"transport"`
-	Strategy     string `json:"strategy"`
-	Title        string `json:"title"`
-	State        string `json:"state"`
-	Agent        string `json:"agent"`
-	Model        string `json:"model"`
-	DefSHA       string `json:"def_sha"`
-	BuiltComment bool   `json:"built_comment,omitempty"`
-}
-
-type retirementFact struct {
-	Ref     string
-	SHA     string
-	Record  retirementRecord
-	ReadErr error
-}
-
-func sanitizeRetirementRecord(record retirementRecord) (retirementRecord, error) {
-	if secretShaped(record.Branch) || secretShaped(record.ItemID) {
-		return retirementRecord{}, errors.New("retirement control identity has credential-shaped text")
-	}
-	record.Title = redactSecretShaped(record.Title)
-	record.Agent = redactSecretShaped(record.Agent)
-	record.Model = redactSecretShaped(record.Model)
-	return record, nil
-}
-
-func retirementRef(branch, revision string) string {
-	return retirementRefPrefix + encodeRefComponent(branch) + "/" + encodeRefComponent(revision)
-}
-
-func retirementPayload(record retirementRecord) (string, error) {
-	payload, err := json.Marshal(record)
-	if err != nil {
-		return "", fmt.Errorf("encode retirement: %w", err)
-	}
-	body := string(payload)
-	if secretShaped(body) {
-		return "", errors.New("encode retirement: credential-shaped text remains")
-	}
-	return body, nil
-}
-
-func validateRetirementRecord(ref string, record retirementRecord) error {
-	if secretShaped(record.Branch) || secretShaped(record.ItemID) ||
-		secretShaped(record.Title) || secretShaped(record.Agent) || secretShaped(record.Model) {
-		return errors.New("retirement evidence contains credential-shaped text")
-	}
-	validState := record.State == "preparing" || record.State == "observed" ||
-		record.State == "pending" || record.State == "landed"
-	if (record.Transport != "git" && record.Transport != "host") ||
-		(record.Strategy != "squash" && record.Strategy != "ff") ||
-		!validState ||
-		(record.Transport == "host" && record.Strategy != "squash") ||
-		(record.Transport == "git" && record.State != "landed") ||
-		((record.State == "preparing" || record.State == "observed") && record.Transport != "host") {
-		return fmt.Errorf("retirement %s has invalid transport/strategy/state %q/%q/%q",
-			ref, record.Transport, record.Strategy, record.State)
-	}
-	name := strings.TrimPrefix(record.Branch, BranchPrefix)
-	dash := strings.IndexByte(name, '-')
-	if !strings.HasPrefix(record.Branch, BranchPrefix) || dash <= 0 ||
-		record.ItemID == "" || encodeBranchID(record.ItemID) != name[:dash] {
-		return fmt.Errorf("retirement %s has invalid branch/item identity %q/%q", ref, record.Branch, record.ItemID)
-	}
-	if !validHex(record.Revision, 20) {
-		return fmt.Errorf("retirement %s has invalid Revision %q", ref, record.Revision)
-	}
-	if record.State == "preparing" || record.State == "observed" {
-		if record.Agent != "" || record.Model != "" || record.DefSHA != "" {
-			return fmt.Errorf("retirement %s has attribution before a durable Verdict", ref)
-		}
-	} else if record.Agent == "" || record.Model == "" || !validHex(record.DefSHA, 8) {
-		return fmt.Errorf("retirement %s has invalid agent attribution", ref)
-	}
-	if retirementRef(record.Branch, record.Revision) != ref {
-		return fmt.Errorf("retirement %s content does not match its ref", ref)
-	}
-	return nil
-}
-
-func retirementMaterial(record retirementRecord, expectedRef string) (retirementFact, string, error) {
-	record, err := sanitizeRetirementRecord(record)
-	if err != nil {
-		return retirementFact{}, "", err
-	}
-	ref := retirementRef(record.Branch, record.Revision)
-	if expectedRef != "" {
-		ref = expectedRef
-	}
-	if err := validateRetirementRecord(ref, record); err != nil {
-		return retirementFact{}, "", err
-	}
-	payload, err := retirementPayload(record)
-	if err != nil {
-		return retirementFact{}, "", err
-	}
-	return retirementFact{Ref: ref, SHA: blobSHA(payload), Record: record}, payload, nil
-}
-
-func prepareRetirement(repoDir string, record retirementRecord) (retirementFact, error) {
-	fact, payload, err := retirementMaterial(record, "")
-	if err != nil {
-		return retirementFact{}, err
-	}
-	fact.SHA, err = writeBlob(repoDir, payload)
-	return fact, err
-}
-
-func readRetirement(repoDir, branch, revision string) (retirementFact, bool, error) {
-	ref := retirementRef(branch, revision)
-	sha, body, err := getBlobRef(repoDir, ref)
-	if err != nil {
-		return retirementFact{}, false, fmt.Errorf("%w: read retirement %s: %v",
-			errFlowRetryable, ref, err)
-	}
-	if sha == "" {
-		return retirementFact{}, false, nil
-	}
-	var record retirementRecord
-	if err := json.Unmarshal([]byte(body), &record); err != nil {
-		return retirementFact{}, false, fmt.Errorf("%w: decode retirement %s: %v",
-			errRetirementEvidenceInvalid, ref, err)
-	}
-	if err := validateRetirementRecord(ref, record); err != nil {
-		return retirementFact{}, false, fmt.Errorf("%w: %v", errRetirementEvidenceInvalid, err)
-	}
-	return retirementFact{Ref: ref, SHA: sha, Record: record}, true, nil
-}
-
-// recordRetirement stores facts created after the Builder comment completed.
-// Pre-comment observation uses recordRetirementExact so recovery cannot lose
-// its Builder exclusion while the Tracker is unavailable.
-func recordRetirement(repoDir string, record retirementRecord) (retirementFact, error) {
-	record.BuiltComment = true
-	return recordRetirementExact(repoDir, record)
-}
-
-func recordRetirementExact(repoDir string, record retirementRecord) (retirementFact, error) {
-	fact, payload, err := retirementMaterial(record, "")
-	if err != nil {
-		return retirementFact{}, err
-	}
-	if existing, found, err := readRetirement(repoDir, record.Branch, record.Revision); err != nil {
-		return retirementFact{}, err
-	} else if found {
-		if existing.Record != fact.Record {
-			return retirementFact{}, fmt.Errorf("%w: retirement %s already records a different effect",
-				errRetirementEvidenceInvalid, existing.Ref)
-		}
-		return existing, nil
-	}
-	if err := putBlobRef(repoDir, fact.Ref, payload, ""); err != nil {
-		if errors.Is(err, errRefMoved) {
-			existing, found, readErr := readRetirement(repoDir, fact.Record.Branch, fact.Record.Revision)
-			if readErr != nil {
-				return retirementFact{}, readErr
-			}
-			if found && existing.Record == fact.Record {
-				return existing, nil
-			}
-			if found {
-				return retirementFact{}, fmt.Errorf("%w: retirement %s records a conflicting effect",
-					errRetirementEvidenceInvalid, existing.Ref)
-			}
-		}
-		return retirementFact{}, fmt.Errorf("%w: record retirement: %v", errFlowRetryable, err)
-	}
-	return fact, nil
-}
-
-func replaceRetirement(repoDir string, fact retirementFact, next retirementRecord) (retirementFact, error) {
-	nextFact, payload, err := retirementMaterial(next, fact.Ref)
-	if err != nil {
-		return retirementFact{}, err
-	}
-	if err := putBlobRef(repoDir, fact.Ref, payload, fact.SHA); err != nil {
-		if errors.Is(err, errRefMoved) {
-			current, found, readErr := readRetirement(repoDir, next.Branch, next.Revision)
-			if readErr != nil {
-				return retirementFact{}, readErr
-			}
-			if found && current.Record == nextFact.Record {
-				return current, nil
-			}
-			if found {
-				return retirementFact{}, fmt.Errorf("%w: retirement %s changed to a conflicting effect",
-					errRetirementEvidenceInvalid, current.Ref)
-			}
-		}
-		return retirementFact{}, fmt.Errorf("%w: replace retirement: %v", errFlowRetryable, err)
-	}
-	return nextFact, nil
-}
-
-func moveRetirement(repoDir string, fact retirementFact, next retirementRecord) (retirementFact, error) {
-	nextFact, err := prepareRetirement(repoDir, next)
-	if err != nil {
-		return retirementFact{}, err
-	}
-	if nextFact.Ref == fact.Ref {
-		return replaceRetirement(repoDir, fact, next)
-	}
-	err = git(repoDir, "push", "--no-verify", "--atomic",
-		"--force-with-lease="+fact.Ref+":"+fact.SHA,
-		"--force-with-lease="+nextFact.Ref+":",
-		"origin", ":"+fact.Ref, nextFact.SHA+":"+nextFact.Ref)
-	if err == nil {
-		return nextFact, nil
-	}
-	current, found, readErr := readRetirement(repoDir, next.Branch, next.Revision)
-	if readErr != nil {
-		return retirementFact{}, readErr
-	}
-	oldSHA, _, oldErr := getBlobRef(repoDir, fact.Ref)
-	if oldErr != nil {
-		return retirementFact{}, fmt.Errorf("%w: inspect moved retirement: %v", errFlowRetryable, oldErr)
-	}
-	if found && current.Record == nextFact.Record && oldSHA == "" {
-		return current, nil
-	}
-	if found && current.Record != nextFact.Record || oldSHA != "" && oldSHA != fact.SHA {
-		return retirementFact{}, fmt.Errorf("%w: retirement move encountered conflicting evidence",
-			errRetirementEvidenceInvalid)
-	}
-	return retirementFact{}, fmt.Errorf("%w: move retirement: %v", errFlowRetryable, err)
-}
 
 func landRetirement(repoDir string, fact retirementFact) (retirementFact, error) {
 	if fact.Record.State == "landed" {
@@ -258,360 +17,128 @@ func landRetirement(repoDir string, fact retirementFact) (retirementFact, error)
 	return replaceRetirement(repoDir, fact, landed)
 }
 
-func scanRetirements(repoDir string) ([]retirementFact, error) {
-	out, err := gitCommand(repoDir, "ls-remote", "origin", retirementRefPrefix+"*")
+func (f verifierFlow) actRetirement(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
+	fact, found, err := readRetirement(repoDir, s.Branch, s.Revision)
 	if err != nil {
-		return nil, err
+		return Outcome{Branch: s.Branch, BaseSHA: s.Revision, Status: "merge_failed"}, err
 	}
-	byBranch := make(map[string]int)
-	byItem := make(map[string]int)
-	var facts []retirementFact
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 || !strings.HasPrefix(fields[1], retirementRefPrefix) {
-			continue
-		}
-		sha, body, err := getBlobRef(repoDir, fields[1])
-		if err != nil {
-			return nil, err
-		}
-		if sha == "" {
-			continue
-		}
-		fact := retirementFact{Ref: fields[1], SHA: sha}
-		if err := json.Unmarshal([]byte(body), &fact.Record); err != nil {
-			fact.ReadErr = fmt.Errorf("%w: decode retirement payload: %v",
-				errRetirementEvidenceInvalid, err)
-		} else if err := validateRetirementRecord(fields[1], fact.Record); err != nil {
-			fact.ReadErr = fmt.Errorf("%w: %v", errRetirementEvidenceInvalid, err)
-		}
-		facts = append(facts, fact)
-		if fact.ReadErr != nil {
-			continue
-		}
-		current := len(facts) - 1
-		if prior, found := byBranch[fact.Record.Branch]; found {
-			conflict := fmt.Errorf("%w: retirement branch has conflicting facts",
-				errRetirementEvidenceInvalid)
-			facts[prior].ReadErr = conflict
-			facts[current].ReadErr = conflict
-		} else {
-			byBranch[fact.Record.Branch] = current
-		}
-		if prior, found := byItem[fact.Record.ItemID]; found {
-			conflict := fmt.Errorf("%w: retirement Item %s has conflicting facts",
-				errRetirementEvidenceInvalid, fact.Record.ItemID)
-			facts[prior].ReadErr = conflict
-			facts[current].ReadErr = conflict
-		} else {
-			byItem[fact.Record.ItemID] = current
-		}
-	}
-	return facts, nil
-}
-
-func retirementRefIdentity(ref string) (branch, id string, ok bool) {
-	encoded := strings.TrimPrefix(ref, retirementRefPrefix)
-	branchHex, _, found := strings.Cut(encoded, "/")
 	if !found {
-		return "", "", false
+		return Outcome{Branch: s.Branch, BaseSHA: s.Revision, Status: "skipped"}, nil
 	}
-	raw, err := hex.DecodeString(branchHex)
-	if err != nil {
-		return "", "", false
+	record := fact.Record
+	out := Outcome{
+		Branch: s.Branch, BaseSHA: s.Revision,
+		Agent: record.Agent, Model: record.Model, DefSHA: record.DefSHA,
 	}
-	branch = string(raw)
-	name := strings.TrimPrefix(branch, BranchPrefix)
-	dash := strings.IndexByte(name, '-')
-	if !strings.HasPrefix(branch, BranchPrefix) || dash <= 0 || secretShaped(branch) {
-		return "", "", false
-	}
-	id = decodeBranchID(name[:dash])
-	if id == "" || secretShaped(id) {
-		return "", "", false
-	}
-	return branch, id, true
-}
-
-func retirementItemIDs(repoDir string) ([]string, error) {
-	facts, err := scanRetirements(repoDir)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(facts))
-	for _, fact := range facts {
-		if fact.ReadErr == nil {
-			ids = append(ids, fact.Record.ItemID)
-			continue
-		}
-		_, id, ok := retirementRefIdentity(fact.Ref)
-		if !ok {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
-
-// recordPreparingHostRetirement publishes the recovery identity before any Host
-// request can exist. A preparing fact blocks duplicate Builder work but still
-// lets the live branch reach the Verifier.
-func recordPreparingHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item) (retirementFact, error) {
-	next := retirementRecord{
-		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
-		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "preparing",
-		BuiltComment: true,
-	}
-	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
-		return retirementFact{}, err
-	} else if found {
-		if fact.Record.ItemID != it.ID {
-			return retirementFact{}, fmt.Errorf("%w: retirement %s does not match item %q",
-				errHostMergeUnavailable, fact.Ref, it.ID)
-		}
-		return fact, nil
-	}
-	facts, err := scanRetirements(repoDir)
-	if err != nil {
-		return retirementFact{}, err
-	}
-	for _, fact := range facts {
-		if fact.ReadErr != nil {
-			badBranch, badID, ok := retirementRefIdentity(fact.Ref)
-			if !ok || badBranch == branch || badID == it.ID {
-				return retirementFact{}, fact.ReadErr
-			}
-			continue
-		}
-		if fact.Record.Branch != branch && fact.Record.ItemID != it.ID {
-			continue
-		}
-		if fact.Record.Branch != branch || fact.Record.ItemID != it.ID ||
-			fact.Record.State != "preparing" {
-			return retirementFact{}, fmt.Errorf("%w: retirement %s already owns branch %q or item %q",
-				errHostMergeUnavailable, fact.Ref, branch, it.ID)
-		}
-		head, err := branchHead(repoDir, branch)
-		if err != nil || head != reviewed {
-			return retirementFact{}, fmt.Errorf("%w: %w: retirement %s cannot move from %s to %s without the exact branch head",
-				errHostMergeUnavailable, errHostRevisionMoved, fact.Ref, fact.Record.Revision, reviewed)
-		}
-		merged, err := mergedProjectionPRs(cfg, branch)
-		if err != nil {
-			return retirementFact{}, fmt.Errorf("inspect prior Host Revision: %w", err)
-		}
-		for _, pr := range merged {
-			if pr.HeadRefOID != fact.Record.Revision {
-				continue
-			}
-			observed, err := observeHostRetirement(repoDir, fact)
-			if err != nil {
-				return retirementFact{}, err
-			}
-			return observed, fmt.Errorf("%w: Host already merged prior Revision %s",
-				errHostMergePending, fact.Record.Revision)
-		}
-		prs, err := openProjectionPR(cfg, branch)
-		if err != nil {
-			return retirementFact{}, fmt.Errorf("inspect advanced Host Projection: %w", err)
-		}
-		if len(prs) == 0 {
-			return moveRetirement(repoDir, fact, next)
-		}
-		if prs[0].HeadRefOID == "" || prs[0].HeadRefOID != reviewed {
-			return retirementFact{}, fmt.Errorf("%w: %w: Host Projection for %s reports Revision %s, want %s",
-				errHostMergeUnavailable, errHostRevisionMoved, branch, prs[0].HeadRefOID, reviewed)
-		}
-		return moveRetirement(repoDir, fact, next)
-	}
-	return recordRetirement(repoDir, next)
-}
-
-func pendingHostRetirement(repoDir string, fact retirementFact, verdict verdictNote) (retirementFact, error) {
-	if fact.Record.State == "landed" || fact.Record.State == "observed" {
-		return fact, nil
-	}
-	if fact.Record.State != "preparing" && fact.Record.State != "pending" {
-		return retirementFact{}, fmt.Errorf("retirement %s cannot become pending from %q", fact.Ref, fact.Record.State)
-	}
-	pending := fact.Record
-	pending.State = "pending"
-	pending.Agent = verdict.Reviewer
-	pending.Model = verdict.Model
-	pending.DefSHA = verdict.DefSHA
-	if pending == fact.Record {
-		return fact, nil
-	}
-	return replaceRetirement(repoDir, fact, pending)
-}
-
-func resetHostRetirement(repoDir string, fact retirementFact, cause error) (retirementFact, error) {
-	preparing := fact.Record
-	preparing.State = "preparing"
-	preparing.Agent = ""
-	preparing.Model = ""
-	preparing.DefSHA = ""
-	next, err := replaceRetirement(repoDir, fact, preparing)
-	if err != nil {
-		return fact, err
-	}
-	return next, fmt.Errorf("%w: %v", errRetirementPreparation, cause)
-}
-
-func moveAdvancedHostRetirement(cfg Config, repoDir string, fact retirementFact) (retirementFact, bool, error) {
-	head, err := branchHead(repoDir, fact.Record.Branch)
-	if err != nil {
-		return fact, false, fmt.Errorf("%w: inspect advanced retirement branch: %v",
-			errFlowRetryable, err)
-	}
-	if head == fact.Record.Revision {
-		return fact, false, nil
-	}
-	prs, err := openProjectionPR(cfg, fact.Record.Branch)
-	if err != nil {
-		return fact, false, err
-	}
-	if len(prs) != 1 || prs[0].HeadRefOID != head {
-		return fact, false, nil
-	}
-	next := fact.Record
-	next.Revision = head
-	next.State = "preparing"
-	next.Agent = ""
-	next.Model = ""
-	next.DefSHA = ""
-	moved, err := moveRetirement(repoDir, fact, next)
-	return moved, err == nil, err
-}
-
-func observeHostRetirement(repoDir string, fact retirementFact) (retirementFact, error) {
-	switch fact.Record.State {
-	case "observed", "landed":
-		return fact, nil
-	case "preparing", "pending":
-	default:
-		return retirementFact{}, fmt.Errorf("retirement %s cannot become observed from %q",
-			fact.Ref, fact.Record.State)
-	}
-	observed := fact.Record
-	observed.State = "observed"
-	observed.Agent = ""
-	observed.Model = ""
-	observed.DefSHA = ""
-	return replaceRetirement(repoDir, fact, observed)
-}
-
-// recordObservedHostRetirement preserves an exact Host merge before missing
-// Builder-comment or approval evidence is recovered. The fact blocks duplicate
-// Builder work until recovery joins every required Effect.
-func recordObservedHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item) (retirementFact, error) {
-	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
-		return retirementFact{}, err
-	} else if found {
-		if fact.Record.ItemID != it.ID {
-			return retirementFact{}, fmt.Errorf("retirement %s does not match item %q", fact.Ref, it.ID)
-		}
-		return observeHostRetirement(repoDir, fact)
-	}
-	record := retirementRecord{
-		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
-		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "observed",
-	}
-	fact, err := recordRetirementExact(repoDir, record)
-	if err == nil {
-		return fact, nil
-	}
-	// Another checkout can publish the approval preparation between the read
-	// and compare-and-set. Its exact fact owns recovery.
-	if winner, found, readErr := readRetirement(repoDir, branch, reviewed); readErr == nil && found && winner.Record.ItemID == it.ID {
-		return observeHostRetirement(repoDir, winner)
-	}
-	return retirementFact{}, err
-}
-func recoverRetirementBuiltComment(
-	cfg Config,
-	repoDir string,
-	fact retirementFact,
-	it Item,
-) (retirementFact, error) {
-	if fact.Record.BuiltComment {
-		return fact, nil
-	}
-	if err := publishBuiltComment(
-		cfg, repoDir, it, fact.Record.Branch, fact.Record.Revision,
-	); err != nil {
-		return retirementFact{}, err
-	}
-	next := fact.Record
-	next.BuiltComment = true
-	recovered, err := replaceRetirement(repoDir, fact, next)
-	if err != nil {
-		return retirementFact{}, fmt.Errorf("record completion: %w", err)
-	}
-	return recovered, nil
-}
-
-func landObservedRetirement(repoDir string, fact retirementFact, verdict verdictNote) (retirementFact, error) {
-	if fact.Record.State != "observed" {
-		return retirementFact{}, fmt.Errorf("retirement %s is not an observed Host merge", fact.Ref)
-	}
-	landed := fact.Record
-	landed.State = "landed"
-	landed.Agent = verdict.Reviewer
-	landed.Model = verdict.Model
-	landed.DefSHA = verdict.DefSHA
-	return replaceRetirement(repoDir, fact, landed)
-}
-
-func recordHostRetirement(
-	cfg Config,
-	repoDir, branch, reviewed string,
-	it Item,
-	verdict verdictNote,
-	checks checksNote,
-) error {
-	if !cfg.Projection.MergeViaHost || verdict.Verdict != "approve" {
-		return nil
-	}
-	fact, err := recordPreparingHostRetirement(cfg, repoDir, branch, reviewed, it)
-	if err != nil {
-		return err
-	}
-	if _, _, err := projectBranch(cfg, repoDir, it, branch,
-		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), reviewed); err != nil {
-		return err
-	}
-	if err := projectVerdict(cfg, repoDir, branch, reviewed, verdict, checks); err != nil {
-		return err
-	}
-	_, err = pendingHostRetirement(repoDir, fact, verdict)
-	return err
-}
-
-func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, it Item, out Outcome) (Outcome, error) {
-	fact, err := recordObservedHostRetirement(cfg, repoDir, branch, reviewed, it)
-	if err != nil {
-		out.Status = "merge_failed"
-		return out, err
-	}
-	fact, err = recoverRetirementBuiltComment(cfg, repoDir, fact, it)
+	fact, err = recoverRetirementBuiltComment(cfg, repoDir, fact, s.Item)
 	if err != nil {
 		out.Status = "comment_failed"
 		return out, fmt.Errorf("comment: %w", err)
 	}
-	record, err := recoverRetirement(cfg, repoDir, fact, it)
-	if err != nil {
-		if errors.Is(err, errHostMergePending) {
+	record = fact.Record
+	if record.State == "preparing" {
+		head, present, headErr := lookupBranchHead(repoDir, record.Branch)
+		if headErr != nil {
 			out.Status = "merge_pending"
 			return out, nil
 		}
-		out.Status = "merge_failed"
-		return out, err
+		if present {
+			if head != record.Revision {
+				moved, moveErr := recordPreparingHostRetirement(
+					cfg, repoDir, record.Branch, head, s.Item)
+				out.BaseSHA = head
+				if moveErr != nil {
+					if errors.Is(moveErr, errHostMergePending) ||
+						errors.Is(moveErr, errRetirementPreparation) {
+						out.Status = "merge_pending"
+						return out, nil
+					}
+					out.Status = "merge_failed"
+					return out, moveErr
+				}
+				if moved.Record.Revision != head {
+					out.Status = "merge_failed"
+					return out, fmt.Errorf("%w: preparing retirement did not move to the live Revision",
+						errHostMergeUnavailable)
+				}
+				out.Status = "skipped"
+				return out, nil
+			}
+			verdict, checks, evidenceErr := readRetirementApproval(repoDir, record.Revision)
+			if evidenceErr != nil {
+				if errors.Is(evidenceErr, errHostMergePending) {
+					out.Status = "merge_pending"
+					return out, nil
+				}
+				out.Status = "merge_failed"
+				return out, evidenceErr
+			}
+			terminal := checks.Status == "fail" || verdict.Verdict == "changes"
+			if terminal {
+				merged, _, inspectErr := inspectProjectMerge(
+					cfg, record.Branch, record.Strategy, record.Revision)
+				if inspectErr != nil {
+					inspectErr = retryableHostError(cfg, inspectErr)
+					if errors.Is(inspectErr, errHostMergePending) {
+						out.Status = "merge_pending"
+						return out, nil
+					}
+					out.Status = "merge_failed"
+					return out, inspectErr
+				}
+				if !merged {
+					out.Status = "reviewed"
+					if checks.Status == "fail" {
+						out.Status = "checks_failed"
+					}
+					out.Verdict = verdict.Verdict
+					return out, nil
+				}
+			} else {
+				agentStalled, stallErr := stalledOn(repoDir, f.Name(),
+					retirementAgentSubjectKey(record.Branch), record.Revision)
+				if stallErr != nil {
+					out.Status = "merge_failed"
+					return out, stallErr
+				}
+				branchStalled, stallErr := stalledOn(repoDir, f.Name(),
+					"branch-"+record.Branch, record.Revision)
+				if stallErr != nil {
+					out.Status = "merge_failed"
+					return out, stallErr
+				}
+				if !agentStalled && !branchStalled {
+					branchSubject := s
+					branchSubject.Key = retirementAgentSubjectKey(record.Branch)
+					branchSubject.Kind = subjectBranch
+					branchSubject.Revision = head
+					return f.actBranch(cfg, repoDir, branchSubject, runID)
+				}
+			}
+		}
 	}
-	out.Agent = record.Agent
-	out.Model = record.Model
-	out.DefSHA = record.DefSHA
-	out.Verdict = "approve"
+	recovered, err := recoverRetirement(cfg, repoDir, fact, s.Item)
+	if recovered.Agent != "" {
+		out.Agent = recovered.Agent
+		out.Model = recovered.Model
+		out.DefSHA = recovered.DefSHA
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, errHostMergePending):
+			out.Status = "merge_pending"
+			return out, nil
+		case errors.Is(err, errRetirementPreparation):
+			out.Status = "skipped"
+			return out, nil
+		case errors.Is(err, errRetirementStale):
+			out.Status = "stale"
+			return out, err
+		default:
+			out.Status = "merge_failed"
+			return out, err
+		}
+	}
 	out.Status = "merged"
 	return out, nil
 }
@@ -732,47 +259,6 @@ func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agen
 		return fmt.Errorf("%w: merge push: %v", errFlowRetryable, pushErr)
 	}
 	return finishRetirement(cfg, repoDir, fact, it)
-}
-func retirementEvidenceReadError(kind string, err error) error {
-	if errors.Is(err, errNoteInvalid) {
-		return fmt.Errorf("%w: read durable %s: %v", errRetirementEvidenceInvalid, kind, err)
-	}
-	return fmt.Errorf("%w: read durable %s: %v", errHostMergePending, kind, err)
-}
-
-func readRetirementApproval(repoDir, revision string) (verdictNote, checksNote, error) {
-	if err := fetchNotes(repoDir); err != nil {
-		return verdictNote{}, checksNote{}, fmt.Errorf("%w: refresh durable notes: %v", errHostMergePending, err)
-	}
-	verdict, _, err := readVerdict(repoDir, revision)
-	if err != nil {
-		return verdictNote{}, checksNote{}, retirementEvidenceReadError("Verdict", err)
-	}
-	checks, _, err := readChecks(repoDir, revision)
-	if err != nil {
-		return verdictNote{}, checksNote{}, retirementEvidenceReadError("Checks", err)
-	}
-	return verdict, checks, nil
-}
-
-func recordHostMergeHandoff(
-	cfg Config,
-	repoDir string,
-	record retirementRecord,
-	it Item,
-	handoff error,
-) error {
-	if err := recordMergeBlocked(
-		cfg, repoDir, retirementSubjectKey(record.Branch), record.Revision, it, handoff,
-	); err != nil {
-		if errors.Is(err, errFlowRetryable) || errors.Is(err, errTrackerUnavailable) {
-			return fmt.Errorf("%w: %v; publish Host merge handoff: %v",
-				errHostMergePending, handoff, err)
-		}
-		return fmt.Errorf("%w: %v; publish Host merge handoff: %v",
-			errRetirementRecoveryHard, handoff, err)
-	}
-	return fmt.Errorf("%w: %v", errRetirementRecoveryHard, handoff)
 }
 
 func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it Item) error {

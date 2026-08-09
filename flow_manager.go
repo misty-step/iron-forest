@@ -17,6 +17,19 @@ import (
 // this key, the plan Revision, and the operator Label.
 const managerSubject = "manager"
 
+// managerMutationOperation identifies the Manager-owned tag transition.
+type managerMutationOperation string
+
+const (
+	managerMutationReap    managerMutationOperation = "reap"
+	managerMutationPromote managerMutationOperation = "promote"
+)
+
+type managerMutation struct {
+	operation        managerMutationOperation
+	expectedRevision string
+}
+
 // managerFlow keeps up to the configured ready depth of unstarted assignments.
 // It reads the open items, filters a candidate set deterministically (unblocked,
 // unbranched, unstalled), asks one agent pass to pick one of them, and lays
@@ -133,7 +146,7 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	reaped := 0
 	for _, it := range plan.reap {
 		changed, err := mutateManagerItem(cfg, repoDir, tk, it,
-			nil, []string{readyTag}, "")
+			managerMutation{operation: managerMutationReap})
 		if err != nil {
 			return Outcome{Status: "tracker_failed"}, fmt.Errorf("reap item %s: %w", it.ID, err)
 		}
@@ -201,7 +214,8 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "refused"
 		return out, fmt.Errorf("refused: pick %q is outside the candidate set", rep.Pick)
 	}
-	promoted, err := mutateManagerItem(cfg, repoDir, tk, picked, []string{readyTag}, nil, plan.revision)
+	promoted, err := mutateManagerItem(cfg, repoDir, tk, picked,
+		managerMutation{operation: managerMutationPromote, expectedRevision: plan.revision})
 	if err != nil {
 		out.Status = "tracker_failed"
 		return out, fmt.Errorf("promote item %s: %w", rep.Pick, err)
@@ -217,7 +231,20 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 // mutateManagerItem shares the canonical Item claim with code-producing Flows.
 // It rechecks branches, retirements, and the current plan under exactly one
 // admission immediately before the tag Effect.
-func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, remove []string, expectedRevision string) (bool, error) {
+func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, mutation managerMutation) (bool, error) {
+	switch mutation.operation {
+	case managerMutationReap:
+		if mutation.expectedRevision != "" {
+			return false, fmt.Errorf("reap Manager mutation cannot carry expected Revision")
+		}
+	case managerMutationPromote:
+		if mutation.expectedRevision == "" {
+			return false, fmt.Errorf("promote Manager mutation requires expected Revision")
+		}
+	default:
+		return false, fmt.Errorf("unknown Manager mutation operation %q", mutation.operation)
+	}
+
 	release, err := claimAdmission(repoDir, cfg.Repo, "manager", Subject{
 		Key: "item-" + it.ID, Kind: subjectItem, ID: it.ID, Revision: it.UpdatedAt,
 	})
@@ -230,7 +257,7 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	defer release()
 
 	// Admission is the durable intent for this tag Effect. Repeating the exact
-	// add/remove operation is safe because SetTags is idempotent.
+	// operation is safe because SetTags is idempotent.
 	snapshot, err := readTrackerSnapshot(tk)
 	if err != nil {
 		return false, err
@@ -249,40 +276,47 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	if err != nil {
 		return false, err
 	}
-	if expectedRevision != "" {
+
+	switch mutation.operation {
+	case managerMutationPromote:
 		// A judged promotion must still match the plan the model saw: same
 		// Revision, a judgement still wanted, no new withdrawal, and the pick
 		// still a candidate.
-		if plan.revision != expectedRevision || !plan.needModel || len(plan.reap) != 0 {
+		if plan.revision != mutation.expectedRevision || !plan.needModel || len(plan.reap) != 0 {
 			return false, nil
 		}
 		for _, fresh := range plan.cands {
-			if fresh.ID == it.ID {
-				if err := tk.SetTags(it.ID, add, remove); err != nil {
-					return false, err
-				}
-				return true, nil
+			if fresh.ID != it.ID {
+				continue
 			}
+			if err := tk.SetTags(it.ID, []string{readyTag}, nil); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		return false, nil
+
+	case managerMutationReap:
+		for _, fresh := range plan.reap {
+			if fresh.ID != it.ID || fresh.UpdatedAt != it.UpdatedAt {
+				continue
+			}
+			add := []string(nil)
+			for _, failed := range plan.failed {
+				if failed.ID == it.ID {
+					add = []string{failedLabel}
+					break
+				}
+			}
+			if err := tk.SetTags(it.ID, add, []string{readyTag}); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 		return false, nil
 	}
-	for _, fresh := range plan.reap {
-		if fresh.ID != it.ID || fresh.UpdatedAt != it.UpdatedAt {
-			continue
-		}
-		add = nil
-		for _, failed := range plan.failed {
-			if failed.ID == it.ID {
-				add = []string{failedLabel}
-				break
-			}
-		}
-		if err := tk.SetTags(it.ID, add, remove); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	return false, nil
+
+	return false, fmt.Errorf("unknown Manager mutation operation %q", mutation.operation)
 }
 
 // managerPlan is the deterministic filter and slot accounting behind one Manager

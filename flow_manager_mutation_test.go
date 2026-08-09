@@ -313,7 +313,7 @@ func TestManagerReapRefusesDifferentFreshAssignment(t *testing.T) {
 	cfg := managerFlowConfig(repo)
 	cfg.Flows.Manager.ExcludeLabels = []string{"parked"}
 
-	changed, err := mutateManagerItem(cfg, repo, tk, tk.items["1"], nil, []string{readyTag}, "")
+	changed, err := mutateManagerItem(cfg, repo, tk, tk.items["1"], managerMutation{operation: managerMutationReap})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,11 +330,27 @@ func TestManagerReapRefusesChangedTargetRevision(t *testing.T) {
 	cfg.Flows.Manager.ExcludeLabels = []string{"parked"}
 	stale := Item{ID: "1", UpdatedAt: "u1", Tags: []string{readyTag, "parked"}}
 
-	changed, err := mutateManagerItem(cfg, repo, tk, stale, nil, []string{readyTag}, "")
+	changed, err := mutateManagerItem(cfg, repo, tk, stale, managerMutation{operation: managerMutationReap})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if changed || !tk.items["1"].hasTag(readyTag) {
 		t.Fatalf("Manager reaped changed assignment revision: %v", tk.items["1"].Tags)
+	}
+}
+
+func TestManagerRejectsUnknownMutationOperation(t *testing.T) {
+	repo := newRefGitRepo(t)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", UpdatedAt: "u1", Tags: []string{readyTag}})
+
+	changed, err := mutateManagerItem(managerFlowConfig(repo), repo, tk, tk.items["1"], managerMutation{
+		operation: managerMutationOperation("unknown"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unknown Manager mutation operation") || changed {
+		t.Fatalf("unknown Manager mutation = (changed=%v, err=%v), want rejection", changed, err)
+	}
+	if !tk.items["1"].hasTag(readyTag) {
+		t.Fatal("unknown Manager mutation changed the item")
 	}
 }
