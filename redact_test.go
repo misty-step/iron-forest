@@ -70,12 +70,28 @@ func TestRedactSecretShapedOutboundSinks(t *testing.T) {
 		t.Fatalf("pull-request body leaked a secret: %q", body)
 	}
 
-	vb := verdictBody(
+	oldProjectionCommand := projectionCommand
+	defer func() { projectionCommand = oldProjectionCommand }()
+	var commentArgs []string
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+		}
+		commentArgs = append([]string(nil), args...)
+		return nil, nil
+	}
+	err := projectVerdict(
+		Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}},
+		"forest/7-change",
 		verdictNote{Verdict: "changes", Notes: "see sk-AAAAAAAAAAAAAAAA"},
 		checksNote{Status: "fail", Results: []checkResult{{Name: "test", Code: 1, Output: "got sk-AAAAAAAAAAAAAAAA"}}},
 	)
-	if strings.Contains(vb, "sk-") {
-		t.Fatalf("comment projection leaked a secret: %q", vb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comment := strings.Join(commentArgs, "\n")
+	if strings.Contains(comment, "sk-") || !strings.Contains(comment, secretRedacted) {
+		t.Fatalf("comment projection redaction = %q, want marker without original", comment)
 	}
 }
 
