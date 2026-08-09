@@ -168,8 +168,8 @@ func TestPreparingHostRetirementMovesRevisionAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fact, err := recordPreparingHostRetirement(cfg, repo, branch, advanced, item); err != nil ||
-		fact.Record.Revision != advanced {
-		t.Fatalf("atomic migration retry = (%#v, %v)", fact, err)
+		fact.Record.Revision != advanced || fact.Record.BuiltComment {
+		t.Fatalf("atomic migration retry = (%#v, %v), want incomplete new-Revision comment", fact, err)
 	}
 	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
 		t.Fatalf("atomic migration retained old fact = (found=%v, err=%v)", found, err)
@@ -207,8 +207,9 @@ func TestPreparingHostRetirementMovesBeforeFirstProjection(t *testing.T) {
 	}
 	record, err := recoverRetirement(cfg, repo, fact, item)
 	if !errors.Is(err, errRetirementPreparation) ||
-		record.Revision != advanced || record.State != "preparing" {
-		t.Fatalf("pre-Projection preparation recovery = (%#v, %v)", record, err)
+		record.Revision != advanced || record.State != "preparing" || record.BuiltComment {
+		t.Fatalf("pre-Projection preparation recovery = (%#v, %v), want incomplete new-Revision comment",
+			record, err)
 	}
 	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
 		t.Fatalf("pre-Projection move retained old fact = (found=%v, err=%v)", found, err)

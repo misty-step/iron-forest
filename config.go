@@ -248,6 +248,19 @@ func loadConfig(path string) (Config, error) {
 				return cfg, fmt.Errorf("%s: enabled Manager cannot exclude its assignment label %s", path, readyTag)
 			}
 		}
+		for _, builderLabel := range cfg.Flows.Builder.ExcludeLabels {
+			inManager := false
+			for _, managerLabel := range cfg.Flows.Manager.ExcludeLabels {
+				if managerLabel == builderLabel {
+					inManager = true
+					break
+				}
+			}
+			if !inManager {
+				return cfg, fmt.Errorf("%s: enabled Manager exclude_labels must include Builder exclusion %q",
+					path, builderLabel)
+			}
+		}
 	}
 	for i, c := range cfg.Checks {
 		if strings.TrimSpace(c.Name) == "" || strings.TrimSpace(c.Run) == "" {

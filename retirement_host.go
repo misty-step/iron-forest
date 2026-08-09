@@ -12,7 +12,6 @@ func recordPreparingHostRetirement(cfg Config, repoDir, branch, reviewed string,
 	next := retirementRecord{
 		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
 		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "preparing",
-		BuiltComment: true,
 	}
 	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
 		return retirementFact{}, err
@@ -135,6 +134,7 @@ func moveAdvancedHostRetirement(cfg Config, repoDir string, fact retirementFact)
 	next.Agent = ""
 	next.Model = ""
 	next.DefSHA = ""
+	next.BuiltComment = false
 	moved, err := moveRetirement(repoDir, fact, next)
 	return moved, err == nil, err
 }

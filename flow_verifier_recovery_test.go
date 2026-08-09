@@ -647,8 +647,18 @@ func TestVerifierActMigratesHostPreparationAndPinsPostRebaseEvidence(t *testing.
 		t.Fatalf("pre-rebase preparation = (found=%v, err=%v), want migrated away", found, err)
 	}
 	fact, found, err := readRetirement(repo, branch, newHead)
-	if err != nil || !found || fact.Record.State != "pending" {
-		t.Fatalf("post-rebase preparation = (%#v, found=%v, err=%v), want pending fact", fact, found, err)
+	if err != nil || !found || fact.Record.State != "pending" || fact.Record.BuiltComment {
+		t.Fatalf("post-rebase preparation = (%#v, found=%v, err=%v), want incomplete pending fact",
+			fact, found, err)
+	}
+	fact, err = recoverRetirementBuiltComment(cfg, repo, fact, item)
+	if err != nil || !fact.Record.BuiltComment {
+		t.Fatalf("post-rebase Builder comment recovery = (%#v, %v), want complete", fact, err)
+	}
+	fresh, err := tk.Get(item.ID)
+	if err != nil || len(fresh.Comments) == 0 ||
+		!strings.Contains(fresh.Comments[len(fresh.Comments)-1].Body, "revision="+newHead) {
+		t.Fatalf("post-rebase Builder comment = (%#v, %v), want Revision %s", fresh.Comments, err, newHead)
 	}
 }
 

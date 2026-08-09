@@ -132,6 +132,28 @@ func TestRetirementFactsRejectConflictingItemBranches(t *testing.T) {
 	}
 }
 
+func TestMalformedRetirementConflictsWithValidIdentity(t *testing.T) {
+	repo := newRefGitRepo(t)
+	branch := "forest/9-change"
+	validRevision := strings.Repeat("b", 40)
+	if _, err := recordRetirement(repo, testRetirementRecord(branch, validRevision, "9")); err != nil {
+		t.Fatal(err)
+	}
+	malformedRef := retirementRef(branch, strings.Repeat("c", 40))
+	if err := putBlobRef(repo, malformedRef, "{", ""); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := scanRetirements(repo)
+	if err != nil || len(facts) != 2 {
+		t.Fatalf("retirement scan = (%#v, %v), want two facts", facts, err)
+	}
+	for _, fact := range facts {
+		if fact.ReadErr == nil || !strings.Contains(fact.ReadErr.Error(), "conflicting facts") {
+			t.Fatalf("duplicate retirement fact = %#v, want conflict quarantine", fact)
+		}
+	}
+}
+
 func TestRetirementRecordAllowsEmptyTitleSlug(t *testing.T) {
 	repo := newRefGitRepo(t)
 	record := testRetirementRecord("forest/9-", strings.Repeat("b", 40), "9")

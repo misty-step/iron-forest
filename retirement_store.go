@@ -275,25 +275,26 @@ func scanRetirements(repoDir string) ([]retirementFact, error) {
 			fact.ReadErr = fmt.Errorf("%w: %v", errRetirementEvidenceInvalid, err)
 		}
 		facts = append(facts, fact)
-		if fact.ReadErr != nil {
+		branch, id, known := retirementFactIdentity(fact)
+		if !known {
 			continue
 		}
 		current := len(facts) - 1
-		if prior, found := byBranch[fact.Record.Branch]; found {
+		if prior, found := byBranch[branch]; found {
 			conflict := fmt.Errorf("%w: retirement branch has conflicting facts",
 				errRetirementEvidenceInvalid)
-			facts[prior].ReadErr = conflict
-			facts[current].ReadErr = conflict
+			facts[prior].ReadErr = errors.Join(facts[prior].ReadErr, conflict)
+			facts[current].ReadErr = errors.Join(facts[current].ReadErr, conflict)
 		} else {
-			byBranch[fact.Record.Branch] = current
+			byBranch[branch] = current
 		}
-		if prior, found := byItem[fact.Record.ItemID]; found {
+		if prior, found := byItem[id]; found {
 			conflict := fmt.Errorf("%w: retirement Item %s has conflicting facts",
-				errRetirementEvidenceInvalid, fact.Record.ItemID)
-			facts[prior].ReadErr = conflict
-			facts[current].ReadErr = conflict
+				errRetirementEvidenceInvalid, id)
+			facts[prior].ReadErr = errors.Join(facts[prior].ReadErr, conflict)
+			facts[current].ReadErr = errors.Join(facts[current].ReadErr, conflict)
 		} else {
-			byItem[fact.Record.ItemID] = current
+			byItem[id] = current
 		}
 	}
 	return facts, nil
@@ -326,6 +327,13 @@ func retirementRefIdentity(ref string) (branch, id string, ok bool) {
 	return branch, id, true
 }
 
+func retirementFactIdentity(fact retirementFact) (branch, id string, ok bool) {
+	if fact.ReadErr == nil {
+		return fact.Record.Branch, fact.Record.ItemID, true
+	}
+	return retirementRefIdentity(fact.Ref)
+}
+
 func retirementItemIDs(repoDir string) ([]string, error) {
 	facts, err := scanRetirements(repoDir)
 	if err != nil {
@@ -333,15 +341,10 @@ func retirementItemIDs(repoDir string) ([]string, error) {
 	}
 	ids := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		if fact.ReadErr == nil {
-			ids = append(ids, fact.Record.ItemID)
-			continue
+		_, id, ok := retirementFactIdentity(fact)
+		if ok {
+			ids = append(ids, id)
 		}
-		_, id, ok := retirementRefIdentity(fact.Ref)
-		if !ok {
-			continue
-		}
-		ids = append(ids, id)
 	}
 	return ids, nil
 }
