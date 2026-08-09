@@ -108,8 +108,8 @@ func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error
 }
 
 // projectBranch publishes a built branch as one idempotent pull request.
-// expectedHead is non-empty only during Verifier recovery. An already-merged
-// request at that exact Revision is returned without creating a duplicate.
+// expectedHead is empty for initial Builder publication and set for Verifier
+// publication or recovery. It fences open and merged requests to that Revision.
 func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (string, bool, error) {
 	if !cfg.Projection.Enabled {
 		return "", false, nil

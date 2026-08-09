@@ -340,9 +340,6 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item, a *Age
 }
 
 func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
-	if err := ensureHostProjection(cfg, branch, reviewed, it); err != nil {
-		return err
-	}
 	fact, err := recordPendingHostRetirement(cfg, repoDir, branch, reviewed, it,
 		a.Name, a.Model, a.DefSHA)
 	if err != nil {

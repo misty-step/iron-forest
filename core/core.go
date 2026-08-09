@@ -107,7 +107,10 @@ type AgentInfo struct {
 	Err         string
 }
 
-// RunRecord is one append-only ledger row in the shape a surface reads.
+// RunRecord is one append-only Ledger row in the shape a surface reads. Status
+// is a Flow routing result. Operator summaries classify built, reviewed,
+// merged, fixed, done, and reaped as progress. Values ending in `_failed` are
+// failed. All other values are other.
 type RunRecord struct {
 	Time          string
 	RunID         string

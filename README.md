@@ -13,7 +13,7 @@ Each lane uses its own interval. The process excludes duplicate work on one Subj
 | Builder | Tracker items with every configured required label, without a forest branch, and without configured exclude labels. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It may create a Projection. |
 | Verifier | Pending retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and attempts remain, or one Host-preparation pass when Host merge is enabled and `auto_merge` is disabled. | Runs the configured Checks, writes the Checks note, obtains an independent Verdict, records pending Host retirement intent, recovers exact operator Host merges, and merges approved branches only when `auto_merge` is enabled. |
 | Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit. | Runs the Builder on the branch, passes the Gate, pushes the repair, and records the attempt. An exhausted branch gets `forest:failed` for a human. |
-| Manager | Unstarted Tracker items without configured exclude labels. | Picks one candidate and applies the ready label for the Builder. It withdraws branchless ready items that become excluded, blocked, failed, or stalled. |
+| Manager | Open Tracker items without a forest branch, pending retirement, ready label, configured exclude label, open blocker, or Builder stall. | Fills the configured ready depth one candidate per pass. It withdraws branchless ready items that become excluded, blocked, failed, or stalled. |
 
 ## State
 
@@ -171,6 +171,7 @@ Self-update waits until every Flow action is idle. It installs the tested binary
 ## Ledger and board
 
 `forest stats` reads `.forest/runs.jsonl` and prints totals and breakdowns. `forest stats --json` emits machine-readable ledger data.
+`Status` is a Flow routing result. Summaries classify `built`, `reviewed`, `merged`, `fixed`, `done`, and `reaped` as progress. They classify any `*_failed` value as failed. Every other value is other.
 
 `forest watch` reads Runs, tracked worktrees, git HEAD, and daemon state.
 It shows each Flow and recent Effects.

@@ -21,14 +21,15 @@ const (
 	subjectManager    subjectKind = "manager"
 )
 
-// A Subject is the one thing a flow acts on in a pass. Key stays stable across
-// revisions of the same work. Revision is what the flow actually saw: an item's
-// update stamp, or a branch's head commit. A flow that recorded a decision
-// against a revision must not decide again until the revision moves.
+// A Subject is the one thing a Flow acts on in a pass. Key stays stable across
+// revisions of the same work. Revision is the decision stamp for its Kind: an
+// item update stamp, a branch head commit, a retirement's reviewed commit, or
+// the Manager candidate-set stamp. A Flow that recorded a decision against a
+// Revision must not decide again until the Revision moves.
 type Subject struct {
 	Key      string // "item-41", "branch-forest/41-add-notes"
 	Kind     subjectKind
-	Revision string // item update stamp or branch head commit
+	Revision string // Kind-specific decision stamp described above
 	Label    string // one line for the operator
 	ID       string // tracker item identity, opaque to the controller
 	Item     Item   // subjectItem or subjectRetirement

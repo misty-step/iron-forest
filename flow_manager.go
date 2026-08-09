@@ -227,8 +227,9 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 	}
 	if expectedRevision != "" {
 		// A judged promotion must still match the plan the model saw: same
-		// Revision, a judgement still wanted, and the pick still a candidate.
-		if plan.revision != expectedRevision || !plan.needModel {
+		// Revision, a judgement still wanted, no new withdrawal, and the pick
+		// still a candidate.
+		if plan.revision != expectedRevision || !plan.needModel || len(plan.reap) != 0 {
 			return false, nil
 		}
 		for _, fresh := range plan.cands {
@@ -510,19 +511,7 @@ func readManagerReportFile(wtDir string) (managerReport, error) {
 // hasOpenBlocker reports whether an item's Blocked by references name an open
 // item. A promoted item's blockers must be closed before the Manager advances it.
 func hasOpenBlocker(it Item, open map[string]Item) bool {
-	for _, ref := range blockedRefs(it.Body) {
-		if _, ok := open[ref]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// blockedRefs extracts the issue references a `Blocked by:` prose line lists.
-func blockedRefs(body string) []string {
-	var refs []string
-	seen := make(map[string]bool)
-	for _, line := range strings.Split(body, "\n") {
+	for _, line := range strings.Split(it.Body, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(strings.ToLower(line), "blocked by") {
 			continue
@@ -534,13 +523,10 @@ func blockedRefs(body string) []string {
 			return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' ||
 				r >= 'A' && r <= 'Z' || r == '_' || r == '-')
 		}) {
-			ref := strings.TrimPrefix(tok, "#")
-			if ref == "" || seen[ref] {
-				continue
+			if _, ok := open[strings.TrimPrefix(tok, "#")]; ok {
+				return true
 			}
-			seen[ref] = true
-			refs = append(refs, ref)
 		}
 	}
-	return refs
+	return false
 }
