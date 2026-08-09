@@ -763,6 +763,36 @@ func readRetirementApproval(repoDir, revision string) (verdictNote, bool, error)
 	return verdict, approved, nil
 }
 
+func recordHostMergeRequestFailure(
+	cfg Config,
+	repoDir string,
+	record retirementRecord,
+	it Item,
+	cause error,
+) error {
+	attempts, err := bumpAttempts(repoDir, "branch-"+record.Branch)
+	if err != nil {
+		return err
+	}
+	limit := cfg.Flows.Fixer.Attempts
+	if limit < 1 {
+		limit = 1
+	}
+	if attempts < limit {
+		return fmt.Errorf("%w: %v", errHostMergePending, cause)
+	}
+	handoff := fmt.Errorf("Host merge request for Revision %s failed after %d attempts",
+		record.Revision, attempts)
+	tracker := trackerFor(cfg.Repo)
+	if err := tracker.SetTags(it.ID, []string{failedLabel}, nil); err != nil {
+		return fmt.Errorf("%w: publish Host merge handoff tag: %v", errFlowRetryable, err)
+	}
+	if err := publishMergeBlocked(tracker, it, record.Revision, handoff); err != nil {
+		return fmt.Errorf("%w: publish Host merge handoff: %v", errFlowRetryable, err)
+	}
+	return fmt.Errorf("%w: %v", errRetirementRecoveryHard, handoff)
+}
+
 func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it Item) error {
 	_, err := recoverRetirement(cfg, repoDir, fact, it)
 	return err
@@ -876,6 +906,9 @@ func recoverRetirement(cfg Config, repoDir string, fact retirementFact, it Item)
 			if err := projectMerge(cfg, record.Branch, record.Strategy, record.Revision); err != nil {
 				if errors.Is(err, errHostMergeUnavailable) {
 					return record, err
+				}
+				if errors.Is(err, errHostMergeRequestFailed) {
+					return record, recordHostMergeRequestFailure(cfg, repoDir, record, it, err)
 				}
 				return record, fmt.Errorf("%w: %v", errHostMergePending, err)
 			}

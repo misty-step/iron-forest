@@ -1126,6 +1126,69 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	}
 }
 
+func TestHostMergeCommandFailureReachesBoundedHandoff(t *testing.T) {
+	branch := "forest/11-host-refusal"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	fact, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "11", Transport: "host",
+		Strategy: "squash", Title: "host refusal", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeApprovalNotes(t, repo, reviewed, agent)
+	item := Item{ID: "11", Title: "host refusal"}
+	tk := newMemoryTracker()
+	tk.seed(item)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	mergeCalls := 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "api":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":11,"url":"https://github.com/owner/repo/pull/11","headRefOid":"` +
+				reviewed + `","headRefName":"` + branch +
+				`","baseRefName":"master","isCrossRepository":false}]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
+			mergeCalls++
+			return nil, errors.New("required approval is missing")
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.AutoMerge = true
+	cfg.Flows.Fixer.Attempts = 2
+
+	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("first Host refusal = %v, want preserved pending intent", err)
+	}
+	if err := recoverRetirementFact(cfg, repo, fact, item); !errors.Is(err, errRetirementRecoveryHard) {
+		t.Fatalf("second Host refusal = %v, want bounded recovery handoff", err)
+	}
+	if mergeCalls != 2 {
+		t.Fatalf("Host merge calls = %d, want bounded two", mergeCalls)
+	}
+	if attempts, err := readAttempts(repo, "branch-"+branch); err != nil || attempts != 2 {
+		t.Fatalf("Host merge attempts = (%d, %v), want two", attempts, err)
+	}
+	got, err := tk.Get(item.ID)
+	if err != nil || !got.hasTag(failedLabel) || len(got.Comments) != 1 ||
+		!strings.Contains(got.Comments[0].Body, "revision="+reviewed+" -->") {
+		t.Fatalf("Host refusal handoff = (%#v, %v), want failed tag and exact marker", got, err)
+	}
+}
+
 func TestRetirementFactBlocksAdvancedBranch(t *testing.T) {
 	branch := "forest/12-advanced"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)

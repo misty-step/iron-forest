@@ -13,6 +13,7 @@ import (
 var projectionCommand = ghJSON
 
 var errHostMergePending = errors.New("Host merge is pending")
+var errHostMergeRequestFailed = errors.New("Host merge request failed")
 var errHostMergeUnavailable = errors.New("Host merge request is unavailable")
 var errHostMergeNoView = errors.New("Host merge request has no visible view")
 var errHostRevisionMoved = errors.New("Host Projection Revision moved")
@@ -373,8 +374,8 @@ func projectMerge(cfg Config, branch, strategy, expectedHead string) error {
 		"-R", cfg.Repo, "--squash", "--match-head-commit", expectedHead}
 	if _, err := projectionCommand(args...); err != nil {
 		// The command can fail after the Host accepted or queued the request.
-		// Preserve intent and determine the exact merged head on a later pass.
-		return fmt.Errorf("%w: merge request: %v", errHostMergePending, err)
+		// Preserve intent, but name the failed write so recovery can bound retries.
+		return fmt.Errorf("%w: %w: %v", errHostMergePending, errHostMergeRequestFailed, err)
 	}
 	merged, _, err = inspectProjectMerge(cfg, branch, strategy, expectedHead)
 	if err != nil {
