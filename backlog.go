@@ -134,9 +134,6 @@ func (it Item) hasTag(name string) bool {
 }
 
 func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
-	if err := fetchNotes(repoDir); err != nil {
-		return nil, fmt.Errorf("notes: %w", err)
-	}
 	items, err := trackerFor(cfg.Repo).ListOpen()
 	if err != nil {
 		return nil, err
@@ -149,88 +146,16 @@ func eligibleItems(cfg Config, repoDir string) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	merged, err := mergedProjectionCoverage(cfg, repoDir, items, branches, retiring)
-	if err != nil {
-		return nil, fmt.Errorf("merged Projection recovery: %w", err)
-	}
-	return eligibleFromCoverage(items, branches, retiring, merged,
+	return eligibleFrom(items, branches, retiring,
 		cfg.Flows.Builder.ExcludeLabels, cfg.Flows.Builder.RequireLabels), nil
 }
 
-func mergedProjectionCoverage(cfg Config, repoDir string, items []Item, branches, retiring []string) (map[string]projectionPullRequest, error) {
-	coverage := make(map[string]projectionPullRequest)
-	if !cfg.Projection.Enabled || !cfg.Projection.MergeViaHost || cfg.Flows.Verifier.Merge != "squash" {
-		return coverage, nil
-	}
-	itemsByID := make(map[string]Item, len(items))
-	for _, it := range items {
-		if it.ID != "" {
-			itemsByID[it.ID] = it
-		}
-	}
-	branched := make(map[string]bool, len(branches))
-	for _, branch := range branches {
-		if id := itemIDFromBranch(branch); id != "" {
-			branched[id] = true
-		}
-	}
-	retired := make(map[string]bool, len(retiring))
-	for _, id := range retiring {
-		retired[id] = true
-	}
-	canRecover := false
-	for _, it := range items {
-		if it.ID != "" && !branched[it.ID] && !retired[it.ID] {
-			canRecover = true
-			break
-		}
-	}
-	if !canRecover {
-		return coverage, nil
-	}
-	prs, err := managedMergedProjectionPRs(cfg)
-	if err != nil {
-		return nil, err
-	}
-	for _, pr := range prs {
-		id := itemIDFromBranch(pr.HeadRefName)
-		if _, ok := itemsByID[id]; !ok || branched[id] || retired[id] {
-			continue
-		}
-		if _, found := coverage[id]; found {
-			continue
-		}
-		if pr.HeadRefOID == "" {
-			continue
-		}
-		verdict, hasVerdict, verdictErr := readVerdict(repoDir, pr.HeadRefOID)
-		if verdictErr != nil {
-			return nil, fmt.Errorf("verdict %s: %w", pr.HeadRefName, verdictErr)
-		}
-		checks, hasChecks, checksErr := readChecks(repoDir, pr.HeadRefOID)
-		if checksErr != nil {
-			return nil, fmt.Errorf("checks %s: %w", pr.HeadRefName, checksErr)
-		}
-		if hasVerdict && verdict.Verdict == "approve" && hasChecks && checks.Status == "pass" {
-			coverage[id] = pr
-		}
-	}
-	return coverage, nil
-}
-
 func eligibleFrom(items []Item, branches, retiring, excluded, required []string) []Item {
-	return eligibleFromCoverage(items, branches, retiring, nil, excluded, required)
-}
-
-func eligibleFromCoverage(items []Item, branches, retiring []string, merged map[string]projectionPullRequest, excluded, required []string) []Item {
-	covered := make(map[string]bool, len(branches)+len(retiring)+len(merged))
+	covered := make(map[string]bool, len(branches)+len(retiring))
 	for _, branch := range branches {
 		covered[itemIDFromBranch(branch)] = true
 	}
 	for _, id := range retiring {
-		covered[id] = true
-	}
-	for id := range merged {
 		covered[id] = true
 	}
 	var ready []Item

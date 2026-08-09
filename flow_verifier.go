@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -43,11 +42,9 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	}
 	var recoveries []Subject
 	retiring := make(map[string]bool, len(retirements))
-	retiringIDs := make(map[string]bool, len(retirements))
 	for _, fact := range retirements {
 		record := fact.Record
 		retiring[record.Branch] = true
-		retiringIDs[record.ItemID] = true
 		s := Subject{
 			Key: "branch-" + record.Branch, Kind: subjectRetirement,
 			Revision: record.Revision, Label: "retire " + record.Branch,
@@ -61,13 +58,6 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		if !stalled {
 			recoveries = append(recoveries, s)
 		}
-	}
-	if cfg.Projection.Enabled && cfg.Projection.MergeViaHost {
-		merged, err := mergedProjectionRecoverySubjects(cfg, repoDir, branchHeads, retiringIDs)
-		if err != nil {
-			return nil, fmt.Errorf("merged Projection recovery: %w", err)
-		}
-		recoveries = append(recoveries, merged...)
 	}
 	var fresh, mergeable []Subject
 	for _, branch := range branches {
@@ -136,51 +126,6 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	return recoveries, nil
 }
 
-func mergedProjectionRecoverySubjects(cfg Config, repoDir string, branchHeads map[string]string, retired map[string]bool) ([]Subject, error) {
-	items, err := trackerFor(cfg.Repo).ListOpen()
-	if err != nil {
-		return nil, err
-	}
-	branches := make([]string, 0, len(branchHeads))
-	for branch := range branchHeads {
-		branches = append(branches, branch)
-	}
-	retiring := make([]string, 0, len(retired))
-	for id := range retired {
-		retiring = append(retiring, id)
-	}
-	coverage, err := mergedProjectionCoverage(cfg, repoDir, items, branches, retiring)
-	if err != nil {
-		return nil, err
-	}
-	ids := make([]string, 0, len(coverage))
-	for id := range coverage {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	itemsByID := make(map[string]Item, len(items))
-	for _, it := range items {
-		itemsByID[it.ID] = it
-	}
-	var subjects []Subject
-	for _, id := range ids {
-		pr := coverage[id]
-		key := "branch-" + pr.HeadRefName
-		stalled, err := stalledOn(repoDir, "verifier", key, pr.HeadRefOID)
-		if err != nil {
-			return nil, fmt.Errorf("stalled %s: %w", key, err)
-		}
-		if stalled {
-			continue
-		}
-		subjects = append(subjects, Subject{
-			Key: key, Kind: subjectBranch, Revision: pr.HeadRefOID,
-			Label: pr.HeadRefName, ID: id, Branch: pr.HeadRefName,
-			Head: pr.HeadRefOID, Item: itemsByID[id],
-		})
-	}
-	return subjects, nil
-}
 
 // mergeBlocked names why an approved, green branch may not land now, or returns
 // "" when it may. It is the single authority for merge policy: Select consults
@@ -203,7 +148,19 @@ func mergeBlocked(cfg Config, attempts int) string {
 	return ""
 }
 
-func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent, out Outcome) (Outcome, error) {
+func recordHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item, verdict verdictNote) error {
+	if !cfg.Projection.MergeViaHost || verdict.Verdict != "approve" {
+		return nil
+	}
+	_, err := recordRetirement(repoDir, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
+		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "pending",
+		Agent: verdict.Reviewer, Model: verdict.Model, DefSHA: verdict.DefSHA,
+	})
+	return err
+}
+
+func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, it Item, out Outcome) (Outcome, error) {
 	verdict, hasVerdict, verr := readVerdict(repoDir, reviewed)
 	checks, hasChecks, cerr := readChecks(repoDir, reviewed)
 	if verr != nil || cerr != nil || !hasVerdict || !hasChecks ||
@@ -211,8 +168,12 @@ func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, i
 		out.Status = "merge_failed"
 		return out, fmt.Errorf("Host merged Revision %s without durable factory approval and passing Checks", reviewed)
 	}
+	out.Agent = verdict.Reviewer
+	out.Model = verdict.Model
+	out.DefSHA = verdict.DefSHA
 	out.Verdict = verdict.Verdict
-	if err := mergeVerified(cfg, repoDir, branch, reviewed, it, a); err != nil {
+	recoveryAgent := &Agent{Name: verdict.Reviewer, Model: verdict.Model, DefSHA: verdict.DefSHA}
+	if err := mergeVerified(cfg, repoDir, branch, reviewed, it, recoveryAgent); err != nil {
 		if errors.Is(err, errHostMergePending) {
 			out.Status = "merge_pending"
 			return out, nil
@@ -270,7 +231,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			merged, pr, inspectErr := inspectProjectMerge(cfg, s.Branch, cfg.Flows.Verifier.Merge, s.Head)
 			if inspectErr == nil && merged && pr.HeadRefOID == s.Head {
 				out := Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, PRURL: pr.URL}
-				return recoverHostMergedProjection(cfg, repoDir, s.Branch, s.Head, it, a, out)
+				return recoverHostMergedProjection(cfg, repoDir, s.Branch, s.Head, it, out)
 			}
 		}
 		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
@@ -285,7 +246,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	out.PRURL = url
 	if hostMerged {
-		return recoverHostMergedProjection(cfg, repoDir, s.Branch, baseSHA, it, a, out)
+		return recoverHostMergedProjection(cfg, repoDir, s.Branch, baseSHA, it, out)
 	}
 	// Rebase the branch onto current master before checking or reviewing it: a
 	// Verdict and its checks must key to the exact tree that will land, not to a
@@ -397,7 +358,10 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	if !found {
 		var stats runStats
-		verdict, stats, err = verifierReview(repoDir, wtDir, it, baseSHA, runID, a)
+		verdict, stats, err = verifierReview(repoDir, wtDir, it, baseSHA, runID, a,
+			func(v verdictNote) error {
+				return recordHostRetirement(cfg, repoDir, s.Branch, baseSHA, it, v)
+			})
 		out.addTokens(stats)
 		if err != nil {
 			// A mechanical prompt-delivery failure names itself prompt_failed so it
@@ -413,6 +377,12 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 				out.Status = "timeout_failed"
 			}
 			return out, err
+		}
+	}
+	if verdict.Verdict == "approve" {
+		if err := recordHostRetirement(cfg, repoDir, s.Branch, baseSHA, it, verdict); err != nil {
+			out.Status = "merge_failed"
+			return out, fmt.Errorf("merge: record Host retirement: %w", err)
 		}
 	}
 	out.Verdict = verdict.Verdict
@@ -435,12 +405,8 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		return out, fmt.Errorf("attempts: %w", err)
 	}
 	if why := mergeBlocked(cfg, attempts); why != "" {
-		if cfg.Projection.MergeViaHost && !cfg.Flows.Verifier.AutoMerge && attempts < cfg.Flows.Fixer.Attempts {
-			if _, err := recordRetirement(repoDir, retirementRecord{
-				Branch: s.Branch, Revision: baseSHA, ItemID: it.ID, Transport: "host",
-				Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "pending",
-				Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
-			}); err != nil {
+		if cfg.Projection.MergeViaHost && !cfg.Flows.Verifier.AutoMerge {
+			if err := recordHostRetirement(cfg, repoDir, s.Branch, baseSHA, it, verdict); err != nil {
 				out.Status = "merge_failed"
 				return out, fmt.Errorf("merge: record Host retirement: %w", err)
 			}
@@ -474,7 +440,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
 // in tokens; a discarded count makes every review look free.
-func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
+func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent, onApprove func(verdictNote) error) (verdictNote, runStats, error) {
 	var out verdictNote
 	var stats runStats
 	diff, err := gitOut(wtDir, "diff", "origin/master..."+head)
@@ -514,6 +480,11 @@ func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent
 	out = verdictNote{
 		Verdict: rv.Verdict, Notes: rv.Notes, Reviewer: a.Name, Model: a.Model,
 		DefSHA: a.DefSHA, RunID: runID, Time: nowRFC(),
+	}
+	if out.Verdict == "approve" && onApprove != nil {
+		if err := onApprove(out); err != nil {
+			return verdictNote{}, stats, fmt.Errorf("retirement: %w", err)
+		}
 	}
 	if err := writeVerdict(repoDir, head, out); err != nil {
 		if !errors.Is(err, errNoteExists) {

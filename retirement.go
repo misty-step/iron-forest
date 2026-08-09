@@ -361,9 +361,19 @@ func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it I
 		if record.Transport != "host" {
 			return fmt.Errorf("retirement %s is pending without Host transport", fact.Ref)
 		}
+		verdict, hasVerdict, verdictErr := readVerdict(repoDir, record.Revision)
+		checks, hasChecks, checksErr := readChecks(repoDir, record.Revision)
+		if verdictErr != nil || checksErr != nil || !hasVerdict || verdict.Verdict != "approve" ||
+			!hasChecks || checks.Status != "pass" {
+			return dropStaleRetirement(repoDir, fact,
+				fmt.Errorf("retirement %s lacks durable approve Verdict and passing Checks", fact.Ref))
+		}
 		_, hostMerged, err := projectBranch(cfg, it, record.Branch,
 			fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), record.Revision)
 		if err == nil && !hostMerged {
+			if !cfg.Flows.Verifier.AutoMerge {
+				return errHostMergePending
+			}
 			err = projectMerge(cfg, record.Branch, record.Strategy, record.Revision)
 		}
 		if err != nil {

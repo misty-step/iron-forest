@@ -27,6 +27,18 @@ func testRetirementRecord(branch, revision, itemID string) retirementRecord {
 	}
 }
 
+func writeApprovalNotes(t *testing.T, repo, revision string, agent *Agent) {
+	t.Helper()
+	if err := writeChecks(repo, revision, checksNote{Status: "pass", RunID: "seed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVerdict(repo, revision, verdictNote{
+		Verdict: "approve", Reviewer: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA, RunID: "seed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRetirementRecordRejectsUnsafeIdentity(t *testing.T) {
 	revision := strings.Repeat("b", 40)
 	const secret = "sk-AAAAAAAAAAAAAAAA"
@@ -379,9 +391,12 @@ func TestMergeViaHostPinsReviewedHead(t *testing.T) {
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Merge = "squash"
+	cfg.Flows.Verifier.AutoMerge = true
+	reviewAgent := testVerifierAgent()
+	writeApprovalNotes(t, repo, reviewed, reviewAgent)
 
 	if err := mergeVerified(cfg, repo, branch, reviewed, Item{ID: "9", Title: "change"},
-		testVerifierAgent()); err == nil {
+		reviewAgent); err == nil {
 		t.Fatal("mergeVerified merged via host despite the host refusing the head")
 	}
 	pinned := false
@@ -407,7 +422,7 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := writeVerdict(repo, reviewed, verdictNote{
-		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model", DefSHA: "def", RunID: "seed",
+		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("a", 16), RunID: "seed",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -502,83 +517,91 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	}
 }
 
-func TestVerifierSelectRecoversMergedProjectionAfterTitleChange(t *testing.T) {
-	branch := "forest/9-original-title"
+// TestPendingHostRetirementWaitsForOperatorMerge proves AutoMerge=false only
+// observes an open Host request and never issues a merge command in recovery.
+func TestPendingHostRetirementWaitsForOperatorMerge(t *testing.T) {
+	branch := "forest/14-manual-pending"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
-	runGitTest(t, repo, "checkout", "-q", "master")
-	runGitTest(t, repo, "branch", "-D", branch)
-	if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
+	agent := testVerifierAgent()
+	fact, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "14", Transport: "host",
+		Strategy: "squash", Title: "manual pending", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	runGitTest(t, repo, "fetch", "-q", "--prune", "origin")
-	writeAgentFixture(t, repo, "builder", "builder-model")
-	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeVerdict(repo, reviewed, verdictNote{
-		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model", DefSHA: "def", RunID: "seed",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	tk := newMemoryTracker()
-	tk.seed(Item{ID: "9", Title: "renamed title"})
-	oldTracker := trackerFor
-	trackerFor = func(string) Tracker { return tk }
-	defer func() { trackerFor = oldTracker }()
+	writeApprovalNotes(t, repo, reviewed, agent)
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
-	mergedQueries, createCalls, mergeCalls := 0, 0, 0
+	mergeCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
+		if len(args) < 2 {
+			return nil, errors.New("unexpected Host command")
+		}
+		if args[1] == "merge" {
+			mergeCalls++
+			return nil, errors.New("unexpected manual Host merge")
+		}
+		if args[1] != "list" {
+			return nil, errors.New("unexpected Host command")
+		}
 		state := ""
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == "--state" {
 				state = args[i+1]
 			}
 		}
-		switch {
-		case args[1] == "list" && state == "merged":
-			mergedQueries++
-			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-		case args[1] == "list":
-			return []byte(`[]`), nil
-		case args[1] == "create":
-			createCalls++
-			return nil, errors.New("duplicate pull request")
-		case args[1] == "merge":
-			mergeCalls++
-			return nil, errors.New("duplicate Host merge")
-		default:
-			return nil, errors.New("unexpected Host command")
+		if state == "open" {
+			return []byte(`[{"number":14,"url":"https://github.com/owner/repo/pull/14","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
 		}
+		return []byte(`[]`), nil
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	if err := recoverRetirementFact(cfg, repo, fact, Item{ID: "14", Title: "manual pending"}); !errors.Is(err, errHostMergePending) {
+		t.Fatalf("pending manual recovery = %v, want Host merge pending", err)
+	}
+	if mergeCalls != 0 {
+		t.Fatalf("pending manual recovery issued %d Host merge calls", mergeCalls)
+	}
+}
+func TestPendingHostRetirementWithoutApprovalReleasesFact(t *testing.T) {
+	branch := "forest/17-unapproved-pending"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	fact, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "17", Transport: "host",
+		Strategy: "squash", Title: "unapproved pending", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	hostCalls := 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		hostCalls++
+		return nil, errors.New("unexpected Host call")
 	}
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
-	cfg.Flows.Verifier.AutoMerge = true
-	subjects, err := (verifierFlow{}).Select(cfg, repo)
-	if err != nil || len(subjects) != 1 || subjects[0].Head != reviewed || subjects[0].Branch != branch {
-		t.Fatalf("merged coverage Select = (subjects=%#v, err=%v)", subjects, err)
+	err = recoverRetirementFact(cfg, repo, fact, Item{ID: "17", Title: "unapproved pending"})
+	if !errors.Is(err, errRetirementStale) {
+		t.Fatalf("unapproved pending recovery = %v, want stale", err)
 	}
-	if mergedQueries != 1 {
-		t.Fatalf("Verifier Select merged queries = %d, want one", mergedQueries)
+	if hostCalls != 0 {
+		t.Fatalf("unapproved pending recovery made %d Host calls", hostCalls)
 	}
-	builderSubjects, err := (builderFlow{}).Select(cfg, repo)
-	if err != nil || len(builderSubjects) != 0 {
-		t.Fatalf("Builder re-exposed merged item = (subjects=%#v, err=%v)", builderSubjects, err)
-	}
-	if err := os.RemoveAll(filepath.Join(repo, DefaultAgentsDir, "builder")); err != nil {
-		t.Fatal(err)
-	}
-	out, err := (builderFlow{}).Act(cfg, repo, Subject{
-		Key: "item-9", Kind: subjectItem, Revision: reviewed, ID: "9", Item: Item{ID: "9", Title: "renamed title"},
-	}, "stale-builder")
-	if err != nil || out.Status != "stale" {
-		t.Fatalf("stale Builder Act = (status=%q, err=%v)", out.Status, err)
-	}
-	if createCalls != 0 || mergeCalls != 0 {
-		t.Fatalf("merged coverage made create/merge calls = %d/%d", createCalls, mergeCalls)
+	if facts, listErr := listRetirements(repo); listErr != nil || len(facts) != 0 {
+		t.Fatalf("released pending facts = (%#v, %v), want none", facts, listErr)
 	}
 }
+
 
 func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 	branch := "forest/9-host-recovery"
@@ -639,9 +662,12 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Merge = "squash"
+	cfg.Flows.Verifier.AutoMerge = true
 	item := Item{ID: "9", Title: "change"}
+	reviewAgent := testVerifierAgent()
+	writeApprovalNotes(t, repo, reviewed, reviewAgent)
 	if err := mergeVerified(cfg, repo, branch, reviewed, item,
-		testVerifierAgent()); err == nil ||
+		reviewAgent); err == nil ||
 		!strings.Contains(err.Error(), "close item") {
 		t.Fatalf("first host merge = %v, want Tracker close failure", err)
 	}
@@ -699,6 +725,7 @@ func TestPendingHostRetirementRecoversAfterBranchAutoDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	writeApprovalNotes(t, repo, reviewed, agent)
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	mergeCalls := 0
@@ -770,6 +797,7 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	writeApprovalNotes(t, repo, reviewed, agent)
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	mergeCalls, listCalls := 0, 0
@@ -795,6 +823,7 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Merge = "ff"
+	cfg.Flows.Verifier.AutoMerge = true
 	err = recoverRetirementFact(cfg, repo, fact, Item{ID: "11", Title: "strategy"})
 	if !errors.Is(err, errHostMergePending) {
 		t.Fatalf("pending retirement retry = %v, want merge pending", err)
@@ -920,6 +949,7 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 	trackerFor = func(string) Tracker { return tk }
 	defer func() { trackerFor = oldTracker }()
 
+	writeApprovalNotes(t, repo, reviewed, agent)
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	created, merged := false, false
@@ -963,6 +993,7 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 	cfg.Repo = "owner/repo"
 	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
 	cfg.Flows.Verifier.Merge = "squash"
+	cfg.Flows.Verifier.AutoMerge = true
 	item := Item{ID: "13", Title: "queued"}
 
 	for pass := range 2 {
