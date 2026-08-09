@@ -530,3 +530,18 @@ func failStatus(err error) string {
 	}
 	return "flow_failed"
 }
+
+// stopClosedItem stops one branch lane whose Tracker item a human closed. It
+// records the terminal brake so later Select passes skip the branch, and the
+// returned Outcome and error become the Ledger row that names the stop: a
+// branch-lane pass that sees a closed item must not check, review, repair, or
+// merge it. Select keeps offering the branch until this brake is recorded, so
+// the reason lands in the Ledger exactly once per branch head.
+func stopClosedItem(repoDir, flow string, s Subject) (Outcome, error) {
+	out := Outcome{Branch: s.Branch, BaseSHA: s.Revision, Status: "closed"}
+	if err := recordTerminalStall(repoDir, flow, s.Key, s.Revision); err != nil {
+		out.Status = "evidence_failed"
+		return out, fmt.Errorf("record closed-item brake: %w", err)
+	}
+	return out, fmt.Errorf("item %q is closed; stopping branch %q lanes", s.ID, s.Branch)
+}
