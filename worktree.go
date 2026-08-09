@@ -82,10 +82,7 @@ func gitOutRaw(repo string, args ...string) (string, error) {
 
 func gitCommit(wtDir string, id CommitIdentity, msg string) error {
 	msg = redactSecretShaped(msg)
-	cmd := exec.Command("git",
-		"-c", "user.name="+id.Name,
-		"-c", "user.email="+id.Email,
-		"-C", wtDir, "commit", "-m", msg)
+	cmd := exec.Command("git", "-C", wtDir, "commit", "-m", msg)
 	cmd.Env = commitIdentityEnv(id)
 	out, err := runCombinedOutput(cmd)
 	if err != nil {
@@ -109,9 +106,8 @@ func cleanIdentityEnv() []string {
 }
 
 func commitIdentityEnv(id CommitIdentity) []string {
-	return append(cleanIdentityEnv(),
-		"GIT_AUTHOR_NAME="+id.Name, "GIT_AUTHOR_EMAIL="+id.Email,
-		"GIT_COMMITTER_NAME="+id.Name, "GIT_COMMITTER_EMAIL="+id.Email)
+	return append(committerIdentityEnv(id),
+		"GIT_AUTHOR_NAME="+id.Name, "GIT_AUTHOR_EMAIL="+id.Email)
 }
 
 func committerIdentityEnv(id CommitIdentity) []string {
@@ -120,7 +116,7 @@ func committerIdentityEnv(id CommitIdentity) []string {
 }
 
 func gitAsCommitter(repo string, id CommitIdentity, args ...string) error {
-	cmdArgs := []string{"-c", "user.name=" + id.Name, "-c", "user.email=" + id.Email, "-C", repo}
+	cmdArgs := []string{"-C", repo}
 	cmd := exec.Command("git", append(cmdArgs, args...)...)
 	cmd.Env = committerIdentityEnv(id)
 	out, err := runCombinedOutput(cmd)

@@ -142,7 +142,6 @@ func mergeBlocked(cfg Config, attempts int) string {
 	return ""
 }
 
-
 func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
 	if s.Kind == subjectRetirement {
 		fact, found, err := readRetirement(repoDir, s.Branch, s.Revision)

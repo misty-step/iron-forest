@@ -309,7 +309,6 @@ func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, i
 	return out, nil
 }
 
-
 // mergeVerified lands only the Revision that carried the approving Verdict.
 // A retirement fact makes the multi-system effect resumable. Git writes its
 // landed fact atomically with master. The host path writes pending intent first,
