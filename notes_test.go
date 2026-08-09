@@ -31,7 +31,7 @@ func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 		DefSHA:   strings.Repeat("a", 16),
 		RunID:    "run-a",
 	}
-	if err := writeVerdict(work, sha, first); err != nil {
+	if err := writeVerdict(work, sha, first, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	got, ok, err := readVerdict(work, sha)
@@ -55,7 +55,7 @@ func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 	replacement := first
 	replacement.Verdict = "changes"
 	replacement.Notes = "replacement decision"
-	if err := writeVerdict(secondClone, sha, replacement); !errors.Is(err, errNoteExists) {
+	if err := writeVerdict(secondClone, sha, replacement, testCommitIdentity()); !errors.Is(err, errNoteExists) {
 		t.Fatalf("second verdict write = %v, want errNoteExists", err)
 	}
 	fromSecond, ok, err := readVerdict(secondClone, sha)
@@ -81,7 +81,7 @@ func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 		Results: []checkResult{{Name: "test", Code: 0, Seconds: 1.25, Output: "ok"}},
 		RunID:   "run-checks",
 	}
-	if err := writeChecks(work, sha, checks); err != nil {
+	if err := writeChecks(work, sha, checks, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	if err := fetchNotes(secondClone); err != nil {
@@ -102,6 +102,22 @@ func TestNotesRoundTripImmutableAndCommitScope(t *testing.T) {
 	}
 	if _, ok, err := readChecks(work, otherSHA); err != nil || ok {
 		t.Fatalf("checks for another commit = (%v, %v), want (false, nil)", ok, err)
+	}
+}
+func TestNoteCommitUsesDeclaredIdentity(t *testing.T) {
+	_, work, sha := notesTestRepository(t)
+	t.Setenv("GIT_AUTHOR_NAME", "ambient author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ambient-author@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "ambient committer")
+	t.Setenv("GIT_COMMITTER_EMAIL", "ambient-committer@example.com")
+	id := CommitIdentity{Name: "declared verifier", Email: "verifier@example.invalid"}
+	if err := writeChecks(work, sha, checksNote{Status: "pass"}, id); err != nil {
+		t.Fatal(err)
+	}
+	got := runGitTest(t, work, "show", "-s", "--format=%an <%ae>|%cn <%ce>", notesRef(checksNotesRef))
+	want := "declared verifier <verifier@example.invalid>|declared verifier <verifier@example.invalid>"
+	if got != want {
+		t.Fatalf("Checks note identity = %q, want %q", got, want)
 	}
 }
 
@@ -194,7 +210,7 @@ func TestFetchNotesConcurrentReconcile(t *testing.T) {
 	if err := writeVerdict(source, sha, verdictNote{
 		Verdict: "approve", Notes: "remote verdict", Reviewer: "reviewer-a",
 		Model: "model-a", DefSHA: strings.Repeat("a", 16), RunID: "run-verdict",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	wantVerdict, ok, err := readVerdict(source, sha)
@@ -203,7 +219,7 @@ func TestFetchNotesConcurrentReconcile(t *testing.T) {
 	}
 	if err := writeChecks(source, sha, checksNote{
 		Status: "pass", Results: []checkResult{{Name: "test", Code: 0, Seconds: 1.5, Output: "remote checks"}}, RunID: "run-checks",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	wantChecks, ok, err := readChecks(source, sha)
@@ -271,7 +287,7 @@ exec "$FOREST_REAL_GIT" "$@"
 	writer := make(chan error, 1)
 	go func() {
 		close(writerStarted)
-		writer <- writeNote(linked, verdictNotesRef, sha, wantVerdict)
+		writer <- writeNote(linked, verdictNotesRef, sha, wantVerdict, testCommitIdentity())
 	}()
 	<-contenderStarted
 	<-writerStarted
@@ -429,7 +445,7 @@ func TestNotesRejectedPushIsNotDurable(t *testing.T) {
 	}
 	if err := writeVerdict(work, sha, verdictNote{
 		Verdict: "approve", Notes: "local only", Reviewer: "reviewer-a", RunID: "run-a",
-	}); err == nil {
+	}, testCommitIdentity()); err == nil {
 		t.Fatal("writeVerdict succeeded though the notes push is rejected")
 	} else if errors.Is(err, errNoteExists) {
 		t.Fatalf("writeVerdict = errNoteExists (%v); a rejected push is not a remote win", err)
@@ -455,7 +471,7 @@ func TestNotesReaderNeverSeesUnpublishedLocalNote(t *testing.T) {
 	go func() {
 		writeDone <- writeVerdict(work, sha, verdictNote{
 			Verdict: "approve", Notes: "never durable", Reviewer: "reviewer-a", RunID: "run-a",
-		})
+		}, testCommitIdentity())
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -517,7 +533,7 @@ func TestConcurrentCloneNoteWritersConvergeOnRemoteWinner(t *testing.T) {
 	for i, repo := range []string{first, second} {
 		go func(repo string, note verdictNote) {
 			<-start
-			results <- writeVerdict(repo, sha, note)
+			results <- writeVerdict(repo, sha, note, testCommitIdentity())
 		}(repo, notes[i])
 	}
 	close(start)
@@ -576,7 +592,7 @@ func TestNotesPreExistingLocalSecretIsDiscarded(t *testing.T) {
 		Verdict: "changes", Notes: "proposed", Reviewer: "reviewer-b",
 		Model: "model-b", DefSHA: strings.Repeat("b", 16), RunID: "run-b",
 	}
-	if err := writeVerdict(work, sha, proposed); err != nil {
+	if err := writeVerdict(work, sha, proposed, testCommitIdentity()); err != nil {
 		t.Fatalf("writeVerdict after local-only secret: %v", err)
 	}
 	secondClone := filepath.Join(t.TempDir(), "second")

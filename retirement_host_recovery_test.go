@@ -14,12 +14,12 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	runGitTest(t, repo, "checkout", "-q", "master")
 	writeAgentFixture(t, repo, "verifier", "verifier-model")
-	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}); err != nil {
+	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeVerdict(repo, reviewed, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("a", 16), RunID: "seed",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	oldTracker := trackerFor
@@ -353,57 +353,57 @@ func TestPendingHostRetirementReconcilesDurableApproval(t *testing.T) {
 		prepare  func(*testing.T, string, string, *Agent)
 	}{
 		"rejected Verdict": {prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
-			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "rejected"}); err != nil {
+			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "rejected"}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 			if err := writeVerdict(repo, reviewed, verdictNote{
 				Verdict: "changes", Reviewer: agent.Name, Model: agent.Model,
 				DefSHA: agent.DefSHA, RunID: "rejected",
-			}); err != nil {
+			}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		"failing Checks": {prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
-			if err := writeChecks(repo, reviewed, checksNote{Status: "fail", RunID: "failed"}); err != nil {
+			if err := writeChecks(repo, reviewed, checksNote{Status: "fail", RunID: "failed"}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 			if err := writeVerdict(repo, reviewed, verdictNote{
 				Verdict: "approve", Reviewer: agent.Name, Model: agent.Model,
 				DefSHA: agent.DefSHA, RunID: "failed",
-			}); err != nil {
+			}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		"Agent mismatch": {approved: true, prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
-			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}); err != nil {
+			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 			if err := writeVerdict(repo, reviewed, verdictNote{
 				Verdict: "approve", Reviewer: "other-agent", Model: agent.Model,
 				DefSHA: agent.DefSHA, RunID: "mismatch",
-			}); err != nil {
+			}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		"Model mismatch": {approved: true, prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
-			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}); err != nil {
+			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 			if err := writeVerdict(repo, reviewed, verdictNote{
 				Verdict: "approve", Reviewer: agent.Name, Model: "other-model",
 				DefSHA: agent.DefSHA, RunID: "mismatch",
-			}); err != nil {
+			}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		"DefSHA mismatch": {approved: true, prepare: func(t *testing.T, repo, reviewed string, agent *Agent) {
-			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}); err != nil {
+			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "mismatch"}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 			if err := writeVerdict(repo, reviewed, verdictNote{
 				Verdict: "approve", Reviewer: agent.Name, Model: agent.Model,
 				DefSHA: strings.Repeat("b", 16), RunID: "mismatch",
-			}); err != nil {
+			}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 		}},

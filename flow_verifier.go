@@ -381,7 +381,7 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 			Time:    nowRFC(),
 			Results: []checkResult{{Name: "rebase", Code: 1, Output: rebaseErr.Error()}},
 		}
-		if err := writeChecks(repoDir, baseSHA, note); err != nil {
+		if err := writeChecks(repoDir, baseSHA, note, a.Commit); err != nil {
 			if !errors.Is(err, errNoteExists) {
 				return out, fmt.Errorf("rebase: %v (notes: %w)", rebaseErr, flowNoteError(err))
 			}
@@ -440,7 +440,7 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 		out.Status = "checks_refused"
 		return out, fmt.Errorf("checks: %w", cleanErr)
 	}
-	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
+	if err := writeChecks(repoDir, baseSHA, checks, a.Commit); err != nil {
 		if !errors.Is(err, errNoteExists) {
 			out.Status = "notes_failed"
 			return out, fmt.Errorf("notes: %w", flowNoteError(err))
@@ -621,7 +621,7 @@ func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent
 		Verdict: rv.Verdict, Notes: rv.Notes, Reviewer: a.Name, Model: a.Model,
 		DefSHA: a.DefSHA, RunID: runID, Time: nowRFC(),
 	}
-	if err := writeVerdict(repoDir, head, out); err != nil {
+	if err := writeVerdict(repoDir, head, out, a.Commit); err != nil {
 		if !errors.Is(err, errNoteExists) {
 			return verdictNote{}, stats, fmt.Errorf("notes: %w", flowNoteError(err))
 		}

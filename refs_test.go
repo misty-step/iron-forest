@@ -109,7 +109,7 @@ func TestInternalEvidenceRefsBypassPrePushButSourcePushDoesNot(t *testing.T) {
 		t.Fatalf("attempt ref after drop = (%q, %v), want absent", out, err)
 	}
 
-	if err := writeVerdict(repo, sha, verdictNote{Verdict: "approve", Reviewer: "hook-test"}); err != nil {
+	if err := writeVerdict(repo, sha, verdictNote{Verdict: "approve", Reviewer: "hook-test"}, testCommitIdentity()); err != nil {
 		t.Fatalf("writeVerdict = %v, want notes publication to bypass pre-push", err)
 	}
 	noteRef := "refs/notes/forest/verdict"

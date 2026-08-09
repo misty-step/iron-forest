@@ -47,7 +47,7 @@ func removeFixerNote(t *testing.T, repo, ref, head string) {
 
 func TestFixerActSkipsWhenSelectedEvidenceDisappears(t *testing.T) {
 	repo, _, head := fixerBranch(t)
-	if err := writeChecks(repo, head, checksNote{Status: "fail"}); err != nil {
+	if err := writeChecks(repo, head, checksNote{Status: "fail"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,7 +79,7 @@ func TestFixerActSkipsWhenSelectedEvidenceDisappears(t *testing.T) {
 }
 func TestFixerActRechecksBrakeAfterSelection(t *testing.T) {
 	repo, _, head := fixerBranch(t)
-	if err := writeChecks(repo, head, checksNote{Status: "fail"}); err != nil {
+	if err := writeChecks(repo, head, checksNote{Status: "fail"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	cfg := defaultConfig()

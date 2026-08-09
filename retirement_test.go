@@ -29,12 +29,12 @@ func testRetirementRecord(branch, revision, itemID string) retirementRecord {
 
 func writeApprovalNotes(t *testing.T, repo, revision string, agent *Agent) {
 	t.Helper()
-	if err := writeChecks(repo, revision, checksNote{Status: "pass", RunID: "seed"}); err != nil {
+	if err := writeChecks(repo, revision, checksNote{Status: "pass", RunID: "seed"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeVerdict(repo, revision, verdictNote{
 		Verdict: "approve", Reviewer: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA, RunID: "seed",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 }

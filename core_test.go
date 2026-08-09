@@ -307,14 +307,14 @@ func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 	if err := writeVerdict(work, sha, verdictNote{
 		Verdict: "approve", Notes: "looks good", Reviewer: "reviewer-a",
 		Model: "model-a", DefSHA: "aaaaaaaaaaaaaaaa", RunID: "run-a",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("writeVerdict: %v", err)
 	}
 	if err := writeChecks(work, sha, checksNote{
 		Status:  "pass",
 		Results: []checkResult{{Name: "test", Code: 0, Output: "ok"}},
 		RunID:   "run-checks",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("writeChecks: %v", err)
 	}
 	v, c, err := api.Notes(sha)

@@ -284,14 +284,14 @@ func TestCmdShowPreservesResultsNilVersusEmptyShape(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			api, work, sha := coreFixture(t)
 			if tc.name == "explicit-empty" {
-				if err := writeChecks(work, sha, checksNote{Status: "pass", Results: []checkResult{}}); err != nil {
+				if err := writeChecks(work, sha, checksNote{Status: "pass", Results: []checkResult{}}, testCommitIdentity()); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				// A checks note carrying only a status has a null (nil) results
 				// field once the note is written and read back, so it exercises
 				// the same path as an explicit JSON null.
-				if err := writeChecks(work, sha, checksNote{Status: "pass"}); err != nil {
+				if err := writeChecks(work, sha, checksNote{Status: "pass"}, testCommitIdentity()); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -318,7 +318,7 @@ func TestCmdShowEmitsNoteLackingTimeAndRunID(t *testing.T) {
 	if err := writeNote(work, verdictNotesRef, sha, verdictNote{
 		Verdict: "approve", Reviewer: "reviewer", Model: "model",
 		DefSHA: strings.Repeat("a", 16),
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	code := 0

@@ -49,7 +49,7 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 		Time:    nowRFC(),
 		Results: []checkResult{{Name: "rebase", Code: 1, Output: "conflicts in file.txt"}},
 	}
-	if err := writeChecks(noteSource, head, fail); err != nil {
+	if err := writeChecks(noteSource, head, fail, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	subjects, err = verifierFlow{}.Select(cfg, work)
@@ -92,14 +92,14 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 		canonicalAdmissionKey(subjects[0]) != "item-9" {
 		t.Fatalf("repaired head = %#v, want item-9 at %s", subjects, newHead)
 	}
-	if err := writeVerdict(work, newHead, verdictNote{Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16)}); err != nil {
+	if err := writeVerdict(work, newHead, verdictNote{Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16)}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	if subjects, err = (verifierFlow{}).Select(cfg, work); err != nil ||
 		len(subjects) != 1 || subjects[0].Revision != newHead {
 		t.Fatalf("approved head missing Checks = (%#v, %v), want check requalification", subjects, err)
 	}
-	if err := writeChecks(work, newHead, checksNote{Status: "pass"}); err != nil {
+	if err := writeChecks(work, newHead, checksNote{Status: "pass"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	for range stalledRunLimit {
@@ -161,7 +161,7 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 			if err := writeVerdict(repo, head, verdictNote{
 				Verdict: verdict, Reviewer: "verifier", Model: "verifier-model",
 				DefSHA: strings.Repeat("a", 16), RunID: "seed",
-			}); err != nil {
+			}, testCommitIdentity()); err != nil {
 				t.Fatalf("seed verdict: %v", err)
 			}
 		}
@@ -241,7 +241,7 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	if err := writeVerdict(repo, head, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
 		DefSHA: strings.Repeat("a", 16), RunID: "seed",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
 
@@ -318,11 +318,11 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 	if err := writeVerdict(repo, head, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
 		DefSHA: strings.Repeat("a", 16), RunID: "seed",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
 	// A stale pass note from an earlier, buggy pass already keys this Revision.
-	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "stale", Time: nowRFC()}); err != nil {
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "stale", Time: nowRFC()}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed stale checks: %v", err)
 	}
 
@@ -574,10 +574,10 @@ func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 
 	if err := writeVerdict(repo, head, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16), RunID: "seed",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
-	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed checks: %v", err)
 	}
 

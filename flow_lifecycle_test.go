@@ -142,7 +142,7 @@ func TestServeSecondSignalHelper(t *testing.T) {
 	if err := git(repo, "add", "forest.yaml"); err != nil {
 		t.Fatal(err)
 	}
-	if err := git(repo, "commit", "-m", "test config"); err != nil {
+	if err := gitAsIdentity(repo, testCommitIdentity(), "commit", "-m", "test config"); err != nil {
 		t.Fatal(err)
 	}
 	if err := git(repo, "push", "-u", "origin", "master"); err != nil {

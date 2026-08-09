@@ -68,7 +68,7 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	if err := writeVerdict(repo, newHead, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
 		DefSHA: strings.Repeat("a", 16), RunID: "seed",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
 	if _, ok, err := readChecks(repo, newHead); err != nil || ok {
@@ -305,7 +305,7 @@ func TestBranchFlowsRejectRevisionThatMovedAfterSelect(t *testing.T) {
 		if err := writeChecks(repo, selected, checksNote{
 			Status: "fail", RunID: "selected",
 			Results: []checkResult{{Name: "test", Code: 1, Output: "failed"}},
-		}); err != nil {
+		}, testCommitIdentity()); err != nil {
 			t.Fatal(err)
 		}
 		writeAgentFixture(t, repo, "fixer", "fixer-model")

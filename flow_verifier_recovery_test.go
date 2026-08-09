@@ -220,13 +220,13 @@ func TestVerifierActRefreshesWinningVerdictBeforeReview(t *testing.T) {
 	writer := filepath.Join(root, "writer")
 	origin := runGitTest(t, repo, "remote", "get-url", "origin")
 	runGitTest(t, root, "clone", "-q", origin, writer)
-	if err := writeChecks(writer, reviewed, checksNote{Status: "pass", RunID: "winner"}); err != nil {
+	if err := writeChecks(writer, reviewed, checksNote{Status: "pass", RunID: "winner"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeVerdict(writer, reviewed, verdictNote{
 		Verdict: "changes", Notes: "winning rejection", Reviewer: "other-verifier",
 		Model: "other-model", DefSHA: strings.Repeat("b", 16), RunID: "winner",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 

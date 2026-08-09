@@ -13,7 +13,7 @@ func TestNewHostApprovalPreparesBeforeProjectedVerdict(t *testing.T) {
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	runGitTest(t, repo, "checkout", "-q", "master")
 	writeAgentFixture(t, repo, "verifier", "verifier-model")
-	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}); err != nil {
+	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	origin := runGitTest(t, repo, "remote", "get-url", "origin")
@@ -367,12 +367,12 @@ func TestPendingHostRetirementIncompleteApprovalRetainsPreparation(t *testing.T)
 			if err := writeVerdict(repo, reviewed, verdictNote{
 				Verdict: "approve", Reviewer: agent.Name, Model: agent.Model,
 				DefSHA: agent.DefSHA, RunID: "verdict-only",
-			}); err != nil {
+			}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 		},
 		"Checks only": func(t *testing.T, repo, reviewed string, _ *Agent) {
-			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "checks-only"}); err != nil {
+			if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "checks-only"}, testCommitIdentity()); err != nil {
 				t.Fatal(err)
 			}
 		},

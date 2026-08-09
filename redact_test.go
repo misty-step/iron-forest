@@ -107,7 +107,7 @@ func TestRedactSecretShapedNotePersistence(t *testing.T) {
 	if err := writeVerdict(work, sha, verdictNote{
 		Verdict: "approve", Notes: "key is sk-AAAAAAAAAAAAAAAA", Reviewer: "reviewer",
 		Model: "model", DefSHA: strings.Repeat("a", 16), RunID: "run-x",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	got, ok, err := readVerdict(work, sha)

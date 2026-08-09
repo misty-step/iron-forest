@@ -16,6 +16,7 @@ func runGitTest(t *testing.T, dir string, args ...string) string {
 		cmdArgs = append([]string{"-C", dir}, args...)
 	}
 	cmd := exec.Command("git", cmdArgs...)
+	cmd.Env = commitIdentityEnv(testCommitIdentity())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v: %s", cmdArgs, err, strings.TrimSpace(string(out)))
@@ -138,10 +139,14 @@ func rebaseTestWriteFile(t *testing.T, path, body string) {
 	}
 }
 
+func testCommitIdentity() CommitIdentity {
+	return CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
+}
+
 func testVerifierAgent() *Agent {
 	return &Agent{
 		Name: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("a", 16),
-		Commit: CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"},
+		Commit: testCommitIdentity(),
 	}
 }
 

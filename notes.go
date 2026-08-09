@@ -125,9 +125,9 @@ func readVerdict(repoDir, sha string) (verdictNote, bool, error) {
 	return v, true, nil
 }
 
-func writeVerdict(repoDir, sha string, v verdictNote) error {
+func writeVerdict(repoDir, sha string, v verdictNote, id CommitIdentity) error {
 	v.Time = time.Now().UTC().Format(time.RFC3339)
-	return writeNote(repoDir, verdictNotesRef, sha, v)
+	return writeNote(repoDir, verdictNotesRef, sha, v, id)
 }
 func readChecks(repoDir, sha string) (checksNote, bool, error) {
 	body, ok, err := readNote(repoDir, checksNotesRef, sha)
@@ -152,9 +152,9 @@ func readChecks(repoDir, sha string) (checksNote, bool, error) {
 	return c, true, nil
 }
 
-func writeChecks(repoDir, sha string, c checksNote) error {
+func writeChecks(repoDir, sha string, c checksNote, id CommitIdentity) error {
 	c.Time = time.Now().UTC().Format(time.RFC3339)
-	return writeNote(repoDir, checksNotesRef, sha, c)
+	return writeNote(repoDir, checksNotesRef, sha, c, id)
 }
 func readNote(repoDir, ref, sha string) (body string, ok bool, err error) {
 	err = withNotesLock(repoDir, func() error {
@@ -186,7 +186,7 @@ func noNote(err error, output []byte) bool {
 	return strings.Contains(msg, "no note found") || strings.Contains(msg, "cannot read note")
 }
 
-func writeNote(repoDir, ref, sha string, value any) error {
+func writeNote(repoDir, ref, sha string, value any, id CommitIdentity) error {
 	body, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode %s note: %w", ref, err)
@@ -201,9 +201,9 @@ func writeNote(repoDir, ref, sha string, value any) error {
 		}
 		var pushErr error
 		for attempt := range 3 {
-			if err := git(repoDir, "notes", "--ref="+ref, "add", "-m", noteText, sha); err != nil {
+			if err := gitAsIdentity(repoDir, id, "notes", "--ref="+ref, "add", "-m", noteText, sha); err != nil {
 				if noteAlreadyExists(err) {
-					return settleNoteWrite(repoDir, ref, sha, err)
+					return settleNoteWrite(repoDir, ref, sha, id, err)
 				}
 				return fmt.Errorf("write %s note: %w", ref, err)
 			}
@@ -219,7 +219,7 @@ func writeNote(repoDir, ref, sha string, value any) error {
 				return nil
 			}
 			if attempt == 2 {
-				if err := git(repoDir, "notes", "--ref="+notesRef(ref), "remove", sha); err != nil {
+				if err := gitAsIdentity(repoDir, id, "notes", "--ref="+notesRef(ref), "remove", sha); err != nil {
 					return fmt.Errorf("push %s note: %v; remove rejected local note: %w", ref, pushErr, err)
 				}
 				break
@@ -236,13 +236,13 @@ func writeNote(repoDir, ref, sha string, value any) error {
 // write. A note the remote already holds is a genuine durable winner. A note
 // that exists only locally is untrusted outbound data from an interrupted or
 // older writer, so the caller removes it rather than publishing it.
-func settleNoteWrite(repoDir, ref, sha string, cause error) error {
+func settleNoteWrite(repoDir, ref, sha string, id CommitIdentity, cause error) error {
 	durable, err := remoteHasNote(repoDir, ref, sha)
 	if err != nil {
 		return fmt.Errorf("settle %s note: %w", ref, err)
 	}
 	if !durable {
-		if derr := git(repoDir, "notes", "--ref="+notesRef(ref), "remove", sha); derr != nil {
+		if derr := gitAsIdentity(repoDir, id, "notes", "--ref="+notesRef(ref), "remove", sha); derr != nil {
 			return fmt.Errorf("settle %s note: remove untrusted local note: %w", ref, derr)
 		}
 		return fmt.Errorf("note is local only; removed before remote publication: %v", cause)

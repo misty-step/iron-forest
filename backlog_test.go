@@ -356,7 +356,7 @@ func TestTrackerGetMismatchStopsBeforeSinks(t *testing.T) {
 	}
 
 	_, repo, revision := notesTestRepository(t)
-	if err := writeChecks(repo, revision, checksNote{Status: "fail"}); err != nil {
+	if err := writeChecks(repo, revision, checksNote{Status: "fail"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	runGitTest(t, repo, "branch", "forest/9-change", revision)
@@ -413,7 +413,7 @@ func TestBranchSelectRecoversOpaqueID(t *testing.T) {
 
 func TestDuplicateBranchItemIdentityIsRejectedDuringAct(t *testing.T) {
 	_, repo, revision := notesTestRepository(t)
-	if err := writeChecks(repo, revision, checksNote{Status: "fail"}); err != nil {
+	if err := writeChecks(repo, revision, checksNote{Status: "fail"}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	for _, branch := range []string{"forest/9-a", "forest/9-b"} {
