@@ -80,8 +80,8 @@ func validateRetirementRecord(ref string, record retirementRecord) error {
 	}
 	name := strings.TrimPrefix(record.Branch, BranchPrefix)
 	dash := strings.IndexByte(name, '-')
-	if !strings.HasPrefix(record.Branch, BranchPrefix) || dash <= 0 ||
-		record.ItemID == "" || encodeBranchID(record.ItemID) != name[:dash] {
+	if !strings.HasPrefix(record.Branch, BranchPrefix) || !validRefSuffix(record.Branch) ||
+		dash <= 0 || record.ItemID == "" || encodeBranchID(record.ItemID) != name[:dash] {
 		return fmt.Errorf("retirement %s has invalid branch/item identity %q/%q", ref, record.Branch, record.ItemID)
 	}
 	if !validHex(record.Revision, 20) {
