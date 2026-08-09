@@ -829,6 +829,85 @@ func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 	}
 }
 
+func TestVerifierBranchLossRetainsObservedHostMergeUntilApproval(t *testing.T) {
+	branch := "forest/31-branch-loss"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "31", Title: "branch loss", UpdatedAt: "u1", Tags: []string{readyTag}})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.AutoMerge = false
+	subjects, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectBranch {
+		t.Fatalf("branch-loss Select = (%#v, %v), want one branch", subjects, err)
+	}
+
+	runGitTest(t, repo, "branch", "-D", branch)
+	if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "fetch", "-q", "--prune", "origin")
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	writes := 0
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "api":
+			return mergedProjectionPage(`{"number":31,"html_url":"https://github.com/owner/repo/pull/31","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && (args[1] == "create" || args[1] == "merge"):
+			writes++
+			return nil, errors.New("duplicate Host write")
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+
+	out, err := (verifierFlow{}).Act(cfg, repo, subjects[0], "observe-merge")
+	if err != nil || out.Status != "merge_pending" {
+		t.Fatalf("branch-loss Act = (status=%q, err=%v), want retained merge_pending", out.Status, err)
+	}
+	facts, err := listRetirements(repo)
+	if err != nil || len(facts) != 1 || facts[0].Record.State != "observed" {
+		t.Fatalf("observed Host retirement = (%#v, %v), want one durable observation", facts, err)
+	}
+	if candidates, err := (builderFlow{}).Select(cfg, repo); err != nil || len(candidates) != 0 {
+		t.Fatalf("Builder re-exposed Host-merged Item = (%#v, %v)", candidates, err)
+	}
+
+	agent := testVerifierAgent()
+	writeApprovalNotes(t, repo, reviewed, agent)
+	recoveries, err := (verifierFlow{}).Select(cfg, repo)
+	if err != nil || len(recoveries) != 1 || recoveries[0].Kind != subjectRetirement {
+		t.Fatalf("observed recovery Select = (%#v, %v), want one retirement", recoveries, err)
+	}
+	out, err = (verifierFlow{}).Act(cfg, repo, recoveries[0], "recover-merge")
+	if err != nil || out.Status != "merged" {
+		t.Fatalf("observed recovery Act = (status=%q, err=%v), want merged", out.Status, err)
+	}
+	if out.Agent != agent.Name || out.Model != agent.Model || out.DefSHA != agent.DefSHA {
+		t.Fatalf("observed recovery attribution = %#v, want %#v", out, agent)
+	}
+	if writes != 0 {
+		t.Fatalf("observed recovery made %d duplicate Host writes", writes)
+	}
+	if _, err := tk.Get("31"); err == nil {
+		t.Fatal("observed recovery left the Tracker Item open")
+	}
+	if facts, err := listRetirements(repo); err != nil || len(facts) != 0 {
+		t.Fatalf("observed recovery facts = (%#v, %v), want retired", facts, err)
+	}
+}
+
 // TestMergeBlockedNamesEveryReason pins the single authority for merge policy.
 // Select and Act both consult it; a precondition that lives in only one of them
 // is how the two drifted and produced the hot loop above.

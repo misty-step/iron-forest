@@ -205,8 +205,8 @@ func TestManagerInProgressBuildKeepsSlotOccupied(t *testing.T) {
 func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 	repo := newRefGitRepo(t)
 	items := []Item{
-		{ID: "149", Title: "still open", UpdatedAt: "u1"},
-		{ID: "70", Title: "waiting", UpdatedAt: "u2", Body: "Blocked by: #149"},
+		{ID: "tracker/item.7", Title: "still open", UpdatedAt: "u1"},
+		{ID: "70", Title: "waiting", UpdatedAt: "u2", Body: "Blocked by: #tracker/item.7"},
 	}
 	plan, err := buildManagerPlan(managerCfg(), repo, items, nil, nil)
 	if err != nil {
@@ -218,6 +218,24 @@ func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 		}
 	}
 
+}
+
+func TestManagerBlockerPreservesOpaqueIdentity(t *testing.T) {
+	open := map[string]Item{
+		"tracker/item.7": {},
+		"hab /?*[~^:":    {},
+	}
+	for _, body := range []string{
+		"Blocked by: #tracker/item.7",
+		"Blocked by: hab /?*[~^:",
+	} {
+		if !hasOpenBlocker(Item{Body: body}, open) {
+			t.Errorf("open opaque blocker was not found in %q", body)
+		}
+	}
+	if hasOpenBlocker(Item{Body: "Blocked by: tracker/item.7"}, map[string]Item{"tracker": {}}) {
+		t.Fatal("opaque blocker matched a shorter open Item identity")
+	}
 }
 
 // TestManagerNeverOffersRepositoryExcludedLabel proves the deployed YAML

@@ -74,11 +74,13 @@ func validHex(value string, bytes int) bool {
 }
 
 func validateRetirementRecord(ref string, record retirementRecord) error {
+	validState := record.State == "observed" || record.State == "pending" || record.State == "landed"
 	if (record.Transport != "git" && record.Transport != "host") ||
 		(record.Strategy != "squash" && record.Strategy != "ff") ||
-		(record.State != "pending" && record.State != "landed") ||
+		!validState ||
 		(record.Transport == "host" && record.Strategy != "squash") ||
-		(record.Transport == "git" && record.State != "landed") {
+		(record.Transport == "git" && record.State != "landed") ||
+		(record.State == "observed" && record.Transport != "host") {
 		return fmt.Errorf("retirement %s has invalid transport/strategy/state %q/%q/%q",
 			ref, record.Transport, record.Strategy, record.State)
 	}
@@ -91,7 +93,11 @@ func validateRetirementRecord(ref string, record retirementRecord) error {
 	if !validHex(record.Revision, 20) {
 		return fmt.Errorf("retirement %s has invalid Revision %q", ref, record.Revision)
 	}
-	if record.Agent == "" || record.Model == "" || !validHex(record.DefSHA, 8) {
+	if record.State == "observed" {
+		if record.Agent != "" || record.Model != "" || record.DefSHA != "" {
+			return fmt.Errorf("retirement %s has attribution before a durable Verdict", ref)
+		}
+	} else if record.Agent == "" || record.Model == "" || !validHex(record.DefSHA, 8) {
 		return fmt.Errorf("retirement %s has invalid agent attribution", ref)
 	}
 	if retirementRef(record.Branch, record.Revision) != ref {
@@ -174,26 +180,37 @@ func recordRetirement(repoDir string, record retirementRecord) (retirementFact, 
 	}, nil
 }
 
+func replaceRetirement(repoDir string, fact retirementFact, next retirementRecord) (retirementFact, error) {
+	next, err := sanitizeRetirementRecord(next)
+	if err != nil {
+		return retirementFact{}, err
+	}
+	if err := validateRetirementRecord(fact.Ref, next); err != nil {
+		return retirementFact{}, err
+	}
+	payload, err := retirementPayload(next)
+	if err != nil {
+		return retirementFact{}, err
+	}
+	if err := putBlobRef(repoDir, fact.Ref, payload, fact.SHA); err != nil {
+		if errors.Is(err, errRefMoved) {
+			current, found, readErr := readRetirement(repoDir, next.Branch, next.Revision)
+			if readErr == nil && found && current.Record == next {
+				return current, nil
+			}
+		}
+		return retirementFact{}, fmt.Errorf("replace retirement: %w", err)
+	}
+	return retirementFact{Ref: fact.Ref, SHA: blobSHA(payload), Record: next}, nil
+}
+
 func landRetirement(repoDir string, fact retirementFact) (retirementFact, error) {
 	if fact.Record.State == "landed" {
 		return fact, nil
 	}
 	landed := fact.Record
 	landed.State = "landed"
-	payload, err := retirementPayload(landed)
-	if err != nil {
-		return retirementFact{}, err
-	}
-	if err := putBlobRef(repoDir, fact.Ref, payload, fact.SHA); err != nil {
-		if errors.Is(err, errRefMoved) {
-			current, found, readErr := readRetirement(repoDir, landed.Branch, landed.Revision)
-			if readErr == nil && found && current.Record == landed {
-				return current, nil
-			}
-		}
-		return retirementFact{}, fmt.Errorf("land retirement: %w", err)
-	}
-	return retirementFact{Ref: fact.Ref, SHA: blobSHA(payload), Record: landed}, nil
+	return replaceRetirement(repoDir, fact, landed)
 }
 
 func listRetirements(repoDir string) ([]retirementFact, error) {
@@ -275,6 +292,46 @@ func recordPendingHostRetirement(cfg Config, repoDir, branch, reviewed string, i
 	})
 }
 
+// recordObservedHostRetirement preserves an exact Host merge that arrived
+// before durable approval was readable. The fact blocks duplicate Builder work
+// until recovery can join the merge observation with its Verdict and Checks.
+func recordObservedHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item) (retirementFact, error) {
+	if fact, found, err := readRetirement(repoDir, branch, reviewed); err != nil {
+		return retirementFact{}, err
+	} else if found {
+		if fact.Record.ItemID != it.ID {
+			return retirementFact{}, fmt.Errorf("retirement %s does not match item %q", fact.Ref, it.ID)
+		}
+		return fact, nil
+	}
+	record := retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
+		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "observed",
+	}
+	fact, err := recordRetirement(repoDir, record)
+	if err == nil {
+		return fact, nil
+	}
+	// Another checkout can publish the approval preparation between the read
+	// and compare-and-set. Its exact fact owns recovery.
+	if winner, found, readErr := readRetirement(repoDir, branch, reviewed); readErr == nil && found && winner.Record.ItemID == it.ID {
+		return winner, nil
+	}
+	return retirementFact{}, err
+}
+
+func landObservedRetirement(repoDir string, fact retirementFact, verdict verdictNote) (retirementFact, error) {
+	if fact.Record.State != "observed" {
+		return retirementFact{}, fmt.Errorf("retirement %s is not an observed Host merge", fact.Ref)
+	}
+	landed := fact.Record
+	landed.State = "landed"
+	landed.Agent = verdict.Reviewer
+	landed.Model = verdict.Model
+	landed.DefSHA = verdict.DefSHA
+	return replaceRetirement(repoDir, fact, landed)
+}
+
 func ensureHostProjection(cfg Config, branch, reviewed string, it Item) error {
 	_, _, err := projectBranch(cfg, it, branch,
 		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), reviewed)
@@ -294,19 +351,13 @@ func recordHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item,
 }
 
 func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, it Item, out Outcome) (Outcome, error) {
-	verdict, hasVerdict, verr := readVerdict(repoDir, reviewed)
-	checks, hasChecks, cerr := readChecks(repoDir, reviewed)
-	if verr != nil || cerr != nil || !hasVerdict || !hasChecks ||
-		verdict.Verdict != "approve" || checks.Status != "pass" {
+	fact, err := recordObservedHostRetirement(cfg, repoDir, branch, reviewed, it)
+	if err != nil {
 		out.Status = "merge_failed"
-		return out, fmt.Errorf("Host merged Revision %s without durable factory approval and passing Checks", reviewed)
+		return out, err
 	}
-	out.Agent = verdict.Reviewer
-	out.Model = verdict.Model
-	out.DefSHA = verdict.DefSHA
-	out.Verdict = verdict.Verdict
-	recoveryAgent := &Agent{Name: verdict.Reviewer, Model: verdict.Model, DefSHA: verdict.DefSHA}
-	if err := mergeVerified(cfg, repoDir, branch, reviewed, it, recoveryAgent); err != nil {
+	record, err := recoverRetirement(cfg, repoDir, fact, it)
+	if err != nil {
 		if errors.Is(err, errHostMergePending) {
 			out.Status = "merge_pending"
 			return out, nil
@@ -314,6 +365,10 @@ func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, i
 		out.Status = "merge_failed"
 		return out, err
 	}
+	out.Agent = record.Agent
+	out.Model = record.Model
+	out.DefSHA = record.DefSHA
+	out.Verdict = "approve"
 	out.Status = "merged"
 	return out, nil
 }
@@ -409,61 +464,84 @@ func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agen
 	}
 	return finishRetirement(cfg, repoDir, fact, it)
 }
+func readRetirementApproval(repoDir, revision string) (verdictNote, bool, error) {
+	if err := fetchNotes(repoDir); err != nil {
+		return verdictNote{}, false, fmt.Errorf("refresh durable notes: %w", err)
+	}
+	verdict, hasVerdict, err := readVerdict(repoDir, revision)
+	if err != nil {
+		return verdictNote{}, false, fmt.Errorf("read durable Verdict: %w", err)
+	}
+	checks, hasChecks, err := readChecks(repoDir, revision)
+	if err != nil {
+		return verdictNote{}, false, fmt.Errorf("read durable Checks: %w", err)
+	}
+	approved := hasVerdict && verdict.Verdict == "approve" && hasChecks && checks.Status == "pass"
+	return verdict, approved, nil
+}
+
 func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it Item) error {
+	_, err := recoverRetirement(cfg, repoDir, fact, it)
+	return err
+}
+
+func recoverRetirement(cfg Config, repoDir string, fact retirementFact, it Item) (retirementRecord, error) {
 	record := fact.Record
 	if record.ItemID != it.ID || record.Branch == "" || record.Revision == "" {
-		return fmt.Errorf("retirement %s does not match item %q", fact.Ref, it.ID)
+		return record, fmt.Errorf("retirement %s does not match item %q", fact.Ref, it.ID)
+	}
+	if record.State == "observed" {
+		verdict, approved, err := readRetirementApproval(repoDir, record.Revision)
+		if err != nil {
+			return record, fmt.Errorf("retirement %s: %w", fact.Ref, err)
+		}
+		if !approved {
+			return record, errHostMergePending
+		}
+		fact, err = landObservedRetirement(repoDir, fact, verdict)
+		if err != nil {
+			return record, err
+		}
+		record = fact.Record
 	}
 	if record.State == "pending" {
 		if record.Transport != "host" {
-			return fmt.Errorf("retirement %s is pending without Host transport", fact.Ref)
+			return record, fmt.Errorf("retirement %s is pending without Host transport", fact.Ref)
 		}
-		// Select may have refreshed notes before another checkout published the
-		// approval. Refresh again under this Item's admission before absence or
-		// mismatch can release the pending intent.
-		if err := fetchNotes(repoDir); err != nil {
-			return fmt.Errorf("retirement %s refresh durable notes: %w", fact.Ref, err)
+		verdict, approved, err := readRetirementApproval(repoDir, record.Revision)
+		if err != nil {
+			return record, fmt.Errorf("retirement %s: %w", fact.Ref, err)
 		}
-		verdict, hasVerdict, readErr := readVerdict(repoDir, record.Revision)
-		if readErr != nil {
-			return fmt.Errorf("retirement %s read durable Verdict: %w", fact.Ref, readErr)
-		}
-		checks, hasChecks, readErr := readChecks(repoDir, record.Revision)
-		if readErr != nil {
-			return fmt.Errorf("retirement %s read durable Checks: %w", fact.Ref, readErr)
-		}
-		if !hasVerdict || verdict.Verdict != "approve" || !hasChecks ||
-			checks.Status != "pass" || record.Agent != verdict.Reviewer ||
+		if !approved || record.Agent != verdict.Reviewer ||
 			record.Model != verdict.Model || record.DefSHA != verdict.DefSHA {
-			return dropPreparationRetirement(repoDir, fact,
+			return record, dropPreparationRetirement(repoDir, fact,
 				fmt.Errorf("retirement %s lacks matching durable approve Verdict and passing Checks", fact.Ref))
 		}
-		var err error
 		if cfg.Flows.Verifier.AutoMerge {
 			err = projectMerge(cfg, record.Branch, record.Strategy, record.Revision)
 		} else {
 			var hostMerged bool
 			hostMerged, _, err = inspectProjectMerge(cfg, record.Branch, record.Strategy, record.Revision)
 			if err == nil && !hostMerged {
-				return errHostMergePending
+				return record, errHostMergePending
 			}
 		}
 		if err != nil {
 			if errors.Is(err, errHostMergeUnavailable) {
-				return dropStaleRetirement(repoDir, fact, err)
+				return record, dropStaleRetirement(repoDir, fact, err)
 			}
 			if errors.Is(err, errHostMergePending) {
-				return err
+				return record, err
 			}
-			return fmt.Errorf("%w: %v", errHostMergePending, err)
+			return record, fmt.Errorf("%w: %v", errHostMergePending, err)
 		}
-		var landErr error
-		fact, landErr = landRetirement(repoDir, fact)
-		if landErr != nil {
-			return landErr
+		fact, err = landRetirement(repoDir, fact)
+		if err != nil {
+			return record, err
 		}
+		record = fact.Record
 	}
-	return finishRetirement(cfg, repoDir, fact, it)
+	return record, finishRetirement(cfg, repoDir, fact, it)
 }
 
 func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) error {

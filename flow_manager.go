@@ -11,11 +11,10 @@ import (
 	"time"
 )
 
-// managerSubject is the Manager lane's singleton subject key. The lane owns one
-// slot in the ready queue, so it acts on at most one thing per pass and never
-// names an item before the model has judged it. Manager Subjects use
-// subjectManager as Kind and carry only this key, the plan Revision, and the
-// operator Label; item and branch payloads stay empty.
+// managerSubject identifies the Manager's one judgement slot per pass. The
+// lane can keep ReadyDepth assignments in flight across passes, but it never
+// names an Item before the model has judged it. Manager Subjects carry only
+// this key, the plan Revision, and the operator Label.
 const managerSubject = "manager"
 
 // managerFlow keeps up to the configured ready depth of unstarted assignments.
@@ -508,23 +507,25 @@ func readManagerReportFile(wtDir string) (managerReport, error) {
 	return rep, nil
 }
 
-// hasOpenBlocker reports whether an item's Blocked by references name an open
-// item. A promoted item's blockers must be closed before the Manager advances it.
+// hasOpenBlocker reports whether a comma-separated Blocked by reference names
+// an open Item. References preserve opaque identity bytes after an optional #.
 func hasOpenBlocker(it Item, open map[string]Item) bool {
 	for _, line := range strings.Split(it.Body, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(strings.ToLower(line), "blocked by") {
 			continue
 		}
-		if i := strings.IndexByte(line, ':'); i >= 0 {
-			line = line[i+1:]
-		}
-		for _, tok := range strings.FieldsFunc(line, func(r rune) bool {
-			return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' ||
-				r >= 'A' && r <= 'Z' || r == '_' || r == '-')
-		}) {
-			if _, ok := open[strings.TrimPrefix(tok, "#")]; ok {
+		line = strings.TrimSpace(line[len("blocked by"):])
+		line = strings.TrimSpace(strings.TrimPrefix(line, ":"))
+		for _, ref := range strings.Split(line, ",") {
+			ref = strings.TrimSpace(ref)
+			if _, ok := open[ref]; ok {
 				return true
+			}
+			if strings.HasPrefix(ref, "#") {
+				if _, ok := open[strings.TrimPrefix(ref, "#")]; ok {
+					return true
+				}
 			}
 		}
 	}

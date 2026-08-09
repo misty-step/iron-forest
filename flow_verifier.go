@@ -157,7 +157,13 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			Branch: s.Branch, BaseSHA: s.Revision,
 			Agent: record.Agent, Model: record.Model, DefSHA: record.DefSHA,
 		}
-		if err := recoverRetirementFact(cfg, repoDir, fact, s.Item); err != nil {
+		recovered, err := recoverRetirement(cfg, repoDir, fact, s.Item)
+		if recovered.Agent != "" {
+			out.Agent = recovered.Agent
+			out.Model = recovered.Model
+			out.DefSHA = recovered.DefSHA
+		}
+		if err != nil {
 			switch {
 			case errors.Is(err, errHostMergePending):
 				out.Status = "merge_pending"

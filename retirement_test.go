@@ -380,7 +380,7 @@ func TestMergeViaHostPinsReviewedHead(t *testing.T) {
 		case len(args) > 0 && args[0] == "api":
 			return []byte(`[]`), nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
-			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeArgs = append([]string(nil), args...)
 			return nil, errors.New("host refused: head does not match reviewed Revision")

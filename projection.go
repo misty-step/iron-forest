@@ -25,6 +25,18 @@ type projectionPullRequest struct {
 	IsCrossRepository bool   `json:"isCrossRepository"`
 }
 
+func validateProjectionPR(repo, branch string, pr projectionPullRequest) error {
+	if pr.Number <= 0 || strings.TrimSpace(pr.URL) == "" {
+		return fmt.Errorf("%w: pull request for branch %q has an incomplete number or URL",
+			errHostMergeUnavailable, branch)
+	}
+	if pr.IsCrossRepository || pr.HeadRefName != branch || pr.BaseRefName != "master" {
+		return fmt.Errorf("%w: pull request %d does not originate from %s branch %q and target master",
+			errHostMergeUnavailable, pr.Number, repo, branch)
+	}
+	return nil
+}
+
 func projectionPRs(cfg Config, branch string) ([]projectionPullRequest, error) {
 	out, err := projectionCommand("pr", "list", "-R", cfg.Repo, "--state", "open",
 		"--head", branch, "--json", "number,url,headRefOid,headRefName,baseRefName,isCrossRepository")
@@ -36,9 +48,8 @@ func projectionPRs(cfg Config, branch string) ([]projectionPullRequest, error) {
 		return nil, err
 	}
 	for _, pr := range prs {
-		if pr.IsCrossRepository || pr.HeadRefName != branch || pr.BaseRefName != "master" {
-			return nil, fmt.Errorf("pull request %d does not originate from %s branch %q and target master",
-				pr.Number, cfg.Repo, branch)
+		if err := validateProjectionPR(cfg.Repo, branch, pr); err != nil {
+			return nil, err
 		}
 	}
 	return prs, nil
@@ -83,9 +94,8 @@ func mergedProjectionPRs(cfg Config, branch string) ([]projectionPullRequest, er
 				BaseRefName:       raw.Base.Ref,
 				IsCrossRepository: raw.Head.Repo == nil || raw.Head.Repo.FullName != cfg.Repo,
 			}
-			if pr.IsCrossRepository || pr.HeadRefName != branch || pr.BaseRefName != "master" {
-				return nil, fmt.Errorf("pull request %d does not originate from %s branch %q and target master",
-					pr.Number, cfg.Repo, branch)
+			if err := validateProjectionPR(cfg.Repo, branch, pr); err != nil {
+				return nil, err
 			}
 			if raw.MergedAt == nil || *raw.MergedAt == "" {
 				continue
@@ -119,7 +129,10 @@ func projectBranch(cfg Config, it Item, branch, body, expectedHead string) (stri
 		return "", false, err
 	}
 	if len(prs) > 0 {
-		if expectedHead != "" && prs[0].HeadRefOID != "" && prs[0].HeadRefOID != expectedHead {
+		if expectedHead != "" && prs[0].HeadRefOID == "" {
+			return "", false, fmt.Errorf("%w: open pull request for branch %q has no reported head Revision", errHostMergeUnavailable, branch)
+		}
+		if expectedHead != "" && prs[0].HeadRefOID != expectedHead {
 			return "", false, fmt.Errorf("%w: open pull request for branch %q moved to %s after reviewed Revision %s", errHostMergeUnavailable, branch, prs[0].HeadRefOID, expectedHead)
 		}
 		return prs[0].URL, false, nil
@@ -261,11 +274,11 @@ func inspectProjectMerge(cfg Config, branch, strategy, expectedHead string) (boo
 			errHostMergeNoView, branch)
 	}
 	pr := prs[0]
-	if pr.Number == 0 {
-		return false, projectionPullRequest{}, fmt.Errorf("%w: open pull request for branch %q has no number",
+	if expectedHead != "" && pr.HeadRefOID == "" {
+		return false, projectionPullRequest{}, fmt.Errorf("%w: open pull request for branch %q has no reported head Revision",
 			errHostMergeUnavailable, branch)
 	}
-	if expectedHead != "" && pr.HeadRefOID != "" && pr.HeadRefOID != expectedHead {
+	if expectedHead != "" && pr.HeadRefOID != expectedHead {
 		return false, projectionPullRequest{}, fmt.Errorf("%w: open pull request for branch %q moved to %s after reviewed Revision %s",
 			errHostMergeUnavailable, branch, pr.HeadRefOID, expectedHead)
 	}

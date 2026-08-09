@@ -81,8 +81,9 @@ func (o *Outcome) addTokens(s runStats) {
 type Flow interface {
 	// Name is the flow's word in the glossary and in the ledger.
 	Name() string
-	// Select returns the subjects this flow would act on right now, most
-	// deserving first. It must be a pure read with no writes.
+	// Select returns the current Subjects in this Flow's consideration order.
+	// It makes no Tracker, Host, or remote Git writes. It may refresh local read
+	// projections before it selects.
 	Select(cfg Config, repoDir string) ([]Subject, error)
 	// Act performs the flow's declared effects on one subject.
 	Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error)

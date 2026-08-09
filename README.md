@@ -28,6 +28,8 @@ A new commit has no Verdict or Checks note, so Iron Forest needs no staleness co
 
 A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. With Host mode and `auto_merge: false`, the Verifier makes one preparation pass, records pending retirement, and never requests a merge. After an operator merges the exact reviewed revision, the next pass observes that merge for recovery. Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
 
+If branch loss hides a merged Projection before approval is readable, an `observed` retirement blocks duplicate Builder work until durable approval arrives.
+
 ## Commands
 
 Run the binary from the repository root. The command surface is:

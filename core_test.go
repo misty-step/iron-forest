@@ -271,9 +271,8 @@ func TestCoreTraceReadsNestedVerifierTrace(t *testing.T) {
 }
 
 // TestCoreTraceIncludesPromptSidecar pins #204's trace contract: runPhase
-// records the full prompt it delivered beside the event stream as <trace>.
-// prompt.txt, and Trace must return that prompt so a surface reading the trace
-// sees the exact text that was sent, not just the events that followed.
+// records a redacted copy of the delivered prompt beside the event stream, and
+// Trace returns that auditable copy with the events.
 func TestCoreTraceIncludesPromptSidecar(t *testing.T) {
 	api, work, _ := coreFixture(t)
 	runsDir := filepath.Join(work, WorkspaceDir, "runs")

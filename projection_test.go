@@ -70,6 +70,55 @@ func TestProjectBranchReusesExistingOpenRequest(t *testing.T) {
 		t.Fatalf("projection list args %v do not constrain the source branch", listArgs)
 	}
 }
+
+func TestProjectBranchRejectsOpenRequestWithoutExpectedHead(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+	}
+	const reviewed = "0123456789abcdef0123456789abcdef01234567"
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if _, _, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", reviewed); !errors.Is(err, errHostMergeUnavailable) {
+		t.Fatalf("open Projection without head = %v, want exact-Revision refusal", err)
+	}
+}
+
+func TestProjectBranchRejectsIncompleteOpenRequestIdentity(t *testing.T) {
+	tests := map[string]string{
+		"number": `[{"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`,
+		"URL":    `[{"number":23,"headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`,
+	}
+	for name, response := range tests {
+		t.Run(name, func(t *testing.T) {
+			old := projectionCommand
+			defer func() { projectionCommand = old }()
+			projectionCommand = func(args ...string) ([]byte, error) {
+				return []byte(response), nil
+			}
+			cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+			if _, _, err := projectBranch(cfg, Item{Title: "change"}, "forest/7-change", "body", ""); !errors.Is(err, errHostMergeUnavailable) {
+				t.Fatalf("open Projection without %s = %v, want refusal", name, err)
+			}
+		})
+	}
+}
+
+func TestInspectProjectMergeRejectsOpenRequestWithoutExpectedHead(t *testing.T) {
+	old := projectionCommand
+	defer func() { projectionCommand = old }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		if args[0] == "api" {
+			return []byte(`[]`), nil
+		}
+		return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+	}
+	const reviewed = "0123456789abcdef0123456789abcdef01234567"
+	cfg := Config{Repo: "owner/repo", Projection: ProjectionConfig{Enabled: true}}
+	if _, _, err := inspectProjectMerge(cfg, "forest/7-change", "squash", reviewed); !errors.Is(err, errHostMergeUnavailable) {
+		t.Fatalf("Host merge without reported head = %v, want exact-Revision refusal", err)
+	}
+}
 func TestProjectBranchRecognizesAlreadyMergedReviewedHead(t *testing.T) {
 	old := projectionCommand
 	defer func() { projectionCommand = old }()
@@ -440,7 +489,7 @@ func TestProjectMergeWaitsForQueuedHostConfirmation(t *testing.T) {
 		case len(args) > 0 && args[0] == "api":
 			return []byte(`[]`), nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
-			return []byte(`[{"number":23,"headRefOid":"` + reviewed + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
+			return []byte(`[{"number":23,"url":"https://github.com/owner/repo/pull/23","headRefOid":"` + reviewed + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
 		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			return nil, nil
