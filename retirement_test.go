@@ -536,6 +536,14 @@ func TestNewHostApprovalPreparesBeforeProjectedVerdict(t *testing.T) {
 	if err := writeChecks(repo, reviewed, checksNote{Status: "pass", RunID: "seed"}); err != nil {
 		t.Fatal(err)
 	}
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	hook := filepath.Join(origin, "hooks", "update")
+	retirement := retirementRef(branch, reviewed)
+	script := "#!/bin/sh\ncase \"$1\" in\n  refs/notes/forest/verdict)\n    git show-ref --verify --quiet '" + retirement + "' || { echo 'Verdict published before Host retirement preparation' >&2; exit 1; }\n    ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	oldTracker := trackerFor
 	tk := newMemoryTracker()
 	tk.seed(Item{ID: "19", Title: "new approval"})
@@ -551,13 +559,11 @@ func TestNewHostApprovalPreparesBeforeProjectedVerdict(t *testing.T) {
 	defer func() { runPhase = oldRun }()
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
-	commentSawFact := false
 	projectionCommand = func(args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[1] == "list" {
 			return []byte(`[{"number":19,"url":"https://github.com/owner/repo/pull/19","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
 		}
 		if len(args) >= 2 && args[1] == "comment" {
-			_, commentSawFact, _ = readRetirement(repo, branch, reviewed)
 			return nil, nil
 		}
 		return nil, errors.New("unexpected Host command")
@@ -573,9 +579,6 @@ func TestNewHostApprovalPreparesBeforeProjectedVerdict(t *testing.T) {
 	}, "new-approval")
 	if err != nil || out.Status != "reviewed" {
 		t.Fatalf("new Host approval = (status=%q, err=%v), want reviewed", out.Status, err)
-	}
-	if !commentSawFact {
-		t.Fatal("projectVerdict ran before the Host retirement preparation was recorded")
 	}
 	facts, err := listRetirements(repo)
 	if err != nil || len(facts) != 1 {
@@ -1279,7 +1282,7 @@ func TestRetirementStaleAdvancedBranchRecordsTerminalBrake(t *testing.T) {
 	}
 }
 
-func TestStaleHostRetirementDropFailureStillBrakes(t *testing.T) {
+func TestStaleHostRetirementDropFailureRemainsRetryable(t *testing.T) {
 	branch := "forest/16-stale-host"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -1301,7 +1304,8 @@ func TestStaleHostRetirementDropFailureStillBrakes(t *testing.T) {
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	projectionCommand = func(args ...string) ([]byte, error) {
-		return []byte(`[{"number":16,"url":"https://github.com/owner/repo/pull/16","headRefOid":"` +
+		return []byte(`[{
+			"number":16,"url":"https://github.com/owner/repo/pull/16","headRefOid":"` +
 			strings.Repeat("c", 40) + `","headRefName":"` + branch +
 			`","baseRefName":"master","isCrossRepository":false}]`), nil
 	}
@@ -1312,13 +1316,27 @@ func TestStaleHostRetirementDropFailureStillBrakes(t *testing.T) {
 		Key: "branch-" + branch, Kind: subjectRetirement, Revision: reviewed,
 		ID: "16", Branch: branch, Head: reviewed, Item: Item{ID: "16", Title: "stale host"},
 	}
-	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
-		t.Fatalf("stale Host retirement code = %d, want failure", code)
+	out, err := (verifierFlow{}).Act(cfg, repo, subject, "stale-drop-rejected")
+	if err == nil || errors.Is(err, errRetirementStale) || out.Status != "merge_failed" {
+		t.Fatalf("stale Host drop rejection = (status=%q, err=%v), want retryable failure", out.Status, err)
 	}
-	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || !stalled {
-		t.Fatalf("stale Host retirement brake = %v, %v; want terminal brake", stalled, err)
+	if stalled, stallErr := stalledOn(repo, "verifier", subject.Key, reviewed); stallErr != nil || stalled {
+		t.Fatalf("stale Host drop rejection brake = (%v, %v), want no terminal brake", stalled, stallErr)
 	}
 	if facts, err := listRetirements(repo); err != nil || len(facts) != 1 {
-		t.Fatalf("stale Host retirement facts = (%#v, %v), want retained intent", facts, err)
+		t.Fatalf("stale Host fact after rejected drop = (%#v, %v), want retained intent", facts, err)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+		t.Fatalf("stale Host retry code = %d, want failure", code)
+	}
+	if facts, err := listRetirements(repo); err != nil || len(facts) != 0 {
+		t.Fatalf("stale Host fact after successful drop = (%#v, %v), want none", facts, err)
+	}
+	if stalled, stallErr := stalledOn(repo, "verifier", subject.Key, reviewed); stallErr != nil || !stalled {
+		t.Fatalf("stale Host retry brake = (%v, %v), want terminal stale classification", stalled, stallErr)
 	}
 }

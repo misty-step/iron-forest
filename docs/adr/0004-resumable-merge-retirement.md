@@ -18,7 +18,9 @@ The fact records the branch, reviewed Revision, Item identity, transport, merge 
 
 The native git path creates a `landed` fact in the same atomic compare-and-set push that advances `master`. The push also leases the target branch, source branch, and absent retirement ref.
 
-The Host path creates a `pending` fact before requesting the merge. It promotes the fact to `landed` after the Host reports that the pull request with the exact reviewed head merged. Recovery queries merged pull requests before open requests, so Host branch auto-deletion does not hide success.
+The Host path creates a `pending` fact before publishing the durable approving Verdict. The fact is the ordering boundary: Verdict publication must not succeed until the exact retirement ref exists. When `AutoMerge=false`, Verifier preparation only observes the current Host state and never issues a merge command. When automatic merge is enabled, the fact remains pending until the Host reports that the pull request with the exact reviewed head merged. Recovery queries merged pull requests before open requests, so Host branch auto-deletion does not hide success.
+
+Every pending recovery revalidates the durable approving Verdict, passing Checks, and matching Verifier attribution before any Host effect. If preparation is incomplete or those facts do not match, recovery releases the pending fact and the subject becomes selectable again. A failed release retains the fact for retry; stale classification is terminal only after successful removal.
 
 The Verifier prioritizes retirement facts over ordinary branch work. Recovery deletes the exact reviewed branch when present, closes the Tracker Item, drops the attempt fact, and deletes the retirement fact. The fact excludes that Item from Builder selection until cleanup finishes. Each ref update uses compare-and-set.
 

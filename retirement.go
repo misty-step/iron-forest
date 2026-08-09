@@ -254,7 +254,7 @@ func dropRetirement(repoDir string, fact retirementFact) error {
 
 func dropStaleRetirement(repoDir string, fact retirementFact, cause error) error {
 	if err := dropRetirement(repoDir, fact); err != nil {
-		return fmt.Errorf("%w: %v; drop stale intent: %v", errRetirementStale, cause, err)
+		return fmt.Errorf("retirement stale: %v; drop stale intent: %w", cause, err)
 	}
 	return fmt.Errorf("%w: %v", errRetirementStale, cause)
 }
@@ -265,6 +265,50 @@ func dropPreparationRetirement(repoDir string, fact retirementFact, cause error)
 	}
 	return fmt.Errorf("%w: %v", errRetirementPreparation, cause)
 }
+
+// recordPendingHostRetirement is the one constructor for a durable pending Host fact.
+func recordPendingHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item, agent, model, defSHA string) (retirementFact, error) {
+	return recordRetirement(repoDir, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
+		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "pending",
+		Agent: agent, Model: model, DefSHA: defSHA,
+	})
+}
+
+func recordHostRetirement(cfg Config, repoDir, branch, reviewed string, it Item, verdict verdictNote) error {
+	if !cfg.Projection.MergeViaHost || verdict.Verdict != "approve" {
+		return nil
+	}
+	_, err := recordPendingHostRetirement(cfg, repoDir, branch, reviewed, it,
+		verdict.Reviewer, verdict.Model, verdict.DefSHA)
+	return err
+}
+
+func recoverHostMergedProjection(cfg Config, repoDir, branch, reviewed string, it Item, out Outcome) (Outcome, error) {
+	verdict, hasVerdict, verr := readVerdict(repoDir, reviewed)
+	checks, hasChecks, cerr := readChecks(repoDir, reviewed)
+	if verr != nil || cerr != nil || !hasVerdict || !hasChecks ||
+		verdict.Verdict != "approve" || checks.Status != "pass" {
+		out.Status = "merge_failed"
+		return out, fmt.Errorf("Host merged Revision %s without durable factory approval and passing Checks", reviewed)
+	}
+	out.Agent = verdict.Reviewer
+	out.Model = verdict.Model
+	out.DefSHA = verdict.DefSHA
+	out.Verdict = verdict.Verdict
+	recoveryAgent := &Agent{Name: verdict.Reviewer, Model: verdict.Model, DefSHA: verdict.DefSHA}
+	if err := mergeVerified(cfg, repoDir, branch, reviewed, it, recoveryAgent); err != nil {
+		if errors.Is(err, errHostMergePending) {
+			out.Status = "merge_pending"
+			return out, nil
+		}
+		out.Status = "merge_failed"
+		return out, err
+	}
+	out.Status = "merged"
+	return out, nil
+}
+
 
 // mergeVerified lands only the Revision that carried the approving Verdict.
 // A retirement fact makes the multi-system effect resumable. Git writes its
@@ -288,11 +332,8 @@ func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item, a *Age
 }
 
 func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item, a *Agent) error {
-	fact, err := recordRetirement(repoDir, retirementRecord{
-		Branch: branch, Revision: reviewed, ItemID: it.ID, Transport: "host",
-		Strategy: cfg.Flows.Verifier.Merge, Title: it.Title, State: "pending",
-		Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA,
-	})
+	fact, err := recordPendingHostRetirement(cfg, repoDir, branch, reviewed, it,
+		a.Name, a.Model, a.DefSHA)
 	if err != nil {
 		return err
 	}
