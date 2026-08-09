@@ -117,6 +117,15 @@ Declare a positive `deadline_seconds`. Do not declare `steps` or
 `budget_seconds`; both fixed ceilings were deleted because they stop real work
 partway (`99b3b74`).
 
+Bound the shell with `bash_allow`: list the commands the agent may run (for
+example `git *`, `gofmt *`, `go test *`, or the `mise exec -- go ...` form that
+runs the pinned toolchain). Every command whose prefix is not listed is denied
+by the harness and recorded as a denied tool in the run trace, so an agent
+reaches the host only through commands its definition names. An empty
+`bash_allow: []` denies the whole shell; omit the key only when the agent may
+keep opencode's default. Do not combine `bash_allow` with `permission.bash`:
+the two declarations cannot both describe the same authority.
+
 ## 4. Keep the factory out of the repository's gates
 
 **No ignore or exclude entries are needed.** Per-run factory artifacts are kept

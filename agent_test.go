@@ -56,6 +56,51 @@ func TestRenderMarkdownCarriesVariant(t *testing.T) {
 	}
 }
 
+// TestRenderMarkdownBashAllowlistIsDenyByDefault pins #118's declaration shape:
+// a `bash_allow` list renders the `bash` permission as a command allowlist with
+// a catch-all deny, so an agent reaches the host only through commands its
+// definition names and an unlisted command (curl, a write outside the worktree)
+// is denied by opencode instead of running. The rendered agent must not contain
+// the old `bash: allow` that made every other deny rule bypassable, and an
+// agent that declares no list keeps the default (no `bash` rule at all).
+func TestRenderMarkdownBashAllowlistIsDenyByDefault(t *testing.T) {
+	cfgDir := renderCfg(t, "forest-opencode-config-")
+	a := &Agent{Name: "builder", Model: "m", Mode: "primary", Instructions: "do work",
+		BashAllow: []string{"git *", "gofmt *", "echo *"}}
+	if err := renderMarkdown(cfgDir, a); err != nil {
+		t.Fatal(err)
+	}
+	md := rendered(t, cfgDir, "builder")
+	for _, want := range []string{
+		`'*': deny`, "echo *: allow", "git *: allow", "gofmt *: allow",
+	} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("rendered permission lacks %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "bash: allow") {
+		t.Fatalf("rendered agent still declares an unbounded shell:\n%s", md)
+	}
+	// An empty list is the declared way to deny the whole shell.
+	denied := renderCfg(t, "forest-opencode-config-")
+	if err := renderMarkdown(denied, &Agent{Name: "noshell", Model: "m", Mode: "primary",
+		Instructions: "do work", BashAllow: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if md := rendered(t, denied, "noshell"); !strings.Contains(md, `'*': deny`) {
+		t.Fatalf("empty bash_allow must deny the whole shell:\n%s", md)
+	}
+	// An absent list renders no bash rule at all.
+	plain := renderCfg(t, "forest-opencode-config-")
+	if err := renderMarkdown(plain, &Agent{Name: "nobash", Model: "m", Mode: "primary",
+		Instructions: "do work"}); err != nil {
+		t.Fatal(err)
+	}
+	if md := rendered(t, plain, "nobash"); strings.Contains(md, "bash") {
+		t.Fatalf("absent bash_allow must not render a bash rule:\n%s", md)
+	}
+}
+
 func TestRenderMarkdownTemperatureIsOptional(t *testing.T) {
 	base := func() *Agent {
 		return &Agent{Name: "verifier", Dir: t.TempDir(), Model: "m", Mode: "primary",
@@ -185,6 +230,7 @@ func TestDeclaredAgentsLoad(t *testing.T) {
 		"fixer":    cfg.Flows.Fixer.Agent,
 		"manager":  cfg.Flows.Manager.Agent,
 	}
+	cfgDir := renderCfg(t, "forest-opencode-config-")
 	for _, f := range flowsFor() {
 		name, ok := agents[f.Name()]
 		if !ok || name == "" {
@@ -196,6 +242,15 @@ func TestDeclaredAgentsLoad(t *testing.T) {
 		}
 		if a.Name != name || a.Model == "" || a.DefSHA == "" {
 			t.Fatalf("incomplete %s declaration for flow %s: %#v", name, f.Name(), a)
+		}
+		// The declared shell must stay bounded (#118): rendering every declared
+		// agent must never produce the blanket `bash: allow` that made other deny
+		// rules bypassable, and a `bash_allow` list must reach the rendered map.
+		if err := renderMarkdown(cfgDir, a); err != nil {
+			t.Fatalf("flow %q renderMarkdown(%q): %v", f.Name(), name, err)
+		}
+		if md := rendered(t, cfgDir, name); strings.Contains(md, "bash: allow") {
+			t.Fatalf("declared agent %s still renders an unbounded shell:\n%s", name, md)
 		}
 	}
 }
@@ -300,6 +355,24 @@ func TestLoadRejectsMissingCommitIdentity(t *testing.T) {
 			!strings.Contains(err.Error(), "commit.name and commit.email are required") {
 			t.Fatalf("loadAgent missing commit identity = %v\n%s", err, body)
 		}
+	}
+}
+
+func TestLoadRejectsBashAllowWithPermissionBash(t *testing.T) {
+	// A declaration that sets both `bash_allow` and `permission.bash` cannot say
+	// which one describes the agent's real authority, so loadAgent refuses it.
+	repoDir := t.TempDir()
+	writeAgentFixture(t, repoDir, "builder", "builder-model")
+	path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
+	body := "description: builder\ncommit:\n  name: builder\n  email: builder@example.invalid\n" +
+		"model: builder-model\ndeadline_seconds: 3600\n" +
+		"permission:\n  bash: deny\nbash_allow:\n  - \"git *\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAgent(repoDir, "builder"); err == nil ||
+		!strings.Contains(err.Error(), "bash_allow and permission.bash cannot both be declared") {
+		t.Fatalf("loadAgent with both bash_allow and permission.bash = %v, want refusal\n%s", err, body)
 	}
 }
 

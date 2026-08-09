@@ -15,13 +15,20 @@ temperature: 0.2
 # (see #207). Time-bound only; there is no step ceiling. Runs that exceed this
 # are cancelled and recorded as timeout_failed.
 deadline_seconds: 3600
+# The shell is bounded to the commands this definition names (see #118). The
+# rendered `bash` permission denies every command whose prefix is not listed
+# here, so curl, a write outside the worktree, or any other unlisted command is
+# refused by the harness and recorded as a denied tool in the run trace. The
+# list covers the build tools the builder legitimately runs: git for state and
+# reports, gofmt for the Go style skill, the declared go checks (build, test,
+# vet, fmt), their pinned-toolchain form through mise, and read-only stdout
+# helpers (echo, ls, cat, tail, head).
 permission:
   read: allow
   edit: allow
   glob: allow
   grep: allow
   list: allow
-  bash: allow
   lsp: allow
   todowrite: allow
   webfetch: deny
@@ -30,6 +37,22 @@ permission:
   skill: deny
   external_directory: deny
   question: ask
+bash_allow:
+  - "git *"
+  - "gofmt *"
+  - "go build *"
+  - "go test *"
+  - "go vet *"
+  - "go fmt *"
+  - "mise exec -- go build *"
+  - "mise exec -- go test *"
+  - "mise exec -- go vet *"
+  - "mise exec -- gofmt *"
+  - "echo *"
+  - "ls *"
+  - "cat *"
+  - "tail *"
+  - "head *"
 # Exa remains declared for shared wiring but disabled for this offline lane.
 mcp:
   - name: exa

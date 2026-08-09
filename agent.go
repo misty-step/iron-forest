@@ -63,7 +63,17 @@ type Agent struct {
 	// the item. The wall-time bound that ends every stall lives in
 	// DeadlineSeconds, which is required and finite.
 	Permission map[string]string `yaml:"permission"`
-	MCP        []McpSpec         `yaml:"mcp"`
+	// BashAllow names the commands one agent may run, so the agent reaches the
+	// host only through commands its definition names (#118). A declared list
+	// renders the `bash` permission as an allowlist object whose catch-all
+	// pattern denies every command and whose named prefixes allow only the
+	// listed commands; a declaration that omits the key keeps today's default
+	// (opencode's own allow-everything fallback) and an empty list denies the
+	// whole shell. Patterns are opencode command prefixes: `git *` matches any
+	// command that starts with `git `. A plain `bash: deny` in Permission is
+	// still available for a shell denied entirely without a list.
+	BashAllow []string  `yaml:"bash_allow"`
+	MCP       []McpSpec `yaml:"mcp"`
 
 	Instructions string
 	PromptTmpl   string
@@ -127,6 +137,13 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	}
 	if a.Mode == "" {
 		a.Mode = "primary"
+	}
+	// The shell is either a named command allowlist or one flat permission, never
+	// both: a declaration that sets `bash_allow` and `permission.bash` at once
+	// cannot say which one describes the agent's real authority, so it is
+	// refused instead of silently rendering one over the other.
+	if a.BashAllow != nil && a.Permission["bash"] != "" {
+		return nil, fmt.Errorf("agent %s: bash_allow and permission.bash cannot both be declared", name)
 	}
 	ins, err := os.ReadFile(filepath.Join(dir, "instructions.md"))
 	if err != nil {
@@ -234,9 +251,25 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	perm := make(map[string]string, len(a.Permission))
+	perm := make(map[string]any, len(a.Permission))
 	for k, v := range a.Permission {
 		perm[k] = v
+	}
+	// A declared `bash_allow` list bounds the shell to the named commands: the
+	// rendered `bash` permission becomes an object whose catch-all pattern denies
+	// every command and whose named prefixes allow only the listed ones, so every
+	// deny rule in the map is real authority and an unlisted command (curl, a
+	// write outside the worktree) records a denied tool in the trace instead of
+	// running. An empty list renders only the catch-all and denies the whole
+	// shell, which is the declared way to delete bash. A declaration that omits
+	// the key renders no bash rule, keeping opencode's own default.
+	if a.BashAllow != nil {
+		rules := make(map[string]string, len(a.BashAllow)+1)
+		rules["*"] = "deny"
+		for _, command := range a.BashAllow {
+			rules[command] = "allow"
+		}
+		perm["bash"] = rules
 	}
 	// Deny every declared-but-disabled MCP so the agent cannot reach it even
 	// though the global opencode config still declares the server.
@@ -247,12 +280,12 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 		}
 	}
 	type frontmatter struct {
-		Description string            `yaml:"description"`
-		Model       string            `yaml:"model"`
-		Variant     string            `yaml:"variant,omitempty"`
-		Mode        string            `yaml:"mode"`
-		Temperature *float64          `yaml:"temperature,omitempty"`
-		Permission  map[string]string `yaml:"permission"`
+		Description string         `yaml:"description"`
+		Model       string         `yaml:"model"`
+		Variant     string         `yaml:"variant,omitempty"`
+		Mode        string         `yaml:"mode"`
+		Temperature *float64       `yaml:"temperature,omitempty"`
+		Permission  map[string]any `yaml:"permission"`
 	}
 	fm, err := yaml.Marshal(frontmatter{
 		Description: a.Description, Model: a.Model, Variant: a.Variant, Mode: a.Mode,
