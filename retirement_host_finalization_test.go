@@ -124,7 +124,7 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 		}
 	}
 }
-func TestRetirementFactBlocksAdvancedBranch(t *testing.T) {
+func TestRetirementFactYieldsAdvancedBranchAfterBrake(t *testing.T) {
 	branch := "forest/12-advanced"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -178,8 +178,9 @@ func TestRetirementFactBlocksAdvancedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subjects) != 0 {
-		t.Fatalf("stalled retirement remained selectable: %#v", subjects)
+	if len(subjects) != 1 || subjects[0].Kind != subjectBranch ||
+		subjects[0].Branch != branch || subjects[0].Revision != advanced {
+		t.Fatalf("subjects after stale retirement brake = %#v, want advanced branch %s", subjects, advanced)
 	}
 }
 

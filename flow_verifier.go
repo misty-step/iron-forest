@@ -83,6 +83,7 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	retiring := make(map[string]bool, len(retirements))
 	for _, fact := range retirements {
 		var s Subject
+		valid := fact.ReadErr == nil
 		if fact.ReadErr != nil {
 			s = Subject{
 				Key:      "retirement-evidence-" + blobSHA(fact.Ref),
@@ -99,7 +100,6 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			}
 		} else {
 			record := fact.Record
-			retiring[record.Branch] = true
 			s = Subject{Key: retirementSubjectKey(record.Branch), Kind: subjectRetirement,
 				Revision: record.Revision, Label: "retire " + record.Branch,
 				ID: record.ItemID, Branch: record.Branch,
@@ -111,6 +111,15 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		}
 		if include {
 			recoveries = append(recoveries, s)
+			if valid {
+				retiring[s.Branch] = true
+			}
+		} else if valid {
+			if head, present := branchHeads[s.Branch]; !present || head == s.Revision {
+				// A braked retirement owns only its reviewed Revision. A newer
+				// branch head is independent work and must remain selectable.
+				retiring[s.Branch] = true
+			}
 		}
 	}
 	var fresh, mergeable, failures []Subject
