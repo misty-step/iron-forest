@@ -34,4 +34,4 @@ A process restart can resume both merge paths from a fresh checkout without load
 
 Retirement refs are temporary. Effect claims remain replay fences while an external outcome is uncertain. Completed retirement removes its claims atomically. Invalid facts and duplicate branch or Item identities quarantine their known Subjects without suppressing unrelated work.
 
-Tracker closure uses separate request and acceptance claims. A failed close retries only after exact `open` evidence. Malformed or uncertain evidence stops recovery. Source branch deletion tolerates absence because a Host can delete the branch. It still refuses an advanced branch.
+Tracker closure uses separate request and acceptance claims. A failed close retries only after exact `open` evidence. Malformed or uncertain evidence stops recovery. Source branch deletion tolerates absence because a Host can delete the branch. It still refuses an advanced branch. A terminal brake keeps that head out of the Verifier because a second fact for the same branch or Item would invalidate both facts. An operator must reconcile the old fact first.

@@ -124,7 +124,7 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 		}
 	}
 }
-func TestRetirementFactYieldsAdvancedBranchAfterBrake(t *testing.T) {
+func TestRetirementFactBlocksAdvancedBranchAfterBrake(t *testing.T) {
 	branch := "forest/12-advanced"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
 	agent := testVerifierAgent()
@@ -178,9 +178,13 @@ func TestRetirementFactYieldsAdvancedBranchAfterBrake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subjects) != 1 || subjects[0].Kind != subjectBranch ||
-		subjects[0].Branch != branch || subjects[0].Revision != advanced {
-		t.Fatalf("subjects after stale retirement brake = %#v, want advanced branch %s", subjects, advanced)
+	if len(subjects) != 0 {
+		t.Fatalf("advanced branch escaped stale retirement quarantine: %#v", subjects)
+	}
+	facts, err := scanRetirements(repo)
+	if err != nil || len(facts) != 1 || facts[0].ReadErr != nil ||
+		facts[0].Record.Revision != reviewed {
+		t.Fatalf("quarantined retirement facts = (%#v, %v), want one valid old fact", facts, err)
 	}
 }
 
