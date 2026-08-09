@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -332,5 +333,82 @@ func TestFixerRestartCompletesFailedHandoffAfterLastAtomicPublish(t *testing.T) 
 	stalled, err := stalledOn(repo, "fixer", key, newHead)
 	if err != nil || !stalled {
 		t.Fatalf("recovered handoff brake = (%v, %v), want terminal", stalled, err)
+	}
+}
+
+// TestFixerStopsAtAttemptCeiling is item #125's oracle at the selector bound. A
+// branch that has spent its Fixer attempts is never offered to a repair agent
+// again: Select still yields the branch at Attempts-1, and the final repair that
+// reaches Attempts applies forest:failed, leaves the human comment, and records
+// the terminal brake, so every later Select pass returns nothing and the repair
+// loop cannot continue past the ceiling.
+func TestFixerStopsAtAttemptCeiling(t *testing.T) {
+	repo, branch, head := fixerBranch(t)
+	if err := writeChecks(repo, head, checksNote{Status: "fail"}, testCommitIdentity()); err != nil {
+		t.Fatal(err)
+	}
+	key := "branch-" + branch
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{}
+	cfg.Flows.Fixer.Attempts = 2
+	// The repair worktree needs the feature branch free: the main checkout must
+	// not sit on it when createWorktreeAtBranch rebuilds the branch locally.
+	runGitTest(t, repo, "checkout", "-q", "master")
+	// One attempt is already spent: the ceiling still admits the final repair.
+	if count, err := bumpAttempts(repo, key); err != nil || count != cfg.Flows.Fixer.Attempts-1 {
+		t.Fatalf("seed attempts = (%d, %v), want (%d, nil)", count, err, cfg.Flows.Fixer.Attempts-1)
+	}
+
+	subjects, err := (fixerFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Key != key {
+		t.Fatalf("Fixer Select at Attempts-1 = (%#v, %v), want one subject before the ceiling", subjects, err)
+	}
+
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "9", Title: "fixer"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	writeAgentFixture(t, repo, "builder", "builder-model")
+
+	oldRun := runPhase
+	runPhase = func(_ string, wtDir string, _ *Agent, _, _ string) (runStats, error) {
+		if err := os.WriteFile(filepath.Join(wtDir, "repair.txt"), []byte("repair\n"), 0o644); err != nil {
+			return runStats{}, err
+		}
+		rep := `{"summary":"last repair","changed_files":["repair.txt"],"notes":""}`
+		if err := os.WriteFile(filepath.Join(wtDir, "report.json"), []byte(rep), 0o644); err != nil {
+			return runStats{}, err
+		}
+		return runStats{}, nil
+	}
+	defer func() { runPhase = oldRun }()
+
+	// The final repair publishes the Attempts-th attempt: reaching the ceiling
+	// applies the failure handoff in the same Act.
+	out, err := (fixerFlow{}).Act(cfg, repo, subjects[0], "run-ceiling")
+	if err != nil || out.Status != "fixed" {
+		t.Fatalf("Fixer Act at the ceiling = (%#v, %v), want fixed", out, err)
+	}
+	if n, err := readAttempts(repo, key); err != nil || n != cfg.Flows.Fixer.Attempts {
+		t.Fatalf("stored attempts = (%d, %v), want exactly the ceiling", n, err)
+	}
+	item, err := tk.Get("9")
+	if err != nil || !item.hasTag(failedLabel) {
+		t.Fatalf("exhausted Item = (%#v, %v), want forest:failed", item, err)
+	}
+	if len(item.Comments) != 1 || !strings.Contains(item.Comments[0].Body, "forest:failed") {
+		t.Fatalf("exhausted comments = %#v, want the human review comment", item.Comments)
+	}
+	publishedHead := remoteBranchHead(t, repo, branch)
+	if stalled, err := stalledOn(repo, "fixer", key, publishedHead); err != nil || !stalled {
+		t.Fatalf("ceiling brake = (%v, %v), want terminal at the published head", stalled, err)
+	}
+
+	subjects, err = (fixerFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 0 {
+		t.Fatalf("Fixer Select at Attempts = (%#v, %v), want no selection after the ceiling", subjects, err)
 	}
 }
