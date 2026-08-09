@@ -420,11 +420,12 @@ const childSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 // credentials stay unreachable. The home sits outside the worktree: the worktree
 // is committed with `git add -A`, so a tool that writes to $HOME there would put
 // its cache directories into the published branch. It preserves only the pinned
-// toolchain and caches the factory needs, and excludes gh, whose credential
-// would reach far beyond the given worktree. Non-Go tools the managed repo
-// declares reach the check child through mise-managed tools with working shims
-// (already on PATH) or the host toolchain mechanism (see checkEnvironment); an
-// agent run gets neither, so host toolchain reach stays scoped to checks.
+// toolchain and caches the factory needs. It omits the operator's credential
+// variables, home, agent sockets, and session bus. A private failing `gh`
+// shadows every Host PATH entry, so normal lookup cannot query a keyring token.
+// Non-Go tools the managed repo declares reach the check child through
+// mise-managed tools or the host toolchain mechanism (see checkEnvironment).
+// An agent run gets neither, so host toolchain reach stays scoped to checks.
 func childEnvironment() ([]string, func(), error) {
 	return childBaseEnv(false)
 }
@@ -463,6 +464,12 @@ func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
 	if err := os.Mkdir(binDir, 0o755); err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("create child command directory: %w", err)
+	}
+	// gh can read an operating-system keyring even with a private HOME and no
+	// token variables. Shadow normal child lookup before any Host path.
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte("#!/bin/sh\nexit 127\n"), 0o555); err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("block gh for child: %w", err)
 	}
 	if err := os.Symlink(mise, filepath.Join(binDir, "mise")); err != nil {
 		cleanup()

@@ -93,15 +93,21 @@ func TestRunChecksAllPassing(t *testing.T) {
 	}
 }
 
-func TestRunChecksCannotUseOperatorGitHubCredential(t *testing.T) {
+func TestRunChecksCannotUseOperatorCredentials(t *testing.T) {
 	t.Setenv("GH_TOKEN", "operator-token")
 	t.Setenv("GITHUB_TOKEN", "operator-token")
 	t.Setenv("FOREST_OPERATOR_SECRET", "operator-secret")
 	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
 	t.Setenv("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh")
+	hostBin := t.TempDir()
+	writeDriver(t, hostBin, "gh", "#!/bin/sh\nexit 0\n")
+	t.Setenv("FOREST_CHECK_PATH", hostBin)
 	cfg := Config{Checks: []Check{{
 		Name: "credential-isolation",
-		Run:  `printf 'gh=%s bus=%s ssh=%s\n' "$(command -v gh || true)" "$DBUS_SESSION_BUS_ADDRESS" "$SSH_AUTH_SOCK"; test -z "$GH_TOKEN" && test -z "$GITHUB_TOKEN" && test -z "$FOREST_OPERATOR_SECRET" && test -z "$DBUS_SESSION_BUS_ADDRESS" && test -z "$SSH_AUTH_SOCK" && ! command -v gh >/dev/null 2>&1`,
+		Run: `printf 'gh=%s bus=%s ssh=%s\n' "$(command -v gh || true)" "$DBUS_SESSION_BUS_ADDRESS" "$SSH_AUTH_SOCK"; ` +
+			`test -z "$GH_TOKEN" && test -z "$GITHUB_TOKEN" && test -z "$FOREST_OPERATOR_SECRET" && ` +
+			`test -z "$DBUS_SESSION_BUS_ADDRESS" && test -z "$SSH_AUTH_SOCK" && ` +
+			`test "$(command -v gh)" = "$HOME/bin/gh" && ! gh auth token >/dev/null 2>&1 && ! gh api user >/dev/null 2>&1`,
 	}}}
 	note, err := runChecks(cfg, t.TempDir(), "run-isolated")
 	if err != nil {

@@ -947,10 +947,16 @@ func TestAssertChecksCleanRefusesTrackedRewriteAllowsScratch(t *testing.T) {
 		t.Fatalf("refusal %q does not name the rewritten tracked path", err)
 	}
 
-	// Staging is refused too, even when the file is restored to HEAD in the
-	// working tree: the index entry moved.
+	// Stage a distinct rewrite, then restore only the working-tree bytes to
+	// HEAD. The index remains tainted while the visible file matches HEAD.
 	runGitTest(t, wtDir, "checkout", "--", "source.go")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n// staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runGitTest(t, wtDir, "add", "source.go")
+	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	err = assertChecksClean(wtDir, head, before)
 	if err == nil {
 		t.Fatal("a check that staged a tracked file was not refused")
