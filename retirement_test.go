@@ -778,7 +778,6 @@ func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 	}
 }
 
-
 func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 	branch := "forest/9-host-recovery"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)
@@ -1291,6 +1290,7 @@ func TestStaleHostRetirementDropFailureStillBrakes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	writeApprovalNotes(t, repo, reviewed, agent)
 	origin := runGitTest(t, repo, "remote", "get-url", "origin")
 	hook := filepath.Join(origin, "hooks", "update")
 	script := "#!/bin/sh\ncase \"$1\" in\n  refs/forest/retirement/*) exit 1 ;;\nesac\nexit 0\n"

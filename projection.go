@@ -43,7 +43,6 @@ func projectionPRs(cfg Config, branch, state string) ([]projectionPullRequest, e
 	return prs, nil
 }
 
-
 func openProjectionPR(cfg Config, branch string) ([]projectionPullRequest, error) {
 	prs, err := projectionPRs(cfg, branch, "open")
 	if err != nil {

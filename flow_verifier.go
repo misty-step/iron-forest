@@ -127,7 +127,6 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	return recoveries, nil
 }
 
-
 // mergeBlocked names why an approved, green branch cannot complete a merge,
 // or returns "" when it may. Select uses it to avoid no-op work, except that a
 // Host branch with AutoMerge disabled gets one pass to record durable intent.
