@@ -435,15 +435,14 @@ func TestProjectMergeWaitsForQueuedHostConfirmation(t *testing.T) {
 	mergeCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
 		switch {
-		case args[0] == "api" && hostMerged:
+		case len(args) > 0 && args[0] == "api" && hostMerged:
 			return mergedProjectionPage(`{"number":23,"html_url":"https://github.com/owner/repo/pull/23","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"forest/7-change","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
-		case args[0] == "api":
+		case len(args) > 0 && args[0] == "api":
 			return []byte(`[]`), nil
-		case args[0] == "pr" && args[1] == "list":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
 			return []byte(`[{"number":23,"headRefOid":"` + reviewed + `","headRefName":"forest/7-change","baseRefName":"master","isCrossRepository":false}]`), nil
-		case args[0] == "pr" && args[1] == "merge":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
-			hostMerged = true
 			return nil, nil
 		default:
 			return nil, errors.New("unexpected host command")

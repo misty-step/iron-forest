@@ -376,10 +376,12 @@ func TestMergeViaHostPinsReviewedHead(t *testing.T) {
 	defer func() { projectionCommand = oldProj }()
 	var mergeArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
-		switch args[1] {
-		case "list":
+		switch {
+		case len(args) > 0 && args[0] == "api":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
 			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-		case "merge":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeArgs = append([]string(nil), args...)
 			return nil, errors.New("host refused: head does not match reviewed Revision")
 		default:
@@ -444,18 +446,20 @@ func TestVerifierRecoversAlreadyMergedProjectionWithoutDuplicate(t *testing.T) {
 			}
 		}
 		switch {
-		case args[1] == "list" && state == "open" && !merged:
-			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-		case args[1] == "list" && state == "merged" && merged:
-			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-		case args[1] == "list":
+		case len(args) > 0 && args[0] == "api" && merged:
+			return mergedProjectionPage(`{"number":9,"html_url":"https://github.com/owner/repo/pull/9","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		case len(args) > 0 && args[0] == "api":
 			return []byte(`[]`), nil
-		case args[1] == "comment":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list" && state == "open" && !merged:
+			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "comment":
 			return nil, nil
-		case args[1] == "create":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "create":
 			createCalls++
 			return nil, errors.New("duplicate pull request")
-		case args[1] == "merge":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			return nil, errors.New("duplicate Host merge")
 		default:
@@ -790,20 +794,6 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 	merged := false
 	mergeCalls := 0
 	projectionCommand = func(args ...string) ([]byte, error) {
-		if len(args) < 2 {
-			return nil, errors.New("unexpected host command")
-		}
-		if args[1] == "merge" {
-			merged = true
-			mergeCalls++
-			if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
-				return nil, err
-			}
-			return nil, nil
-		}
-		if args[1] != "list" {
-			return nil, errors.New("unexpected host command")
-		}
 		state := ""
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == "--state" {
@@ -811,12 +801,28 @@ func TestMergeViaHostRecoversTrackerCloseFailure(t *testing.T) {
 			}
 		}
 		switch {
-		case state == "open" && !merged:
-			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-		case state == "merged" && merged:
-			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-		default:
+		case len(args) > 0 && args[0] == "api" && merged:
+			return mergedProjectionPage(`{"number":9,"html_url":"https://github.com/owner/repo/pull/9","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		case len(args) > 0 && args[0] == "api":
 			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
+			merged = true
+			mergeCalls++
+			if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			switch {
+			case state == "open" && !merged:
+				return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+			case state == "merged" && merged:
+				return []byte(`[]`), nil
+			default:
+				return []byte(`[]`), nil
+			}
+		default:
+			return nil, errors.New("unexpected host command")
 		}
 	}
 
@@ -902,25 +908,23 @@ func TestPendingHostRetirementRecoversAfterBranchAutoDelete(t *testing.T) {
 	if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
 		t.Fatal(err)
 	}
-
 	writeApprovalNotes(t, repo, reviewed, agent)
 	oldProjection := projectionCommand
 	defer func() { projectionCommand = oldProjection }()
 	mergeCalls := 0
+
 	projectionCommand = func(args ...string) ([]byte, error) {
-		if len(args) >= 2 && args[1] == "merge" {
+		switch {
+		case len(args) > 0 && args[0] == "api":
+			return mergedProjectionPage(`{"number":10,"html_url":"https://github.com/owner/repo/pull/10","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			return nil, errors.New("recovery attempted a duplicate Host merge")
-		}
-		if len(args) >= 2 && args[1] == "list" {
-			for i := 0; i+1 < len(args); i++ {
-				if args[i] == "--state" && args[i+1] == "merged" {
-					return []byte(`[{"number":10,"url":"https://github.com/owner/repo/pull/10","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-				}
-			}
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
 			return []byte(`[]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
 		}
-		return nil, errors.New("unexpected Host command")
 	}
 	oldGH := ghJSON
 	defer func() { ghJSON = oldGH }()
@@ -981,21 +985,19 @@ func TestPendingHostRetirementObservesRecordedStrategy(t *testing.T) {
 	mergeCalls, listCalls := 0, 0
 	var mergeArgs []string
 	projectionCommand = func(args ...string) ([]byte, error) {
-		if len(args) >= 2 && args[1] == "merge" {
+		switch {
+		case len(args) > 0 && args[0] == "api":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			mergeArgs = append([]string(nil), args...)
 			return nil, errors.New("Host merge queued")
-		}
-		if len(args) >= 2 && args[1] == "list" {
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
 			listCalls++
-			for i := 0; i+1 < len(args); i++ {
-				if args[i] == "--state" && args[i+1] == "open" {
-					return []byte(`[{"number":11,"url":"https://github.com/owner/repo/pull/11","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
-				}
-			}
-			return []byte(`[]`), nil
+			return []byte(`[{"number":11,"url":"https://github.com/owner/repo/pull/11","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
 		}
-		return nil, errors.New("unexpected Host command")
 	}
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
@@ -1134,31 +1136,29 @@ func TestPendingHostRetirementCreatesOneExactRequestAndRetriesMerge(t *testing.T
 	createCalls, mergeCalls := 0, 0
 	var mergeHeads []string
 	projectionCommand = func(args ...string) ([]byte, error) {
-		if len(args) < 2 {
-			return nil, errors.New("unexpected Host command")
+		state := ""
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--state" {
+				state = args[i+1]
+			}
 		}
-		switch args[1] {
-		case "create":
+		pr := `[{"number":13,"url":"https://github.com/owner/repo/pull/13","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`
+		switch {
+		case len(args) > 0 && args[0] == "api" && merged:
+			return mergedProjectionPage(`{"number":13,"html_url":"https://github.com/owner/repo/pull/13","merged_at":"2026-08-08T00:00:00Z","head":{"sha":"` + reviewed + `","ref":"` + branch + `","repo":{"full_name":"owner/repo"}},"base":{"ref":"master"}}`), nil
+		case len(args) > 0 && args[0] == "api":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "create":
 			createCalls++
 			created = true
 			return []byte("https://github.com/owner/repo/pull/13"), nil
-		case "merge":
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "merge":
 			mergeCalls++
 			if hasArgumentPair(args, "--match-head-commit", reviewed) {
 				mergeHeads = append(mergeHeads, reviewed)
 			}
 			return nil, nil
-		case "list":
-			state := ""
-			for i := range args[:len(args)-1] {
-				if args[i] == "--state" {
-					state = args[i+1]
-				}
-			}
-			pr := `[{"number":13,"url":"https://github.com/owner/repo/pull/13","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`
-			if state == "merged" && merged {
-				return []byte(pr), nil
-			}
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
 			if state == "open" && created {
 				return []byte(pr), nil
 			}
