@@ -115,11 +115,6 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "notes_failed"
 		return out, s.Failure
 	}
-	it, err := validatedTrackerItem(trackerFor(cfg.Repo), s.ID)
-	if err != nil {
-		out.Status = "item_failed"
-		return out, fmt.Errorf("item: %w", err)
-	}
 	if err := fetchNotes(repoDir); err != nil {
 		out.Status = "notes_failed"
 		return out, fmt.Errorf("notes: refresh before repair: %w", flowNoteError(err))
@@ -137,6 +132,29 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	if !fixerNeedsRepair(v, hasVerdict, checks, hasChecks) {
 		out.Status = "skipped"
 		return out, nil
+	}
+	stalled, err := stalledOn(repoDir, "fixer", s.Key, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, err
+	}
+	if stalled {
+		out.Status = "skipped"
+		return out, nil
+	}
+	attempts, err := readAttempts(repoDir, s.Key)
+	if err != nil {
+		out.Status = "attempts_failed"
+		return out, err
+	}
+	if attempts >= cfg.Flows.Fixer.Attempts {
+		out.Status = "skipped"
+		return out, nil
+	}
+	it, err := validatedTrackerItem(trackerFor(cfg.Repo), s.ID)
+	if err != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("item: %w", err)
 	}
 
 	a, err := loadAgent(repoDir, cfg.Flows.Fixer.Agent)

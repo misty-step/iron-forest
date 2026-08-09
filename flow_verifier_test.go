@@ -91,7 +91,7 @@ func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
 	// Stub the tracker so Act's item read does not touch the host CLI.
 	oldGH := ghJSON
 	ghJSON = func(args ...string) ([]byte, error) {
-		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 	}
 	defer func() { ghJSON = oldGH }()
 
@@ -339,6 +339,10 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	if err := writeVerdict(work, newHead, verdictNote{Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16)}); err != nil {
 		t.Fatal(err)
 	}
+	if subjects, err = (verifierFlow{}).Select(cfg, work); err != nil ||
+		len(subjects) != 1 || subjects[0].Revision != newHead {
+		t.Fatalf("approved head missing Checks = (%#v, %v), want check requalification", subjects, err)
+	}
 	if err := writeChecks(work, newHead, checksNote{Status: "pass"}); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +390,7 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 
 		oldGH := ghJSON
 		ghJSON = func(args ...string) ([]byte, error) {
-			return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+			return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 		}
 		defer func() { ghJSON = oldGH }()
 
@@ -487,7 +491,7 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 
 	oldGH := ghJSON
 	ghJSON = func(args ...string) ([]byte, error) {
-		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 	}
 	defer func() { ghJSON = oldGH }()
 
@@ -521,10 +525,8 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range subjects {
-		if s.Branch == branch {
-			t.Fatalf("verifier offered the preflight-failed head as mergeable: %#v", s)
-		}
+	if len(subjects) != 1 || subjects[0].Branch != branch {
+		t.Fatalf("preflight-failed head = %#v, want one bounded check requalification", subjects)
 	}
 	repairs, err := (fixerFlow{}).Select(cfg, repo)
 	if err != nil {
@@ -570,7 +572,7 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 
 	oldGH := ghJSON
 	ghJSON = func(args ...string) ([]byte, error) {
-		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 	}
 	defer func() { ghJSON = oldGH }()
 
@@ -633,7 +635,7 @@ func TestVerifierRefusesPassNoteWhenCheckMutatesTree(t *testing.T) {
 
 			oldGH := ghJSON
 			ghJSON = func(args ...string) ([]byte, error) {
-				return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+				return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 			}
 			defer func() { ghJSON = oldGH }()
 
@@ -706,7 +708,7 @@ func TestVerifierReviewNamesMutationWhenPhaseErrors(t *testing.T) {
 
 	oldGH := ghJSON
 	ghJSON = func(args ...string) ([]byte, error) {
-		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 	}
 	defer func() { ghJSON = oldGH }()
 
@@ -1077,10 +1079,8 @@ func TestVerifierMalformedHostProjectionUsesFailureBrake(t *testing.T) {
 	cfg.Flows.Verifier.Agent = "verifier"
 	subject := Subject{Key: "branch-" + branch, Kind: subjectBranch, Revision: reviewed,
 		ID: "41", Branch: branch}
-	for range stalledRunLimit {
-		if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
-			t.Fatalf("malformed Host pass code = %d, want failure", code)
-		}
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 1 {
+		t.Fatalf("malformed Host pass code = %d, want failure", code)
 	}
 	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || !stalled {
 		t.Fatalf("malformed Host Projection stalled = (%v, %v), want hard brake", stalled, err)

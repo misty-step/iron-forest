@@ -474,9 +474,11 @@ func TestProjectionRejectsNullOrNonArrayResponses(t *testing.T) {
 		}},
 	}
 	responses := map[string]string{
-		"null":      "null",
-		"object":    `{"items":[]}`,
-		"null-page": `[null]`,
+		"null":        "null",
+		"object":      `{"items":[]}`,
+		"null-page":   `[null]`,
+		"null-entry":  `[[null]]`,
+		"empty-entry": `[[{}]]`,
 	}
 	for responseName, response := range responses {
 		for _, tc := range cases {

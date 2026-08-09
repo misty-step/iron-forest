@@ -29,15 +29,3 @@ type Tracker interface {
 	SetTags(id string, add, remove []string) error
 }
 
-// Projection is the optional, one-way human surface. It mirrors a branch and
-// each decision as a pull request and can merge one.
-type Projection interface {
-	// FindOpen returns the open projection for a branch, if any.
-	FindOpen(branch string) (Item, error)
-	// Open publishes a branch as one projection.
-	Open(branch, title, body string) (Item, error)
-	// Comment appends a comment to an open projection.
-	Comment(id, body string) error
-	// Merge merges an open projection using the named strategy.
-	Merge(id, strategy string) error
-}

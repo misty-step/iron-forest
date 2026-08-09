@@ -800,7 +800,7 @@ func recoverRetirement(cfg Config, repoDir string, fact retirementFact, it Item)
 					}
 					if !found {
 						return record, fmt.Errorf("%w: preparing branch %q has no Host view or remote Revision",
-							errHostMergePending, record.Branch)
+							errRetirementRecoveryHard, record.Branch)
 					}
 					if head != record.Revision {
 						moved, moveErr := recordPreparingHostRetirement(cfg, repoDir, record.Branch, head, it)

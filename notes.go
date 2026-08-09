@@ -303,19 +303,29 @@ func fetchNoteRef(repoDir, ref string) error {
 	return git(repoDir, "update-ref", durableNotesRef(ref), head)
 }
 
+func decodeAttempts(body string) (int, error) {
+	if strings.TrimSpace(body) == "" {
+		return 0, fmt.Errorf("%w: empty attempt record", errAttemptsInvalid)
+	}
+	var note attemptsNote
+	if err := json.Unmarshal([]byte(body), &note); err != nil {
+		return 0, fmt.Errorf("%w: decode attempt record: %v", errAttemptsInvalid, err)
+	}
+	if note.Count < 1 {
+		return 0, fmt.Errorf("%w: invalid attempt count", errAttemptsInvalid)
+	}
+	return note.Count, nil
+}
+
 func readAttempts(repoDir, key string) (int, error) {
-	_, body, err := getBlobRef(repoDir, "refs/forest/attempt/"+key)
+	sha, body, err := getBlobRef(repoDir, "refs/forest/attempt/"+key)
 	if err != nil {
 		return 0, fmt.Errorf("%w: read attempt record: %v", errFlowRetryable, err)
 	}
-	if strings.TrimSpace(body) == "" {
+	if sha == "" {
 		return 0, nil
 	}
-	var a attemptsNote
-	if err := json.Unmarshal([]byte(body), &a); err != nil {
-		return 0, fmt.Errorf("%w: decode attempt record: %v", errAttemptsInvalid, err)
-	}
-	return a.Count, nil
+	return decodeAttempts(body)
 }
 
 func bumpAttempts(repoDir, key string) (int, error) {
@@ -327,12 +337,11 @@ func bumpAttempts(repoDir, key string) (int, error) {
 			return 0, fmt.Errorf("%w: read attempt record: %v", errFlowRetryable, err)
 		}
 		count := 0
-		if strings.TrimSpace(body) != "" {
-			var a attemptsNote
-			if err := json.Unmarshal([]byte(body), &a); err != nil {
-				return 0, fmt.Errorf("%w: decode attempt record: %v", errAttemptsInvalid, err)
+		if sha != "" {
+			count, err = decodeAttempts(body)
+			if err != nil {
+				return 0, err
 			}
-			count = a.Count
 		}
 		count++
 		payload, err := json.Marshal(attemptsNote{Count: count})

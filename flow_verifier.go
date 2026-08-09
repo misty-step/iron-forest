@@ -191,7 +191,11 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			}
 			return nil, fmt.Errorf("checks %s: %w", branch, err)
 		}
-		if !found || checks.Status != "pass" {
+		if !found {
+			fresh = append(fresh, s)
+			continue
+		}
+		if checks.Status != "pass" {
 			continue
 		}
 		// An approved, green branch is a subject when it can land. With Host
@@ -340,8 +344,15 @@ func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (
 						out.Status = "merge_failed"
 						return out, stallErr
 					}
-					if !agentStalled {
+					branchStalled, stallErr := stalledOn(repoDir, f.Name(),
+						"branch-"+record.Branch, record.Revision)
+					if stallErr != nil {
+						out.Status = "merge_failed"
+						return out, stallErr
+					}
+					if !agentStalled && !branchStalled {
 						branchSubject := s
+						branchSubject.Key = retirementAgentSubjectKey(record.Branch)
 						branchSubject.Kind = subjectBranch
 						branchSubject.Revision = head
 						return f.actBranch(cfg, repoDir, branchSubject, runID)
@@ -378,21 +389,43 @@ func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (
 }
 
 func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
+	out := Outcome{Branch: s.Branch, BaseSHA: s.Revision}
+	stalled, err := stalledOn(repoDir, "verifier", s.Key, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, err
+	}
+	if stalled {
+		out.Status = "skipped"
+		return out, nil
+	}
 	it, err := validatedTrackerItem(trackerFor(cfg.Repo), s.ID)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Revision, Status: "item_failed"}, fmt.Errorf("item: %w", err)
+		out.Status = "item_failed"
+		return out, fmt.Errorf("item: %w", err)
+	}
+	if cfg.Projection.MergeViaHost {
+		if _, err := recordPreparingHostRetirement(cfg, repoDir, s.Branch, s.Revision, it); err != nil {
+			out.Status = "projection_failed"
+			return out, fmt.Errorf("projection preparation: %w", retryableHostError(cfg, err))
+		}
 	}
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
 	if err != nil {
 		if cfg.Projection.MergeViaHost && s.Revision != "" {
 			merged, pr, inspectErr := inspectProjectMerge(cfg, s.Branch, cfg.Flows.Verifier.Merge, s.Revision)
-			if inspectErr == nil && merged && pr.HeadRefOID == s.Revision {
-				out := Outcome{Branch: s.Branch, BaseSHA: s.Revision, PRURL: pr.URL}
+			if inspectErr != nil {
+				out.Status = "projection_failed"
+				return out, fmt.Errorf("projection: %w", retirementProjectionError(cfg, inspectErr))
+			}
+			if merged && pr.HeadRefOID == s.Revision {
+				out.PRURL = pr.URL
 				return recoverHostMergedProjection(cfg, repoDir, s.Branch, s.Revision, it, out)
 			}
 		}
-		return Outcome{Branch: s.Branch, BaseSHA: s.Revision, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
+		out.Status = "worktree_failed"
+		return out, fmt.Errorf("worktree: %w", err)
 	}
 	defer cleanupWorktree(repoDir, wtDir)
 	if err := checkSubjectRevision(s, baseSHA); err != nil {
@@ -400,15 +433,10 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 	}
 	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Revision, Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
+		out.Status = "agent_failed"
+		return out, fmt.Errorf("agent: %w", err)
 	}
-	out := Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
-	if cfg.Projection.MergeViaHost {
-		if _, err := recordPreparingHostRetirement(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
-			out.Status = "projection_failed"
-			return out, fmt.Errorf("projection preparation: %w", retryableHostError(cfg, err))
-		}
-	}
+	out = Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
 	url, hostMerged, err := projectBranch(cfg, repoDir, it, s.Branch,
 		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), baseSHA)
 	if err != nil {

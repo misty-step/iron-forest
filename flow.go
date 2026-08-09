@@ -418,7 +418,8 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
 			case errors.Is(err, errRetirementEvidenceInvalid) ||
 				errors.Is(err, errAttemptsInvalid) ||
-				errors.Is(err, errControlEvidenceInvalid):
+				errors.Is(err, errControlEvidenceInvalid) ||
+				errors.Is(err, errTrackerEvidenceInvalid):
 				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
 			case errors.Is(err, errRetirementRecoveryHard):
 				brakeErr = recordTerminalStall(repoDir, f.Name(),
@@ -426,6 +427,10 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 			case errors.Is(err, errHostMergeUnavailable) &&
 				!errors.Is(err, errHostRevisionMoved):
 				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			case errors.Is(err, errHostRevisionMoved):
+				// Revision movement is a stale observation, not a failed Effect.
+			case errors.Is(err, errTrackerUnavailable):
+				// Tracker transport failure is retryable and must not consume the brake.
 			case s.Kind == subjectRetirement:
 				switch {
 				case errors.Is(err, errHostMergePending),

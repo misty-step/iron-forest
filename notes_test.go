@@ -348,6 +348,34 @@ func TestNotesAttemptsStartAtZeroAndIncrement(t *testing.T) {
 		t.Fatalf("stored attempts = (%d, %v), want (2, nil)", got, err)
 	}
 }
+func TestControlCountersRejectMalformedExistingEvidence(t *testing.T) {
+	_, work, _ := notesTestRepository(t)
+	for i, body := range []string{"", `{}`, `{"count":-1}`, `{"count":"one"}`} {
+		key := fmt.Sprintf("branch-forest/%d-malformed", i)
+		if err := putBlobRef(work, "refs/forest/attempt/"+key, body, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readAttempts(work, key); !errors.Is(err, errAttemptsInvalid) {
+			t.Fatalf("attempt body %q read error = %v, want invalid evidence", body, err)
+		}
+		if _, err := bumpAttempts(work, key); !errors.Is(err, errAttemptsInvalid) {
+			t.Fatalf("attempt body %q bump error = %v, want invalid evidence", body, err)
+		}
+	}
+
+	for i, body := range []string{"", `{}`, `{"revision":"","count":1}`, `{"revision":"r","count":0}`} {
+		subject := fmt.Sprintf("branch-forest/%d-stalled", i)
+		if err := putBlobRef(work, stalledRef("verifier", subject), body, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stalledOn(work, "verifier", subject, "r"); !errors.Is(err, errControlEvidenceInvalid) {
+			t.Fatalf("stalled body %q read error = %v, want invalid evidence", body, err)
+		}
+		if err := recordStalled(work, "verifier", subject, "r"); !errors.Is(err, errControlEvidenceInvalid) {
+			t.Fatalf("stalled body %q write error = %v, want invalid evidence", body, err)
+		}
+	}
+}
 
 func TestNotesAttemptsCASRetriesAreBounded(t *testing.T) {
 	remote, work, _ := notesTestRepository(t)

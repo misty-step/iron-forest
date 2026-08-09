@@ -64,6 +64,32 @@ func TestFixerActSkipsWhenSelectedEvidenceDisappears(t *testing.T) {
 		t.Fatalf("Fixer Act after evidence removal = (%#v, %v), want skipped", out, err)
 	}
 }
+func TestFixerActRechecksBrakeAfterSelection(t *testing.T) {
+	repo, _, head := fixerBranch(t)
+	if err := writeChecks(repo, head, checksNote{Status: "fail"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	selected, err := (fixerFlow{}).Select(cfg, repo)
+	if err != nil || len(selected) != 1 {
+		t.Fatalf("Fixer Select = (%#v, %v), want one qualified Subject", selected, err)
+	}
+	for range stalledRunLimit {
+		if err := recordStalled(repo, "fixer", selected[0].Key, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker {
+		t.Fatal("Fixer read the Tracker after a concurrent brake")
+		return nil
+	}
+	defer func() { trackerFor = oldTracker }()
+	out, err := (fixerFlow{}).Act(cfg, repo, selected[0], "run-braked")
+	if err != nil || out.Status != "skipped" {
+		t.Fatalf("Fixer Act after brake = (%#v, %v), want skipped", out, err)
+	}
+}
 
 func TestFixerSelectCarriesMalformedEvidenceToRevisionFailure(t *testing.T) {
 	cases := []struct {

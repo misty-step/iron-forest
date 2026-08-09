@@ -243,6 +243,11 @@ func loadConfig(path string) (Config, error) {
 				return cfg, fmt.Errorf("%s: enabled Manager requires %s to remain eligible for Builder", path, readyTag)
 			}
 		}
+		for _, label := range cfg.Flows.Manager.ExcludeLabels {
+			if label == readyTag {
+				return cfg, fmt.Errorf("%s: enabled Manager cannot exclude its assignment label %s", path, readyTag)
+			}
+		}
 	}
 	for i, c := range cfg.Checks {
 		if strings.TrimSpace(c.Name) == "" || strings.TrimSpace(c.Run) == "" {

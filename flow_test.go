@@ -256,6 +256,24 @@ func TestRetryableNoteTransportNeverBrakesRevision(t *testing.T) {
 		t.Fatalf("retryable notes brake = (%v, %v), want selectable Revision", stalled, err)
 	}
 }
+func TestTrackerTransportNeverBrakesRevision(t *testing.T) {
+	_, repo, _ := notesTestRepository(t)
+	revision := strings.Repeat("c", 40)
+	subject := Subject{
+		Key: "item-21", Kind: subjectItem, Revision: revision, ID: "21",
+	}
+	flow := classifiedFailureFlow{
+		name: "builder", status: "item_failed", err: errTrackerUnavailable,
+	}
+	for range stalledRunLimit + 1 {
+		if code := actOnSubject(flow, Config{}, repo, subject, nil); code != 1 {
+			t.Fatalf("retryable Tracker code = %d, want failure", code)
+		}
+	}
+	if stalled, err := stalledOn(repo, flow.Name(), subject.Key, revision); err != nil || stalled {
+		t.Fatalf("retryable Tracker brake = (%v, %v), want selectable Revision", stalled, err)
+	}
+}
 
 func TestPreparingRetirementReviewFailureReachesBrake(t *testing.T) {
 	_, repo, _ := notesTestRepository(t)

@@ -238,10 +238,12 @@ func TestManagerNeverPromotesOpenBlocker(t *testing.T) {
 func TestManagerBlockerPreservesOpaqueIdentity(t *testing.T) {
 	open := map[string]Item{
 		"tracker/item.7": {},
+		"tracker,item":   {},
 		"hab /?*[~^:":    {},
 	}
 	for _, body := range []string{
 		"Blocked by: #tracker/item.7",
+		"Blocked by: tracker,item",
 		"Blocked by: hab /?*[~^:",
 	} {
 		if !hasOpenBlocker(Item{Body: body}, open) {

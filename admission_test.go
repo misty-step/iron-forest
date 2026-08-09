@@ -168,6 +168,15 @@ func TestLoadConfigRejectsManagerLabelDrift(t *testing.T) {
 	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "remain eligible") {
 		t.Fatalf("loadConfig Builder exclusion of Manager output = %v, want refusal", err)
 	}
+	body = "repo: owner/repo\nchecks:\n  - name: test\n    run: \"true\"\n" +
+		"flows:\n  builder:\n    require_labels: [forest:ready]\n" +
+		"  manager:\n    enabled: true\n    exclude_labels: [forest:ready]\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "cannot exclude") {
+		t.Fatalf("loadConfig Manager exclusion of assignment label = %v, want refusal", err)
+	}
 }
 
 func TestLoadConfigRejectsTrailingDocumentAndBlankCheck(t *testing.T) {

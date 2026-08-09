@@ -343,7 +343,7 @@ func buildManagerPlan(cfg ManagerFlowCfg, repoDir string, items []Item, branches
 			// Already assigned; accounted above, never offered as a candidate.
 			continue
 		}
-		if hasExcludedLabel(it, cfg.ExcludeLabels) {
+		if it.hasTag(failedLabel) || hasExcludedLabel(it, cfg.ExcludeLabels) {
 			continue
 		}
 		stalled, err := stalledOn(repoDir, "builder", "item-"+it.ID, it.UpdatedAt)
@@ -507,8 +507,8 @@ func readManagerReportFile(wtDir string) (managerReport, error) {
 	return rep, nil
 }
 
-// hasOpenBlocker reports whether a comma-separated Blocked by reference names
-// an open Item. References preserve opaque identity bytes after an optional #.
+// hasOpenBlocker reports whether a Blocked by reference names an open Item.
+// A complete opaque identity wins before the optional comma-list grammar.
 func hasOpenBlocker(it Item, open map[string]Item) bool {
 	for _, line := range strings.Split(it.Body, "\n") {
 		line = strings.TrimSpace(line)
@@ -517,6 +517,10 @@ func hasOpenBlocker(it Item, open map[string]Item) bool {
 		}
 		line = strings.TrimSpace(line[len("blocked by"):])
 		line = strings.TrimSpace(strings.TrimPrefix(line, ":"))
+		whole := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+		if _, ok := open[whole]; ok {
+			return true
+		}
 		for _, ref := range strings.Split(line, ",") {
 			ref = strings.TrimSpace(ref)
 			if _, ok := open[ref]; ok {

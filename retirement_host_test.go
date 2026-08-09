@@ -1308,6 +1308,40 @@ func TestPendingHostRetirementRetriesVisibleOpenMerge(t *testing.T) {
 	}
 }
 
+func TestPreparingHostRetirementWithoutBranchOrViewHardBrakes(t *testing.T) {
+	branch := "forest/20-lost-preparation"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	item := Item{ID: "20", Title: "lost preparation"}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	fact, err := recordPreparingHostRetirement(cfg, repo, branch, reviewed, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "checkout", "-q", "master")
+	runGitTest(t, repo, "branch", "-D", branch)
+	if err := deleteRef(repo, "refs/heads/"+branch, reviewed); err != nil {
+		t.Fatal(err)
+	}
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "api":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			return []byte(`[]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	if _, err := recoverRetirement(cfg, repo, fact, item); !errors.Is(err, errRetirementRecoveryHard) {
+		t.Fatalf("lost preparing retirement = %v, want hard recovery brake", err)
+	}
+}
+
 func TestPendingHostRetirementNoViewAfterAcceptedMergeRetainsIntent(t *testing.T) {
 	branch := "forest/20-no-view"
 	repo, _, reviewed, _ := newVerifierBranch(t, branch)

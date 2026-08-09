@@ -227,16 +227,13 @@ func (c *coreImpl) Items() ([]core.Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	return toCoreItems(subjectsToItems(subjects)), nil
-}
-
-func subjectsToItems(subjects []Subject) []Item {
 	items := make([]Item, 0, len(subjects))
 	for _, s := range subjects {
 		items = append(items, s.Item)
 	}
-	return items
+	return toCoreItems(items), nil
 }
+
 
 // EligibleItems returns the tracker backlog without the builder's stalled-item
 // filtering: every open item that is not already covered by a forest branch and
@@ -301,12 +298,13 @@ func (c *coreImpl) Daemon() (core.Daemon, error) {
 // probeDaemon reports whether the factory service is active, preferring
 // systemd --user and falling back to the workspace daemon lock.
 func probeDaemon(repoDir string) core.Daemon {
-	d := core.Daemon{Unit: "forest.service"}
-	out, err := runOutput(exec.Command("systemctl", "--user", "is-active", "forest"))
+	unit := "forest@" + filepath.Base(repoDir) + ".service"
+	d := core.Daemon{Unit: unit}
+	out, err := runOutput(exec.Command("systemctl", "--user", "is-active", unit))
 	active := err == nil && strings.TrimSpace(string(out)) == "active"
 	d.Active = active
 	if active {
-		if pid, err := runOutput(exec.Command("systemctl", "--user", "show", "forest", "-p", "MainPID", "--value")); err == nil {
+		if pid, err := runOutput(exec.Command("systemctl", "--user", "show", unit, "-p", "MainPID", "--value")); err == nil {
 			d.PID = strings.TrimSpace(string(pid))
 		}
 		d.Note = "systemd --user"

@@ -118,7 +118,7 @@ func projectionCommentExists(cfg Config, number int, revision, body string) (boo
 	if err != nil {
 		return false, err
 	}
-	var pages [][]projectionReview
+	var pages [][]*projectionReview
 	if err := json.Unmarshal(out, &pages); err != nil {
 		return false, fmt.Errorf("%w: decode Projection review response: %v", errHostMergeUnavailable, err)
 	}
@@ -132,6 +132,10 @@ func projectionCommentExists(cfg Config, number int, revision, body string) (boo
 				errHostMergeUnavailable)
 		}
 		for _, review := range page {
+			if review == nil || !validProjectionHeadRefOID(review.CommitID) {
+				return false, fmt.Errorf("%w: decode Projection review response: invalid review identity",
+					errHostMergeUnavailable)
+			}
 			if review.CommitID == revision && review.Body == body {
 				return true, nil
 			}

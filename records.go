@@ -165,21 +165,35 @@ func validRefSuffix(value string) bool {
 	return true
 }
 
+func decodeStalled(body string) (stalledRecord, error) {
+	if strings.TrimSpace(body) == "" {
+		return stalledRecord{}, fmt.Errorf("%w: empty stalled record", errControlEvidenceInvalid)
+	}
+	var record stalledRecord
+	if err := json.Unmarshal([]byte(body), &record); err != nil {
+		return stalledRecord{}, fmt.Errorf("%w: decode stalled record: %v", errControlEvidenceInvalid, err)
+	}
+	if record.Revision == "" || record.Count < 1 {
+		return stalledRecord{}, fmt.Errorf("%w: invalid stalled record", errControlEvidenceInvalid)
+	}
+	return record, nil
+}
+
 // stalledOn reports whether a flow reached the failure limit on this revision.
 func stalledOn(repoDir, flow, subject, revision string) (bool, error) {
 	if revision == "" {
 		return false, nil
 	}
-	_, body, err := getBlobRef(repoDir, stalledRef(flow, subject))
+	sha, body, err := getBlobRef(repoDir, stalledRef(flow, subject))
 	if err != nil {
 		return false, fmt.Errorf("%w: read stalled record: %v", errFlowRetryable, err)
 	}
-	if strings.TrimSpace(body) == "" {
+	if sha == "" {
 		return false, nil
 	}
-	var record stalledRecord
-	if err := json.Unmarshal([]byte(body), &record); err != nil {
-		return false, fmt.Errorf("%w: decode stalled record: %v", errControlEvidenceInvalid, err)
+	record, err := decodeStalled(body)
+	if err != nil {
+		return false, err
 	}
 	return record.Revision == revision && record.Count >= stalledRunLimit, nil
 }
@@ -210,10 +224,10 @@ func writeStalled(repoDir, flow, subject, revision string, terminal bool) error 
 		if terminal {
 			record.Count = stalledRunLimit
 		}
-		if strings.TrimSpace(body) != "" {
-			var previous stalledRecord
-			if err := json.Unmarshal([]byte(body), &previous); err != nil {
-				return fmt.Errorf("decode stalled record: %w", err)
+		if sha != "" {
+			previous, err := decodeStalled(body)
+			if err != nil {
+				return err
 			}
 			if previous.Revision == revision {
 				if terminal {

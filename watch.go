@@ -235,7 +235,7 @@ func renderWatch(w *os.File, s watchSnapshot) {
 	}
 
 	fmt.Fprintln(w, strings.Repeat("─", 78))
-	fmt.Fprintln(w, "sources: .forest/runs.jsonl  git worktree list --porcelain  git HEAD  .forest/daemon.lock  systemd --user forest.service")
+	fmt.Fprintln(w, "sources: .forest/runs.jsonl  git worktree list --porcelain  git HEAD  .forest/daemon.lock  systemd --user forest@<checkout>.service")
 }
 
 func orDash(s string) string {

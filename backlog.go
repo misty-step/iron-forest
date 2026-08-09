@@ -32,13 +32,16 @@ type githubTracker struct {
 // ListOpen returns every open item on the host.
 func (t githubTracker) ListOpen() ([]Item, error) {
 	out, err := ghJSON("issue", "list", "-R", t.repo, "--state", "open",
-		"--json", "number,title,body,updatedAt,comments,labels", "--limit", "200")
+		"--json", "number,title,body,updatedAt,comments,labels", "--limit", strconv.Itoa(int(^uint(0)>>1)))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: list open items: %v", errTrackerUnavailable, err)
 	}
 	var raw []issueJSON
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: decode Tracker items: %v", errTrackerEvidenceInvalid, err)
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("%w: decode Tracker items: response is null", errTrackerEvidenceInvalid)
 	}
 	items := make([]Item, 0, len(raw))
 	for _, it := range raw {
@@ -49,22 +52,24 @@ func (t githubTracker) ListOpen() ([]Item, error) {
 
 // Get reads one item by its opaque id.
 func (t githubTracker) Get(id string) (Item, error) {
-	out, err := ghJSON("issue", "view", id, "-R", t.repo,
+	out, err := ghJSON("issue", "view", "-R", t.repo, id,
 		"--json", "number,title,body,updatedAt,comments,labels")
 	if err != nil {
-		return Item{}, err
+		return Item{}, fmt.Errorf("%w: get item: %v", errTrackerUnavailable, err)
 	}
 	var raw issueJSON
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return Item{}, err
+		return Item{}, fmt.Errorf("%w: decode Tracker item: %v", errTrackerEvidenceInvalid, err)
 	}
 	return raw.asItem(), nil
 }
 
-// Comment appends a comment to an item's discussion.
 func (t githubTracker) Comment(id, body string) error {
 	_, err := ghJSON("issue", "comment", "-R", t.repo, id, "--body", body)
-	return err
+	if err != nil {
+		return fmt.Errorf("%w: comment on item: %v", errTrackerUnavailable, err)
+	}
+	return nil
 }
 
 // Close idempotently closes one item. If the close command fails after the Host
@@ -76,15 +81,18 @@ func (t githubTracker) Close(id string) error {
 	}
 	out, viewErr := ghJSON("issue", "view", id, "-R", t.repo, "--json", "state")
 	if viewErr != nil {
-		return closeErr
+		return fmt.Errorf("%w: close item: %v; reconcile: %v", errTrackerUnavailable, closeErr, viewErr)
 	}
 	var state struct {
 		State string `json:"state"`
 	}
-	if json.Unmarshal(out, &state) == nil && strings.EqualFold(state.State, "closed") {
+	if err := json.Unmarshal(out, &state); err != nil {
+		return fmt.Errorf("%w: decode closed Item state: %v", errTrackerEvidenceInvalid, err)
+	}
+	if strings.EqualFold(state.State, "closed") {
 		return nil
 	}
-	return closeErr
+	return fmt.Errorf("%w: close item: %v", errTrackerUnavailable, closeErr)
 }
 
 // SetTags adds and removes labels on one item in one call.
@@ -96,11 +104,11 @@ func (t githubTracker) SetTags(id string, add, remove []string) error {
 	for _, label := range remove {
 		args = append(args, "--remove-label", label)
 	}
-	if len(args) == 5 {
-		return nil
-	}
 	_, err := ghJSON(args...)
-	return err
+	if err != nil {
+		return fmt.Errorf("%w: set Item tags: %v", errTrackerUnavailable, err)
+	}
+	return nil
 }
 
 // issueJSON is the raw GitHub CLI issue shape. It only exists to feed the
@@ -139,10 +147,14 @@ func (i issueJSON) asItem() Item {
 var trackerFor = func(repo string) Tracker { return githubTracker{repo: repo} }
 
 var (
-	errTrackerItemIDEmpty        = errors.New("Tracker Item ID is empty")
-	errTrackerItemIDCredential   = errors.New("Tracker Item ID is credential-shaped")
-	errTrackerItemIDMismatch     = errors.New("Tracker Item ID does not match requested identity")
-	errTrackerRevisionCredential = errors.New("Tracker Item Revision is credential-shaped")
+	errTrackerUnavailable           = errors.New("Tracker is unavailable")
+	errTrackerEvidenceInvalid       = errors.New("Tracker evidence is invalid")
+	errTrackerItemIDEmpty           = errors.New("Tracker Item ID is empty")
+	errTrackerItemIDCredential      = errors.New("Tracker Item ID is credential-shaped")
+	errTrackerItemIDMismatch        = errors.New("Tracker Item ID does not match requested identity")
+	errTrackerRevisionEmpty         = errors.New("Tracker Item Revision is empty")
+	errTrackerRevisionCredential    = errors.New("Tracker Item Revision is credential-shaped")
+	errTrackerItemIdentityDuplicate = errors.New("Tracker Item identity is duplicated")
 )
 
 func validateTrackerItemID(id string) error {
@@ -162,6 +174,9 @@ func validateTrackerItem(item Item, expectedID string) error {
 	if expectedID != "" && item.ID != expectedID {
 		return errTrackerItemIDMismatch
 	}
+	if strings.TrimSpace(item.UpdatedAt) == "" {
+		return errTrackerRevisionEmpty
+	}
 	if secretShaped(item.UpdatedAt) {
 		return errTrackerRevisionCredential
 	}
@@ -173,10 +188,15 @@ func validatedTrackerItems(t Tracker) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		if err := validateTrackerItem(item, ""); err != nil {
 			return nil, err
 		}
+		if _, exists := seen[item.ID]; exists {
+			return nil, errTrackerItemIdentityDuplicate
+		}
+		seen[item.ID] = struct{}{}
 	}
 	return items, nil
 }
@@ -241,7 +261,7 @@ func eligibleFrom(items []Item, branches, retiring, excluded, required []string)
 		if len(required) > 0 && !hasTags(item, required) {
 			continue
 		}
-		if hasExcludedLabel(item, excluded) {
+		if item.hasTag(failedLabel) || hasExcludedLabel(item, excluded) {
 			continue
 		}
 		ready = append(ready, item)
@@ -272,14 +292,22 @@ func forestBranches(repoDir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
 	var branches []string
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 || !strings.HasPrefix(fields[1], "refs/heads/") {
-			continue
+		if len(fields) != 2 || !validHex(fields[0], 20) ||
+			!strings.HasPrefix(fields[1], "refs/heads/"+BranchPrefix) {
+			return nil, errors.New("forest branch listing has invalid remote evidence")
 		}
 		branch := strings.TrimPrefix(fields[1], "refs/heads/")
-		if secretShaped(branch) || validateTrackerItemID(itemIDFromBranch(branch)) != nil {
+		name := strings.TrimPrefix(branch, BranchPrefix)
+		delimiter := strings.IndexByte(name, '-')
+		id := itemIDFromBranch(branch)
+		if delimiter < 1 || encodeBranchID(id) != name[:delimiter] ||
+			secretShaped(branch) || validateTrackerItemID(id) != nil {
 			return nil, errors.New("forest branch has invalid Tracker Item identity")
 		}
 		branches = append(branches, branch)
@@ -299,6 +327,9 @@ func lookupBranchHead(repoDir, branch string) (string, bool, error) {
 	fields := strings.Fields(out)
 	if len(fields) == 0 {
 		return "", false, nil
+	}
+	if len(fields) != 2 || !validHex(fields[0], 20) || fields[1] != ref {
+		return "", false, errors.New("branch lookup has invalid remote evidence")
 	}
 	return fields[0], true, nil
 }

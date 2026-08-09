@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,4 +154,84 @@ func remoteBranchHead(t *testing.T, repo, branch string) string {
 		t.Fatalf("origin branch %q not found", branch)
 	}
 	return fields[0]
+}
+
+// memoryTracker is an in-memory tracker used by tests. Open items live in the
+// map; closing one removes it, exactly as a host would stop returning it.
+type memoryTracker struct {
+	items map[string]Item
+}
+
+// newMemoryTracker returns an empty in-memory tracker.
+func newMemoryTracker() *memoryTracker {
+	return &memoryTracker{items: make(map[string]Item)}
+}
+
+// seed inserts or replaces one contract-valid item by id. Tests that exercise
+// revision validation use a raw Tracker stub instead of this behavioral fake.
+func (m *memoryTracker) seed(it Item) {
+	if it.UpdatedAt == "" {
+		it.UpdatedAt = "test-revision"
+	}
+	m.items[it.ID] = it
+}
+
+// ListOpen implements Tracker.
+func (m *memoryTracker) ListOpen() ([]Item, error) {
+	items := make([]Item, 0, len(m.items))
+	for _, it := range m.items {
+		items = append(items, it)
+	}
+	return items, nil
+}
+
+// Get implements Tracker.
+func (m *memoryTracker) Get(id string) (Item, error) {
+	it, ok := m.items[id]
+	if !ok {
+		return Item{}, fmt.Errorf("item %q not found", id)
+	}
+	return it, nil
+}
+
+// Comment implements Tracker.
+func (m *memoryTracker) Comment(id, body string) error {
+	it, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	it.Comments = append(it.Comments, comment{Body: body})
+	m.items[id] = it
+	return nil
+}
+
+// Close implements Tracker. Closing an absent item is idempotent because a
+// recovery can retry cleanup after an earlier Host close succeeded.
+func (m *memoryTracker) Close(id string) error {
+	delete(m.items, id)
+	return nil
+}
+
+// SetTags implements Tracker.
+func (m *memoryTracker) SetTags(id string, add, remove []string) error {
+	it, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	tags := make(map[string]bool, len(it.Tags)+len(add))
+	for _, t := range it.Tags {
+		tags[t] = true
+	}
+	for _, t := range remove {
+		delete(tags, t)
+	}
+	for _, t := range add {
+		tags[t] = true
+	}
+	it.Tags = it.Tags[:0]
+	for t := range tags {
+		it.Tags = append(it.Tags, t)
+	}
+	m.items[id] = it
+	return nil
 }

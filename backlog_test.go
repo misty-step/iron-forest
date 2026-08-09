@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -75,11 +76,46 @@ func TestGitHubTrackerCloseAcceptsAlreadyClosedItem(t *testing.T) {
 		t.Fatalf("close recovery calls = %v, want close then exact state read", calls)
 	}
 }
+func TestGitHubTrackerListRejectsNullAndRequestsAllItems(t *testing.T) {
+	old := ghJSON
+	defer func() { ghJSON = old }()
+	var got []string
+	ghJSON = func(args ...string) ([]byte, error) {
+		got = append([]string(nil), args...)
+		return []byte("null"), nil
+	}
+	_, err := (githubTracker{repo: "owner/repo"}).ListOpen()
+	if err == nil || !strings.Contains(err.Error(), "null") {
+		t.Fatalf("null Tracker list = %v, want refusal", err)
+	}
+	if !hasArgumentPair(got, "--limit", strconv.Itoa(int(^uint(0)>>1))) {
+		t.Fatalf("Tracker list args = %v, want all-item limit", got)
+	}
+}
+func TestGitHubTrackerClassifiesTransportAndMalformedEvidence(t *testing.T) {
+	old := ghJSON
+	defer func() { ghJSON = old }()
+	ghJSON = func(...string) ([]byte, error) {
+		return nil, errors.New("temporary network failure")
+	}
+	if _, err := (githubTracker{repo: "owner/repo"}).ListOpen(); !errors.Is(err, errTrackerUnavailable) {
+		t.Fatalf("transport error = %v, want retryable Tracker classification", err)
+	}
+	ghJSON = func(...string) ([]byte, error) {
+		return []byte(`{"not":"an array"}`), nil
+	}
+	if _, err := (githubTracker{repo: "owner/repo"}).ListOpen(); !errors.Is(err, errTrackerEvidenceInvalid) {
+		t.Fatalf("malformed response = %v, want invalid Tracker evidence", err)
+	}
+}
 
 func TestEligibleItemsExcludesLabelsAndCoveredBranches(t *testing.T) {
-	labelled := Item{ID: "2"}
-	labelled.Tags = append(labelled.Tags, "parked")
-	items := []Item{{ID: "1", Title: "ready"}, labelled, {ID: "3", Title: "covered"}, {ID: "4", Title: "retiring"}}
+	labelled := Item{ID: "2", Tags: []string{"parked"}}
+	failed := Item{ID: "5", Tags: []string{failedLabel}}
+	items := []Item{
+		{ID: "1", Title: "ready"}, labelled, failed,
+		{ID: "3", Title: "covered"}, {ID: "4", Title: "retiring"},
+	}
 	got := eligibleFrom(items, []string{"forest/3-covered"}, []string{"4"}, []string{"parked"}, nil)
 	if len(got) != 1 || got[0].ID != "1" {
 		t.Fatalf("eligible items = %+v, want only item 1", got)
@@ -185,6 +221,13 @@ func TestBuilderSelectCarriesOpaqueID(t *testing.T) {
 		t.Fatalf("builder selected stalled Subject = (%#v, %v), want none", subjects, err)
 	}
 }
+func TestForestBranchesRejectsNonCanonicalOpaqueIdentity(t *testing.T) {
+	remote, work, revision := notesTestRepository(t)
+	runGitTest(t, remote, "update-ref", "refs/heads/forest/a%2db-change", revision)
+	if branches, err := forestBranches(work); err == nil {
+		t.Fatalf("non-canonical branches = %v, want refusal", branches)
+	}
+}
 
 func TestBuilderSelectRejectsInvalidIdentity(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
@@ -196,6 +239,7 @@ func TestBuilderSelectRejectsInvalidIdentity(t *testing.T) {
 		{name: "empty id", item: Item{UpdatedAt: "revision"}, want: "empty"},
 		{name: "credential-shaped id", item: Item{ID: secret, UpdatedAt: "revision"}, want: "credential-shaped"},
 		{name: "credential-shaped revision", item: Item{ID: "9", UpdatedAt: secret}, want: "credential-shaped"},
+		{name: "empty revision", item: Item{ID: "9"}, want: "empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			old := trackerFor
@@ -212,6 +256,15 @@ func TestBuilderSelectRejectsInvalidIdentity(t *testing.T) {
 		})
 	}
 }
+func TestValidatedTrackerItemsRejectsDuplicateIdentity(t *testing.T) {
+	_, err := validatedTrackerItems(trackerStub{items: []Item{
+		{ID: "9", UpdatedAt: "r1"},
+		{ID: "9", UpdatedAt: "r2"},
+	}})
+	if !errors.Is(err, errTrackerItemIdentityDuplicate) {
+		t.Fatalf("duplicate Tracker identity = %v, want refusal", err)
+	}
+}
 
 func TestTrackerGetMismatchStopsBeforeSinks(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
@@ -223,12 +276,16 @@ func TestTrackerGetMismatchStopsBeforeSinks(t *testing.T) {
 		t.Fatalf("credential-shaped Tracker Get reached %d source reads", tk.gets)
 	}
 
+	_, repo, revision := notesTestRepository(t)
+	if err := writeChecks(repo, revision, checksNote{Status: "fail"}); err != nil {
+		t.Fatal(err)
+	}
 	old := trackerFor
 	trackerFor = func(string) Tracker { return tk }
 	defer func() { trackerFor = old }()
 
-	out, err := (fixerFlow{}).Act(defaultConfig(), t.TempDir(), Subject{
-		ID: "9", Branch: "forest/9", Revision: "revision",
+	out, err := (fixerFlow{}).Act(defaultConfig(), repo, Subject{
+		Key: "branch-forest/9", ID: "9", Branch: "forest/9", Revision: revision,
 	}, "mismatch")
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("mismatched Tracker Item was accepted: %#v, %v", out, err)
