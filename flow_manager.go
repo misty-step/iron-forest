@@ -18,17 +18,17 @@ import (
 // operator Label; item and branch payloads stay empty.
 const managerSubject = "manager"
 
-// managerFlow is the lane that keeps exactly one unstarted assignment in the
-// ready queue. It reads the open items, filters a candidate set deterministically
-// (unblocked, unbranched, unstalled), asks one agent pass to pick one of them,
-// and lays readyTag on that pick. It writes no code, branch, comment, or merge;
-// the Builder loop is unchanged and simply selects the tag the Manager laid.
+// managerFlow keeps up to the configured ready depth of unstarted assignments.
+// It reads the open items, filters a candidate set deterministically (unblocked,
+// unbranched, unstalled), asks one agent pass to pick one of them, and lays
+// readyTag on that pick. It writes no code, branch, comment, or merge. The
+// Builder loop is unchanged and selects the tag the Manager laid.
 //
 // The Manager never dispatches the Builder. Its only fact about the Builder is
-// the repository: an item that carries readyTag but has no remote forest branch
-// occupies the slot for the whole of an in-progress build, because commitAndPush
-// runs only after the agent and the gate. Depth one therefore means one Manager
-// decision per Builder run, bounding Manager spend against Builder spend.
+// the repository. An item that carries readyTag but has no remote forest branch
+// occupies one slot throughout an in-progress build because commitAndPush runs
+// only after the agent and Gate. ReadyDepth bounds Manager decisions against
+// Builder work, while each Manager pass promotes at most one candidate.
 type managerFlow struct{}
 
 func (managerFlow) Name() string { return "manager" }

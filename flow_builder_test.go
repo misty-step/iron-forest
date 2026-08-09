@@ -106,3 +106,34 @@ func TestBuilderCommitUsesDeclaredIdentity(t *testing.T) {
 		t.Fatalf("builder commit author = %q, want declared identity", author)
 	}
 }
+
+func TestBuilderActRevalidatesEligibilityAfterSelect(t *testing.T) {
+	repo := setupTestRepo(t)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "9", Title: "stale assignment", UpdatedAt: "u1", Tags: []string{readyTag}})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Flows.Builder.RequireLabels = []string{readyTag}
+	cfg.Flows.Builder.ExcludeLabels = []string{"parked"}
+	subjects, err := (builderFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 {
+		t.Fatalf("initial Builder Select = (%#v, %v), want one Subject", subjects, err)
+	}
+	if err := tk.SetTags("9", []string{"parked"}, []string{readyTag}); err != nil {
+		t.Fatal(err)
+	}
+	if code := actOnSubject(builderFlow{}, cfg, repo, subjects[0], nil); code != 0 {
+		t.Fatalf("stale Builder Subject exit = %d, want success without agent spend", code)
+	}
+	runs, invalid, err := loadLedger(ledgerPath(repo))
+	if err != nil || invalid != 0 || len(runs) != 1 || runs[0].Status != "stale" {
+		t.Fatalf("stale Builder Ledger = (runs=%#v, invalid=%d, err=%v), want stale", runs, invalid, err)
+	}
+	if out := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/forest/*"); out != "" {
+		t.Fatalf("stale Builder Subject published a branch: %s", out)
+	}
+}

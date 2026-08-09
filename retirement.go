@@ -418,10 +418,22 @@ func recoverRetirementFact(cfg Config, repoDir string, fact retirementFact, it I
 		if record.Transport != "host" {
 			return fmt.Errorf("retirement %s is pending without Host transport", fact.Ref)
 		}
-		verdict, hasVerdict, verdictErr := readVerdict(repoDir, record.Revision)
-		checks, hasChecks, checksErr := readChecks(repoDir, record.Revision)
-		if verdictErr != nil || checksErr != nil || !hasVerdict || verdict.Verdict != "approve" ||
-			!hasChecks || checks.Status != "pass" || record.Agent != verdict.Reviewer ||
+		// Select may have refreshed notes before another checkout published the
+		// approval. Refresh again under this Item's admission before absence or
+		// mismatch can release the pending intent.
+		if err := fetchNotes(repoDir); err != nil {
+			return fmt.Errorf("retirement %s refresh durable notes: %w", fact.Ref, err)
+		}
+		verdict, hasVerdict, readErr := readVerdict(repoDir, record.Revision)
+		if readErr != nil {
+			return fmt.Errorf("retirement %s read durable Verdict: %w", fact.Ref, readErr)
+		}
+		checks, hasChecks, readErr := readChecks(repoDir, record.Revision)
+		if readErr != nil {
+			return fmt.Errorf("retirement %s read durable Checks: %w", fact.Ref, readErr)
+		}
+		if !hasVerdict || verdict.Verdict != "approve" || !hasChecks ||
+			checks.Status != "pass" || record.Agent != verdict.Reviewer ||
 			record.Model != verdict.Model || record.DefSHA != verdict.DefSHA {
 			return dropPreparationRetirement(repoDir, fact,
 				fmt.Errorf("retirement %s lacks matching durable approve Verdict and passing Checks", fact.Ref))

@@ -282,6 +282,91 @@ func TestPendingHostRetirementWithoutApprovalReleasesFact(t *testing.T) {
 	}
 }
 
+func TestPendingHostRetirementRefreshesNotesAfterSelect(t *testing.T) {
+	branch := "forest/21-stale-notes"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "21", Transport: "host",
+		Strategy: "squash", Title: "stale notes", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	staleRepo := filepath.Join(root, "stale")
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	runGitTest(t, root, "clone", "-q", origin, staleRepo)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "21", Title: "stale notes"})
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	cfg.Flows.Verifier.AutoMerge = false
+
+	subjects, err := (verifierFlow{}).Select(cfg, staleRepo)
+	if err != nil || len(subjects) != 1 || subjects[0].Kind != subjectRetirement {
+		t.Fatalf("stale-note Select = (%#v, %v), want one retirement", subjects, err)
+	}
+	writeApprovalNotes(t, repo, reviewed, agent)
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		switch {
+		case len(args) > 0 && args[0] == "api":
+			return []byte(`[]`), nil
+		case len(args) >= 2 && args[0] == "pr" && args[1] == "list":
+			return []byte(`[{"number":21,"url":"https://github.com/owner/repo/pull/21","headRefOid":"` + reviewed + `","headRefName":"` + branch + `","baseRefName":"master","isCrossRepository":false}]`), nil
+		default:
+			return nil, errors.New("unexpected Host command")
+		}
+	}
+	out, err := (verifierFlow{}).Act(cfg, staleRepo, subjects[0], "stale-note-recovery")
+	if err != nil || out.Status != "merge_pending" {
+		t.Fatalf("stale-note recovery = (status=%q, err=%v), want merge_pending", out.Status, err)
+	}
+	if facts, err := listRetirements(staleRepo); err != nil || len(facts) != 1 {
+		t.Fatalf("stale-note retirement facts = (%#v, %v), want retained fact", facts, err)
+	}
+}
+
+func TestPendingHostRetirementNoteReadFailureRetainsFact(t *testing.T) {
+	branch := "forest/22-bad-note"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	fact, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: "22", Transport: "host",
+		Strategy: "squash", Title: "bad note", State: "pending",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeApprovalNotes(t, repo, reviewed, agent)
+	runGitTest(t, repo, "notes", "--ref="+verdictNotesRef, "add", "-f", "-m", "{", reviewed)
+	runGitTest(t, repo, "push", "-q", "--force", "origin", notesRef(verdictNotesRef))
+
+	oldProjection := projectionCommand
+	defer func() { projectionCommand = oldProjection }()
+	projectionCommand = func(args ...string) ([]byte, error) {
+		return nil, errors.New("unexpected Host command")
+	}
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
+	err = recoverRetirementFact(cfg, repo, fact, Item{ID: "22", Title: "bad note"})
+	if err == nil || !strings.Contains(err.Error(), "decode verdict note") {
+		t.Fatalf("malformed durable Verdict recovery = %v, want read failure", err)
+	}
+	if facts, listErr := listRetirements(repo); listErr != nil || len(facts) != 1 {
+		t.Fatalf("read-failed retirement facts = (%#v, %v), want retained fact", facts, listErr)
+	}
+}
+
 func TestPendingHostRetirementDropsNonMatchingApproval(t *testing.T) {
 	tests := map[string]func(*testing.T, string, string, *Agent){
 		"rejected Verdict": func(t *testing.T, repo, reviewed string, agent *Agent) {

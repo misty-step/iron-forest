@@ -303,6 +303,33 @@ func TestLoadRejectsMissingCommitIdentity(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsSecretShapedCommitIdentity(t *testing.T) {
+	tests := []struct {
+		identity CommitIdentity
+		secret   string
+	}{
+		{CommitIdentity{Name: "sk-AAAAAAAAAAAAAAAA", Email: "builder@example.invalid"}, "sk-AAAAAAAAAAAAAAAA"},
+		{CommitIdentity{Name: "builder", Email: "__mint.example__"}, "__mint.example__"},
+	}
+	for _, tc := range tests {
+		repoDir := t.TempDir()
+		writeAgentFixture(t, repoDir, "builder", "builder-model")
+		body := fmt.Sprintf("description: builder\ncommit:\n  name: %s\n  email: %s\nmodel: builder-model\ndeadline_seconds: 3600\n",
+			tc.identity.Name, tc.identity.Email)
+		path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadAgent(repoDir, "builder")
+		if err == nil || !strings.Contains(err.Error(), "credential-shaped") {
+			t.Fatalf("loadAgent secret-shaped commit identity = %v, want refusal", err)
+		}
+		if strings.Contains(err.Error(), tc.secret) {
+			t.Fatalf("loadAgent error echoed secret-shaped commit identity: %v", err)
+		}
+	}
+}
+
 func TestLoadAgentRejectsPathAndIdentityOverrides(t *testing.T) {
 	repoDir := t.TempDir()
 	if _, err := loadAgent(repoDir, "../outside"); err == nil {

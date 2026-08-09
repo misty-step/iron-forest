@@ -122,6 +122,9 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if strings.TrimSpace(a.Commit.Name) == "" || strings.TrimSpace(a.Commit.Email) == "" {
 		return nil, fmt.Errorf("agent %s: commit.name and commit.email are required", name)
 	}
+	if secretShaped(a.Commit.Name) || secretShaped(a.Commit.Email) {
+		return nil, fmt.Errorf("agent %s: commit identity contains credential-shaped text", name)
+	}
 	if a.Mode == "" {
 		a.Mode = "primary"
 	}

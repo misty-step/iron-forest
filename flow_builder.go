@@ -52,34 +52,29 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 }
 
 func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it := s.Item
-	if it.ID == "" {
-		var err error
-		it, err = trackerFor(cfg.Repo).Get(s.ID)
-		if err != nil {
-			return Outcome{Status: "item_failed"}, fmt.Errorf("item: %w", err)
+	// The caller holds the canonical Item admission. Re-run the complete
+	// Selector now so a Tracker or durable-fact change after Select cannot start
+	// an agent on stale work.
+	items, err := eligibleItems(cfg, repoDir)
+	if err != nil {
+		return Outcome{Status: "item_failed"}, fmt.Errorf("revalidate item: %w", err)
+	}
+	var it Item
+	for _, fresh := range items {
+		if fresh.ID == s.ID && fresh.UpdatedAt == s.Revision {
+			it = fresh
+			break
 		}
 	}
-
-	if cfg.Projection.Enabled && cfg.Projection.MergeViaHost {
-		branches, err := forestBranches(repoDir)
-		if err != nil {
-			return Outcome{Status: "branch_failed"}, fmt.Errorf("branches: %w", err)
-		}
-		for _, branch := range branches {
-			if itemIDFromBranch(branch) == it.ID {
-				return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
-			}
-		}
-		retiring, err := retirementItemIDs(repoDir)
-		if err != nil {
-			return Outcome{Status: "branch_failed"}, fmt.Errorf("retirements: %w", err)
-		}
-		for _, id := range retiring {
-			if id == it.ID {
-				return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
-			}
-		}
+	if it.ID == "" {
+		return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
+	}
+	stalled, err := stalledOn(repoDir, "builder", s.Key, s.Revision)
+	if err != nil {
+		return Outcome{Status: "notes_failed"}, fmt.Errorf("revalidate stalled %s: %w", s.Key, err)
+	}
+	if stalled {
+		return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
 	}
 	a, err := loadAgent(repoDir, cfg.Flows.Builder.Agent)
 	if err != nil {
