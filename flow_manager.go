@@ -110,18 +110,10 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	// Withdraw assigned items first. Each Tracker write shares the Item admission
 	// key with the Builder and Verifier, then rechecks durable coverage after
 	// taking it.
-	failed := make(map[string]bool, len(plan.failed))
-	for _, it := range plan.failed {
-		failed[it.ID] = true
-	}
 	reaped := 0
 	for _, it := range plan.reap {
-		var add []string
-		if failed[it.ID] {
-			add = []string{failedLabel}
-		}
 		changed, err := mutateManagerItem(cfg, repoDir, tk, it,
-			add, []string{readyTag}, "")
+			nil, []string{readyTag}, "")
 		if err != nil {
 			return Outcome{Status: "tracker_failed"}, fmt.Errorf("reap item %s: %w", it.ID, err)
 		}
@@ -249,15 +241,23 @@ func mutateManagerItem(cfg Config, repoDir string, tk Tracker, it Item, add, rem
 		}
 		return false, nil
 	}
-	// A deterministic reap only needs the slot still open (plan is a stamp over
-	// the fresh reap set), and it changes no plan the model judged.
-	if plan.revision == "" {
-		return false, nil
+	for _, fresh := range plan.reap {
+		if fresh.ID != it.ID || fresh.UpdatedAt != it.UpdatedAt {
+			continue
+		}
+		add = nil
+		for _, failed := range plan.failed {
+			if failed.ID == it.ID {
+				add = []string{failedLabel}
+				break
+			}
+		}
+		if err := tk.SetTags(it.ID, add, remove); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
-	if err := tk.SetTags(it.ID, add, remove); err != nil {
-		return false, err
-	}
-	return true, nil
+	return false, nil
 }
 
 // managerPlan is the deterministic filter and slot accounting behind one Manager

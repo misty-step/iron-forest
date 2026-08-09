@@ -936,3 +936,20 @@ func TestManagerDoesNotPromoteWhenDeadAssignmentRemainsClaimed(t *testing.T) {
 		t.Fatalf("Manager overfilled the ready slot: item 7 %v, item 8 %v", tk.items["7"].Tags, tk.items["8"].Tags)
 	}
 }
+
+func TestManagerReapRefusesDifferentFreshAssignment(t *testing.T) {
+	repo := newRefGitRepo(t)
+	tk := newMemoryTracker()
+	tk.seed(Item{ID: "1", UpdatedAt: "u1", Tags: []string{readyTag}})
+	tk.seed(Item{ID: "2", UpdatedAt: "u2", Tags: []string{readyTag, "parked"}})
+	cfg := managerFlowConfig(repo)
+	cfg.Flows.Manager.ExcludeLabels = []string{"parked"}
+
+	changed, err := mutateManagerItem(cfg, repo, tk, tk.items["1"], nil, []string{readyTag}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || !tk.items["1"].hasTag(readyTag) {
+		t.Fatalf("Manager reaped a healthy assignment because another item needed withdrawal: %v", tk.items["1"].Tags)
+	}
+}
