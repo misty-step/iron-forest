@@ -1,12 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -21,44 +18,136 @@ func (verifierFlow) Interval(cfg Config) time.Duration {
 
 func (verifierFlow) Enabled(cfg Config) bool { return cfg.Flows.Verifier.Enabled }
 
+func retryableHostError(cfg Config, err error) error {
+	if !cfg.Projection.Enabled || errors.Is(err, errHostMergePending) ||
+		errors.Is(err, errFlowRetryable) ||
+		errors.Is(err, errRetirementEvidenceInvalid) ||
+		errors.Is(err, errAttemptsInvalid) ||
+		errors.Is(err, errControlEvidenceInvalid) ||
+		errors.Is(err, errHostMergeUnavailable) && !errors.Is(err, errHostRevisionMoved) ||
+		!cfg.Projection.MergeViaHost && errors.Is(err, errHostRevisionMoved) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errHostMergePending, err)
+}
+
+func retirementProjectionError(cfg Config, err error) error {
+	err = retryableHostError(cfg, err)
+	if cfg.Projection.MergeViaHost &&
+		errors.Is(err, errHostMergeUnavailable) &&
+		!errors.Is(err, errHostRevisionMoved) {
+		return fmt.Errorf("%w: %w", errRetirementRecoveryHard, err)
+	}
+	return err
+}
+
+func flowNoteError(err error) error {
+	if errors.Is(err, errNoteInvalid) {
+		return fmt.Errorf("%w: %v", errRetirementEvidenceInvalid, err)
+	}
+	return fmt.Errorf("%w: %v", errFlowRetryable, err)
+}
+
+func retirementSubjectKey(branch string) string {
+	return "retirement-" + branch
+}
+
+func retirementAgentSubjectKey(branch string) string {
+	return "retirement-agent-" + branch
+}
+
 func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
 	if err := fetchNotes(repoDir); err != nil {
 		return nil, fmt.Errorf("notes: %w", err)
 	}
-	branches, err := forestBranches(repoDir)
+	branchSnapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
 		return nil, err
 	}
-	// A durable merged fact outranks the live state, but only for the exact
-	// Revision it records: a branch that still points at that merged Revision must
-	// never be offered for a second merge, even if its item survives an
-	// interrupted finalisation. A branch that advanced past the merged Revision is
-	// new, unreviewed work and is offered as fresh instead of being stranded by an
-	// item-wide fact.
-	var fresh, mergeable []Subject
+	branches := branchSnapshot.Actionable
+	branchHeads := make(map[string]string, len(branches))
 	for _, branch := range branches {
 		head, err := branchHead(repoDir, branch)
 		if err != nil {
 			return nil, fmt.Errorf("branch %s: %w", branch, err)
 		}
-		if note, ok, err := mergedNoteFor(repoDir, itemIDFromBranch(branch)); err != nil {
-			return nil, fmt.Errorf("merged facts: %w", err)
-		} else if ok && note.Revision == head {
+		branchHeads[branch] = head
+	}
+	retirements, err := scanRetirements(repoDir)
+	if err != nil {
+		return nil, fmt.Errorf("retirements: %w", err)
+	}
+	var recoveries []Subject
+	retiring := make(map[string]bool, len(retirements))
+	for _, fact := range retirements {
+		var s Subject
+		if fact.ReadErr != nil {
+			s = Subject{
+				Key:      "retirement-evidence-" + blobSHA(fact.Ref),
+				Kind:     subjectRetirement,
+				Revision: fact.SHA,
+				Label:    "invalid retirement evidence",
+				Failure:  fact.ReadErr,
+			}
+			if branch, id, ok := retirementRefIdentity(fact.Ref); ok {
+				s.ID = id
+				s.Branch = branch
+				s.Item = Item{ID: id}
+				retiring[branch] = true
+			}
+		} else {
+			record := fact.Record
+			retiring[record.Branch] = true
+			s = Subject{Key: retirementSubjectKey(record.Branch), Kind: subjectRetirement,
+				Revision: record.Revision, Label: "retire " + record.Branch,
+				ID: record.ItemID, Branch: record.Branch,
+				Item: Item{ID: record.ItemID, Title: record.Title}}
+		}
+		s, include, err := subjectAfterBrake(repoDir, "verifier", s)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", s.Key, err)
+		}
+		if include {
+			recoveries = append(recoveries, s)
+		}
+	}
+	var fresh, mergeable, failures []Subject
+	for _, failure := range branchSnapshot.Failures {
+		failure, include, err := subjectAfterBrake(repoDir, "verifier", failure)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", failure.Key, err)
+		}
+		if include {
+			failures = append(failures, failure)
+		}
+	}
+	for _, branch := range branches {
+		head := branchHeads[branch]
+		if retiring[branch] {
 			continue
 		}
-		s := Subject{
-			Key:      "branch-" + branch,
-			Kind:     "branch",
+		s := Subject{Key: "branch-" + branch,
+			Kind:     subjectBranch,
 			Revision: head,
 			Label:    branch,
 			ID:       itemIDFromBranch(branch),
-			Branch:   branch,
-			Head:     head,
+			Branch:   branch}
+		s, include, err := subjectAfterBrake(repoDir, "verifier", s)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", s.Key, err)
+		}
+		if !include {
+			continue
 		}
 		v, found, err := readVerdict(repoDir, head)
 		if err != nil {
+			if errors.Is(err, errNoteInvalid) {
+				s.Failure = flowNoteError(err)
+				fresh = append(fresh, s)
+				continue
+			}
 			return nil, fmt.Errorf("verdict %s: %w", branch, err)
 		}
 		if !found {
@@ -67,16 +156,14 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 			// branch has a new head carrying no notes, so it returns here.
 			checks, hasChecks, cerr := readChecks(repoDir, head)
 			if cerr != nil {
+				if errors.Is(cerr, errNoteInvalid) {
+					s.Failure = flowNoteError(cerr)
+					fresh = append(fresh, s)
+					continue
+				}
 				return nil, fmt.Errorf("checks %s: %w", branch, cerr)
 			}
 			if hasChecks && checks.Status == "fail" {
-				continue
-			}
-			stalled, err := stalledOn(repoDir, "verifier", s.Key, head)
-			if err != nil {
-				return nil, fmt.Errorf("stalled %s: %w", s.Key, err)
-			}
-			if stalled {
 				continue
 			}
 			fresh = append(fresh, s)
@@ -87,37 +174,107 @@ func (verifierFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 		}
 		checks, found, err := readChecks(repoDir, head)
 		if err != nil {
+			if errors.Is(err, errNoteInvalid) {
+				s.Failure = flowNoteError(err)
+				fresh = append(fresh, s)
+				continue
+			}
 			return nil, fmt.Errorf("checks %s: %w", branch, err)
 		}
-		if !found || checks.Status != "pass" {
+		if !found {
+			fresh = append(fresh, s)
 			continue
 		}
-		// An approved, green branch is only a subject when it can actually land.
-		// Every reason it cannot is named by mergeBlocked, so a branch waiting on
-		// an operator is a state to read, not an action to run.
+		if checks.Status != "pass" {
+			continue
+		}
+		// An approved, green branch is a subject when it can land. With Host
+		// projection and AutoMerge disabled, select it once to prepare durable
+		// intent; the resulting retirement fact suppresses later branch work.
 		attempts, err := readAttempts(repoDir, s.Key)
 		if err != nil {
+			if errors.Is(err, errAttemptsInvalid) {
+				s.Failure = err
+				mergeable = append(mergeable, s)
+				continue
+			}
 			return nil, fmt.Errorf("attempts %s: %w", branch, err)
 		}
-		if mergeBlocked(cfg, attempts) != "" {
+		if mergeBlocked(cfg, attempts) != "" &&
+			!(cfg.Projection.MergeViaHost && !cfg.Flows.Verifier.AutoMerge) {
 			continue
 		}
 		mergeable = append(mergeable, s)
 	}
-	return append(fresh, mergeable...), nil
+	mergeable = append(mergeable, fresh...)
+	mergeable = append(mergeable, recoveries...)
+	mergeable = append(mergeable, failures...)
+	return mergeable, nil
 }
 
-// mergeBlocked names why an approved, green branch may not land now, or returns
-// "" when it may. It is the single authority for merge policy: Select consults
-// it so a lane never offers a subject whose only possible outcome is a no-op,
-// and Act consults the same function so the two cannot drift apart.
-//
-// Splitting this decision is what produced a live hot loop: Select checked the
-// verdict, the checks and the attempts, Act checked auto_merge, and an approved
-// branch under auto_merge: false was selected, rebased, rechecked and reviewed
-// on every pass forever. 217 passes wrote 217 identical ledger rows and ran
-// build, vet and test 217 times before discovering the merge was never allowed.
-// A precondition that lives in one place cannot cause that.
+func recordMergeBlocked(
+	cfg Config,
+	repoDir, subjectKey, revision string,
+	it Item,
+	cause error,
+) error {
+	tracker := trackerFor(cfg.Repo)
+	tagClaim, err := readAttempts(repoDir, effectAttemptKey("Tracker-tag", it.ID, revision))
+	if err != nil {
+		return err
+	}
+	current, err := validatedTrackerItem(tracker, it.ID)
+	if err != nil {
+		return err
+	}
+	marker := "<!-- iron-forest:merge-blocked revision=" + revision + " -->"
+	if !current.hasTag(failedLabel) {
+		if tagClaim != 0 {
+			return fmt.Errorf("%w: prior Tracker tag attempt for Item %q is not visible",
+				errHostMergeUnavailable, it.ID)
+		}
+		if err := claimEffect(repoDir, "Tracker-tag", it.ID, revision); err != nil {
+			return err
+		}
+		if tagErr := tracker.SetTags(it.ID, []string{failedLabel}, nil); tagErr != nil {
+			current, readErr := validatedTrackerItem(tracker, it.ID)
+			if readErr != nil {
+				if errors.Is(readErr, errTrackerEvidenceInvalid) {
+					return readErr
+				}
+				return fmt.Errorf("%w: set failed tag: %v; reconcile: %v",
+					errHostMergeUnavailable, tagErr, readErr)
+			}
+			if !current.hasTag(failedLabel) {
+				return fmt.Errorf("%w: set failed tag: %v",
+					errHostMergeUnavailable, tagErr)
+			}
+		}
+	}
+	commentErr := publishTrackerComment(
+		repoDir,
+		tracker,
+		current,
+		"Tracker-comment",
+		revision,
+		"Merge blocked: "+redactSecretShaped(cause.Error()),
+		marker,
+	)
+	if commentErr != nil &&
+		(errors.Is(commentErr, errFlowRetryable) || errors.Is(commentErr, errTrackerUnavailable)) {
+		return commentErr
+	}
+	if err := recordTerminalStall(repoDir, (verifierFlow{}).Name(), subjectKey, revision); err != nil {
+		return fmt.Errorf("record durable merge brake: %w", err)
+	}
+	return commentErr
+}
+
+// mergeBlocked names why an approved, green branch cannot complete a merge,
+// or returns "" when it may. Select uses it to avoid no-op work, except that a
+// Host branch with AutoMerge disabled gets one pass to record durable intent.
+// Act still consults the same authority after that preparation, so it reports
+// the operator handoff without repeating work.
 func mergeBlocked(cfg Config, attempts int) string {
 	if !cfg.Flows.Verifier.AutoMerge {
 		return "auto_merge is off; an operator merges this branch"
@@ -128,30 +285,89 @@ func mergeBlocked(cfg Config, attempts int) string {
 	return ""
 }
 
-func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it, err := trackerFor(cfg.Repo).Get(s.ID)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
+func (f verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
+	if s.Failure != nil {
+		return Outcome{
+			Branch: s.Branch, BaseSHA: s.Revision, Status: "evidence_failed",
+		}, s.Failure
 	}
-	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
+	if s.Kind == subjectRetirement {
+		return f.actRetirement(cfg, repoDir, s, runID)
+	}
+	return f.actBranch(cfg, repoDir, s, runID)
+}
+
+func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
+	out := Outcome{Branch: s.Branch, BaseSHA: s.Revision}
+	if err := requalifyForestBranch(repoDir, s.Branch); err != nil {
+		out.Status = "branch_failed"
+		return out, err
+	}
+	stalled, err := stalledOn(repoDir, "verifier", s.Key, s.Revision)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
+		out.Status = "notes_failed"
+		return out, err
+	}
+	if stalled {
+		out.Status = "skipped"
+		return out, nil
+	}
+	it, err := validatedTrackerItem(trackerFor(cfg.Repo), s.ID)
+	if err != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("item: %w", err)
 	}
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
+		if cfg.Projection.MergeViaHost && s.Revision != "" {
+			merged, pr, inspectErr := inspectProjectMerge(cfg, s.Branch, cfg.Flows.Verifier.Merge, s.Revision)
+			if inspectErr != nil {
+				out.Status = "projection_failed"
+				return out, fmt.Errorf("projection: %w", retirementProjectionError(cfg, inspectErr))
+			}
+			if merged && pr.HeadRefOID == s.Revision {
+				out.PRURL = pr.URL
+				return recoverHostMergedProjection(cfg, repoDir, s.Branch, s.Revision, it, out)
+			}
+		}
+		out.Status = "worktree_failed"
+		return out, fmt.Errorf("worktree: %w", err)
 	}
-	defer func() {
-		removeWorktree(repoDir, wtDir)
-		untrackWorktree(wtDir)
-	}()
-	out := Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
-
+	defer cleanupWorktree(repoDir, wtDir)
+	if err := checkSubjectRevision(s, baseSHA); err != nil {
+		return Outcome{Branch: s.Branch, BaseSHA: baseSHA, Status: "stale"}, err
+	}
+	if err := publishBuiltComment(cfg, repoDir, it, s.Branch, baseSHA); err != nil {
+		out.Status = "comment_failed"
+		return out, fmt.Errorf("comment: %w", err)
+	}
+	if cfg.Projection.MergeViaHost {
+		if _, err := recordPreparingHostRetirement(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
+			out.Status = "projection_failed"
+			return out, fmt.Errorf("projection preparation: %w", retryableHostError(cfg, err))
+		}
+	}
+	a, err := loadAgent(repoDir, cfg.Flows.Verifier.Agent)
+	if err != nil {
+		out.Status = "agent_failed"
+		return out, fmt.Errorf("agent: %w", err)
+	}
+	out = Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
+	url, hostMerged, err := projectBranch(cfg, repoDir, it, s.Branch,
+		fmt.Sprintf("Recovered Projection for item #%s: %s.\n", it.ID, it.Title), baseSHA)
+	if err != nil {
+		out.Status = "projection_failed"
+		return out, fmt.Errorf("projection: %w", retryableHostError(cfg, err))
+	}
+	out.PRURL = url
+	if hostMerged {
+		return recoverHostMergedProjection(cfg, repoDir, s.Branch, baseSHA, it, out)
+	}
 	// Rebase the branch onto current master before checking or reviewing it: a
 	// Verdict and its checks must key to the exact tree that will land, not to a
 	// tree built from an ancient master. Every later step uses the returned head.
-	newHead, rebaseErr := rebaseOntoMaster(wtDir, s.Branch)
+	newHead, rebaseErr := rebaseOntoMaster(wtDir, s.Branch, baseSHA, a.Commit)
 	if rebaseErr != nil {
 		// A conflict is a fact about this head, so record it where every lane
 		// already looks: a failing check on the commit. The Fixer selects failing
@@ -165,21 +381,22 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 			Time:    nowRFC(),
 			Results: []checkResult{{Name: "rebase", Code: 1, Output: rebaseErr.Error()}},
 		}
-		if err := writeChecks(repoDir, baseSHA, note); err != nil {
+		if err := writeChecks(repoDir, baseSHA, note, a.Commit); err != nil {
 			if !errors.Is(err, errNoteExists) {
-				return out, fmt.Errorf("rebase: %w (notes: %v)", rebaseErr, err)
+				return out, fmt.Errorf("rebase: %v (notes: %w)", rebaseErr, flowNoteError(err))
 			}
 			winner, found, readErr := readChecks(repoDir, baseSHA)
 			if readErr != nil {
-				return out, fmt.Errorf("rebase: %w (notes: read winning check: %v)", rebaseErr, readErr)
+				return out, fmt.Errorf("rebase: %v (notes: read winning check: %w)",
+					rebaseErr, flowNoteError(readErr))
 			}
 			if !found {
 				return out, fmt.Errorf("rebase: %w (notes: check note disappeared: %v)", rebaseErr, err)
 			}
 			note = winner
 		}
-		if err := projectChecks(cfg, s.Branch, note); err != nil {
-			return out, fmt.Errorf("rebase: %w (projection: %v)", rebaseErr, err)
+		if err := projectChecks(cfg, repoDir, s.Branch, baseSHA, note); err != nil {
+			return out, fmt.Errorf("rebase: %v (projection: %w)", rebaseErr, retryableHostError(cfg, err))
 		}
 		return out, fmt.Errorf("rebase: %w", rebaseErr)
 	}
@@ -187,11 +404,26 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// The ledger must record the head the checks, the Verdict, and the merge all
 	// key to; the value above was the pre-rebase head.
 	out.BaseSHA = newHead
+	if cfg.Projection.MergeViaHost {
+		if _, err := recordPreparingHostRetirement(cfg, repoDir, s.Branch, newHead, it); err != nil {
+			out.Status = "projection_failed"
+			return out, fmt.Errorf("projection preparation after rebase: %w", retryableHostError(cfg, err))
+		}
+	}
 
+	// Snapshot the pristine reviewed tree before any agent code runs, so a check
+	// that rewrites or stages a tracked file is visible afterwards: its green
+	// would then judge an uncommitted edit, never the Review revision it was
+	// declared to test.
+	beforeChecks, err := snapshotReviewTree(wtDir)
+	if err != nil {
+		out.Status = "checks_environment_failed"
+		return out, fmt.Errorf("review snapshot: %w", err)
+	}
 	checks, checkErr := runChecks(cfg, wtDir, runID)
-	// A preflight failure means no declared check ran: the child environment
-	// could not be built, the toolchain was missing, or FOREST_CHECK_PATH did
-	// not resolve. There is nothing to record, so no Checks note exists, and the
+	// A preflight failure means no declared check ran because the child
+	// environment could not be built. There is nothing to record, so no Checks
+	// note exists, and the
 	// head is not broken code for the Fixer to repair. Write no note, classify it
 	// as a mechanical failure for an operator, and let the stalled brake park the
 	// head here instead of reviewing or merging a Revision whose checks never ran.
@@ -199,15 +431,24 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "checks_environment_failed"
 		return out, fmt.Errorf("checks: %w", checkErr)
 	}
-	if err := writeChecks(repoDir, baseSHA, checks); err != nil {
+	// A check that rewrote or staged a tracked file — or moved HEAD — is refused:
+	// the green it reports is an artifact of its own uncommitted edit, not of the
+	// Review revision. No Checks note is written, so the head is neither offered
+	// to a reviewer (no Verdict may rest on the untrustworthy result) nor to the
+	// Fixer (there is nothing to repair in the committed tree).
+	if cleanErr := assertChecksClean(wtDir, baseSHA, beforeChecks); cleanErr != nil {
+		out.Status = "checks_refused"
+		return out, fmt.Errorf("checks: %w", cleanErr)
+	}
+	if err := writeChecks(repoDir, baseSHA, checks, a.Commit); err != nil {
 		if !errors.Is(err, errNoteExists) {
 			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: %w", err)
+			return out, fmt.Errorf("notes: %w", flowNoteError(err))
 		}
 		winner, found, readErr := readChecks(repoDir, baseSHA)
 		if readErr != nil {
 			out.Status = "notes_failed"
-			return out, fmt.Errorf("notes: read winning check: %w", readErr)
+			return out, fmt.Errorf("notes: read winning check: %w", flowNoteError(readErr))
 		}
 		if !found {
 			out.Status = "notes_failed"
@@ -220,6 +461,9 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	}
 	if checkErr != nil {
 		out.Status = "checks_failed"
+		if err := projectChecks(cfg, repoDir, s.Branch, baseSHA, checks); err != nil {
+			return out, fmt.Errorf("checks: %v (projection: %w)", checkErr, retryableHostError(cfg, err))
+		}
 		return out, fmt.Errorf("checks: %w", checkErr)
 	}
 
@@ -227,20 +471,28 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 	// let the Fixer repair the head, so no reviewer is paid to read broken code.
 	if checks.Status != "pass" {
 		out.Status = "checks_failed"
-		if err := projectChecks(cfg, s.Branch, checks); err != nil {
-			return out, fmt.Errorf("projection: %w", err)
+		if err := projectChecks(cfg, repoDir, s.Branch, baseSHA, checks); err != nil {
+			return out, fmt.Errorf("projection: %w", retryableHostError(cfg, err))
 		}
 		return out, nil
 	}
 
+	// Select can precede another checkout's write. Refresh both durable notes
+	// after Checks and under Item admission before paying for a second review.
+	if err := fetchNotes(repoDir); err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: refresh before review: %w", flowNoteError(err))
+	}
 	verdict, found, err := readVerdict(repoDir, baseSHA)
 	if err != nil {
 		out.Status = "notes_failed"
-		return out, fmt.Errorf("notes: %w", err)
+		return out, fmt.Errorf("notes: %w", flowNoteError(err))
 	}
 	if !found {
 		var stats runStats
-		verdict, stats, err = verifierReview(cfg, repoDir, wtDir, it, baseSHA, runID, a)
+		// The durable winning Verdict decides whether the existing Host
+		// preparation becomes pending. A losing review cannot publish intent.
+		verdict, stats, err = verifierReview(repoDir, wtDir, it, baseSHA, runID, a)
 		out.addTokens(stats)
 		if err != nil {
 			// A mechanical prompt-delivery failure names itself prompt_failed so it
@@ -259,20 +511,29 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		}
 	}
 	out.Verdict = verdict.Verdict
-	// Every terminal decision reaches the human surface, not merges alone: a
-	// rejection is the outcome an operator most needs to see.
-	if err := projectVerdict(cfg, s.Branch, verdict, checks); err != nil {
+	// Host retirement becomes pending only after its exact-Revision decision is
+	// visible. A malformed reconciliation therefore cannot be bypassed by the
+	// durable recovery path.
+	if verdict.Verdict == "approve" && cfg.Projection.MergeViaHost {
+		if err := recordHostRetirement(
+			cfg, repoDir, s.Branch, baseSHA, it, verdict, checks,
+		); err != nil {
+			out.Status = "merge_failed"
+			return out, fmt.Errorf("merge: record Host retirement: %w",
+				retirementProjectionError(cfg, err))
+		}
+	} else if err := projectVerdict(cfg, repoDir, s.Branch, baseSHA, verdict, checks); err != nil {
 		out.Status = "projection_failed"
-		return out, fmt.Errorf("projection: %w", err)
+		return out, fmt.Errorf("projection: %w", retirementProjectionError(cfg, err))
 	}
 	if verdict.Verdict != "approve" {
 		out.Status = "reviewed"
 		return out, nil
 	}
-	// A fresh review that lands on approve reaches here; a branch selected for
-	// merge already passed this test in Select. Consulting the same authority
-	// keeps the two from drifting, which is what caused the 217-pass hot loop.
-	attempts, err := readAttempts(repoDir, s.Key)
+	// The durable Verdict owns merge attribution, including when another
+	// checkout won the write-once race after this pass began.
+	attemptKey := "branch-" + s.Branch
+	attempts, err := readAttempts(repoDir, attemptKey)
 	if err != nil {
 		out.Status = "notes_failed"
 		return out, fmt.Errorf("attempts: %w", err)
@@ -281,15 +542,35 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 		out.Status = "reviewed"
 		return out, nil
 	}
-	if err := mergeVerified(cfg, repoDir, s.Branch, baseSHA, it); err != nil {
-		// A branch that cannot land needs a human, not another attempt. Spend one
-		// attempt so the merge selector stops offering it, and say so on the item.
-		out.Status = "merge_failed"
-		if _, berr := bumpAttempts(repoDir, s.Key); berr != nil {
-			return out, fmt.Errorf("merge: %w (attempt record failed: %v)", err, berr)
+	mergeAgent := *a
+	mergeAgent.Name = verdict.Reviewer
+	mergeAgent.Model = verdict.Model
+	mergeAgent.DefSHA = verdict.DefSHA
+	if err := mergeVerified(cfg, repoDir, s.Branch, baseSHA, it, &mergeAgent); err != nil {
+		switch {
+		case errors.Is(err, errHostMergePending):
+			out.Status = "merge_pending"
+			return out, nil
+		case errors.Is(err, errFlowRetryable):
+			out.Status = "merge_pending"
+			return out, err
+		case errors.Is(err, errRetirementStale):
+			out.Status = "stale"
+			return out, err
+		case errors.Is(err, errRetirementEvidenceInvalid),
+			errors.Is(err, errAttemptsInvalid),
+			errors.Is(err, errControlEvidenceInvalid),
+			errors.Is(err, errHostMergeUnavailable):
+			out.Status = "merge_failed"
+			return out, err
 		}
-		trackerFor(cfg.Repo).SetTags(it.ID, []string{failedLabel}, nil)
-		_ = trackerFor(cfg.Repo).Comment(it.ID, "Merge blocked: "+err.Error())
+		// A branch that cannot land needs one durable operator handoff.
+		out.Status = "merge_failed"
+		if handoffErr := recordMergeBlocked(
+			cfg, repoDir, s.Key, baseSHA, it, err,
+		); handoffErr != nil {
+			return out, fmt.Errorf("merge failed: %v; handoff: %w", err, handoffErr)
+		}
 		return out, err
 	}
 	out.Status = "merged"
@@ -299,7 +580,7 @@ func (verifierFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Ou
 // verifierReview reviews one head and records the verdict as a note on it. It
 // returns the phase statistics so the ledger reports the work the review cost
 // in tokens; a discarded count makes every review look free.
-func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
+func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
 	var out verdictNote
 	var stats runStats
 	diff, err := gitOut(wtDir, "diff", "origin/master..."+head)
@@ -310,10 +591,27 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 	if err != nil {
 		return out, stats, fmt.Errorf("review: prompt: %w", err)
 	}
-	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
-	stats, err = runPhase(repoDir, wtDir, a, prompt, trace)
+	// Snapshot the tracked worktree before the agent runs so a review that edits
+	// any tracked file, stages a change, or moves HEAD can be refused on full
+	// comparison with this state. The snapshot records content and index state,
+	// so an edit to a file a check already dirtied is caught too.
+	before, err := snapshotReviewTree(wtDir)
 	if err != nil {
-		return out, stats, fmt.Errorf("review: %w", err)
+		return out, stats, fmt.Errorf("review: pre-run snapshot: %w", err)
+	}
+	trace := filepath.Join(workspaceDir(repoDir), "runs", runID+".verifier.jsonl")
+	stats, phaseErr := runPhase(repoDir, wtDir, a, prompt, trace)
+	// The worktree started at the Review revision; refuse a Verdict if the review
+	// edited a tracked file or moved HEAD since the snapshot, naming what changed.
+	// This assertion runs even when the phase crashed or timed out, so a verifier
+	// that edits a tracked file and then fails is refused for the edit — the
+	// required named clean-tree refusal — rather than reported only with the
+	// harness error, which would let the mutation slip through unexamined.
+	if err := assertCleanReviewTree(wtDir, head, before); err != nil {
+		return out, stats, err
+	}
+	if phaseErr != nil {
+		return out, stats, fmt.Errorf("review: %w", phaseErr)
 	}
 	rv, err := gateReview(wtDir, filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"))
 	if err != nil {
@@ -323,13 +621,13 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 		Verdict: rv.Verdict, Notes: rv.Notes, Reviewer: a.Name, Model: a.Model,
 		DefSHA: a.DefSHA, RunID: runID, Time: nowRFC(),
 	}
-	if err := writeVerdict(repoDir, head, out); err != nil {
+	if err := writeVerdict(repoDir, head, out, a.Commit); err != nil {
 		if !errors.Is(err, errNoteExists) {
-			return verdictNote{}, stats, fmt.Errorf("notes: %w", err)
+			return verdictNote{}, stats, fmt.Errorf("notes: %w", flowNoteError(err))
 		}
 		winner, found, readErr := readVerdict(repoDir, head)
 		if readErr != nil {
-			return verdictNote{}, stats, fmt.Errorf("notes: read winning verdict: %w", readErr)
+			return verdictNote{}, stats, fmt.Errorf("notes: read winning verdict: %w", flowNoteError(readErr))
 		}
 		if !found {
 			return verdictNote{}, stats, fmt.Errorf("notes: verdict note disappeared: %w", err)
@@ -345,7 +643,7 @@ func verifierReview(cfg Config, repoDir, wtDir string, it Item, head, runID stri
 // A branch that is already current is left untouched and its head returned
 // unchanged. A rebase that conflicts returns an error naming the conflicting
 // paths, never a bare exit status.
-func rebaseOntoMaster(wtDir, branch string) (string, error) {
+func rebaseOntoMaster(wtDir, branch, expectedHead string, id CommitIdentity) (string, error) {
 	if err := git(wtDir, "fetch", "origin", "master"); err != nil {
 		return "", fmt.Errorf("rebase: fetch origin/master: %w", err)
 	}
@@ -360,7 +658,7 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 	if behind == "0" {
 		return head, nil
 	}
-	if err := git(wtDir, "rebase", "origin/master"); err != nil {
+	if err := gitAsCommitter(wtDir, id, "rebase", "origin/master"); err != nil {
 		if paths, perr := gitOut(wtDir, "diff", "--name-only", "--diff-filter=U"); perr == nil && strings.TrimSpace(paths) != "" {
 			return "", fmt.Errorf("rebase onto origin/master conflicts in %s", strings.Join(strings.Fields(paths), ", "))
 		}
@@ -370,147 +668,15 @@ func rebaseOntoMaster(wtDir, branch string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("rebase: head: %w", err)
 	}
-	if err := git(wtDir, "push", "--force-with-lease", "origin", "HEAD:"+branch); err != nil {
+	if err := git(wtDir, "push", "--force-with-lease=refs/heads/"+branch+":"+expectedHead,
+		"origin", "HEAD:"+branch); err != nil {
 		return "", fmt.Errorf("rebase: push %s: %w", branch, err)
 	}
 	return head, nil
 }
 
-// mergeVerified lands an approved branch, but only the Revision that carried
-// the approving Verdict. reviewed is that exact Revision: the head the checks
-// and the Verdict key to and that rebaseOntoMaster pushed to the remote. Before
-// any merge action, fenceMergeOnRevision confirms the remote branch still points
-// at it, so newer, unreviewed work pushed in the interval is never silently
-// discarded or deleted. The acting step that follows is itself compare-and-set:
-// the git path lands and deletes the source branch in one atomic push, and the
-// host path merges only a head that still is the reviewed Revision. The host
-// path and the git path are exclusive: a protected target branch means only the
-// host may write it, and building a local commit that is then discarded would
-// waste the work and confuse the next reader.
-func mergeVerified(cfg Config, repoDir, branch, reviewed string, it Item) error {
-	// fenceMergeOnRevision is the decision gate; the merge below is the acting
-	// step. Both pin to the same reviewed Revision, and each of the two effects
-	// carries its own compare-and-set, so a branch that advances in the gap
-	// between the two is neither merged nor deleted.
-	if err := fenceMergeOnRevision(repoDir, branch, reviewed); err != nil {
-		return err
-	}
-	if cfg.Projection.MergeViaHost {
-		return mergeHostPath(cfg, repoDir, branch, reviewed, it)
-	}
-	return mergeGitPath(cfg, repoDir, branch, reviewed, it)
-}
-
-// mergeHostPath lands an approved branch on the host path. It holds mergeCoord
-// for the whole claim→merge→confirm sequence, the same lock reconcileMerged takes
-// while observing and mutating one subject's claim, so a concurrent
-// reconciliation pass can never observe the pull request as open, drop the pending
-// claim, and then let the host merge succeed with no claim left to confirm. A
-// durable pending claim is written before the merge is committed to, so from that
-// moment the subject is never fresh work even while its item is open; the claim
-// survives a crash so restart can resolve it. On any projectMerge error the claim
-// is deliberately left in place: an ambiguous host/network error may mean the
-// merge actually landed, so it is never dropped here. Reconciliation observes the
-// host to graduate the claim to landed or roll it back.
-func mergeHostPath(cfg Config, repoDir, branch, reviewed string, it Item) error {
-	mergeCoord.Lock()
-	defer mergeCoord.Unlock()
-	if err := markMergedClaim(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed}); err != nil {
-		return fmt.Errorf("merge: merged claim: %w", err)
-	}
-	if err := projectMerge(cfg, branch, cfg.Flows.Verifier.Merge, reviewed); err != nil {
-		return fmt.Errorf("merge: projection: %w", err)
-	}
-	if err := confirmMerged(repoDir, it.ID); err != nil {
-		return fmt.Errorf("merge: confirm merged: %w", err)
-	}
-	return finishMerge(cfg, repoDir, branch, reviewed, it)
-}
-
-// mergeGitPath lands an approved branch on the git path: it builds one merge
-// commit on a scratch worktree and retires the subject. The master update and
-// the source-branch deletion are a single atomic compare-and-set push, so the
-// merge lands exactly the reviewed Revision and never deletes newer, unreviewed
-// commits pushed in the review-to-merge interval. A branch that advanced past
-// the reviewed Revision fails the whole push: master is untouched, the branch
-// survives, and the next pass reviews the new head.
-func mergeGitPath(cfg Config, repoDir, branch, reviewed string, it Item) error {
-	workspace := workspaceDir(repoDir)
-	mergeDir := filepath.Join(workspace, "worktrees", "merge-"+slug(branch))
-	trackWorktree(mergeDir)
-	defer func() {
-		removeWorktree(repoDir, mergeDir)
-		untrackWorktree(mergeDir)
-	}()
-	_ = os.RemoveAll(mergeDir)
-	if err := git(repoDir, "worktree", "prune"); err != nil {
-		return fmt.Errorf("merge: prune: %w", err)
-	}
-	// Refresh master so the merge builds on the current tree, and capture its tip
-	// as the lease for the atomic compare-and-set push below, closing the window
-	// between reading origin/master here and writing the merge commit to it.
-	if err := git(repoDir, "fetch", "origin", "master"); err != nil {
-		return fmt.Errorf("merge: fetch master: %w", err)
-	}
-	masterTip, err := gitOut(repoDir, "rev-parse", "origin/master")
-	if err != nil {
-		return fmt.Errorf("merge: origin/master: %w", err)
-	}
-	if err := git(repoDir, "worktree", "add", "--detach", mergeDir, "origin/master"); err != nil {
-		return fmt.Errorf("merge: worktree: %w", err)
-	}
-	switch cfg.Flows.Verifier.Merge {
-	case "squash":
-		// One commit per subject on master is the history shape this factory
-		// has always produced; the strategy is declared, never assumed.
-		if err := git(mergeDir, "merge", "--squash", branch); err != nil {
-			return fmt.Errorf("merge: squash: %w", err)
-		}
-		if err := gitCommit(mergeDir, cfg.Commit, fmt.Sprintf("forest: %s (#%s)", it.Title, it.ID)); err != nil {
-			return fmt.Errorf("merge: commit: %w", err)
-		}
-	case "ff":
-		if err := git(mergeDir, "merge", "--ff-only", branch); err != nil {
-			return fmt.Errorf("merge: ff: %w", err)
-		}
-	default:
-		return fmt.Errorf("merge: unsupported strategy %q", cfg.Flows.Verifier.Merge)
-	}
-	// A durable merged fact lands atomically with the master update and the
-	// branch deletion, so no interval lets the merged subject look like fresh
-	// work: eligibility consults the fact, so once this push lands the Builder
-	// can never re-select the item no matter what happens to the Tracker next.
-	media, err := json.Marshal(mergedNote{Branch: branch, Revision: reviewed, State: mergedLanded})
-	if err != nil {
-		return fmt.Errorf("merge: encode merged record: %w", err)
-	}
-	mergedFact, err := gitBlob(repoDir, string(media))
-	if err != nil {
-		return fmt.Errorf("merge: merged record blob: %w", err)
-	}
-	// One atomic push updates master, deletes the source branch, and records the
-	// durable merged fact. The lease on master pins the merge to the tree it was
-	// built on; the lease on the source branch pins the deletion to the reviewed
-	// Revision, so newer, unreviewed work is never merged around or deleted.
-	if err := git(mergeDir, "push", "--atomic",
-		"--force-with-lease=refs/heads/master:"+masterTip,
-		"--force-with-lease=refs/heads/"+branch+":"+reviewed,
-		"origin", "HEAD:master", ":"+branch,
-		mergedFact+":"+mergedRef(it.ID)); err != nil {
-		return fmt.Errorf("merge: push: %w", err)
-	}
-	// The atomic push already deleted the branch and recorded the fact, so
-	// retiring only clears the item and its attempt record.
-	return retireItem(cfg, repoDir, branch, it)
-}
-
-// fenceMergeOnRevision refuses a merge the moment the remote branch no longer
-// points at the Revision that carried the approving Verdict. It fetches the
-// branch and compares its observed tip to the reviewed Revision, so a second
-// checkout, a manual run, or an operator pushing a new head in the review-to-merge
-// interval is never silently discarded. On a mismatch it returns an error naming
-// both Revisions and leaves the branch untouched for a fresh review; it never
-// deletes the branch or merges the stale tree.
+// fenceMergeOnRevision refuses a merge when the remote branch no longer points
+// at the Revision that carried the approving Verdict.
 func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
 	if err := git(repoDir, "fetch", "origin", branch); err != nil {
 		return fmt.Errorf("merge: fetch %s: %w", branch, err)
@@ -523,102 +689,4 @@ func fenceMergeOnRevision(repoDir, branch, reviewed string) error {
 		return fmt.Errorf("merge refused: branch %s advanced to %s after its approving Verdict on reviewed Revision %s; re-review the new head", branch, observed, reviewed)
 	}
 	return nil
-}
-
-// finishMerge retires a landed subject on the host path. It records the durable
-// landed fact first (idempotently — a claim already graduated by mergeVerified is
-// left untouched), so eligibility no longer depends on the Tracker the moment
-// the merge lands; then it closes the item and drops its attempt record before
-// removing the branch. Ordering close before deletion means no window deletes the
-// branch while the item still looks like fresh work, and every effect is
-// idempotent so a retry after partial failure is safe. The branch is deleted
-// only when it still is the reviewed Revision — a compare-and-set deletion — and
-// a branch that advanced past it is left in place with its newer, unreviewed
-// commits.
-func finishMerge(cfg Config, repoDir, branch, reviewed string, it Item) error {
-	if err := markMerged(repoDir, it.ID, mergedNote{Branch: branch, Revision: reviewed, State: mergedLanded}); err != nil {
-		return fmt.Errorf("merge: merged fact: %w", err)
-	}
-	if err := retireItem(cfg, repoDir, branch, it); err != nil {
-		return err
-	}
-	if err := deleteBranchIfPresent(repoDir, branch, reviewed); err != nil {
-		return fmt.Errorf("merge: delete branch %s (wanted %s): %w", branch, reviewed, err)
-	}
-	return nil
-}
-
-// retireItem closes a merged subject and drops its attempt record. It never
-// touches a branch ref: the git path already deleted the branch atomically with
-// the master push, and the host path deletes it only after this call returns.
-// The item is closed before the branch goes away so eligibility — which reads
-// the open items — never offers a merged subject as fresh work.
-func retireItem(cfg Config, repoDir, branch string, it Item) error {
-	if err := trackerFor(cfg.Repo).Close(it.ID); err != nil {
-		return fmt.Errorf("merge: close item: %w", err)
-	}
-	if err := dropAttempts(repoDir, "branch-"+branch); err != nil {
-		return fmt.Errorf("merge: drop attempt record: %w", err)
-	}
-	return nil
-}
-
-// encodeBranchID renders a tracker id as a forest branch's id segment. The
-// branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as they
-// always have. The segment must be valid in a git refname and in a filesystem
-// path, so every byte outside a small safe set is escaped as %XX; '%' itself is
-// always escaped so the decoder can treat any '%' as the start of an escape.
-// The delimiter on the way back is the first '-', so '-' is escaped too. Numeric
-// ids and hyphen-free alphanumeric Habitat ids contain only safe bytes, so their
-// branches are unchanged.
-func encodeBranchID(id string) string {
-	var b strings.Builder
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		if isBranchIDByte(c) {
-			b.WriteByte(c)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
-}
-
-// isBranchIDByte reports whether c can appear literally in a forest branch's id
-// segment. Only bytes valid in a git refname and in a file path are kept; '/' and
-// other path separators, control bytes, whitespace, and git's special characters
-// are escaped so any opaque id derives a usable worktree and branch.
-func isBranchIDByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
-		c >= '0' && c <= '9' || c == '_'
-}
-
-// decodeBranchID reverses encodeBranchID in a single left-to-right pass. '%'
-// always begins a two-hex-digit escape, so an id containing the literal escape
-// sequence `%2D` (encoded as `%252D`) reconstructs to `%2D`, never to a stray
-// '-'; the mapping is bijective and any opaque id round-trips.
-func decodeBranchID(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '%' && i+2 < len(s) {
-			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
-				b.WriteByte(byte(v))
-				i += 2
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
-}
-
-// itemIDFromBranch recovers the opaque item identity from a forest branch,
-// undoing encodeBranchID on the id segment. It never assumes the segment is an
-// integer: it stays a numeric GitHub id or a Habitat id as written.
-func itemIDFromBranch(branch string) string {
-	name := strings.TrimPrefix(branch, BranchPrefix)
-	if i := strings.IndexByte(name, '-'); i >= 0 {
-		name = name[:i]
-	}
-	return decodeBranchID(name)
 }

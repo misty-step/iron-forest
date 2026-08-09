@@ -2,9 +2,12 @@
 #
 # This lane judges only the candidate set deterministic code has already filtered:
 # it ranks the items it is offered and returns one pick. It never writes a branch,
-# tag, comment, or merge; the controller applies the one tag. The run directory is
-# a throwaway empty dir, so the agent holds no repository authority at all.
-description: "The Manager picks one unstarted item from a filtered candidate set and reasons for its pick."
+# label, comment, or merge; the controller applies the one label. The run directory
+# is a throwaway empty dir, so the agent receives no repository context.
+description: "The Manager picks one unstarted item from a filtered candidate set."
+commit:
+  name: "Iron Forest Manager"
+  email: "manager@iron-forest.invalid"
 harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
@@ -13,9 +16,9 @@ temperature: 0.2
 # step ceiling. Runs that exceed this are cancelled and recorded as
 # timeout_failed.
 deadline_seconds: 3600
-# The manager writes only report.json in its throwaway run directory. Reads and
-# edits are allowed so it can reason; every network and repository surface is
-# denied, so it can neither research nor act beyond the one report it proposes.
+# The Manager writes only report.json in its throwaway run directory. The harness
+# supplies no repository context or credentials. Built-in web and MCP tools are
+# denied; bash remains available for local reasoning, so the instruction forbids network use.
 permission:
   read: allow
   edit: allow

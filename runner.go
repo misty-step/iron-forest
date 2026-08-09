@@ -16,6 +16,7 @@ const checkOutputTailBytes = 4000
 // locating the toolchain, resolving FOREST_CHECK_PATH — means no declared check
 // ran, so the returned note keeps an empty status and the caller must not write
 // it as pass. The status is built from the observed result, never assumed.
+
 func runChecks(cfg Config, wtDir, runID string) (checksNote, error) {
 	note := checksNote{
 		RunID: runID,
@@ -33,7 +34,7 @@ func runChecks(cfg Config, wtDir, runID string) (checksNote, error) {
 		cmd := exec.Command("sh", "-c", check.Run)
 		cmd.Dir = wtDir
 		cmd.Env = env
-		output, err := cmd.CombinedOutput()
+		output, err := runCombinedOutput(cmd)
 		result := checkResult{
 			Name:    check.Name,
 			Seconds: time.Since(started).Seconds(),

@@ -1,61 +1,65 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
 
 var worktreeSet = struct {
-	mu   sync.Mutex
-	dirs map[string]struct{}
-}{dirs: make(map[string]struct{})}
+	mu    sync.Mutex
+	locks map[string]*os.File
+}{locks: make(map[string]*os.File)}
 
-func trackWorktree(dir string) {
+func worktreeLockPath(dir string) string {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		absolute = dir
+	}
+	root := filepath.Join("/tmp", fmt.Sprintf("iron-forest-%d", os.Getuid()), "worktree")
+	return filepath.Join(root, blobSHA(absolute)+".lock")
+}
+
+func trackWorktree(dir string) error {
 	if dir == "" {
-		return
+		return errors.New("track worktree: empty path")
+	}
+	lock, err := holdLock(worktreeLockPath(dir))
+	if err != nil {
+		return fmt.Errorf("worktree %s is active: %w", dir, err)
 	}
 	worktreeSet.mu.Lock()
-	worktreeSet.dirs[dir] = struct{}{}
+	if _, exists := worktreeSet.locks[dir]; exists {
+		worktreeSet.mu.Unlock()
+		dropLock(lock)
+		return fmt.Errorf("worktree %s is already tracked", dir)
+	}
+	worktreeSet.locks[dir] = lock
 	worktreeSet.mu.Unlock()
+	return nil
 }
 
 func untrackWorktree(dir string) {
-	if dir == "" {
-		return
-	}
 	worktreeSet.mu.Lock()
-	delete(worktreeSet.dirs, dir)
+	lock := worktreeSet.locks[dir]
+	delete(worktreeSet.locks, dir)
 	worktreeSet.mu.Unlock()
-}
-
-func trackedWorktrees() []string {
-	worktreeSet.mu.Lock()
-	out := make([]string, 0, len(worktreeSet.dirs))
-	for dir := range worktreeSet.dirs {
-		out = append(out, dir)
-	}
-	worktreeSet.mu.Unlock()
-	sort.Strings(out)
-	return out
+	dropLock(lock)
 }
 
 func git(repo string, args ...string) error {
-	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	_, err := gitCommand(repo, args...)
+	return err
 }
 
 func gitOut(repo string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	out, err := cmd.Output()
+	out, err := runOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
@@ -69,7 +73,7 @@ func gitOut(repo string, args ...string) (string, error) {
 // any caller parsing by column must use this instead of gitOut.
 func gitOutRaw(repo string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-	out, err := cmd.Output()
+	out, err := runOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
@@ -77,15 +81,111 @@ func gitOutRaw(repo string, args ...string) (string, error) {
 }
 
 func gitCommit(wtDir string, id CommitIdentity, msg string) error {
-	cmd := exec.Command("git",
-		"-c", "user.name="+id.Name,
-		"-c", "user.email="+id.Email,
-		"-C", wtDir, "commit", "-m", msg)
-	out, err := cmd.CombinedOutput()
+	msg = redactSecretShaped(msg)
+	return gitAsIdentity(wtDir, id, "commit", "-m", msg)
+}
+
+func cleanIdentityEnv() []string {
+	host := os.Environ()
+	env := make([]string, 0, len(host)+4)
+	for _, entry := range host {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL":
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
+func commitIdentityEnv(id CommitIdentity) []string {
+	return append(committerIdentityEnv(id),
+		"GIT_AUTHOR_NAME="+id.Name, "GIT_AUTHOR_EMAIL="+id.Email)
+}
+
+func committerIdentityEnv(id CommitIdentity) []string {
+	return append(cleanIdentityEnv(),
+		"GIT_COMMITTER_NAME="+id.Name, "GIT_COMMITTER_EMAIL="+id.Email)
+}
+
+func gitAsIdentity(repo string, id CommitIdentity, args ...string) error {
+	return gitWithIdentityEnv(repo, commitIdentityEnv(id), args...)
+}
+
+func gitAsCommitter(repo string, id CommitIdentity, args ...string) error {
+	return gitWithIdentityEnv(repo, committerIdentityEnv(id), args...)
+}
+
+func gitWithIdentityEnv(repo string, env []string, args ...string) error {
+	cmdArgs := []string{"-C", repo}
+	cmd := exec.Command("git", append(cmdArgs, args...)...)
+	cmd.Env = env
+	out, err := runCombinedOutput(cmd)
 	if err != nil {
-		return fmt.Errorf("git commit: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// encodeBranchID renders a tracker id as a forest branch's id segment. The
+// branch keeps the forest/<id>-<slug> shape so numeric GitHub ids read as they
+// always have. The segment must be valid in a git refname and in a filesystem
+// path, so every byte outside a small safe set is escaped as %XX; '%' itself is
+// always escaped so the decoder can treat any '%' as the start of an escape.
+// The delimiter on the way back is the first '-', so '-' is escaped too. Numeric
+// ids and hyphen-free alphanumeric Habitat ids contain only safe bytes, so their
+// branches are unchanged.
+func encodeBranchID(id string) string {
+	var b strings.Builder
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if isBranchIDByte(c) {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
+// isBranchIDByte reports whether c can appear literally in a forest branch's id
+// segment. Only bytes valid in a git refname and in a file path are kept; '/' and
+// other path separators, control bytes, whitespace, and git's special characters
+// are escaped so any opaque id derives a usable worktree and branch.
+func isBranchIDByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' || c == '_'
+}
+
+// decodeBranchID reverses encodeBranchID in a single left-to-right pass. '%'
+// always begins a two-hex-digit escape, so an id containing the literal escape
+// sequence `%2D` (encoded as `%252D`) reconstructs to `%2D`, never to a stray
+// '-'; the mapping is bijective and any opaque id round-trips.
+func decodeBranchID(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// itemIDFromBranch recovers the opaque item identity from a forest branch,
+// undoing encodeBranchID on the id segment. It never assumes the segment is an
+// integer: it stays a numeric GitHub id or a Habitat id as written.
+func itemIDFromBranch(branch string) string {
+	name := strings.TrimPrefix(branch, BranchPrefix)
+	if i := strings.IndexByte(name, '-'); i >= 0 {
+		name = name[:i]
+	}
+	return decodeBranchID(name)
 }
 
 // createWorktree makes a fresh linked worktree for one item at the remote tip.
@@ -94,9 +194,11 @@ func gitCommit(wtDir string, id CommitIdentity, msg string) error {
 // non-numeric tracker id — even one containing the '-' delimiter — derives an
 // equally valid, reverse-lookup-able branch.
 func createWorktree(repo, workspace, id, title string) (wtDir, branch, baseSHA string, err error) {
-	branch = fmt.Sprintf("%s%s-%s", BranchPrefix, encodeBranchID(id), slug(title))
+	branch = fmt.Sprintf("%s%s-%s", BranchPrefix, encodeBranchID(id), slug(redactSecretShaped(title)))
 	wtDir = filepath.Join(workspace, "worktrees", branch)
-	trackWorktree(wtDir)
+	if err = trackWorktree(wtDir); err != nil {
+		return "", "", "", err
+	}
 	defer func() {
 		if err != nil {
 			untrackWorktree(wtDir)
@@ -122,16 +224,29 @@ func createWorktree(repo, workspace, id, title string) (wtDir, branch, baseSHA s
 	return wtDir, branch, baseSHA, nil
 }
 
-func removeWorktree(repo, wtDir string) {
-	_ = git(repo, "worktree", "remove", "--force", wtDir)
-	_ = os.RemoveAll(wtDir)
-	untrackWorktree(wtDir)
+func removeWorktree(repo, wtDir string) error {
+	gitErr := git(repo, "worktree", "remove", "--force", wtDir)
+	removeErr := os.RemoveAll(wtDir)
+	if removeErr == nil {
+		untrackWorktree(wtDir)
+	}
+	return errors.Join(gitErr, removeErr)
+}
+
+func cleanupWorktree(repo, wtDir string) {
+	if err := removeWorktree(repo, wtDir); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: remove worktree %s: %v\n", wtDir, err)
+	}
 }
 
 // reapOrphanWorktrees removes linked worktrees left by an interrupted process.
 func reapOrphanWorktrees(repoDir string) {
 	wtRoot, err := filepath.Abs(filepath.Join(repoDir, WorkspaceDir, "worktrees"))
 	if err != nil {
+		return
+	}
+	if err := git(repoDir, "worktree", "prune"); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: prune worktrees: %v\n", err)
 		return
 	}
 	list, err := gitOut(repoDir, "worktree", "list", "--porcelain")
@@ -153,18 +268,25 @@ func reapOrphanWorktrees(repoDir string) {
 		if aerr != nil || !strings.HasPrefix(abs, wtRoot+string(os.PathSeparator)) {
 			continue
 		}
+		lock, lockErr := holdLock(worktreeLockPath(wtDir))
+		if lockErr != nil {
+			if !errors.Is(lockErr, errAdmissionHeld) {
+				fmt.Fprintf(os.Stderr, "forest: inspect worktree owner %s: %v\n", wtDir, lockErr)
+			}
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "forest: removing stale worktree %s\n", wtDir)
-		removeWorktree(repoDir, wtDir)
-	}
-	if err := os.RemoveAll(wtRoot); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: reap worktrees: %v\n", err)
+		cleanupWorktree(repoDir, wtDir)
+		dropLock(lock)
 	}
 }
 
 // createWorktreeAtBranch adds a linked worktree at an existing branch tip.
 func createWorktreeAtBranch(repo, workspace, branch string) (wtDir, baseSHA string, err error) {
 	wtDir = filepath.Join(workspace, "worktrees", branch)
-	trackWorktree(wtDir)
+	if err = trackWorktree(wtDir); err != nil {
+		return "", "", err
+	}
 	defer func() {
 		if err != nil {
 			untrackWorktree(wtDir)

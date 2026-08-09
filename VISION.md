@@ -4,8 +4,8 @@
 
 Iron Forest is a self-hosted software factory. One organization runs one
 installation, which works an arbitrary number of that organization's
-repositories. Each repository gets its own process, running three independent
-Flows: Builder, Verifier, and Fixer.
+repositories. Each repository gets its own process, running four independent
+Flows: Builder, Verifier, Fixer, and Manager.
 
 ## Value proposition
 
@@ -35,13 +35,15 @@ no authority reconciler. No path is withheld from an agent; the factory may
 work on its own declarations, and independent review on the exact commit is
 what decides whether that work lands.
 
-Coordination is facts, not locks. A Verdict or Checks note is keyed to the exact
-reviewed commit and written once; git refuses the second writer. Attempts and the
-repeat-failure brake are compare-and-set refs. Branch publication carries the
-observed remote tip, so a lost race fails cleanly. Exclusion inside one process
-is an in-process subject set, and one lock file keeps one daemon per checkout.
-That lock covers `serve` only: `forest run` dispatches outside it, and nothing
-today excludes two checkouts of the same repository.
+Durable coordination uses git facts. Host-local locks serialize admission and note updates.
+A Verdict or Checks note is keyed to the exact reviewed commit and written once; git refuses the second writer.
+Attempts and the repeat-failure brake are compare-and-set refs. Branch publication carries the
+observed remote tip, so a lost race fails cleanly.
+Admission uses a durable claim ref for each canonical Subject and a per-owner
+lock keyed by repository and Item. It excludes concurrent Effects across
+checkouts on one host and refuses claims held by another Host. The daemon lock
+keeps one `serve` process per checkout; `forest run` bypasses that lock but uses
+Subject admission.
 
 Run history lives in `.forest/runs.jsonl` on the host and is not in git. It is
 telemetry. No selection decision depends on it.
@@ -50,10 +52,12 @@ The Tracker is the work source. Tracker and Projection both call `gh`, so this
 repository requires GitHub today.
 
 Iron Forest runs its own checks in the worktree and writes their results as
-notes. It never reads a Host's checks, reviews, or merge decisions as factory
-state. Projection is optional; when enabled it publishes a branch and mirrors
-each decision as a comment, and it reads the open pull-request list so it does
-not create a second one.
+notes. It never reads a Host's checks or reviews as factory state. Projection
+is optional. It publishes branches, mirrors decisions, and reads pull-request
+identity for idempotent publication. Host recovery covers `preparing`,
+`pending`, and `observed` retirements. An exact merged head first advances
+`preparing` or `pending` to `observed` before approval-note read; a read failure
+retains `observed`.
 
 Agents run through opencode. Credentials are Mint markers in the opencode
 configuration. No `.env` adapter ships. An agent run carries no credential of
@@ -142,4 +146,4 @@ are the same program seen from three places.
 - Reading Host checks, reviews, or merge state as factory state.
 - Central policy for repositories the installation does not own.
 - A coordinated merge across repositories.
-- Two processes working one repository at the same time.
+- Concurrent ownership of one repository by two Hosts.

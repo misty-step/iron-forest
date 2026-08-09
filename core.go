@@ -35,7 +35,6 @@ func (c *coreImpl) Config() (core.Config, error) {
 	}
 	return core.Config{
 		Repo:   cfg.Repo,
-		Commit: core.CommitIdentity{Name: cfg.Commit.Name, Email: cfg.Commit.Email},
 		Checks: checks,
 		Flows: core.Flows{
 			Builder: core.BuilderFlowConfig{
@@ -53,9 +52,9 @@ func (c *coreImpl) Config() (core.Config, error) {
 				Attempts:   cfg.Flows.Fixer.Attempts,
 			},
 			Manager: core.ManagerFlowConfig{
-				FlowConfig:  flowConfig(cfg.Flows.Manager.Enabled, cfg.Flows.Manager.Agent, cfg.Flows.Manager.IntervalSec),
-				ReadyDepth:  cfg.Flows.Manager.ReadyDepth,
-				ExcludeTags: cfg.Flows.Manager.ExcludeTags,
+				FlowConfig:    flowConfig(cfg.Flows.Manager.Enabled, cfg.Flows.Manager.Agent, cfg.Flows.Manager.IntervalSec),
+				ReadyDepth:    cfg.Flows.Manager.ReadyDepth,
+				ExcludeLabels: cfg.Flows.Manager.ExcludeLabels,
 			},
 		},
 		Projection: core.ProjectionConfig{Enabled: cfg.Projection.Enabled, MergeViaHost: cfg.Projection.MergeViaHost},
@@ -92,6 +91,7 @@ func (c *coreImpl) Agents() ([]core.AgentInfo, error) {
 			// field. The agents command always listed the directory name; an
 			// agent.yaml carrying its own `name:` must not change that output.
 			Name: name, Description: a.Description, Model: a.Model,
+			CommitName: a.Commit.Name, CommitEmail: a.Commit.Email,
 			Variant: a.Variant, Mode: a.Mode, DefSHA: a.DefSHA, Mcps: mcps,
 		})
 	}
@@ -137,12 +137,9 @@ func (c *coreImpl) Ledger(q core.LedgerQuery) ([]core.RunRecord, int, error) {
 func (c *coreImpl) Trace(runID string) ([]byte, error) {
 	runsDir := filepath.Join(c.repoDir, WorkspaceDir, "runs")
 
-	// Verifier and fixer run ids embed the branch ("branch-forest/<branch>"),
-	// and filepath.Join in those flows nests the trace below a subdirectory of
-	// the runs dir (runs/<timestamp>-branch-forest/<branch>.jsonl). Reproduce
-	// the writer's join to reach that nested path, reading the name literally
-	// so a glob metacharacter in an item id never matches a sibling. Refuse any
-	// id whose joined path escapes the runs dir.
+	// Current run ids are flat path segments. Older verifier and fixer traces can
+	// contain branch-shaped ids with slashes, so Trace keeps literal nested-path
+	// compatibility. Refuse any id whose joined path escapes the runs directory.
 	for _, suffix := range []string{".builder.jsonl", ".verifier.jsonl", ".fixer.jsonl", ".manager.jsonl"} {
 		p := filepath.Join(runsDir, filepath.FromSlash(runID)+suffix)
 		rel, err := filepath.Rel(runsDir, p)
@@ -153,13 +150,11 @@ func (c *coreImpl) Trace(runID string) ([]byte, error) {
 		if err != nil {
 			continue
 		}
-		// runPhase records the exact prompt it delivered to the agent in a
-		// .prompt.txt sidecar beside the event stream (see runPhase in
-		// harness.go). A trace must record that full prompt too, not just the
-		// events, or a surface reading the trace loses the text that was sent.
-		// When the sidecar exists, append it after the events so both halves of
-		// the record survive; a run that predates the sidecar returns the events
-		// alone.
+		// runPhase records a redacted copy of the delivered prompt in a
+		// .prompt.txt sidecar beside the event stream. A trace returns that
+		// auditable copy too, without retaining credential-shaped input. When
+		// the sidecar exists, append it after the events; a run that predates
+		// the sidecar returns the events alone.
 		if prompt, perr := os.ReadFile(p + ".prompt.txt"); perr == nil {
 			out := make([]byte, 0, len(b)+1+len(prompt))
 			out = append(out, b...)
@@ -232,15 +227,14 @@ func (c *coreImpl) Items() ([]core.Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	return toCoreItems(subjectsToItems(subjects)), nil
-}
-
-func subjectsToItems(subjects []Subject) []Item {
 	items := make([]Item, 0, len(subjects))
 	for _, s := range subjects {
+		if s.Failure != nil {
+			continue
+		}
 		items = append(items, s.Item)
 	}
-	return items
+	return toCoreItems(items), nil
 }
 
 // EligibleItems returns the tracker backlog without the builder's stalled-item
@@ -306,12 +300,13 @@ func (c *coreImpl) Daemon() (core.Daemon, error) {
 // probeDaemon reports whether the factory service is active, preferring
 // systemd --user and falling back to the workspace daemon lock.
 func probeDaemon(repoDir string) core.Daemon {
-	d := core.Daemon{Unit: "forest.service"}
-	out, err := exec.Command("systemctl", "--user", "is-active", "forest").Output()
+	unit := "forest@" + filepath.Base(repoDir) + ".service"
+	d := core.Daemon{Unit: unit}
+	out, err := runOutput(exec.Command("systemctl", "--user", "is-active", unit))
 	active := err == nil && strings.TrimSpace(string(out)) == "active"
 	d.Active = active
 	if active {
-		if pid, err := exec.Command("systemctl", "--user", "show", "forest", "-p", "MainPID", "--value").Output(); err == nil {
+		if pid, err := runOutput(exec.Command("systemctl", "--user", "show", unit, "-p", "MainPID", "--value")); err == nil {
 			d.PID = strings.TrimSpace(string(pid))
 		}
 		d.Note = "systemd --user"

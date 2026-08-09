@@ -136,9 +136,47 @@ type stalledRecord struct {
 	Count    int    `json:"count"`
 }
 
-// stalledRef returns the repository ref that survives checkout and host changes.
+// stalledRef keeps legacy valid refs stable and moves only opaque invalid keys
+// into a disjoint encoded namespace.
 func stalledRef(flow, subject string) string {
-	return "refs/forest/stalled/" + flow + "/" + subject
+	if validRefSuffix(subject) {
+		return "refs/forest/stalled/" + flow + "/" + subject
+	}
+	return "refs/forest/stalled-opaque/" + flow + "/" + encodeRefComponent(subject)
+}
+
+func validRefSuffix(value string) bool {
+	if value == "" || value == "@" || strings.HasPrefix(value, "/") ||
+		strings.HasSuffix(value, "/") || strings.HasSuffix(value, ".") ||
+		strings.Contains(value, "..") || strings.Contains(value, "@{") {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || strings.HasPrefix(component, ".") ||
+			strings.HasSuffix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] <= ' ' || value[i] == 0x7f || strings.ContainsRune(`~^:?*[\`, rune(value[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeStalled(body string) (stalledRecord, error) {
+	if strings.TrimSpace(body) == "" {
+		return stalledRecord{}, fmt.Errorf("%w: empty stalled record", errControlEvidenceInvalid)
+	}
+	var record stalledRecord
+	if err := json.Unmarshal([]byte(body), &record); err != nil {
+		return stalledRecord{}, fmt.Errorf("%w: decode stalled record: %v", errControlEvidenceInvalid, err)
+	}
+	if record.Revision == "" || record.Count < 1 {
+		return stalledRecord{}, fmt.Errorf("%w: invalid stalled record", errControlEvidenceInvalid)
+	}
+	return record, nil
 }
 
 // stalledOn reports whether a flow reached the failure limit on this revision.
@@ -146,22 +184,43 @@ func stalledOn(repoDir, flow, subject, revision string) (bool, error) {
 	if revision == "" {
 		return false, nil
 	}
-	_, body, err := getBlobRef(repoDir, stalledRef(flow, subject))
+	sha, body, err := getBlobRef(repoDir, stalledRef(flow, subject))
+	if err != nil {
+		return false, fmt.Errorf("%w: read stalled record: %v", errFlowRetryable, err)
+	}
+	if sha == "" {
+		return false, nil
+	}
+	record, err := decodeStalled(body)
 	if err != nil {
 		return false, err
 	}
-	if strings.TrimSpace(body) == "" {
-		return false, nil
-	}
-	var record stalledRecord
-	if err := json.Unmarshal([]byte(body), &record); err != nil {
-		return false, fmt.Errorf("decode stalled record: %w", err)
-	}
 	return record.Revision == revision && record.Count >= stalledRunLimit, nil
+}
+func subjectAfterBrake(repoDir, flow string, subject Subject) (Subject, bool, error) {
+	stalled, err := stalledOn(repoDir, flow, subject.Key, subject.Revision)
+	if err != nil {
+		if errors.Is(err, errControlEvidenceInvalid) {
+			subject.Failure = errors.Join(subject.Failure, err)
+			return subject, true, nil
+		}
+		return Subject{}, false, err
+	}
+	return subject, !stalled, nil
 }
 
 // recordStalled increments the durable failure count with compare-and-swap.
 func recordStalled(repoDir, flow, subject, revision string) error {
+	return writeStalled(repoDir, flow, subject, revision, false)
+}
+
+// recordTerminalStall sets the brake immediately for a failure that cannot
+// succeed again on the same Revision.
+func recordTerminalStall(repoDir, flow, subject, revision string) error {
+	return writeStalled(repoDir, flow, subject, revision, true)
+}
+
+func writeStalled(repoDir, flow, subject, revision string, terminal bool) error {
 	if revision == "" {
 		return errors.New("stalled: empty revision")
 	}
@@ -173,13 +232,22 @@ func recordStalled(repoDir, flow, subject, revision string) error {
 			return err
 		}
 		record := stalledRecord{Revision: revision, Count: 1}
-		if strings.TrimSpace(body) != "" {
-			var previous stalledRecord
-			if err := json.Unmarshal([]byte(body), &previous); err != nil {
-				return fmt.Errorf("decode stalled record: %w", err)
+		if terminal {
+			record.Count = stalledRunLimit
+		}
+		if sha != "" {
+			previous, err := decodeStalled(body)
+			if err != nil {
+				return err
 			}
 			if previous.Revision == revision {
-				record.Count = previous.Count + 1
+				if terminal {
+					if previous.Count > record.Count {
+						record.Count = previous.Count
+					}
+				} else {
+					record.Count = previous.Count + 1
+				}
 			}
 		}
 		payload, err := json.Marshal(record)
@@ -200,7 +268,7 @@ func recordStalled(repoDir, flow, subject, revision string) error {
 // runCategory groups ledger statuses for operator summaries.
 func runCategory(status string) string {
 	switch status {
-	case "built", "reviewed", "merged", "fixed":
+	case "built", "reviewed", "merged", "fixed", "done", "reaped":
 		return "progress"
 	case "skipped":
 		return "other"
@@ -222,6 +290,21 @@ func appendRun(workspace string, r runRecord) error {
 		return err
 	}
 	defer f.Close()
+	r.Time = redactSecretShaped(r.Time)
+	r.RunID = redactSecretShaped(r.RunID)
+	r.Flow = redactSecretShaped(r.Flow)
+	r.Subject = redactSecretShaped(r.Subject)
+	r.Revision = redactSecretShaped(r.Revision)
+	r.ID = redactSecretShaped(r.ID)
+	r.Branch = redactSecretShaped(r.Branch)
+	r.PRURL = redactSecretShaped(r.PRURL)
+	r.Status = redactSecretShaped(r.Status)
+	r.Agent = redactSecretShaped(r.Agent)
+	r.Model = redactSecretShaped(r.Model)
+	r.BaseSHA = redactSecretShaped(r.BaseSHA)
+	r.DefSHA = redactSecretShaped(r.DefSHA)
+	r.ReviewVerdict = redactSecretShaped(r.ReviewVerdict)
+	r.Error = redactSecretShaped(r.Error)
 	enc := json.NewEncoder(f)
 	return enc.Encode(r)
 }

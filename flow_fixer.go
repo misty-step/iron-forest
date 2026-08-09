@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -23,87 +24,184 @@ func (fixerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	if err := fetchNotes(repoDir); err != nil {
 		return nil, fmt.Errorf("notes: %w", err)
 	}
-	branches, err := forestBranches(repoDir)
+	branchSnapshot, err := readForestBranchSnapshot(repoDir)
 	if err != nil {
 		return nil, err
 	}
-	var subjects []Subject
-	for _, branch := range branches {
+	subjects := make([]Subject, 0, len(branchSnapshot.Failures)+len(branchSnapshot.Actionable))
+	for _, branch := range branchSnapshot.Actionable {
 		head, err := branchHead(repoDir, branch)
 		if err != nil {
 			return nil, fmt.Errorf("branch %s: %w", branch, err)
 		}
 		key := "branch-" + branch
-		v, hasVerdict, err := readVerdict(repoDir, head)
-		if err != nil {
-			return nil, fmt.Errorf("verdict %s: %w", branch, err)
-		}
-		checks, hasChecks, err := readChecks(repoDir, head)
-		if err != nil {
-			return nil, fmt.Errorf("checks %s: %w", branch, err)
-		}
-		if !(hasVerdict && v.Verdict == "changes") && !(hasChecks && checks.Status == "fail") {
-			continue
-		}
-		attempts, err := readAttempts(repoDir, key)
-		if err != nil {
-			return nil, fmt.Errorf("attempts %s: %w", branch, err)
-		}
-		if attempts >= cfg.Flows.Fixer.Attempts {
-			continue
-		}
-		// The attempt ceiling bounds published repairs; this bounds the repairs
-		// that never reached a commit, so a lane that cannot even publish stops
-		// paying an agent to retry one unchanged situation.
-		stalled, err := stalledOn(repoDir, "fixer", key, head)
-		if err != nil {
-			return nil, fmt.Errorf("stalled %s: %w", key, err)
-		}
-		if stalled {
-			continue
-		}
-		subjects = append(subjects, Subject{
+		subject := Subject{
 			Key:      key,
-			Kind:     "branch",
+			Kind:     subjectBranch,
 			Revision: head,
 			Label:    branch,
 			ID:       itemIDFromBranch(branch),
 			Branch:   branch,
-			Head:     head,
-		})
+		}
+		subject, include, err := subjectAfterBrake(repoDir, "fixer", subject)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", key, err)
+		}
+		if !include {
+			continue
+		}
+		if subject.Failure != nil {
+			subjects = append(subjects, subject)
+			continue
+		}
+		attempts, err := readAttempts(repoDir, key)
+		if err != nil {
+			if errors.Is(err, errAttemptsInvalid) {
+				subject.Failure = err
+				subjects = append(subjects, subject)
+				continue
+			}
+			return nil, fmt.Errorf("attempts %s: %w", branch, err)
+		}
+		if attempts >= cfg.Flows.Fixer.Attempts {
+			subjects = append(subjects, subject)
+			continue
+		}
+		v, hasVerdict, err := readVerdict(repoDir, head)
+		if err != nil {
+			if errors.Is(err, errNoteInvalid) {
+				subject.Failure = flowNoteError(err)
+				subjects = append(subjects, subject)
+				continue
+			}
+			return nil, fmt.Errorf("verdict %s: %w", branch, err)
+		}
+		checks, hasChecks, err := readChecks(repoDir, head)
+		if err != nil {
+			if errors.Is(err, errNoteInvalid) {
+				subject.Failure = flowNoteError(err)
+				subjects = append(subjects, subject)
+				continue
+			}
+			return nil, fmt.Errorf("checks %s: %w", branch, err)
+		}
+		if !fixerNeedsRepair(v, hasVerdict, checks, hasChecks) {
+			continue
+		}
+		subjects = append(subjects, subject)
+	}
+	for _, failure := range branchSnapshot.Failures {
+		failure, include, err := subjectAfterBrake(repoDir, "fixer", failure)
+		if err != nil {
+			return nil, fmt.Errorf("stalled %s: %w", failure.Key, err)
+		}
+		if include {
+			subjects = append(subjects, failure)
+		}
 	}
 	return subjects, nil
 }
 
 func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
-	it, err := trackerFor(cfg.Repo).Get(s.ID)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "item_failed"}, fmt.Errorf("item: %w", err)
+	out := Outcome{Branch: s.Branch, BaseSHA: s.Revision}
+	if s.Failure != nil {
+		out.Status = "evidence_failed"
+		return out, s.Failure
 	}
+	if err := requalifyForestBranch(repoDir, s.Branch); err != nil {
+		out.Status = "branch_failed"
+		return out, err
+	}
+	head, present, err := lookupBranchHead(repoDir, s.Branch)
+	if err != nil {
+		out.Status = "branch_failed"
+		return out, fmt.Errorf("branch: %w", err)
+	}
+	if !present || head != s.Revision {
+		out.Status = "stale"
+		out.BaseSHA = head
+		return out, errSubjectRevisionStale
+	}
+	stalled, err := stalledOn(repoDir, "fixer", s.Key, s.Revision)
+	if err != nil {
+		out.Status = "evidence_failed"
+		return out, err
+	}
+	if stalled {
+		out.Status = "skipped"
+		return out, nil
+	}
+	attempts, err := readAttempts(repoDir, s.Key)
+	if err != nil {
+		out.Status = "attempts_failed"
+		return out, err
+	}
+	it, err := validatedTrackerItem(trackerFor(cfg.Repo), s.ID)
+	if err != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("item: %w", err)
+	}
+	exhausted := attempts >= cfg.Flows.Fixer.Attempts
+	if exhausted {
+		if err := markFixerFailed(cfg.Repo, repoDir, s.Revision, it); err != nil {
+			out.Status = "tracker_failed"
+			return out, fmt.Errorf("tracker: %w", err)
+		}
+	}
+	if err := fetchNotes(repoDir); err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: refresh before repair: %w", flowNoteError(err))
+	}
+	v, hasVerdict, err := readVerdict(repoDir, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: %w", flowNoteError(err))
+	}
+	checks, hasChecks, err := readChecks(repoDir, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: %w", flowNoteError(err))
+	}
+	if hasChecks && checks.Status == "fail" {
+		if err := projectChecks(cfg, repoDir, s.Branch, s.Revision, checks); err != nil {
+			out.Status = "projection_failed"
+			return out, fmt.Errorf("projection: %w", retryableHostError(cfg, err))
+		}
+	}
+	if exhausted {
+		if err := recordTerminalStall(repoDir, "fixer", s.Key, s.Revision); err != nil {
+			out.Status = "evidence_failed"
+			return out, fmt.Errorf("record failed handoff brake: %w", err)
+		}
+		out.Status = "exhausted"
+		return out, nil
+	}
+	if !fixerNeedsRepair(v, hasVerdict, checks, hasChecks) {
+		out.Status = "skipped"
+		return out, nil
+	}
+
 	a, err := loadAgent(repoDir, cfg.Flows.Fixer.Agent)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Status: "agent_failed"}, fmt.Errorf("agent: %w", err)
-	}
-	v, _, err := readVerdict(repoDir, s.Head)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("notes: %w", err)
-	}
-	checks, _, err := readChecks(repoDir, s.Head)
-	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "notes_failed"}, fmt.Errorf("notes: %w", err)
+		out.Status = "agent_failed"
+		return out, fmt.Errorf("agent: %w", err)
 	}
 	request := fixerRevision(v, checks)
 
 	workspace := workspaceDir(repoDir)
 	wtDir, baseSHA, err := createWorktreeAtBranch(repoDir, workspace, s.Branch)
 	if err != nil {
-		return Outcome{Branch: s.Branch, BaseSHA: s.Head, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA, Status: "worktree_failed"}, fmt.Errorf("worktree: %w", err)
+		out.Status = "worktree_failed"
+		return out, fmt.Errorf("worktree: %w", err)
 	}
-	defer func() {
-		removeWorktree(repoDir, wtDir)
-		untrackWorktree(wtDir)
-	}()
-	out := Outcome{Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model, DefSHA: a.DefSHA}
+	defer cleanupWorktree(repoDir, wtDir)
+	if err := checkSubjectRevision(s, baseSHA); err != nil {
+		return Outcome{
+			Branch: s.Branch, BaseSHA: baseSHA, Agent: a.Name, Model: a.Model,
+			DefSHA: a.DefSHA, Status: "stale",
+		}, err
+	}
+	out.Agent, out.Model, out.DefSHA = a.Name, a.Model, a.DefSHA
 	prompt, err := renderUserPrompt(a, issueData(it, request))
 	if err != nil {
 		out.Status = "prompt_failed"
@@ -133,23 +231,29 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
-	if err := commitAndPush(repoDir, wtDir, s.Branch, s.Head, cfg.Commit, it); err != nil {
+	publishedHead, count, err := commitFixAndPush(
+		repoDir, wtDir, s.Branch, s.Revision, s.Key, attempts, a.Commit, it,
+	)
+	if err != nil {
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
-	count, err := bumpAttempts(repoDir, s.Key)
-	if err != nil {
-		out.Status = "attempts_failed"
-		return out, fmt.Errorf("attempts: %w", err)
-	}
 	if count >= cfg.Flows.Fixer.Attempts {
-		if err := markFixerFailed(cfg.Repo, it); err != nil {
+		if err := markFixerFailed(cfg.Repo, repoDir, publishedHead, it); err != nil {
 			out.Status = "tracker_failed"
 			return out, fmt.Errorf("tracker: %w", err)
+		}
+		if err := recordTerminalStall(repoDir, "fixer", s.Key, publishedHead); err != nil {
+			out.Status = "evidence_failed"
+			return out, fmt.Errorf("record failed handoff brake: %w", err)
 		}
 	}
 	out.Status = "fixed"
 	return out, nil
+}
+
+func fixerNeedsRepair(v verdictNote, hasVerdict bool, c checksNote, hasChecks bool) bool {
+	return hasVerdict && v.Verdict == "changes" || hasChecks && c.Status == "fail"
 }
 
 func fixerRevision(v verdictNote, c checksNote) string {
@@ -171,15 +275,20 @@ func fixerRevision(v verdictNote, c checksNote) string {
 	return strings.TrimSpace(b.String())
 }
 
-func markFixerFailed(repo string, it Item) error {
+func markFixerFailed(repo, repoDir, revision string, it Item) error {
+	// The Flow admission claim records intent before this idempotent tag Effect.
 	tk := trackerFor(repo)
 	if err := tk.SetTags(it.ID, []string{failedLabel}, nil); err != nil {
 		return err
 	}
-	for _, c := range it.Comments {
-		if strings.Contains(c.Body, "forest:failed: attempts ceiling reached") {
-			return nil
-		}
-	}
-	return tk.Comment(it.ID, "forest:failed: attempts ceiling reached; human review is required.")
+	marker := "<!-- iron-forest:fixer-failed revision=" + revision + " -->"
+	return publishTrackerComment(
+		repoDir,
+		tk,
+		it,
+		"Tracker-fixer-comment",
+		revision,
+		"forest:failed: attempts ceiling reached; human review is required.",
+		marker,
+	)
 }

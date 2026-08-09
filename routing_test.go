@@ -155,10 +155,16 @@ func TestCmdAgentsReportsMalformedAndContinues(t *testing.T) {
 	if err := os.MkdirAll(good, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(good, "agent.yaml"), []byte("description: good\nmodel: g-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(good, "agent.yaml"), []byte("description: good\ncommit:\n  name: good\n  email: good@example.invalid\nmodel: g-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(good, "instructions.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(good, "prompt.md"), []byte("{{.Task}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(good, "report.schema.json"), []byte(`{"type":"object"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	bad := filepath.Join(work, DefaultAgentsDir, "bad")
@@ -278,14 +284,14 @@ func TestCmdShowPreservesResultsNilVersusEmptyShape(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			api, work, sha := coreFixture(t)
 			if tc.name == "explicit-empty" {
-				if err := writeChecks(work, sha, checksNote{Status: "pass", Results: []checkResult{}}); err != nil {
+				if err := writeChecks(work, sha, checksNote{Status: "pass", Results: []checkResult{}}, testCommitIdentity()); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				// A checks note carrying only a status has a null (nil) results
 				// field once the note is written and read back, so it exercises
 				// the same path as an explicit JSON null.
-				if err := writeChecks(work, sha, checksNote{Status: "pass"}); err != nil {
+				if err := writeChecks(work, sha, checksNote{Status: "pass"}, testCommitIdentity()); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -309,7 +315,10 @@ func TestCmdShowEmitsNoteLackingTimeAndRunID(t *testing.T) {
 	api, work, sha := coreFixture(t)
 	// writeNote bypasses writeVerdict's time stamp, leaving both Time and RunID
 	// empty in the stored note.
-	if err := writeNote(work, verdictNotesRef, sha, verdictNote{Verdict: "approve"}); err != nil {
+	if err := writeNote(work, verdictNotesRef, sha, verdictNote{
+		Verdict: "approve", Reviewer: "reviewer", Model: "model",
+		DefSHA: strings.Repeat("a", 16),
+	}, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	code := 0

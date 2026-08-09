@@ -16,9 +16,6 @@ func coreFixture(t *testing.T) (core.API, string, string) {
 	_, work, sha := notesTestRepository(t)
 	if err := os.WriteFile(filepath.Join(work, "forest.yaml"), []byte(
 		"repo: owner/repo\n"+
-			"commit:\n"+
-			"  name: forest\n"+
-			"  email: forest@invalid\n"+
 			"checks:\n"+
 			"  - name: test\n"+
 			"    run: \"true\"\n"+
@@ -45,9 +42,9 @@ func coreFixture(t *testing.T) (core.API, string, string) {
 	), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	notesTestGit(t, work, "add", "forest.yaml")
-	notesTestGit(t, work, "commit", "-m", "config")
-	notesTestGit(t, work, "push", "-q", "origin", "HEAD:master")
+	runGitTest(t, work, "add", "forest.yaml")
+	runGitTest(t, work, "commit", "-m", "config")
+	runGitTest(t, work, "push", "-q", "origin", "HEAD:master")
 	return NewCore(work), work, sha
 }
 
@@ -62,9 +59,6 @@ func TestCoreConfigReadsForestYAML(t *testing.T) {
 	}
 	if len(cfg.Checks) != 1 || cfg.Checks[0].Name != "test" {
 		t.Fatalf("Config checks = %+v, want one test check", cfg.Checks)
-	}
-	if cfg.Commit.Name != "forest" || cfg.Commit.Email != "forest@invalid" {
-		t.Fatalf("Config commit = %+v, want forest/forest@invalid", cfg.Commit)
 	}
 	if len(cfg.Flows.Builder.ExcludeLabels) != 1 || cfg.Flows.Builder.ExcludeLabels[0] != "parked" {
 		t.Fatalf("Config builder labels = %v, want [parked]", cfg.Flows.Builder.ExcludeLabels)
@@ -87,11 +81,17 @@ func TestCoreAgentsListsDeclaredAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"),
-		[]byte("description: test agent\nmodel: test-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
+		[]byte("description: test agent\ncommit:\n  name: test\n  email: test@example.invalid\nmodel: test-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "instructions.md"),
 		[]byte("Be helpful.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte("{{.Task}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.schema.json"), []byte(`{"type":"object"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	agents, err := api.Agents()
@@ -103,6 +103,9 @@ func TestCoreAgentsListsDeclaredAgents(t *testing.T) {
 	}
 	if agents[0].Name != "builder" || agents[0].Model != "test-model" {
 		t.Fatalf("agent = %+v, want name=builder model=test-model", agents[0])
+	}
+	if agents[0].CommitName != "test" || agents[0].CommitEmail != "test@example.invalid" {
+		t.Fatalf("agent commit identity = %s <%s>", agents[0].CommitName, agents[0].CommitEmail)
 	}
 	if agents[0].DefSHA == "" {
 		t.Fatalf("agent def_sha is empty, want a digest")
@@ -121,7 +124,7 @@ func TestCoreAgentsUsesDirectoryNameNotDeclarationName(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"),
-		[]byte("name: renamed-in-yaml\ndescription: test agent\nmodel: test-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
+		[]byte("name: renamed-in-yaml\ndescription: test agent\ncommit:\n  name: test\n  email: test@example.invalid\nmodel: test-model\ndeadline_seconds: 3600\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "instructions.md"),
@@ -268,9 +271,8 @@ func TestCoreTraceReadsNestedVerifierTrace(t *testing.T) {
 }
 
 // TestCoreTraceIncludesPromptSidecar pins #204's trace contract: runPhase
-// records the full prompt it delivered beside the event stream as <trace>.
-// prompt.txt, and Trace must return that prompt so a surface reading the trace
-// sees the exact text that was sent, not just the events that followed.
+// records a redacted copy of the delivered prompt beside the event stream, and
+// Trace returns that auditable copy with the events.
 func TestCoreTraceIncludesPromptSidecar(t *testing.T) {
 	api, work, _ := coreFixture(t)
 	runsDir := filepath.Join(work, WorkspaceDir, "runs")
@@ -304,15 +306,15 @@ func TestCoreNotesReadsVerdictAndChecks(t *testing.T) {
 	}
 	if err := writeVerdict(work, sha, verdictNote{
 		Verdict: "approve", Notes: "looks good", Reviewer: "reviewer-a",
-		Model: "model-a", DefSHA: "def-a", RunID: "run-a",
-	}); err != nil {
+		Model: "model-a", DefSHA: "aaaaaaaaaaaaaaaa", RunID: "run-a",
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("writeVerdict: %v", err)
 	}
 	if err := writeChecks(work, sha, checksNote{
 		Status:  "pass",
 		Results: []checkResult{{Name: "test", Code: 0, Output: "ok"}},
 		RunID:   "run-checks",
-	}); err != nil {
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("writeChecks: %v", err)
 	}
 	v, c, err := api.Notes(sha)
@@ -331,6 +333,7 @@ func TestCoreItemsReturnsBuilderSelectorBacklog(t *testing.T) {
 	old := trackerFor
 	trackerFor = func(repo string) Tracker {
 		return trackerStub{items: []Item{
+			{ID: "", Title: "malformed", UpdatedAt: "bad"},
 			{
 				ID: "hab_01J9X", Title: "opaque", UpdatedAt: "r",
 				Comments: []comment{{Body: "a note", CreatedAt: "t"}},
@@ -354,13 +357,13 @@ func TestCoreItemsReturnsBuilderSelectorBacklog(t *testing.T) {
 
 func TestCoreBranchesListsForestBranches(t *testing.T) {
 	api, work, _ := coreFixture(t)
-	notesTestGit(t, work, "checkout", "-q", "-b", "forest/7-example")
+	runGitTest(t, work, "checkout", "-q", "-b", "forest/7-example")
 	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("b\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	notesTestGit(t, work, "commit", "-qam", "branch work")
-	notesTestGit(t, work, "push", "-q", "-u", "origin", "forest/7-example")
-	notesTestGit(t, work, "checkout", "-q", "master")
+	runGitTest(t, work, "commit", "-qam", "branch work")
+	runGitTest(t, work, "push", "-q", "-u", "origin", "forest/7-example")
+	runGitTest(t, work, "checkout", "-q", "master")
 
 	branches, err := api.Branches()
 	if err != nil {

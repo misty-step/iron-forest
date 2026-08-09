@@ -1,47 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// setupTestRepo builds a throwaway repository with a real origin, because
-// createWorktree resolves its base from the remote tip and a fixture without a
-// remote would prove nothing about the path the flows actually take.
-func setupTestRepo(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	origin := filepath.Join(root, "origin.git")
-	repo := filepath.Join(root, "work")
-	run := func(dir, name string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v: %s", name, err, strings.TrimSpace(string(out)))
-		}
-	}
-	if err := os.MkdirAll(origin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run(origin, "init-bare", "init", "--bare", "-b", "master")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	run(repo, "init", "init", "-b", "master")
-	run(repo, "config", "config", "user.email", "test@example.com")
-	run(repo, "config", "config", "user.name", "test")
-	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run(repo, "add", "add", "file.txt")
-	run(repo, "commit", "commit", "-m", "init")
-	run(repo, "remote", "remote", "add", "origin", origin)
-	run(repo, "push", "push", "-q", "-u", "origin", "master")
-	return repo
-}
 
 // currentWorktrees lists the worktree paths git has registered for a repo.
 func currentWorktrees(t *testing.T, repo string) []string {
@@ -75,6 +44,7 @@ func TestReapOrphanWorktreesRemovesStaleRun(t *testing.T) {
 		t.Fatalf("worktree %s was not created: %v", wtDir, err)
 	}
 	// Leak it: deliberately skip removeWorktree, the way an os.Exit would.
+	untrackWorktree(wtDir)
 	reapOrphanWorktrees(repo)
 	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
 		t.Fatalf("worktree %s still exists after reap", wtDir)
@@ -84,6 +54,56 @@ func TestReapOrphanWorktreesRemovesStaleRun(t *testing.T) {
 			t.Fatalf("stale worktree %s still registered after reap", wtDir)
 		}
 	}
+}
+
+func TestReapOrphanWorktreesPrunesMissingDirectoryRegistration(t *testing.T) {
+	repo := setupTestRepo(t)
+	workspace := filepath.Join(repo, WorkspaceDir)
+	wtDir, _, _, err := createWorktree(repo, workspace, "45", "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(wtDir); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a restart: process-local ownership is gone, but Git still has
+	// the linked-worktree registration.
+	untrackWorktree(wtDir)
+	registered := false
+	for _, wt := range currentWorktrees(t, repo) {
+		registered = registered || filepath.Clean(wt) == filepath.Clean(wtDir)
+	}
+	if !registered {
+		t.Fatal("fixture lost the stale Git worktree registration")
+	}
+	reapOrphanWorktrees(repo)
+	for _, wt := range currentWorktrees(t, repo) {
+		if filepath.Clean(wt) == filepath.Clean(wtDir) {
+			t.Fatalf("missing worktree %s remains registered after reap", wtDir)
+		}
+	}
+}
+
+func TestRemoveWorktreeUntracksAfterGitFailure(t *testing.T) {
+	wtDir := filepath.Join(t.TempDir(), "worktree")
+	if err := os.MkdirAll(wtDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := trackWorktree(wtDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { untrackWorktree(wtDir) })
+
+	if err := removeWorktree(filepath.Join(t.TempDir(), "missing-repo"), wtDir); err == nil {
+		t.Fatal("Git removal failure returned nil")
+	}
+	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
+		t.Fatalf("worktree directory still exists: %v", err)
+	}
+	if err := trackWorktree(wtDir); err != nil {
+		t.Fatalf("removed worktree retained its ownership lock: %v", err)
+	}
+	untrackWorktree(wtDir)
 }
 
 // TestCreateWorktreeStartsAtTheRemoteTip pins the isolation invariant: a run
@@ -106,6 +126,21 @@ func TestCreateWorktreeStartsAtTheRemoteTip(t *testing.T) {
 	}
 	if want := "forest/5-tip"; branch != want {
 		t.Fatalf("branch = %q, want %q", branch, want)
+	}
+}
+func TestCreateWorktreeRedactsTitleBeforeBranchSlug(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	repo := setupTestRepo(t)
+	wtDir, branch, _, err := createWorktree(repo, filepath.Join(repo, WorkspaceDir), "6", "change "+secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removeWorktree(repo, wtDir)
+	if strings.Contains(branch, secret) {
+		t.Fatalf("branch %q retained the title secret", branch)
+	}
+	if branch != "forest/6-change-redacted" {
+		t.Fatalf("branch = %q, want redacted slug forest/6-change-redacted", branch)
 	}
 }
 
@@ -169,29 +204,95 @@ func TestEncodeBranchIDBijective(t *testing.T) {
 	}
 }
 
-// TestTrackedWorktreesIsolateLanes pins the contract the drain handler depends
-// on: every live worktree is listed, and clearing one lane's worktree never
-// hides another lane's, which would leak it on an abrupt exit.
-func TestTrackedWorktreesIsolateLanes(t *testing.T) {
-	repo := setupTestRepo(t)
-	workspace := filepath.Join(repo, WorkspaceDir)
-	first, _, _, err := createWorktree(repo, workspace, "7", "one")
+func TestWorktreeOwnerProcessHelper(t *testing.T) {
+	repo := os.Getenv("FOREST_WORKTREE_OWNER_REPO")
+	if repo == "" {
+		return
+	}
+	wtDir, _, _, err := createWorktree(repo, workspaceDir(repo), "901", "live-owner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer removeWorktree(repo, first)
-	second, _, _, err := createWorktree(repo, workspace, "8", "two")
-	if err != nil {
+	fmt.Println(wtDir)
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	if err := removeWorktree(repo, wtDir); err != nil {
 		t.Fatal(err)
 	}
-	defer removeWorktree(repo, second)
+}
 
-	if got := trackedWorktrees(); len(got) != 2 {
-		t.Fatalf("trackedWorktrees() = %v, want both lanes", got)
+// TestReaperPreservesWorktreeOwnedByAnotherProcess pins startup cleanup to
+// process-independent ownership. A new daemon must not reap a live manual Run.
+func TestReaperPreservesWorktreeOwnedByAnotherProcess(t *testing.T) {
+	repo := setupTestRepo(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestWorktreeOwnerProcessHelper$")
+	cmd.Env = append(os.Environ(), "FOREST_WORKTREE_OWNER_REPO="+repo)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	untrackWorktree(first)
-	got := trackedWorktrees()
-	if len(got) != 1 || got[0] != second {
-		t.Fatalf("trackedWorktrees() = %v after clearing one lane, want only %q", got, second)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	done, markWaited := startTestProcess(t, cmd)
+	t.Cleanup(func() { _ = stdin.Close() })
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read owner worktree: %v: %s", err, stderr.String())
+	}
+	wtDir := strings.TrimSpace(line)
+	reapOrphanWorktrees(repo)
+	if _, err := os.Stat(wtDir); err != nil {
+		t.Fatalf("reaper removed live foreign-process worktree %s: %v", wtDir, err)
+	}
+	list, err := gitOut(repo, "worktree", "list", "--porcelain")
+	if err != nil || !strings.Contains(list, "worktree "+wtDir) {
+		t.Fatalf("live worktree registration = (%q, %v), want %s", list, err, wtDir)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("owner helper: %v: %s", err, stderr.String())
+	}
+	markWaited()
+}
+
+func TestGitCommitIgnoresAmbientIdentity(t *testing.T) {
+	repo := setupTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "identity.txt"), []byte("declared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "add", "identity.txt")
+	t.Setenv("GIT_AUTHOR_NAME", "ambient author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ambient-author@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "ambient committer")
+	t.Setenv("GIT_COMMITTER_EMAIL", "ambient-committer@example.com")
+	id := CommitIdentity{Name: "declared agent", Email: "declared@example.invalid"}
+	if err := gitCommit(repo, id, "declared identity"); err != nil {
+		t.Fatal(err)
+	}
+	got := runGitTest(t, repo, "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD")
+	want := "declared agent <declared@example.invalid>|declared agent <declared@example.invalid>"
+	if got != want {
+		t.Fatalf("commit identities = %q, want %q", got, want)
+	}
+}
+func TestGitCommitRedactsMessage(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	repo := setupTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "secret-message.txt"), []byte("change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "add", "secret-message.txt")
+	id := CommitIdentity{Name: "declared agent", Email: "declared@example.invalid"}
+	if err := gitCommit(repo, id, "publish "+secret); err != nil {
+		t.Fatal(err)
+	}
+	got := runGitTest(t, repo, "show", "-s", "--format=%s", "HEAD")
+	if strings.Contains(got, secret) || !strings.Contains(got, secretRedacted) {
+		t.Fatalf("commit message = %q, want marker without original", got)
 	}
 }

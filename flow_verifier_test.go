@@ -3,224 +3,31 @@ package main
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// rebaseTestGit runs git against a test repository, failing the test on error.
-func rebaseTestGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmdArgs := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", cmdArgs...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %s: %v: %s", strings.Join(cmdArgs, " "), err, strings.TrimSpace(string(out)))
-	}
-}
-
-// rebaseTestGitOut runs git and returns its trimmed stdout, failing the test on error.
-func rebaseTestGitOut(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmdArgs := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", cmdArgs...)
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git %s: %v", strings.Join(cmdArgs, " "), err)
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func rebaseTestWriteFile(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestRebaseOntoMasterRebasesBehindBranch proves a branch behind master by a
-// non-conflicting commit is rebased onto origin/master and its new head pushed
-// with force, and that Act writes the checks note at the post-rebase head and
-// records that same head in its outcome.
-func TestRebaseOntoMasterRebasesBehindBranch(t *testing.T) {
-	repo := setupTestRepo(t)
-	workspace := filepath.Join(repo, WorkspaceDir)
-
-	// Build a branch from the current master, then advance master.
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", "forest/9-change")
-	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "branch.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/forest/9-change")
-	rebaseTestGit(t, repo, "checkout", "-q", "master")
-	rebaseTestWriteFile(t, filepath.Join(repo, "master.txt"), "master\n")
-	rebaseTestGit(t, repo, "add", "master.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "master work")
-	rebaseTestGit(t, repo, "push", "-q", "origin", "master")
-
-	// A verifier agent directory is required for Act to build a run.
-	writeAgentFixture(t, repo, "verifier", "verifier-model")
-
-	// Learn the post-rebase head in a worktree so a verdict can be seeded there
-	// and Act stops after review; Act then rebases again, a no-op because the
-	// branch is already current.
-	wtDir, oldHead, err := createWorktreeAtBranch(repo, workspace, "forest/9-change")
-	if err != nil {
-		t.Fatal(err)
-	}
-	newHead, err := rebaseOntoMaster(wtDir, "forest/9-change")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if newHead == oldHead {
-		t.Fatalf("rebase produced no new head: both %q", newHead)
-	}
-	if _, err := os.Stat(filepath.Join(wtDir, "master.txt")); err != nil {
-		t.Fatalf("rebased worktree lacks the master commit: %v", err)
-	}
-	removeWorktree(repo, wtDir)
-	if remoteHead := remoteBranchHead(t, repo, "forest/9-change"); remoteHead != newHead {
-		t.Fatalf("origin branch = %q, want pushed post-rebase head %q", remoteHead, newHead)
-	}
-
-	// A verdict already recorded at the post-rebase head lets Act pass the
-	// review phase without a model call; the checks note Act writes is the
-	// signal under test.
-	if err := writeVerdict(repo, newHead, verdictNote{
-		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
-		DefSHA: "def", RunID: "seed",
-	}); err != nil {
-		t.Fatalf("seed verdict: %v", err)
-	}
-	if _, ok, err := readChecks(repo, newHead); err != nil || ok {
-		t.Fatalf("checks already present on post-rebase head before Act: (found=%v, err=%v)", ok, err)
-	}
-
-	// Stub the tracker so Act's item read does not touch the host CLI.
-	oldGH := ghJSON
-	ghJSON = func(args ...string) ([]byte, error) {
-		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
-	}
-	defer func() { ghJSON = oldGH }()
-
-	cfg := defaultConfig()
-	cfg.Repo = "owner/repo"
-	cfg.Checks = []Check{{Name: "true", Run: "true"}}
-	cfg.Flows.Verifier.Agent = "verifier"
-	cfg.Flows.Verifier.AutoMerge = false
-	cfg.Projection = ProjectionConfig{}
-
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-forest/9-change", Kind: "branch", Revision: oldHead,
-		Label: "forest/9-change", ID: "9", Branch: "forest/9-change", Head: oldHead,
-	}, "run-1")
-	if err != nil {
-		t.Fatalf("Act: %v", err)
-	}
-	if out.BaseSHA != newHead {
-		t.Fatalf("out.BaseSHA = %q, want post-rebase head %q", out.BaseSHA, newHead)
-	}
-	if got, ok, err := readChecks(repo, newHead); err != nil || !ok || got.Status != "pass" {
-		t.Fatalf("checks on post-rebase head = (found=%v, status=%q, err=%v), want pass", ok, got.Status, err)
-	}
-	if _, ok, err := readChecks(repo, oldHead); err != nil || ok {
-		t.Fatalf("checks on pre-rebase head = (found=%v, err=%v), want not found", ok, err)
-	}
-}
-
-// TestRebaseOntoMasterConflictNamesPaths proves a conflicting rebase returns an
-// error naming the conflicting paths rather than a bare exit status, so a human
-// sees what a robot could not resolve.
-func TestRebaseOntoMasterConflictNamesPaths(t *testing.T) {
-	repo := setupTestRepo(t)
-	workspace := filepath.Join(repo, WorkspaceDir)
-
-	// The branch edits file.txt its own way; master edits it differently.
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", "forest/9-conflict")
-	rebaseTestWriteFile(t, filepath.Join(repo, "file.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "file.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch edit")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/forest/9-conflict")
-	rebaseTestGit(t, repo, "checkout", "-q", "master")
-	rebaseTestWriteFile(t, filepath.Join(repo, "file.txt"), "master\n")
-	rebaseTestGit(t, repo, "add", "file.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "master edit")
-	rebaseTestGit(t, repo, "push", "-q", "origin", "master")
-
-	wtDir, _, err := createWorktreeAtBranch(repo, workspace, "forest/9-conflict")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer removeWorktree(repo, wtDir)
-
-	_, err = rebaseOntoMaster(wtDir, "forest/9-conflict")
-	if err == nil {
-		t.Fatal("conflicting rebase returned no error")
-	}
-	if !strings.Contains(err.Error(), "file.txt") {
-		t.Errorf("error %q does not name the conflicting path", err)
-	}
-	if strings.TrimSpace(err.Error()) == "exit status 1" {
-		t.Errorf("error %q is a bare exit status", err)
-	}
-}
-
-// TestRebaseOntoMasterLeavesCurrentBranchUntouched proves a branch that already
-// contains origin/master is not rebased and its head does not change.
-func TestRebaseOntoMasterLeavesCurrentBranchUntouched(t *testing.T) {
-	repo := setupTestRepo(t)
-	workspace := filepath.Join(repo, WorkspaceDir)
-
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", "forest/9-current")
-	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "branch.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/forest/9-current")
-	rebaseTestGit(t, repo, "checkout", "-q", "master")
-
-	wtDir, oldHead, err := createWorktreeAtBranch(repo, workspace, "forest/9-current")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer removeWorktree(repo, wtDir)
-
-	newHead, err := rebaseOntoMaster(wtDir, "forest/9-current")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if newHead != oldHead {
-		t.Fatalf("current branch was rebased: head changed %q -> %q", oldHead, newHead)
-	}
-	if remoteHead := remoteBranchHead(t, repo, "forest/9-current"); remoteHead != oldHead {
-		t.Fatalf("origin branch changed to %q, want unchanged %q", remoteHead, oldHead)
-	}
-}
-
-// remoteBranchHead reads the head of one branch advertised by origin.
-func remoteBranchHead(t *testing.T, repo, branch string) string {
-	t.Helper()
-	out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch)
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		t.Fatalf("origin branch %q not found", branch)
-	}
-	return fields[0]
-}
 
 // TestVerifierSkipsHeadOwnedByTheFixer pins the spin this factory already paid
 // for: a head whose checks failed carries a fact, and re-offering it re-runs
 // every check and re-reviews the same commit forever. The lane that can repair
 // it must be the one that selects it, and a new head must clear the fact.
 func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
-	_, work, _ := notesTestRepository(t)
+	remote, work, _ := notesTestRepository(t)
 	branch := "forest/9-conflicted"
-	notesTestGit(t, work, "checkout", "-q", "-b", branch)
+	runGitTest(t, work, "checkout", "-q", "-b", branch)
 	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("branch\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	notesTestGit(t, work, "commit", "-qam", "branch work")
-	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
-	head := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+	runGitTest(t, work, "commit", "-qam", "branch work")
+	runGitTest(t, work, "push", "-q", "-u", "origin", branch)
+	head := runGitTest(t, work, "rev-parse", "HEAD")
+	noteSource := filepath.Join(t.TempDir(), "note-source")
+	runGitTest(t, "", "clone", remote, noteSource)
+	runGitTest(t, noteSource, "config", "user.name", "note-source")
+	runGitTest(t, noteSource, "config", "user.email", "note-source@example.com")
+	fixerWork := filepath.Join(t.TempDir(), "fixer-work")
+	runGitTest(t, "", "clone", remote, fixerWork)
 
 	cfg := defaultConfig()
 	cfg.Repo = "example/repo"
@@ -230,8 +37,9 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subjects) != 1 || subjects[0].Head != head {
-		t.Fatalf("fresh head = %#v, want one subject at %s", subjects, head)
+	if len(subjects) != 1 || subjects[0].Revision != head || subjects[0].ID != "9" ||
+		canonicalAdmissionKey(subjects[0]) != "item-9" {
+		t.Fatalf("fresh head = %#v, want item-9 at %s", subjects, head)
 	}
 
 	// A failing check is the fact a rebase conflict or a broken build leaves.
@@ -241,7 +49,7 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 		Time:    nowRFC(),
 		Results: []checkResult{{Name: "rebase", Code: 1, Output: "conflicts in file.txt"}},
 	}
-	if err := writeChecks(work, head, fail); err != nil {
+	if err := writeChecks(noteSource, head, fail, testCommitIdentity()); err != nil {
 		t.Fatal(err)
 	}
 	subjects, err = verifierFlow{}.Select(cfg, work)
@@ -251,12 +59,21 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	if len(subjects) != 0 {
 		t.Fatalf("verifier still offers a failed head: %#v", subjects)
 	}
-	repairs, err := fixerFlow{}.Select(cfg, work)
+	repairs, err := fixerFlow{}.Select(cfg, fixerWork)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repairs) != 1 || repairs[0].Head != head {
-		t.Fatalf("fixer subjects = %#v, want the failed head %s", repairs, head)
+	if len(repairs) != 1 || repairs[0].Revision != head || repairs[0].ID != "9" ||
+		canonicalAdmissionKey(repairs[0]) != "item-9" {
+		t.Fatalf("fixer subjects = %#v, want item-9 at %s", repairs, head)
+	}
+	for range stalledRunLimit {
+		if err := recordStalled(fixerWork, "fixer", repairs[0].Key, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if repairs, err = (fixerFlow{}).Select(cfg, fixerWork); err != nil || len(repairs) != 0 {
+		t.Fatalf("fixer selected stalled head = (%#v, %v), want none", repairs, err)
 	}
 
 	// A repair moves the branch, and notes key to the commit, so the new head is
@@ -264,15 +81,34 @@ func TestVerifierSkipsHeadOwnedByTheFixer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("repaired\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	notesTestGit(t, work, "commit", "-qam", "repair")
-	notesTestGit(t, work, "push", "-q", "origin", branch)
-	newHead := notesTestGitOutput(t, work, "rev-parse", "HEAD")
+	runGitTest(t, work, "commit", "-qam", "repair")
+	runGitTest(t, work, "push", "-q", "origin", branch)
+	newHead := runGitTest(t, work, "rev-parse", "HEAD")
 	subjects, err = verifierFlow{}.Select(cfg, work)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(subjects) != 1 || subjects[0].Head != newHead {
-		t.Fatalf("repaired head = %#v, want one subject at %s", subjects, newHead)
+	if len(subjects) != 1 || subjects[0].Revision != newHead || subjects[0].ID != "9" ||
+		canonicalAdmissionKey(subjects[0]) != "item-9" {
+		t.Fatalf("repaired head = %#v, want item-9 at %s", subjects, newHead)
+	}
+	if err := writeVerdict(work, newHead, verdictNote{Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16)}, testCommitIdentity()); err != nil {
+		t.Fatal(err)
+	}
+	if subjects, err = (verifierFlow{}).Select(cfg, work); err != nil ||
+		len(subjects) != 1 || subjects[0].Revision != newHead {
+		t.Fatalf("approved head missing Checks = (%#v, %v), want check requalification", subjects, err)
+	}
+	if err := writeChecks(work, newHead, checksNote{Status: "pass"}, testCommitIdentity()); err != nil {
+		t.Fatal(err)
+	}
+	for range stalledRunLimit {
+		if err := recordStalled(work, "verifier", subjects[0].Key, newHead); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if subjects, err = (verifierFlow{}).Select(cfg, work); err != nil || len(subjects) != 0 {
+		t.Fatalf("verifier selected stalled approved head = (%#v, %v), want none", subjects, err)
 	}
 }
 
@@ -297,20 +133,20 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 		t.Helper()
 		repo := setupTestRepo(t)
 		branch := "forest/9-change"
-		rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+		runGitTest(t, repo, "checkout", "-q", "-b", branch)
 		rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-		rebaseTestGit(t, repo, "add", "branch.txt")
-		rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-		rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+		runGitTest(t, repo, "add", "branch.txt")
+		runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+		runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
 		head := remoteBranchHead(t, repo, branch)
-		rebaseTestGit(t, repo, "checkout", "-q", "master")
+		runGitTest(t, repo, "checkout", "-q", "master")
 		masterBefore := remoteBranchHead(t, repo, "master")
 
 		writeAgentFixture(t, repo, "verifier", "verifier-model")
 
 		oldGH := ghJSON
 		ghJSON = func(args ...string) ([]byte, error) {
-			return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+			return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 		}
 		defer func() { ghJSON = oldGH }()
 
@@ -324,16 +160,14 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 		if verdict != "" {
 			if err := writeVerdict(repo, head, verdictNote{
 				Verdict: verdict, Reviewer: "verifier", Model: "verifier-model",
-				DefSHA: "def", RunID: "seed",
-			}); err != nil {
+				DefSHA: strings.Repeat("a", 16), RunID: "seed",
+			}, testCommitIdentity()); err != nil {
 				t.Fatalf("seed verdict: %v", err)
 			}
 		}
 
-		out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-			Key: "branch-" + branch, Kind: "branch", Revision: head,
-			Label: branch, ID: "9", Branch: branch, Head: head,
-		}, "run-1")
+		out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+			Label: branch, ID: "9", Branch: branch}, "run-1")
 		if err != nil {
 			t.Fatalf("Act: %v", err)
 		}
@@ -377,7 +211,7 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 		if got := remoteBranchHead(t, r.repo, "master"); got == r.masterBefore {
 			t.Fatalf("master did not advance after a verified merge (%q)", got)
 		}
-		if out := rebaseTestGitOut(t, r.repo, "ls-remote", "origin", "refs/heads/"+r.branch); out != "" {
+		if out := runGitTest(t, r.repo, "ls-remote", "origin", "refs/heads/"+r.branch); out != "" {
 			t.Fatalf("merged branch %q still exists on origin: %s", r.branch, out)
 		}
 	})
@@ -392,13 +226,13 @@ func TestVerifierMergeRequiresApproveAndPassingChecks(t *testing.T) {
 func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	repo := setupTestRepo(t)
 	branch := "forest/9-change"
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
 	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "branch.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
 	head := remoteBranchHead(t, repo, branch)
-	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	runGitTest(t, repo, "checkout", "-q", "master")
 
 	writeAgentFixture(t, repo, "verifier", "verifier-model")
 
@@ -406,14 +240,14 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	// trustworthy checks note may admit; a preflight failure must never pass it.
 	if err := writeVerdict(repo, head, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
-		DefSHA: "def", RunID: "seed",
-	}); err != nil {
+		DefSHA: strings.Repeat("a", 16), RunID: "seed",
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
 
 	oldGH := ghJSON
 	ghJSON = func(args ...string) ([]byte, error) {
-		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 	}
 	defer func() { ghJSON = oldGH }()
 
@@ -430,10 +264,8 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	cfg.Flows.Verifier.AutoMerge = true
 	cfg.Projection = ProjectionConfig{}
 
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: "branch", Revision: head,
-		Label: branch, ID: "9", Branch: branch, Head: head,
-	}, "run-1")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch}, "run-1")
 	if err == nil {
 		t.Fatalf("preflight failure returned no error: %#v", out)
 	}
@@ -449,10 +281,8 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range subjects {
-		if s.Branch == branch {
-			t.Fatalf("verifier offered the preflight-failed head as mergeable: %#v", s)
-		}
+	if len(subjects) != 1 || subjects[0].Branch != branch {
+		t.Fatalf("preflight-failed head = %#v, want one bounded check requalification", subjects)
 	}
 	repairs, err := (fixerFlow{}).Select(cfg, repo)
 	if err != nil {
@@ -474,31 +304,31 @@ func TestVerifierPreflightFailureWritesNoPassNote(t *testing.T) {
 func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 	repo := setupTestRepo(t)
 	branch := "forest/9-change"
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
 	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "branch.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
 	head := remoteBranchHead(t, repo, branch)
-	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	runGitTest(t, repo, "checkout", "-q", "master")
 	masterBefore := remoteBranchHead(t, repo, "master")
 
 	writeAgentFixture(t, repo, "verifier", "verifier-model")
 
 	if err := writeVerdict(repo, head, verdictNote{
 		Verdict: "approve", Reviewer: "verifier", Model: "verifier-model",
-		DefSHA: "def", RunID: "seed",
-	}); err != nil {
+		DefSHA: strings.Repeat("a", 16), RunID: "seed",
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
 	// A stale pass note from an earlier, buggy pass already keys this Revision.
-	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "stale", Time: nowRFC()}); err != nil {
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "stale", Time: nowRFC()}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed stale checks: %v", err)
 	}
 
 	oldGH := ghJSON
 	ghJSON = func(args ...string) ([]byte, error) {
-		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"","comments":[],"labels":[]}`), nil
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
 	}
 	defer func() { ghJSON = oldGH }()
 
@@ -515,10 +345,8 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 	cfg.Flows.Verifier.AutoMerge = true
 	cfg.Projection = ProjectionConfig{}
 
-	out, err := (verifierFlow{}).Act(cfg, repo, Subject{
-		Key: "branch-" + branch, Kind: "branch", Revision: head,
-		Label: branch, ID: "9", Branch: branch, Head: head,
-	}, "run-2")
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch}, "run-2")
 	if err == nil {
 		t.Fatalf("retry over an existing note returned no error: %#v", out)
 	}
@@ -533,175 +361,149 @@ func TestVerifierPreflightRetryIgnoresExistingNote(t *testing.T) {
 	}
 }
 
-// TestFenceMergeOnReviewedRevision pins item #188: a merge may land only the
-// Revision that carried the approving Verdict. An unchanged remote branch passes
-// the fence; a branch that advanced after the Verdict is refused with both
-// Revisions named, and mergeVerified leaves the branch with its newer commits
-// intact rather than deleting it.
-func TestFenceMergeOnReviewedRevision(t *testing.T) {
-	repo := setupTestRepo(t)
-	branch := "forest/9-change"
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
-	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "branch.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
-	reviewed := remoteBranchHead(t, repo, branch)
+// TestVerifierRefusesPassNoteWhenCheckMutatesTree is the end-to-end regression
+// for item #191's check-phase guard. A declared check that rewrites or stages a
+// tracked file taints the very tree the check was meant to judge; even a
+// reviewer that would only write review.json must yield no Verdict and no pass
+// Checks note, because the green belongs to an uncommitted edit, never the
+// Review revision.
+func TestVerifierRefusesPassNoteWhenCheckMutatesTree(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  string
+	}{
+		{"rewrites a tracked file", `printf 'tainted\n' > file.txt`},
+		{"stages a tracked file", `printf 'tainted\n' > file.txt && git add file.txt`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := setupTestRepo(t)
+			branch := "forest/9-change"
+			runGitTest(t, repo, "checkout", "-q", "-b", branch)
+			rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+			runGitTest(t, repo, "add", "branch.txt")
+			runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+			runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+			head := remoteBranchHead(t, repo, branch)
+			masterBefore := remoteBranchHead(t, repo, "master")
+			runGitTest(t, repo, "checkout", "-q", "master")
 
-	// An unchanged remote branch is exactly the reviewed Revision: it passes.
-	if err := fenceMergeOnRevision(repo, branch, reviewed); err != nil {
-		t.Fatalf("unchanged branch refused by the fence: %v", err)
-	}
+			writeAgentFixture(t, repo, "verifier", "verifier-model")
 
-	// The operator pushes newer, unreviewed work after the Verdict was written.
-	rebaseTestGit(t, repo, "checkout", "-q", branch)
-	rebaseTestWriteFile(t, filepath.Join(repo, "later.txt"), "later\n")
-	rebaseTestGit(t, repo, "add", "later.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "newer unreviewed work")
-	rebaseTestGit(t, repo, "push", "-q", "origin", branch)
-	observed := remoteBranchHead(t, repo, branch)
-	if observed == reviewed {
-		t.Fatalf("branch did not advance, cannot probe the fence")
-	}
+			oldGH := ghJSON
+			ghJSON = func(args ...string) ([]byte, error) {
+				return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
+			}
+			defer func() { ghJSON = oldGH }()
 
-	if err := fenceMergeOnRevision(repo, branch, reviewed); err == nil {
-		t.Fatalf("advanced branch passed the fence")
-	} else if !strings.Contains(err.Error(), reviewed[:8]) || !strings.Contains(err.Error(), observed[:8]) {
-		t.Fatalf("refusal %q does not name both the reviewed (%s) and observed (%s) Revisions", err, reviewed[:8], observed[:8])
-	}
+			// The reviewer is blameless: it would write only review.json and approve.
+			reviewRan := false
+			oldRun := runPhase
+			runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string) (runStats, error) {
+				reviewRan = true
+				if err := os.WriteFile(filepath.Join(wtDir, "review.json"), []byte(`{"verdict":"approve","summary":"looks fine","notes":""}`), 0o644); err != nil {
+					return runStats{}, err
+				}
+				return runStats{}, nil
+			}
+			defer func() { runPhase = oldRun }()
 
-	// mergeVerified must refuse without deleting the branch, so the newer,
-	// unreviewed commits survive for the next pass to review.
-	if err := mergeVerified(defaultConfig(), repo, branch, reviewed, Item{ID: "9", Title: "change"}); err == nil {
-		t.Fatal("mergeVerified merged a branch that advanced past its reviewed Revision")
-	}
-	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out == "" {
-		t.Fatal("mergeVerified deleted the branch despite refusing the merge")
-	}
-	if got := remoteBranchHead(t, repo, branch); got != observed {
-		t.Fatalf("branch tip = %s, want the newer commits %s intact", got, observed)
+			cfg := defaultConfig()
+			cfg.Repo = "owner/repo"
+			cfg.Checks = []Check{{Name: "tainted", Run: tc.run}}
+			cfg.Flows.Verifier.Agent = "verifier"
+			cfg.Flows.Verifier.AutoMerge = true
+			cfg.Projection = ProjectionConfig{}
+
+			out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+				Label: branch, ID: "9", Branch: branch}, "run-1")
+			if err == nil {
+				t.Fatalf("a check that tainted the tree returned no error: %#v", out)
+			}
+			if !strings.Contains(err.Error(), "file.txt") {
+				t.Fatalf("refusal %q does not name the tainted tracked path", err)
+			}
+			if out.Status != "checks_refused" {
+				t.Fatalf("status = %q, want checks_refused", out.Status)
+			}
+
+			// No pass Checks note and no Verdict, and the reviewer never ran: the
+			// tainted green is refused before anything records it or acts on it.
+			if _, ok, err := readChecks(repo, head); err != nil || ok {
+				t.Fatalf("checks note on head = (found=%v, err=%v), want no note when a check tainted the tree", ok, err)
+			}
+			if _, ok, err := readVerdict(repo, head); err != nil || ok {
+				t.Fatalf("verdict note on head = (found=%v, err=%v), want no Verdict when a check tainted the tree", ok, err)
+			}
+			if reviewRan {
+				t.Fatalf("reviewer ran for a head whose checks tainted the tree")
+			}
+			if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
+				t.Fatalf("master advanced to %s, want %s, when a check tainted the tree", got, masterBefore)
+			}
+		})
 	}
 }
 
-// TestMergeGitPathPinsReviewedRevision pins the acting step that closes the gap
-// between fenceMergeOnRevision's read and the merge push: the git path updates
-// master and deletes the source branch in a single atomic compare-and-set push,
-// so a branch that advances after the fence was read is neither merged nor
-// deleted — master is untouched and the newer, unreviewed commits survive, while
-// an unchanged branch lands and is retired as before.
-func TestMergeGitPathPinsReviewedRevision(t *testing.T) {
-	newRepo := func(t *testing.T) (repo, branch, reviewed, masterBefore string) {
-		t.Helper()
-		repo = setupTestRepo(t)
-		branch = "forest/9-change"
-		rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
-		rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-		rebaseTestGit(t, repo, "add", "branch.txt")
-		rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-		rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
-		reviewed = remoteBranchHead(t, repo, branch)
-		masterBefore = remoteBranchHead(t, repo, "master")
-		return
-	}
-	// retireItem closes the item through the tracker, which talks to the host;
-	// stub it so the merge path is exercised without a host CLI.
+// TestVerifierReviewNamesMutationWhenPhaseErrors pins #191's verifier-review
+// fix: the post-run clean-tree assertion must run even when the phase reports an
+// error. A verifier that edits a tracked file and then crashes or times out would
+// otherwise return only the harness error, never the required named clean-tree
+// refusal, and the mutation would go unreported. The refusal must name the
+// edited path even though the phase itself failed.
+func TestVerifierReviewNamesMutationWhenPhaseErrors(t *testing.T) {
+	repo := setupTestRepo(t)
+	branch := "forest/9-change"
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
+	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	head := remoteBranchHead(t, repo, branch)
+	runGitTest(t, repo, "checkout", "-q", "master")
+	writeAgentFixture(t, repo, "verifier", "verifier-model")
+
 	oldGH := ghJSON
-	ghJSON = func(args ...string) ([]byte, error) { return []byte(`{}`), nil }
+	ghJSON = func(args ...string) ([]byte, error) {
+		return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
+	}
 	defer func() { ghJSON = oldGH }()
+
+	// The verifier edits a tracked file and then crashes, so the harness error
+	// and the mutation arrive together.
+	phaseErr := errors.New("verifier crashed")
+	mutated := false
+	oldRun := runPhase
+	runPhase = func(_ string, wtDir string, _ *Agent, _ string, _ string) (runStats, error) {
+		mutated = true
+		if err := os.WriteFile(filepath.Join(wtDir, "file.txt"), []byte("tainted\n"), 0o644); err != nil {
+			return runStats{}, err
+		}
+		return runStats{}, phaseErr
+	}
+	defer func() { runPhase = oldRun }()
+
 	cfg := defaultConfig()
 	cfg.Repo = "owner/repo"
+	cfg.Checks = []Check{{Name: "ok", Run: "true"}}
+	cfg.Flows.Verifier.Agent = "verifier"
+	cfg.Flows.Verifier.AutoMerge = true
 	cfg.Projection = ProjectionConfig{}
-	cfg.Flows.Verifier.Merge = "squash"
-	cfg.Commit = CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
-	it := Item{ID: "9", Title: "change"}
 
-	t.Run("unchanged branch lands and retires", func(t *testing.T) {
-		repo, branch, reviewed, masterBefore := newRepo(t)
-		if err := mergeGitPath(cfg, repo, branch, reviewed, it); err != nil {
-			t.Fatalf("mergeGitPath on an unchanged branch = %v, want nil", err)
-		}
-		if got := remoteBranchHead(t, repo, "master"); got == masterBefore {
-			t.Fatal("master did not advance on an unchanged branch")
-		}
-		if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out != "" {
-			t.Fatalf("source branch %q still on origin after landing: %s", branch, out)
-		}
-	})
-
-	t.Run("advanced branch is refused and survives", func(t *testing.T) {
-		repo, branch, reviewed, masterBefore := newRepo(t)
-		// The operator pushes newer, unreviewed work after the Verdict and after
-		// the fence was read, simulating the review-to-merge window.
-		rebaseTestGit(t, repo, "checkout", "-q", branch)
-		rebaseTestWriteFile(t, filepath.Join(repo, "later.txt"), "later\n")
-		rebaseTestGit(t, repo, "add", "later.txt")
-		rebaseTestGit(t, repo, "commit", "-q", "-m", "newer unreviewed work")
-		rebaseTestGit(t, repo, "push", "-q", "origin", branch)
-		observed := remoteBranchHead(t, repo, branch)
-		if observed == reviewed {
-			t.Fatal("branch did not advance, cannot probe the race")
-		}
-
-		if err := mergeGitPath(cfg, repo, branch, reviewed, it); err == nil {
-			t.Fatal("mergeGitPath merged a branch that advanced past its reviewed Revision")
-		}
-		if got := remoteBranchHead(t, repo, "master"); got != masterBefore {
-			t.Fatalf("master advanced to %s after the refused merge, want %s", got, masterBefore)
-		}
-		if got := remoteBranchHead(t, repo, branch); got != observed {
-			t.Fatalf("branch tip = %s, want the newer commits %s intact", got, observed)
-		}
-	})
-}
-
-// TestMergeViaHostPinsReviewedHead pins the host path of item #188: a host merge
-// receives the expected-head facility pinned to the reviewed Revision, and when
-// the host refuses (head mismatch), the branch is not deleted so the newer,
-// unreviewed commits survive for re-review.
-func TestMergeViaHostPinsReviewedHead(t *testing.T) {
-	repo := setupTestRepo(t)
-	branch := "forest/9-change"
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
-	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "branch.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
-	reviewed := remoteBranchHead(t, repo, branch)
-
-	oldProj := projectionCommand
-	defer func() { projectionCommand = oldProj }()
-	var mergeArgs []string
-	projectionCommand = func(args ...string) ([]byte, error) {
-		switch args[1] {
-		case "list":
-			return []byte(`[{"number":9,"url":"https://github.com/owner/repo/pull/9"}]`), nil
-		case "merge":
-			mergeArgs = append([]string(nil), args...)
-			return nil, errors.New("host refused: head does not match reviewed Revision")
-		default:
-			return nil, nil
-		}
+	out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+		Label: branch, ID: "9", Branch: branch}, "run-1")
+	if err == nil {
+		t.Fatalf("a review that mutated the tree and crashed returned no error: %#v", out)
 	}
-
-	cfg := defaultConfig()
-	cfg.Repo = "owner/repo"
-	cfg.Projection = ProjectionConfig{Enabled: true, MergeViaHost: true}
-	cfg.Flows.Verifier.Merge = "squash"
-
-	if err := mergeVerified(cfg, repo, branch, reviewed, Item{ID: "9", Title: "change"}); err == nil {
-		t.Fatal("mergeVerified merged via host despite the host refusing the head")
+	// The required named clean-tree refusal, not the bare harness error alone.
+	if !strings.Contains(err.Error(), "file.txt") {
+		t.Fatalf("refusal %q does not name the mutated tracked path; the phase error swallowed the tree check", err)
 	}
-	pinned := false
-	for i := 0; i+1 < len(mergeArgs); i++ {
-		if mergeArgs[i] == "--match-head-commit" && mergeArgs[i+1] == reviewed {
-			pinned = true
-		}
+	if !mutated {
+		t.Fatal("the verifier did not run")
 	}
-	if !pinned {
-		t.Fatalf("host merge args %v do not pin the reviewed Revision %s with --match-head-commit", mergeArgs, reviewed)
-	}
-	if out := rebaseTestGitOut(t, repo, "ls-remote", "origin", "refs/heads/"+branch); out == "" {
-		t.Fatal("mergeVerified deleted the branch even though the host merge refused")
+	// No Verdict may rest on a tree the review itself changed.
+	if _, ok, rerr := readVerdict(repo, head); rerr != nil || ok {
+		t.Fatalf("verdict note on head = (found=%v, err=%v), want none when the review mutated the tree", ok, rerr)
 	}
 }
 
@@ -710,8 +512,22 @@ func TestMergeViaHostPinsReviewedHead(t *testing.T) {
 // decision remains after the host-local ledger is removed.
 func TestStalledOnPersistsOutsideLedger(t *testing.T) {
 	_, repo, _ := notesTestRepository(t)
-	const subject = "branch-forest/9-x"
+	const subject = "branch-forest/../../opaque ?~^:[x]"
 	const revision = "aaa"
+	if got, want := stalledRef("fixer", "branch-forest/9-x"), "refs/forest/stalled/fixer/branch-forest/9-x"; got != want {
+		t.Fatalf("legacy stalled ref = %q, want %q", got, want)
+	}
+	if got := stalledRef("fixer", subject); !strings.HasPrefix(got, "refs/forest/stalled-opaque/fixer/") {
+		t.Fatalf("opaque stalled ref = %q, want encoded namespace", got)
+	}
+	for _, invalid := range []string{".item", "item.lock", "foo./bar", "item..x", "item@{x", "item?x", `item\x`, "item/"} {
+		if got := stalledRef("fixer", invalid); !strings.HasPrefix(got, "refs/forest/stalled-opaque/fixer/") {
+			t.Errorf("invalid Subject %q produced raw stalled ref %q", invalid, got)
+		}
+	}
+	if a, b := stalledRef("fixer", "item?x"), stalledRef("fixer", "item*x"); a == b {
+		t.Fatalf("distinct opaque Subjects share stalled ref %q", a)
+	}
 	for range stalledRunLimit {
 		if err := recordStalled(repo, "fixer", subject, revision); err != nil {
 			t.Fatalf("record stalled: %v", err)
@@ -739,56 +555,6 @@ func TestStalledOnPersistsOutsideLedger(t *testing.T) {
 	}
 }
 
-// TestCommitAndPushCASLandsARewrittenBranch pins the capability the Fixer
-// needs to resolve a conflict: a rebased branch must be able to land, and only
-// against the commit the run actually observed.
-func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
-	_, work, _ := notesTestRepository(t)
-	branch := "forest/9-rewrite"
-	notesTestGit(t, work, "checkout", "-q", "-b", branch)
-	if err := os.WriteFile(filepath.Join(work, "branch.txt"), []byte("branch\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	notesTestGit(t, work, "add", "branch.txt")
-	notesTestGit(t, work, "commit", "-qm", "branch work")
-	notesTestGit(t, work, "push", "-q", "-u", "origin", branch)
-	observed := notesTestGitOutput(t, work, "rev-parse", "HEAD")
-
-	// Master moves, and the branch is rebased onto it, so the branch's history is
-	// rewritten and a plain push would be rejected.
-	notesTestGit(t, work, "checkout", "-q", "master")
-	if err := os.WriteFile(filepath.Join(work, "master.txt"), []byte("master\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	notesTestGit(t, work, "add", "master.txt")
-	notesTestGit(t, work, "commit", "-qm", "master work")
-	notesTestGit(t, work, "push", "-q", "origin", "master")
-	notesTestGit(t, work, "checkout", "-q", branch)
-	notesTestGit(t, work, "rebase", "-q", "master")
-
-	id := CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
-	it := Item{ID: "9", Title: "rewrite"}
-	// Each attempt needs its own change: a failed push leaves its commit behind,
-	// and a run that has nothing to commit is a different failure.
-	if err := os.WriteFile(filepath.Join(work, "stale.txt"), []byte("stale\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := commitAndPush(work, work, branch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", id, it); err == nil {
-		t.Fatal("a stale observed ref must lose the push")
-	}
-	if err := os.WriteFile(filepath.Join(work, "fix.txt"), []byte("repair\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := commitAndPush(work, work, branch, observed, id, it); err != nil {
-		t.Fatalf("rebased branch with the observed ref = %v, want nil", err)
-	}
-	remote := notesTestGitOutput(t, work, "rev-parse", "refs/remotes/origin/"+branch)
-	local := notesTestGitOutput(t, work, "rev-parse", "HEAD")
-	if remote != local {
-		t.Fatalf("remote %s != local %s after a compare-and-swap push", remote, local)
-	}
-}
-
 // TestSelectOffersNoBranchItCannotMerge defines the hot loop out of existence.
 // A branch that is approved and green but cannot land is not a Verifier subject:
 // it is a state an operator reads. When Select offered it anyway, every pass
@@ -798,20 +564,20 @@ func TestCommitAndPushCASLandsARewrittenBranch(t *testing.T) {
 func TestSelectOffersNoBranchItCannotMerge(t *testing.T) {
 	repo := setupTestRepo(t)
 	branch := "forest/9-change"
-	rebaseTestGit(t, repo, "checkout", "-q", "-b", branch)
+	runGitTest(t, repo, "checkout", "-q", "-b", branch)
 	rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
-	rebaseTestGit(t, repo, "add", "branch.txt")
-	rebaseTestGit(t, repo, "commit", "-q", "-m", "branch work")
-	rebaseTestGit(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	runGitTest(t, repo, "add", "branch.txt")
+	runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+	runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
 	head := remoteBranchHead(t, repo, branch)
-	rebaseTestGit(t, repo, "checkout", "-q", "master")
+	runGitTest(t, repo, "checkout", "-q", "master")
 
 	if err := writeVerdict(repo, head, verdictNote{
-		Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: "def", RunID: "seed",
-	}); err != nil {
+		Verdict: "approve", Reviewer: "verifier", Model: "m", DefSHA: strings.Repeat("a", 16), RunID: "seed",
+	}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
-	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}); err != nil {
+	if err := writeChecks(repo, head, checksNote{Status: "pass", RunID: "seed", Time: nowRFC()}, testCommitIdentity()); err != nil {
 		t.Fatalf("seed checks: %v", err)
 	}
 

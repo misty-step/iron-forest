@@ -2,32 +2,11 @@ package main
 
 import (
 	"errors"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-func runGitTest(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, strings.TrimSpace(string(out)))
-	}
-	return string(out)
-}
-
-func newRefGitRepo(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote.git")
-	repo := filepath.Join(root, "repo")
-	runGitTest(t, root, "init", "--bare", remote)
-	runGitTest(t, root, "init", repo)
-	runGitTest(t, repo, "remote", "add", "origin", remote)
-	return repo
-}
 
 func TestBlobRefCreateReadAndCompareAndSet(t *testing.T) {
 	repo := newRefGitRepo(t)
@@ -51,6 +30,34 @@ func TestBlobRefCreateReadAndCompareAndSet(t *testing.T) {
 	_, content, err = getBlobRef(repo, ref)
 	if err != nil || content != "second" {
 		t.Fatalf("updated ref = %q %v, want second", content, err)
+	}
+}
+
+func TestBlobRefReadsDoNotCreateSharedLocalRef(t *testing.T) {
+	repo := newRefGitRepo(t)
+	ref := "refs/forest/retirement/branch/revision"
+	if err := putBlobRef(repo, ref, "fact", ""); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		sha, body string
+		err       error
+	}
+	results := make(chan result, 16)
+	for range 16 {
+		go func() {
+			sha, body, err := getBlobRef(repo, ref)
+			results <- result{sha: sha, body: body, err: err}
+		}()
+	}
+	for range 16 {
+		got := <-results
+		if got.err != nil || got.sha != blobSHA("fact") || got.body != "fact" {
+			t.Fatalf("concurrent ref read = %#v", got)
+		}
+	}
+	if _, err := gitOut(repo, "show-ref", "--verify", ref); err == nil {
+		t.Fatalf("ref read created shared local ref %s", ref)
 	}
 }
 
@@ -80,64 +87,40 @@ func TestBlobRefMissingAndDeleteCompareAndSet(t *testing.T) {
 	}
 }
 
-func TestListRefsEnumeratesPrefix(t *testing.T) {
-	repo := newRefGitRepo(t)
-	for _, ref := range []string{"refs/forest/attempt/a", "refs/forest/attempt/b", "refs/forest/stalled/a"} {
-		if err := putBlobRef(repo, ref, ref, ""); err != nil {
-			t.Fatalf("put %s: %v", ref, err)
-		}
+func TestInternalEvidenceRefsBypassPrePushButSourcePushDoesNot(t *testing.T) {
+	_, repo, sha := notesTestRepository(t)
+	hook := filepath.Join(repo, ".git", "hooks", "pre-push")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	refs, err := listRefs(repo, "refs/forest/attempt/")
-	if err != nil {
-		t.Fatalf("list refs: %v", err)
-	}
-	if len(refs) != 2 {
-		t.Fatalf("listed %d refs, want 2", len(refs))
-	}
-}
 
-// newBranchRemoteRepo returns a repo whose origin has a branch named "forest/9-change"
-// pointing at the given commit target ("" pushes an empty — tests pass a real sha).
-func pushTestBranch(t *testing.T, repo, branch, target string) {
-	t.Helper()
-	runGitTest(t, repo, "push", "origin", target+":refs/heads/"+branch)
-}
+	const key = "stalled-hook"
+	if count, err := bumpAttempts(repo, key); err != nil || count != 1 {
+		t.Fatalf("bumpAttempts = (%d, %v), want (1, nil)", count, err)
+	}
+	attemptRef := "refs/forest/attempt/" + key
+	if out, err := gitOut(repo, "ls-remote", "origin", attemptRef); err != nil || strings.TrimSpace(out) == "" {
+		t.Fatalf("attempt ref after bump = (%q, %v), want present", out, err)
+	}
+	if err := dropAttempts(repo, key); err != nil {
+		t.Fatalf("dropAttempts = %v, want internal deletion to bypass pre-push", err)
+	}
+	if out, err := gitOut(repo, "ls-remote", "origin", attemptRef); err != nil || strings.TrimSpace(out) != "" {
+		t.Fatalf("attempt ref after drop = (%q, %v), want absent", out, err)
+	}
 
-// TestDeleteBranchIfPresentIsIdempotentUnderRetry pins the cleanup idempotency of
-// item #190: deleting a branch that is already gone (a retry after a partial
-// finalisation) is a no-op, never a stale-ref error, so a concurrent pass cannot
-// make reconciliation fail forever.
-func TestDeleteBranchIfPresentIsIdempotentUnderRetry(t *testing.T) {
-	repo := newRefGitRepo(t)
-	// Materialise a commit so a branch can exist.
-	runGitTest(t, repo, "config", "user.email", "t@example.com")
-	runGitTest(t, repo, "config", "user.name", "test")
-	runGitTest(t, repo, "commit", "--allow-empty", "-m", "root")
-	head := strings.TrimSpace(runGitTest(t, repo, "rev-parse", "HEAD"))
-	pushTestBranch(t, repo, "forest/9-change", head)
-	// First deletion succeeds.
-	if err := deleteBranchIfPresent(repo, "forest/9-change", head); err != nil {
-		t.Fatalf("first delete: %v", err)
+	if err := writeVerdict(repo, sha, verdictNote{Verdict: "approve", Reviewer: "hook-test"}, testCommitIdentity()); err != nil {
+		t.Fatalf("writeVerdict = %v, want notes publication to bypass pre-push", err)
 	}
-	// A retry is a safe no-op instead of a stale-ref error.
-	if err := deleteBranchIfPresent(repo, "forest/9-change", head); err != nil {
-		t.Fatalf("retry delete of an already-removed branch: %v", err)
+	noteRef := "refs/notes/forest/verdict"
+	if out, err := gitOut(repo, "ls-remote", "origin", noteRef); err != nil || strings.TrimSpace(out) == "" {
+		t.Fatalf("notes ref after write = (%q, %v), want present", out, err)
 	}
-}
 
-// TestDropAttemptsIsIdempotentUnderRetry pins the same boundary for the attempt
-// record: dropping an already-dropped record is a no-op, so a retry after a
-// concurrent pass never fails forever on a stale compare-and-set.
-func TestDropAttemptsIsIdempotentUnderRetry(t *testing.T) {
-	repo := newRefGitRepo(t)
-	ref := "refs/forest/attempt/item-11"
-	if err := putBlobRef(repo, ref, "attempt", ""); err != nil {
-		t.Fatalf("put attempt: %v", err)
+	if err := git(repo, "push", "origin", "HEAD:refs/heads/source"); err == nil {
+		t.Fatal("source push succeeded despite the failing pre-push hook")
 	}
-	if err := dropAttempts(repo, "item-11"); err != nil {
-		t.Fatalf("first drop: %v", err)
-	}
-	if err := dropAttempts(repo, "item-11"); err != nil {
-		t.Fatalf("retry drop of an already-dropped record: %v", err)
+	if out, err := gitOut(repo, "ls-remote", "origin", "refs/heads/source"); err != nil || strings.TrimSpace(out) != "" {
+		t.Fatalf("source ref after blocked push = (%q, %v), want absent", out, err)
 	}
 }

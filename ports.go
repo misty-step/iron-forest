@@ -23,23 +23,10 @@ type Tracker interface {
 	Get(id string) (Item, error)
 	// Comment appends a comment to an item's discussion.
 	Comment(id, body string) error
-	// Close closes one item. It is idempotent: closing an item that is already
-	// closed returns nil, so a crash after Close but before a subject's other
-	// effects land cannot block a later reconciliation pass from finishing them.
+	// Close closes one item.
+	// Close returns errTrackerEffectNotApplied only after an exact read proves
+	// that a failed close left the item open. Every other failure is uncertain.
 	Close(id string) error
 	// SetTags adds and removes tags on one item in one call.
 	SetTags(id string, add, remove []string) error
-}
-
-// Projection is the optional, one-way human surface. It mirrors a branch and
-// each decision as a pull request and can merge one.
-type Projection interface {
-	// FindOpen returns the open projection for a branch, if any.
-	FindOpen(branch string) (Item, error)
-	// Open publishes a branch as one projection.
-	Open(branch, title, body string) (Item, error)
-	// Comment appends a comment to an open projection.
-	Comment(id, body string) error
-	// Merge merges an open projection using the named strategy.
-	Merge(id, strategy string) error
 }

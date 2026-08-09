@@ -22,7 +22,7 @@ Iron Forest has three declarations:
 
 Each declaration uses these files:
 
-- `agent.yaml` declares the harness, model, permissions, MCP wiring, and run limits.
+- `agent.yaml` declares the harness, model, commit identity, permissions, MCP wiring, and run limits.
 - `instructions.md` contains the system prompt and standing rules.
 - `prompt.md` contains the user-prompt template for one Subject.
 - `report.schema.json` defines the output contract enforced by the Gate.
@@ -46,7 +46,10 @@ including `forest.yaml` and `agents/`.
 Iron Forest runs its own commands from `checks:` and writes their results as git
 notes. It never reads a Host's review or check state.
 
-The Ledger records tokens only.
+The Ledger records host Run telemetry: time, Run ID, Flow, Subject, Revision,
+Tracker identity, branch, Projection URL, Status, Verdict, agent/model,
+definition and base revisions, errors, and measured `tokens_in`, `tokens_out`,
+`cache_read`, `cache_write`, and `reasoning`. It never records or computes money.
 
 ## Toolchain and branch
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,22 +16,6 @@ import (
 
 // version is stamped at build time with -ldflags "-X main.version=<sha>".
 
-func recordPendingUpdate() {
-	from, to := os.Getenv("FOREST_UPDATE_FROM"), os.Getenv("FOREST_UPDATE_TO")
-	if from == "" || to == "" {
-		return
-	}
-	_ = os.Unsetenv("FOREST_UPDATE_FROM")
-	_ = os.Unsetenv("FOREST_UPDATE_TO")
-	repoDir, err := os.Getwd()
-	if err != nil {
-		return
-	}
-	if err := appendUpdate(repoDir, updateRecord{Time: nowRFC(), From: from, To: to, Status: "swapped"}); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: update: record: %v\n", err)
-	}
-}
-
 var version = "dev"
 
 // factoryDir is the factory's own source checkout, declared by the operator
@@ -40,6 +25,13 @@ var factoryDir string
 
 var updateGate sync.RWMutex
 
+var selfUpdateTicker = func() (<-chan time.Time, func()) {
+	ticker := time.NewTicker(60 * time.Second)
+	return ticker.C, ticker.Stop
+}
+var selfUpdateCheck = runUpdateCheck
+var exitSelf = os.Exit
+
 type updateRecord struct {
 	Time   string `json:"time"`
 	From   string `json:"from_sha"`
@@ -47,24 +39,43 @@ type updateRecord struct {
 	Status string `json:"status"`
 }
 
-// selfUpdateLoop checks for a new binary only when all lanes are idle.
-func selfUpdateLoop(cfg Config, repoDir string, drain *int32) {
-	_ = cfg
+func canonicalLocalPath(source string) string {
+	absolute, err := filepath.Abs(source)
+	if err != nil {
+		absolute = source
+	}
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return resolved
+	}
+	return absolute
+}
+
+func factorySourceLockPath(source string) string {
+	absolute := canonicalLocalPath(source)
+	root := filepath.Join("/tmp", fmt.Sprintf("iron-forest-%d", os.Getuid()), "factory-source")
+	return filepath.Join(root, blobSHA(absolute)+".lock")
+}
+func selfUpdateLoop(repoDir string, drain *int32, drainNow <-chan struct{}) {
 	if factoryDir == "" {
 		return
 	}
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
+	ticks, stop := selfUpdateTicker()
+	defer stop()
+	for {
+		select {
+		case <-drainNow:
+			return
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
+		}
 		if atomic.LoadInt32(drain) != 0 {
 			return
 		}
-		if !inFlight.idle() {
-			continue
-		}
 		updateGate.Lock()
-		if inFlight.idle() {
-			runUpdateCheck(repoDir)
+		if atomic.LoadInt32(drain) == 0 {
+			selfUpdateCheck(repoDir, drain)
 		}
 		updateGate.Unlock()
 	}
@@ -73,11 +84,23 @@ func selfUpdateLoop(cfg Config, repoDir string, drain *int32) {
 // runUpdateCheck rebuilds this instance from the factory source. Source and
 // managed repository are separate, so the checkout being worked on is never
 // built and may be in any language.
-func runUpdateCheck(repoDir string) {
+func runUpdateCheck(repoDir string, drain *int32) {
+	sourceLock, err := holdLock(factorySourceLockPath(factoryDir))
+	if err != nil {
+		if !errors.Is(err, errAdmissionHeld) {
+			fmt.Fprintf(os.Stderr, "forest: update: source lock: %v\n", err)
+		}
+		return
+	}
+	defer dropLock(sourceLock)
+	if err := removeInterruptedUpdateArtifacts(repoDir); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: update: remove interrupted artifacts: %v\n", err)
+		return
+	}
 	// Only the instance that manages the factory source may move it. Every
 	// other instance rebuilds from whatever that source currently is, so one
 	// process mutates the shared checkout and all of them still converge.
-	if repoDir == factoryDir {
+	if canonicalLocalPath(repoDir) == canonicalLocalPath(factoryDir) {
 		ref, err := gitOut(factoryDir, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil || ref != "master" {
 			fmt.Fprintf(os.Stderr, "forest: update: not on master (%s), skipping\n", ref)
@@ -127,8 +150,15 @@ func runUpdateCheck(repoDir string) {
 	fresh := filepath.Join(repoDir, "forest.next")
 	smoke := exec.Command(fresh, "selfcheck")
 	smoke.Dir = repoDir
-	if out, err := smoke.CombinedOutput(); err != nil {
+	if out, err := runCombinedOutput(smoke); err != nil {
+		_ = os.Remove(fresh)
 		fmt.Fprintf(os.Stderr, "forest: update: selfcheck failed, keeping current build:\n%s", out)
+		return
+	}
+	// The signal path never waits here. If this check wins the race, install
+	// can finish; otherwise drain removes the tested binary and stops the update.
+	if draining(drain) {
+		_ = os.Remove(fresh)
 		return
 	}
 	swapSelf(repoDir, short, version, short)
@@ -144,6 +174,7 @@ func deferDirty(repoDir string) bool {
 		return false
 	}
 	lines := strings.SplitN(dirty, "\n", 5)
+
 	suffix := ""
 	if len(lines) == 5 {
 		suffix = "…"
@@ -152,15 +183,26 @@ func deferDirty(repoDir string) bool {
 		strings.Join(lines, "\n"), suffix)
 	return true
 }
+func removeInterruptedUpdateArtifacts(repoDir string) error {
+	var errs []error
+	for _, name := range []string{"forest.prev", "forest.next", "forest.next.tmp"} {
+		err := os.Remove(filepath.Join(repoDir, name))
+		if err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
 
 func buildSelf(srcDir, outDir, shortSHA string) error {
 	tmp := filepath.Join(outDir, "forest.next.tmp")
 	target := filepath.Join(outDir, "forest.next")
+	defer os.Remove(tmp)
 	ldflags := "-X main.version=" + shortSHA
 	try := func(name string, args ...string) error {
 		c := exec.Command(name, args...)
 		c.Dir = srcDir
-		out, err := c.CombinedOutput()
+		out, err := runCombinedOutput(c)
 		if err != nil {
 			return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
@@ -183,39 +225,18 @@ func buildSelf(srcDir, outDir, shortSHA string) error {
 
 func swapSelf(repoDir, shortSHA, fromSHA, toSHA string) {
 	cur := filepath.Join(repoDir, "forest")
-	prev := filepath.Join(repoDir, "forest.prev")
 	next := filepath.Join(repoDir, "forest.next")
-	if err := os.Rename(cur, prev); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "forest: update: keep current: %v\n", err)
-		return
-	}
 	if err := os.Rename(next, cur); err != nil {
-		_ = os.Rename(prev, cur)
 		fmt.Fprintf(os.Stderr, "forest: update: install new binary: %v\n", err)
 		return
 	}
-	if err := os.Setenv("FOREST_UPDATE_FROM", fromSHA); err != nil {
-		_ = os.Rename(cur, next)
-		_ = os.Rename(prev, cur)
-		fmt.Fprintf(os.Stderr, "forest: update: pending record: %v\n", err)
-		return
+	if err := appendUpdate(repoDir, updateRecord{
+		Time: nowRFC(), From: fromSHA, To: toSHA, Status: "swapped",
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: update: record: %v\n", err)
 	}
-	if err := os.Setenv("FOREST_UPDATE_TO", toSHA); err != nil {
-		_ = os.Unsetenv("FOREST_UPDATE_FROM")
-		_ = os.Rename(cur, next)
-		_ = os.Rename(prev, cur)
-		fmt.Fprintf(os.Stderr, "forest: update: pending record: %v\n", err)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "forest: self-updated to %s, handoff at next pass\n", shortSHA)
-	argv := append([]string{cur}, os.Args[1:]...)
-	if err := syscall.Exec(cur, argv, os.Environ()); err != nil {
-		_ = os.Unsetenv("FOREST_UPDATE_FROM")
-		_ = os.Unsetenv("FOREST_UPDATE_TO")
-		_ = os.Rename(cur, next)
-		_ = os.Rename(prev, cur)
-		fmt.Fprintf(os.Stderr, "forest: update: exec: %v\n", err)
-	}
+	fmt.Fprintf(os.Stderr, "forest: self-updated to %s; exiting for supervisor restart\n", shortSHA)
+	exitSelf(0)
 }
 
 // acquireSingletonLock takes one non-blocking lock for a running service.
@@ -248,7 +269,9 @@ func appendUpdate(repoDir string, r updateRecord) error {
 	return json.NewEncoder(f).Encode(r)
 }
 
-// cmdSelfcheck verifies config and every configured lane agent offline.
+// cmdSelfcheck verifies config, every declaration, and every configured Flow
+// agent offline. An unused malformed declaration is still invalid repository
+// state: `forest agents` can discover it, so selfcheck must reject it.
 func cmdSelfcheck(repoDir string) int {
 	cfgPath := filepath.Join(repoDir, "forest.yaml")
 	if _, err := os.Stat(cfgPath); err != nil {
@@ -260,21 +283,28 @@ func cmdSelfcheck(repoDir string) int {
 		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
 		return 1
 	}
-	for _, name := range []string{cfg.Flows.Builder.Agent, cfg.Flows.Verifier.Agent, cfg.Flows.Fixer.Agent, cfg.Flows.Manager.Agent} {
-		if name == "" {
-			continue
-		}
+	names, err := discoverAgents(repoDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
+		return 1
+	}
+	if len(names) == 0 {
+		fmt.Fprintln(os.Stderr, "forest selfcheck: no agents under agents/")
+		return 1
+	}
+	declared := make(map[string]bool, len(names))
+	for _, name := range names {
 		if _, err := loadAgent(repoDir, name); err != nil {
 			fmt.Fprintf(os.Stderr, "forest selfcheck: agent %s: %v\n", name, err)
 			return 1
 		}
+		declared[name] = true
 	}
-	if names, err := discoverAgents(repoDir); err != nil {
-		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
-		return 1
-	} else if len(names) == 0 {
-		fmt.Fprintln(os.Stderr, "forest selfcheck: no agents under agents/")
-		return 1
+	for _, name := range []string{cfg.Flows.Builder.Agent, cfg.Flows.Verifier.Agent, cfg.Flows.Fixer.Agent, cfg.Flows.Manager.Agent} {
+		if name != "" && !declared[name] {
+			fmt.Fprintf(os.Stderr, "forest selfcheck: configured agent %s has no declaration\n", name)
+			return 1
+		}
 	}
 	fmt.Printf("forest %s selfcheck: ok\n", version)
 	return 0

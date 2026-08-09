@@ -12,7 +12,6 @@ import (
 )
 
 func main() {
-	recordPendingUpdate()
 	os.Exit(run(os.Args[1:]))
 }
 
@@ -150,8 +149,9 @@ func cmdAgents(api core.API) int {
 			fmt.Fprintln(os.Stderr, "forest:", a.Err)
 			continue
 		}
-		fmt.Printf("%s\tmodel=%s%s mode=%s def_sha=%s\n",
-			a.Name, a.Model, variantSuffix(a.Variant), a.Mode, a.DefSHA)
+		fmt.Printf("%s\tmodel=%s%s mode=%s author=%s <%s> def_sha=%s\n",
+			a.Name, a.Model, variantSuffix(a.Variant), a.Mode,
+			a.CommitName, a.CommitEmail, a.DefSHA)
 		fmt.Printf("  %s\n", a.Description)
 		var mcps []string
 		for _, m := range a.Mcps {

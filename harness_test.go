@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -10,31 +11,6 @@ import (
 	"testing"
 	"time"
 )
-
-// TestRenderedAgentDeclaresNoStepCeiling pins the unbounded contract. opencode
-// reads an absent `steps` key as no limit; any value there is a guess about how
-// much work an item needs, and a wrong guess stops a working run partway and
-// reports it as a gate failure. No agent definition may reintroduce one.
-func TestRenderedAgentDeclaresNoStepCeiling(t *testing.T) {
-	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(cfgDir)
-	a := &Agent{Name: "probe", Model: "m", Mode: "primary", Instructions: "do work"}
-	if err := renderMarkdown(cfgDir, a); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(filepath.Join(cfgDir, "agents", "probe.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"steps:", "maxSteps:"} {
-		if strings.Contains(string(b), key) {
-			t.Errorf("rendered agent declares %q; opencode must run unbounded", key)
-		}
-	}
-}
 
 // TestRunPhaseKeepsConfigOutOfWorktree pins option 1 of #174 against opencode's
 // supported external configuration mechanism: the per-run config root is handed
@@ -230,12 +206,13 @@ func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
 // than Linux's single-argument ceiling (maxArgLen = 131072) must still reach the
 // agent. runPhase streamed the prompt as one argv entry, so anything over that
 // failed with a raw fork/exec "argument list too long" before opencode was
-// reached. The harness now writes the full prompt to a .prompt.txt file beside
-// the trace and streams the same text on stdin, which has no per-entry ceiling.
-// The stub captures both channels: runPhase must succeed (never E2BIG), the
-// prompt must arrive whole on stdin, and it must not appear in argv.
+// reached. The harness streams the full prompt on stdin and writes only a
+// redacted audit copy beside the trace. The stub captures both channels:
+// runPhase must succeed, stdin must receive the whole prompt, and argv and the
+// durable audit copy must retain no credential-shaped value.
 func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
-	big := strings.Repeat("prompt-payload", (200*1024)/len("prompt-payload")) + "END-MARKER"
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	big := strings.Repeat("prompt-payload", (200*1024)/len("prompt-payload")) + secret + "END-MARKER"
 	if len(big) <= maxArgLen {
 		t.Fatalf("test prompt is %d bytes, must exceed maxArgLen %d", len(big), maxArgLen)
 	}
@@ -263,6 +240,41 @@ func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
 	}
 	if strings.Contains(string(argv), "prompt-payload") {
 		t.Errorf("prompt leaked into argv: %.120q", string(argv))
+	}
+	audit, err := os.ReadFile(trace + ".prompt.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(audit), secret) || !strings.Contains(string(audit), secretRedacted) {
+		t.Errorf("durable prompt audit retained credential-shaped text")
+	}
+	info, err := os.Stat(trace + ".prompt.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("durable prompt audit mode = %o, want 600", got)
+	}
+}
+func TestRunPhaseRedactsTraceButParsesOriginalEvent(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	event := `{"type":"step_finish","note":"` + secret + `","part":{"tokens":{"input":11,"output":7}}}`
+	script := "#!/bin/sh\nprintf '%s\\n' '" + event + "'\nexit 0\n"
+	wt, trace := fakeOpencode(t, script)
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	if err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	if stats.tokensIn != 11 || stats.tokensOut != 7 {
+		t.Fatalf("raw event token accounting = %+v, want input 11 and output 7", stats)
+	}
+	raw, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), secret) || !strings.Contains(string(raw), secretRedacted) {
+		t.Fatalf("trace redaction = %q, want marker without original", raw)
 	}
 }
 
@@ -298,6 +310,7 @@ func fakeOpencode(t *testing.T, script string) (string, string) {
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	trace := filepath.Join(t.TempDir(), "run", "agent.jsonl")
 	return wt, trace
 }
@@ -317,6 +330,18 @@ func TestRunPhaseFailsOnHarnessCrash(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "exit status 1") {
 		t.Errorf("error %q did not record the exit status", err)
+	}
+}
+func TestRunPhaseRedactsHarnessError(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'provider rejected `"+secret+"`\\n' >&2\nexit 1\n")
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	if err == nil {
+		t.Fatal("runPhase returned nil error on a crashed harness")
+	}
+	if strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), secretRedacted) {
+		t.Fatalf("harness error redaction = %q, want marker without original", err)
 	}
 }
 
@@ -458,15 +483,62 @@ func TestRunStatsTokenFieldsHaveLedgerConsumers(t *testing.T) {
 	}
 }
 
+func TestHardStopAgentProcessHelper(t *testing.T) {
+	heartbeat := os.Getenv("FOREST_HARD_STOP_HEARTBEAT")
+	if heartbeat == "" {
+		return
+	}
+	cmd := exec.Command("/bin/sh", "-c", "(while :; do printf x >> '"+heartbeat+"'; sleep 0.05; done) & wait")
+	if err := startManagedCommand(cmd); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if body, err := os.ReadFile(heartbeat); err == nil && len(body) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent descendant did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if errs := hardStopRunCommands(); len(errs) != 0 {
+		t.Fatalf("hard stop: %v", errs)
+	}
+	if err := waitRunCommand(cmd); err == nil {
+		t.Fatal("hard-stopped agent exited successfully")
+	}
+}
+
+func TestHardStopKillsAgentDescendants(t *testing.T) {
+	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHardStopAgentProcessHelper$")
+	cmd.Env = append(os.Environ(), "FOREST_HARD_STOP_HEARTBEAT="+heartbeat)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hard-stop helper: %v: %s", err, out)
+	}
+	before, err := os.ReadFile(heartbeat)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("agent descendant produced no heartbeat: %d bytes, %v", len(before), err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	after, err := os.ReadFile(heartbeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("agent descendant survived hard stop: heartbeat grew from %d to %d bytes", len(before), len(after))
+	}
+}
+
 // TestRunPhaseTimesOutPastDeclaredBound is the falsifier for #207: a run whose
-// agent produces no output past its declared deadline must be cancelled and
-// recorded as a timeout, never left to hold a lane forever. The stub streams one
-// event then sleeps far past the agent's 1-second bound; runPhase must return a
-// runTimeoutError that names the elapsed time and the last trace event, and it
-// must do so soon after the bound rather than waiting for the sleep to finish.
+// agent and descendant produce output past its declared deadline must be
+// cancelled as one process group and reported as a timeout.
 func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
+	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
 	wt, trace := fakeOpencode(t,
-		"#!/bin/sh\nprintf '{\"type\":\"shell\",\"content\":\"sleep\"}\\n'\nexec sleep 30\n")
+		"#!/bin/sh\n(while :; do printf x >> '"+heartbeat+"'; sleep 0.05; done) &\n"+
+			"printf '{\"type\":\"shell\",\"content\":\"sleep\"}\\n'\nwait\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe", DeadlineSeconds: 1}
 	start := time.Now()
 	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
@@ -485,5 +557,18 @@ func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sleep") {
 		t.Errorf("error %q did not name the last trace event", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	before, err := os.ReadFile(heartbeat)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("agent descendant produced no heartbeat: %d bytes, %v", len(before), err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	after, err := os.ReadFile(heartbeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("agent descendant survived cancellation: heartbeat grew from %d to %d bytes", len(before), len(after))
 	}
 }

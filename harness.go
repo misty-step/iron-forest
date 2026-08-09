@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -23,6 +24,145 @@ import (
 // such per-entry ceiling. The value is named so a delivery failure can state
 // the limit it is designed around.
 const maxArgLen = 131072
+
+type runProcess struct {
+	cmd  *exec.Cmd
+	done chan struct{}
+	once sync.Once
+	err  error
+}
+
+var runProcesses = struct {
+	sync.Mutex
+	stopping bool
+	runs     map[int]*runProcess
+}{runs: make(map[int]*runProcess)}
+
+func killRunProcessGroup(pid int) error {
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return nil
+}
+
+func startManagedCommand(cmd *exec.Cmd) error {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if cmd.Cancel != nil {
+		cmd.Cancel = func() error {
+			if cmd.Process == nil {
+				return os.ErrProcessDone
+			}
+			return killRunProcessGroup(cmd.Process.Pid)
+		}
+	}
+
+	runProcesses.Lock()
+	defer runProcesses.Unlock()
+	if runProcesses.stopping {
+		return errors.New("run start refused during hard stop")
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	process := &runProcess{cmd: cmd, done: make(chan struct{})}
+	runProcesses.runs[cmd.Process.Pid] = process
+	return nil
+}
+
+func beginRunWait(process *runProcess) {
+	process.once.Do(func() {
+		go func() {
+			process.err = process.cmd.Wait()
+			close(process.done)
+		}()
+	})
+}
+
+func waitRunCommand(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+	pid := cmd.Process.Pid
+	runProcesses.Lock()
+	process := runProcesses.runs[pid]
+	runProcesses.Unlock()
+	if process == nil {
+		return os.ErrProcessDone
+	}
+	beginRunWait(process)
+	<-process.done
+	runProcesses.Lock()
+	delete(runProcesses.runs, pid)
+	err := process.err
+	runProcesses.Unlock()
+	return err
+}
+
+func runCommand(cmd *exec.Cmd) error {
+	if err := startManagedCommand(cmd); err != nil {
+		return err
+	}
+	return waitRunCommand(cmd)
+}
+
+func runOutput(cmd *exec.Cmd) ([]byte, error) {
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	err := runCommand(cmd)
+	return output.Bytes(), err
+}
+
+func runCombinedOutput(cmd *exec.Cmd) ([]byte, error) {
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := runCommand(cmd)
+	return output.Bytes(), err
+}
+
+func abortRunCommand(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	_ = killRunProcessGroup(cmd.Process.Pid)
+	_ = waitRunCommand(cmd)
+}
+
+func hardStopRunCommands() []error {
+	runProcesses.Lock()
+	runProcesses.stopping = true
+	runs := make(map[int]*runProcess, len(runProcesses.runs))
+	for pid, process := range runProcesses.runs {
+		runs[pid] = process
+	}
+	runProcesses.Unlock()
+	var errs []error
+	for pid := range runs {
+		if err := killRunProcessGroup(pid); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			errs = append(errs, fmt.Errorf("kill run process group %d: %w", pid, err))
+		}
+	}
+	for _, process := range runs {
+		beginRunWait(process)
+	}
+	if len(runs) == 0 {
+		return errs
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for pid, process := range runs {
+		select {
+		case <-process.done:
+		case <-timer.C:
+			errs = append(errs, fmt.Errorf("wait for run process group %d: timeout", pid))
+			return errs
+		}
+	}
+	return errs
+}
 
 // promptDeliveryError reports a prompt that could not be delivered whole to the
 // agent. It names both the prompt size and the delivery ceiling so the failure
@@ -84,7 +224,7 @@ const maxTraceEventLabel = 200
 // traceEventLabel renders one trace line for an error message, truncated so a
 // huge event cannot bloat a ledger row. An empty trace reports "(none)".
 func traceEventLabel(line string) string {
-	line = strings.TrimSpace(line)
+	line = redactSecretShaped(strings.TrimSpace(line))
 	if line == "" {
 		return "(none)"
 	}
@@ -195,11 +335,11 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	// entry: Linux caps one argument at maxArgLen, so a large prompt passed on
 	// the command line fails with a raw fork/exec "argument list too long"
 	// before opencode is reached. Stdin has no such per-entry ceiling, so the
-	// prompt's only remaining bound is the model's context. The exact text that
-	// was sent is also written to a .prompt.txt file beside the trace so a run
-	// stays auditable after the agent exits.
+	// prompt's only remaining bound is the model's context. A redacted copy is
+	// written beside the trace so a run stays auditable without retaining
+	// credential-shaped values from mutable Tracker or repository content.
 	promptPath := filepath.Join(filepath.Dir(tracePath), filepath.Base(tracePath)+".prompt.txt")
-	if err := os.WriteFile(promptPath, []byte(userPrompt), 0o644); err != nil {
+	if err := os.WriteFile(promptPath, []byte(redactSecretShaped(userPrompt)), 0o600); err != nil {
 		return stats, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
 	}
 
@@ -216,7 +356,7 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	if err != nil {
 		return stats, err
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startManagedCommand(cmd); err != nil {
 		// With stdin delivery an argument-limit start error is not expected, but
 		// if one ever surfaces it must be named, never the raw fork/exec text.
 		if errors.Is(err, syscall.E2BIG) {
@@ -224,17 +364,24 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 		}
 		return stats, err
 	}
+	waited := false
+	defer func() {
+		if !waited {
+			abortRunCommand(cmd)
+		}
+	}()
 
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	lastTrace := ""
 	for sc.Scan() {
 		line := sc.Bytes()
-		if _, err := trace.Write(append(line, '\n')); err != nil {
+		traceLine := redactSecretShaped(string(line))
+		if _, err := trace.WriteString(traceLine + "\n"); err != nil {
 			return stats, err
 		}
 		if len(line) > 0 {
-			lastTrace = string(line)
+			lastTrace = traceLine
 		}
 		if st, ok := parseStepFinish(line); ok {
 			stats.tokensIn += st.tokensIn
@@ -244,7 +391,8 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 			stats.reasoning += st.reasoning
 		}
 	}
-	waitErr := cmd.Wait()
+	waitErr := waitRunCommand(cmd)
+	waited = true
 	// A deadline expiry is detected before any exit-status reading: when the
 	// context's timer fires, exec.CommandContext kills the child and Wait returns
 	// because of that cancellation, not because of anything the agent did. That
@@ -261,7 +409,7 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	if waitErr != nil {
 		// A non-zero exit is a crash or a truncation. Record the status and
 		// stderr so the failure is auditable.
-		return stats, fmt.Errorf("agent exited %q: %s", waitErr, strings.TrimSpace(stderr.String()))
+		return stats, fmt.Errorf("agent exited %q: %s", waitErr, redactSecretShaped(strings.TrimSpace(stderr.String())))
 	}
 	return stats, nil
 }

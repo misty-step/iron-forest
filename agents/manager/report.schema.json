@@ -3,15 +3,11 @@
   "title": "manager report",
   "description": "Output contract for report.json from the Manager lane.",
   "type": "object",
-  "required": ["pick", "reason"],
+  "required": ["pick"],
   "properties": {
     "pick": {
       "type": "string",
       "description": "the id of the one chosen candidate"
-    },
-    "reason": {
-      "type": "string",
-      "description": "a short reason for the pick"
     }
   }
 }

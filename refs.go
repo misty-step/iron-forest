@@ -7,45 +7,36 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 var errRefMoved = errors.New("ref moved")
 
-type refRecord struct {
-	Ref string
-	SHA string
+func encodeRefComponent(value string) string {
+	return hex.EncodeToString([]byte(value))
+}
+func validHex(value string, bytes int) bool {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != bytes {
+		return false
+	}
+	for _, b := range decoded {
+		if b != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func gitCommand(repoDir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runCombinedOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
-}
-
-func gitBlob(repoDir, content string) (string, error) {
-	cmd := exec.Command("git", "-C", repoDir, "hash-object", "-w", "--stdin")
-	cmd.Stdin = strings.NewReader(content)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	sha := strings.TrimSpace(string(out))
-	if sha == "" {
-		return "", errors.New("git hash-object returned no object id")
-	}
-	return sha, nil
-}
-
-func putRef(repoDir, ref, objectSHA, expectSHA string) error {
-	cas := fmt.Sprintf("--force-with-lease=%s:%s", ref, expectSHA)
-	_, err := gitCommand(repoDir, "push", cas, "origin", objectSHA+":"+ref)
-	return refWriteError(err)
 }
 
 func refWriteError(err error) error {
@@ -63,92 +54,120 @@ func refWriteError(err error) error {
 	return err
 }
 
+func writeBlob(repoDir, content string) (string, error) {
+	cmd := exec.Command("git", "-C", repoDir, "hash-object", "-w", "--stdin")
+	cmd.Stdin = strings.NewReader(content)
+	out, err := runCombinedOutput(cmd)
+	if err != nil {
+		return "", fmt.Errorf("git hash-object: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	objectSHA := strings.TrimSpace(string(out))
+	if objectSHA == "" {
+		return "", errors.New("git hash-object returned no object id")
+	}
+	return objectSHA, nil
+}
+
 func putBlobRef(repoDir, ref, content, expectSHA string) error {
-	objectSHA, err := gitBlob(repoDir, content)
+	objectSHA, err := writeBlob(repoDir, content)
 	if err != nil {
 		return err
 	}
-	return putRef(repoDir, ref, objectSHA, expectSHA)
+	cas := fmt.Sprintf("--force-with-lease=%s:%s", ref, expectSHA)
+	_, err = gitCommand(repoDir, "push", "--no-verify", cas, "origin", objectSHA+":"+ref)
+	return refWriteError(err)
 }
 
 func deleteRef(repoDir, ref, expectSHA string) error {
 	cas := fmt.Sprintf("--force-with-lease=%s:%s", ref, expectSHA)
-	_, err := gitCommand(repoDir, "push", cas, "origin", ":"+ref)
+	args := []string{"push"}
+	if strings.HasPrefix(ref, "refs/forest/") {
+		args = append(args, "--no-verify")
+	}
+	args = append(args, cas, "origin", ":"+ref)
+	_, err := gitCommand(repoDir, args...)
 	return refWriteError(err)
 }
 
-// deleteBranchIfPresent removes a source branch only when it still exists,
-// matching it to its reviewed Revision with a compare-and-delete. A branch
-// already removed by an earlier effect is left alone, so a retry after partial
-// failure is a safe no-op instead of a stale-ref error. If the compare-and-delete
-// loses to a concurrent pass, the branch is re-checked: when it is now gone the
-// effect already happened and the retry is a success, not a stale-ref error.
-func deleteBranchIfPresent(repoDir, branch, revision string) error {
-	gone := func() (bool, error) {
-		out, err := gitCommand(repoDir, "ls-remote", "origin", "refs/heads/"+branch)
+// deleteRefsAtomically removes one required ref and any present optional refs
+// in one compare-and-delete transaction. A lost response is reconciled by
+// checking that every selected ref is absent.
+func deleteRefsAtomically(repoDir, requiredRef, requiredSHA string, optionalRefs ...string) error {
+	leases := map[string]string{requiredRef: requiredSHA}
+	for _, ref := range optionalRefs {
+		sha, _, err := getBlobRef(repoDir, ref)
 		if err != nil {
-			return false, err
+			return err
 		}
-		return strings.TrimSpace(out) == "", nil
+		if sha != "" {
+			leases[ref] = sha
+		}
 	}
-	isGone, err := gone()
+	current, _, err := getBlobRef(repoDir, requiredRef)
 	if err != nil {
 		return err
 	}
-	if isGone {
+	if current != requiredSHA {
+		return fmt.Errorf("%w: ref %s is %s, want %s",
+			errRefMoved, requiredRef, current, requiredSHA)
+	}
+	refs := make([]string, 0, len(leases))
+	for ref := range leases {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	args := []string{"push", "--no-verify", "--atomic"}
+	for _, ref := range refs {
+		args = append(args, fmt.Sprintf("--force-with-lease=%s:%s", ref, leases[ref]))
+	}
+	args = append(args, "origin")
+	for _, ref := range refs {
+		args = append(args, ":"+ref)
+	}
+	if _, err := gitCommand(repoDir, args...); err == nil {
+		return nil
+	} else {
+		for _, ref := range refs {
+			sha, _, readErr := getBlobRef(repoDir, ref)
+			if readErr != nil || sha != "" {
+				return refWriteError(err)
+			}
+		}
 		return nil
 	}
-	err = deleteRef(repoDir, "refs/heads/"+branch, revision)
-	if errors.Is(err, errRefMoved) {
-		// A concurrent pass deleted the branch after our check. Confirm it is
-		// gone; if so this effect already happened and the retry is a no-op.
-		isGone, rerr := gone()
-		if rerr != nil {
-			return rerr
-		}
-		if isGone {
-			return nil
-		}
-	}
-	return err
 }
 
 func getBlobRef(repoDir, ref string) (sha, content string, err error) {
-	out, err := gitCommand(repoDir, "ls-remote", "origin", ref)
-	if err != nil {
-		return "", "", err
-	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return "", "", nil
-	}
-	sha = fields[0]
-	if _, err := gitCommand(repoDir, "fetch", "origin", "+"+ref+":"+ref); err != nil {
-		return "", "", err
-	}
-	content, err = gitCommand(repoDir, "cat-file", "-p", ref)
-	if err != nil {
-		return "", "", err
-	}
-	return sha, content, nil
-}
-
-func listRefs(repoDir, prefix string) ([]refRecord, error) {
-	if !strings.Contains(prefix, "*") {
-		prefix += "*"
-	}
-	out, err := gitCommand(repoDir, "ls-remote", "origin", prefix)
-	if err != nil {
-		return nil, err
-	}
-	var refs []refRecord
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			refs = append(refs, refRecord{Ref: fields[1], SHA: fields[0]})
+	for range 3 {
+		out, err := gitCommand(repoDir, "ls-remote", "origin", ref)
+		if err != nil {
+			return "", "", err
 		}
+		fields := strings.Fields(out)
+		if len(fields) == 0 {
+			return "", "", nil
+		}
+		sha = fields[0]
+		// Fetch the named object without writing FETCH_HEAD or a shared local
+		// ref. Concurrent Flow readers therefore cannot contend on one ref lock.
+		if _, err := gitCommand(repoDir, "fetch", "--no-write-fetch-head", "origin", ref); err != nil {
+			return "", "", err
+		}
+		current, err := gitCommand(repoDir, "ls-remote", "origin", ref)
+		if err != nil {
+			return "", "", err
+		}
+		currentFields := strings.Fields(current)
+		if len(currentFields) == 0 || currentFields[0] != sha {
+			continue
+		}
+		content, err = gitCommand(repoDir, "cat-file", "-p", sha)
+		if err != nil {
+			return "", "", err
+		}
+		return sha, content, nil
 	}
-	return refs, nil
+	return "", "", fmt.Errorf("read ref %s: remote changed during three attempts", ref)
 }
 
 func blobSHA(content string) string {
@@ -157,36 +176,3 @@ func blobSHA(content string) string {
 	_, _ = io.WriteString(h, content)
 	return hex.EncodeToString(h.Sum(nil))
 }
-
-type subjectSet struct {
-	mu   sync.Mutex
-	keys map[string]struct{}
-}
-
-func newSubjectSet() *subjectSet {
-	return &subjectSet{keys: make(map[string]struct{})}
-}
-
-func (b *subjectSet) claim(key string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.keys[key]; ok {
-		return false
-	}
-	b.keys[key] = struct{}{}
-	return true
-}
-
-func (b *subjectSet) release(key string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.keys, key)
-}
-
-func (b *subjectSet) idle() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.keys) == 0
-}
-
-var inFlight = newSubjectSet()

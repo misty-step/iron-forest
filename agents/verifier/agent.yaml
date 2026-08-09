@@ -1,9 +1,13 @@
 # verifier: one worktree change to an independent verdict.
 #
 # This lane reads the proposed diff and may write only review.json.
-# Every network surface is denied, so review cannot push, fetch, or research.
+# Built-in web and MCP tools are denied. Bash remains available for local review,
+# so the standing instruction, empty child HOME, and absent credentials forbid network use.
 # The verifier uses a different model family from the Builder.
 description: "The Verifier reviews one change against its item and writes review.json."
+commit:
+  name: "Iron Forest Verifier"
+  email: "verifier@iron-forest.invalid"
 harness: opencode
 mode: primary
 model: openrouter/openai/gpt-5.6-luna
@@ -12,7 +16,6 @@ variant: max
 # step ceiling. Runs that exceed this are cancelled and recorded as
 # timeout_failed.
 deadline_seconds: 3600
-# A large diff costs the reviewer reads before it can judge. Keep headroom so a
 permission:
   read: allow
   edit: allow

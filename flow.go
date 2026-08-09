@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,25 +12,51 @@ import (
 	"time"
 )
 
-// A Subject is the one thing a flow acts on in a pass. Key stays stable across
-// revisions of the same work. Revision is what the flow actually saw: an item's
-// update stamp, or a branch's head commit. A flow that recorded a decision
-// against a revision must not decide again until the revision moves.
+type subjectKind string
+
+const (
+	subjectItem       subjectKind = "item"
+	subjectBranch     subjectKind = "branch"
+	subjectRetirement subjectKind = "retirement"
+	subjectManager    subjectKind = "manager"
+)
+
+var (
+	errSubjectRevisionStale   = errors.New("Subject Revision is stale")
+	errFlowRetryable          = errors.New("Flow operation is retryable")
+	errControlEvidenceInvalid = errors.New("durable control evidence is invalid")
+)
+
+// A Subject is the one thing a Flow acts on in a pass. Key stays stable across
+// revisions of the same work. Revision is the decision stamp for its Kind: an
+// item update stamp, a branch head commit, a retirement's reviewed commit, or
+// the Manager candidate-set stamp. A Flow that recorded a decision against a
+// Revision must not decide again until the Revision moves.
 type Subject struct {
 	Key      string // "item-41", "branch-forest/41-add-notes"
-	Kind     string // item | branch
-	Revision string // item updatedAt, or branch head sha
+	Kind     subjectKind
+	Revision string // Kind-specific decision stamp described above
 	Label    string // one line for the operator
-	ID       string // tracker item identity, opaque to the controller
-	Item     Item   // Kind == "item"
-	Branch   string // Kind == "branch"
-	Head     string // Kind == "branch": head commit sha
+	ID       string // Tracker Item identity, opaque to the controller
+	Item     Item   // subjectItem or subjectRetirement
+	Branch   string // subjectBranch or subjectRetirement
+	Failure  error  // malformed durable evidence carried to Act for a bounded brake
 }
 
-// An Outcome is what one Act call did. It becomes one ledger row. There is no
-// money in it: spend is bounded by the provider key, not counted here.
+func checkSubjectRevision(s Subject, actual string) error {
+	if s.Revision == actual {
+		return nil
+	}
+	return fmt.Errorf("%w: branch %s moved from %s to %s before Act",
+		errSubjectRevisionStale, s.Branch, s.Revision, actual)
+}
+
+// An Outcome is what one Act call did. It becomes one ledger row. Status is a
+// routing result for the Act call, not a closed enumeration; callers classify
+// it for progress, handoff, or failure summaries. Measured token classes are
+// preserved; no money is recorded or computed.
 type Outcome struct {
-	Status  string // done | reviewed | merged | fixed | skipped | <stage>_failed
+	Status  string // routing result
 	Branch  string
 	PRURL   string
 	Verdict string
@@ -68,8 +95,9 @@ func (o *Outcome) addTokens(s runStats) {
 type Flow interface {
 	// Name is the flow's word in the glossary and in the ledger.
 	Name() string
-	// Select returns the subjects this flow would act on right now, most
-	// deserving first. It must be a pure read with no writes.
+	// Select returns the current Subjects in this Flow's consideration order.
+	// It makes no Tracker, Host, or remote Git writes. It may refresh local read
+	// projections before it selects.
 	Select(cfg Config, repoDir string) ([]Subject, error)
 	// Act performs the flow's declared effects on one subject.
 	Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error)
@@ -103,43 +131,58 @@ func draining(drain *int32) bool {
 }
 
 // serve runs every enabled flow, each in its own goroutine on its own clock.
-// names filters to a subset of flows; empty means every enabled flow.
 func serve(cfg Config, repoDir string, names []string) int {
+	return serveSelected(cfg, repoDir, names, flowsFor())
+}
+
+func serveSelected(cfg Config, repoDir string, names []string, selected []Flow) int {
 	lock, err := acquireSingletonLock(repoDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
+		fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
 		return 1
 	}
 	defer lock.Close()
 
 	// A worktree leaked by an abnormal exit is reaped once, before any flow
 	// starts, so a stale run directory never survives a restart.
+	if err := removeInterruptedUpdateArtifacts(repoDir); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: remove interrupted update artifacts: %s\n", redactSecretShaped(err.Error()))
+	}
 	reapOrphanWorktrees(repoDir)
 
-	// Reconcile merged-but-unfinished subjects before any lane starts, so a
-	// restart reaches a consistent state without operator action. A failure here
-	// is logged, never fatal: the lane loop reconciles again on every pass.
-	if err := reconcileMerged(cfg, repoDir); err != nil {
-		fmt.Fprintf(os.Stderr, "forest: reconcile: %v\n", err)
-	}
-
 	var drain int32
+	drainNow := make(chan struct{})
+	served := make(chan struct{})
+	defer close(served)
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
 	go func() {
-		<-sig // first signal: finish the in-flight agents, start no new pass
-		atomic.StoreInt32(&drain, 1)
-		fmt.Fprintln(os.Stderr, "forest: draining, waiting for in-flight agents")
-		<-sig // second signal: the operator's hard stop, which still outranks the agents' own wall-clock deadlines
-		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
-		for _, dir := range trackedWorktrees() {
-			removeWorktree(repoDir, dir)
-			fmt.Fprintf(os.Stderr, "forest: removed in-flight worktree %s\n", dir)
+		select {
+		case <-sig:
+		case <-served:
+			return
 		}
+		// Drain starts immediately, even when final update I/O is blocked. An
+		// update whose last drain check already passed may finish its install;
+		// both paths stop this process, and a second signal always stays live.
+		atomic.StoreInt32(&drain, 1)
+		close(drainNow)
+		fmt.Fprintln(os.Stderr, "forest: draining, waiting for in-flight agents")
+		select {
+		case <-sig:
+		case <-served:
+			return
+		}
+		fmt.Fprintln(os.Stderr, "forest: second signal, exiting now")
+		for _, err := range hardStopRunCommands() {
+			fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
+		}
+		// A forced stop does not wait for blocked repository I/O. The next
+		// startup reaps every linked worktree before it starts a Flow.
 		os.Exit(1)
 	}()
 
-	selected := flowsFor()
 	if len(names) > 0 {
 		var keep []Flow
 		for _, f := range selected {
@@ -151,7 +194,7 @@ func serve(cfg Config, repoDir string, names []string) int {
 		}
 		selected = keep
 		if len(selected) == 0 {
-			fmt.Fprintf(os.Stderr, "forest: no such flow: %v\n", names)
+			fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", redactSecretShaped(fmt.Sprint(names)))
 			return 2
 		}
 	}
@@ -167,16 +210,18 @@ func serve(cfg Config, repoDir string, names []string) int {
 	}
 
 	fmt.Printf("forest v%s: %s on %s\n", version, flowNames(live), cfg.Repo)
-	// The self-updater is not a lane: it owns no subject. It swaps the binary
-	// only when no subject is in flight, so a rebuild never kills a live agent.
-	go selfUpdateLoop(cfg, repoDir, &drain)
-
+	// The updater takes the write gate only between Subject Effects.
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		selfUpdateLoop(repoDir, &drain, drainNow)
+	}()
 	for _, f := range live {
 		wg.Add(1)
 		go func(f Flow) {
 			defer wg.Done()
-			runFlowLoop(f, cfg, repoDir, &drain)
+			runFlowLoop(f, cfg, repoDir, &drain, drainNow)
 		}(f)
 	}
 	wg.Wait()
@@ -223,69 +268,86 @@ func verifyHostConfig(repoDir string) error {
 
 // runFlowLoop is one lane's whole life: select, act, record, sleep. Config is
 // re-read every pass so an operator edit lands without a restart, and a failing
-// pass never stops the lane.
-//
-// The immediate re-select after productive work exists so a lane can pick up
-// sibling work its own write unblocked. It is only valid for *different* work:
-// if a pass acts on the same subject it just acted on, the lane is not making
-// progress and must wait. Without that rule any action that succeeds while
-// changing nothing becomes a hot loop, which is what 217 identical verifier
-// passes on one branch were.
-func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32) {
+// pass never stops the lane. Every result waits for the configured interval.
+// The cursor resumes after the prior Subject so pending work cannot starve its
+// siblings.
+func runFlowLoop(f Flow, cfg Config, repoDir string, drain *int32, drainNow <-chan struct{}) {
 	var lastKey string
 	for {
 		if atomic.LoadInt32(drain) == 1 {
 			fmt.Fprintf(os.Stderr, "forest: %s draining, no new pass\n", f.Name())
 			return
 		}
-		if nc, err := loadConfig(configPath(repoDir)); err == nil {
-			cfg = nc
-		}
-		if !f.Enabled(cfg) {
-			time.Sleep(f.Interval(cfg))
+		nc, err := loadConfig(configPath(repoDir))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forest: %s config: %s\n", f.Name(), redactSecretShaped(err.Error()))
+			if !waitFlowInterval(f.Interval(cfg), drainNow) {
+				return
+			}
 			continue
 		}
-		// Reconcile merged-but-unfinished subjects on every pass so a partial
-		// failure is completed on a later pass, without needing a restart. Each
-		// effect is idempotent, so running alongside a live merge is safe.
-		if err := reconcileMerged(cfg, repoDir); err != nil {
-			fmt.Fprintf(os.Stderr, "forest: %s reconcile: %v\n", f.Name(), err)
+		cfg = nc
+		if !f.Enabled(cfg) {
+			if !waitFlowInterval(f.Interval(cfg), drainNow) {
+				return
+			}
+			continue
 		}
 		if err := verifyHostConfig(repoDir); err != nil {
 			// The host config was modified outside this lane: a run left a
 			// working-tree write in forest.yaml, which would change what the next
 			// pass's checks execute on the host. Refuse to act this pass, name the
 			// file, and retry on the next interval so an operator sees it.
-			fmt.Fprintf(os.Stderr, "forest: %s: %v\n", f.Name(), err)
-			time.Sleep(f.Interval(cfg))
+			fmt.Fprintf(os.Stderr, "forest: %s: %s\n", f.Name(), redactSecretShaped(err.Error()))
+			if !waitFlowInterval(f.Interval(cfg), drainNow) {
+				return
+			}
 			continue
 		}
-		code, key := runFlowPass(f, cfg, repoDir, drain)
-		if code == 0 && key != lastKey {
-			// This pass did work on a subject it did not just handle: its write
-			// may have made another subject actionable, so re-select at once.
-			lastKey = key
-			continue
-		}
+		_, key := runFlowPass(f, cfg, repoDir, drain, lastKey)
 		lastKey = key
-		time.Sleep(f.Interval(cfg))
+		if !waitFlowInterval(f.Interval(cfg), drainNow) {
+			return
+		}
 	}
 }
 
-// runFlowPass acts on at most one subject and reports 0 when it did work, plus
-// the key of the subject it acted on so the caller can tell repeated work from
-// progress. One subject per pass keeps a lane's decisions small and re-reads the
-// world between them, so a lane never acts on state it has already invalidated.
-func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string) {
+func waitFlowInterval(interval time.Duration, drainNow <-chan struct{}) bool {
+	if drainNow == nil {
+		time.Sleep(interval)
+		return true
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-drainNow:
+		return false
+	}
+}
+
+// runFlowPass acts on at most one subject and reports 0 when it did work.
+// Selection resumes after the prior key, so one retryable or pending Subject
+// cannot starve another while each Effect still re-reads repository state.
+func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32, afterKey string) (int, string) {
 	subjects, err := f.Select(cfg, repoDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forest: %s select: %v\n", f.Name(), err)
+		fmt.Fprintf(os.Stderr, "forest: %s select: %s\n", f.Name(), redactSecretShaped(err.Error()))
 		return 1, ""
 	}
 	if len(subjects) == 0 {
 		return 1, ""
 	}
-	for _, s := range subjects {
+	start := 0
+	for i, s := range subjects {
+		if s.Key == afterKey {
+			start = (i + 1) % len(subjects)
+			break
+		}
+	}
+	for offset := range len(subjects) {
+		s := subjects[(start+offset)%len(subjects)]
 		code := actOnSubject(f, cfg, repoDir, s, drain)
 		if code == codeBusy {
 			continue // another worker handles it; try the next candidate
@@ -295,21 +357,38 @@ func runFlowPass(f Flow, cfg Config, repoDir string, drain *int32) (int, string)
 	return 1, ""
 }
 
-// actOnSubject excludes one subject within this process, acts, and records.
-// The read-side update gate spans Act so a binary swap cannot interrupt it.
-// Act must never take this lock again: a second read lock behind a waiting
-// writer deadlocks.
+var (
+	runPrefix   = fmt.Sprintf("%s-%d", time.Now().UTC().Format("20060102T150405.000000000Z"), os.Getpid())
+	runSequence uint64
+)
+
+func newRunID() string {
+	return fmt.Sprintf("%s-%016x", runPrefix, atomic.AddUint64(&runSequence, 1))
+}
+
+// actOnSubject admits one Subject across every process and checkout before it
+// spends work, then acts and records. The read-side update gate spans Act so a
+// binary swap cannot interrupt it. Act must never take this lock again: a
+// second read lock behind a waiting writer deadlocks.
 func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) int {
 	updateGate.RLock()
 	defer updateGate.RUnlock()
-	if !inFlight.claim(s.Key) {
-		return codeBusy
+	if draining(drain) {
+		return 1
 	}
-	defer inFlight.release(s.Key)
 
-	runID := fmt.Sprintf("%s-%s", time.Now().UTC().Format("20060102T150405Z"), s.Key)
+	runID := newRunID()
+	release, err := claimAdmission(repoDir, cfg.Repo, f.Name(), s)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(err.Error()))
+		if errors.Is(err, errAdmissionHeld) {
+			return codeBusy
+		}
+		return 1
+	}
+	defer release()
 
-	fmt.Printf("forest: %s %s\n", f.Name(), s.Label)
+	fmt.Printf("forest: %s %s\n", f.Name(), redactSecretShaped(s.Label))
 	out, err := f.Act(cfg, repoDir, s, runID)
 	rec := runRecord{
 		Time: nowRFC(), RunID: runID, Flow: f.Name(), Subject: s.Key,
@@ -326,29 +405,69 @@ func actOnSubject(f Flow, cfg Config, repoDir string, s Subject, drain *int32) i
 			// failure, keep the spent tokens, and leave the brake untouched.
 			rec.Status = shutdownStatus
 		} else {
-			if brakeErr := recordStalled(repoDir, f.Name(), s.Key, s.Revision); brakeErr != nil {
+			var brakeErr error
+			switch {
+			case s.Kind == subjectRetirement && errors.Is(err, errSubjectRevisionStale):
+				// A live preparing branch moved. The next retirement pass moves
+				// the durable fact before it retries the branch path.
+			case errors.Is(err, errRetirementStale) || errors.Is(err, errSubjectRevisionStale):
+				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			case errors.Is(err, errRetirementEvidenceInvalid) ||
+				errors.Is(err, errAttemptsInvalid) ||
+				errors.Is(err, errControlEvidenceInvalid) ||
+				errors.Is(err, errTrackerEvidenceInvalid):
+				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			case errors.Is(err, errRetirementRecoveryHard):
+				brakeErr = recordTerminalStall(repoDir, f.Name(),
+					retirementSubjectKey(s.Branch), s.Revision)
+			case errors.Is(err, errHostMergeUnavailable) &&
+				!errors.Is(err, errHostRevisionMoved):
+				brakeErr = recordTerminalStall(repoDir, f.Name(), s.Key, s.Revision)
+			case errors.Is(err, errHostRevisionMoved):
+				// Revision movement is a stale observation, not a failed Effect.
+			case errors.Is(err, errTrackerUnavailable):
+				// Tracker transport failure is retryable and must not consume the brake.
+			case s.Kind == subjectRetirement:
+				switch {
+				case errors.Is(err, errHostMergePending),
+					errors.Is(err, errFlowRetryable),
+					errors.Is(err, errHostRevisionMoved):
+				default:
+					brakeErr = recordStalled(repoDir, f.Name(),
+						retirementAgentSubjectKey(s.Branch), s.Revision)
+				}
+			case !errors.Is(err, errHostMergePending) && !errors.Is(err, errFlowRetryable):
+				brakeErr = recordStalled(repoDir, f.Name(), s.Key, s.Revision)
+			}
+			if brakeErr != nil {
 				err = fmt.Errorf("%w; record stalled: %v", err, brakeErr)
 			}
 			if rec.Status == "" || rec.Status == "done" {
 				rec.Status = failStatus(err)
 			}
 		}
-		rec.Error = err.Error()
-		_ = appendRun(workspaceDir(repoDir), rec)
-		fmt.Fprintf(os.Stderr, "forest: %s %s: %v\n", f.Name(), s.Key, err)
+		rec.Error = redactSecretShaped(err.Error())
+		if ledgerErr := appendRun(workspaceDir(repoDir), rec); ledgerErr != nil {
+			fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(ledgerErr.Error()))
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "forest: %s %s: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(err.Error()))
 		return 1
 	}
-	_ = appendRun(workspaceDir(repoDir), rec)
-	fmt.Printf("forest: %s %s %s\n", f.Name(), s.Key, rec.Status)
+	if err := appendRun(workspaceDir(repoDir), rec); err != nil {
+		fmt.Fprintf(os.Stderr, "forest: %s %s ledger: %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(err.Error()))
+		return 1
+	}
+	fmt.Printf("forest: %s %s %s\n", f.Name(), redactSecretShaped(s.Key), redactSecretShaped(rec.Status))
 	return 0
 }
 
-// runOnce acts on one named subject with one flow, outside the daemon. It does
-// not take the singleton lock, so the in-process subject exclusion remains the
-// only guard for a manual dispatch beside a running daemon.
+// runOnce acts on one named Subject with one Flow outside the daemon. The
+// durable admission in actOnSubject prevents a manual run from duplicating
+// work held by serve or another checkout.
 func runOnce(cfg Config, repoDir, flowName, subject string) int {
 	if err := verifyHostConfig(repoDir); err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
+		fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
 		return 1
 	}
 	for _, f := range flowsFor() {
@@ -357,23 +476,45 @@ func runOnce(cfg Config, repoDir, flowName, subject string) int {
 		}
 		subjects, err := f.Select(cfg, repoDir)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "forest:", err)
+			fmt.Fprintln(os.Stderr, "forest:", redactSecretShaped(err.Error()))
 			return 1
 		}
-		for _, s := range subjects {
-			if s.Key == subject || s.Branch == subject ||
-				(s.ID != "" && s.ID == subject) {
-				return actOnSubject(f, cfg, repoDir, s, nil)
-			}
+		match, found, err := resolveSelectedSubject(subjects, subject)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forest: %s: %s\n", redactSecretShaped(flowName), redactSecretShaped(err.Error()))
+			return 1
 		}
-		fmt.Fprintf(os.Stderr, "forest: %s does not select %q now\n", flowName, subject)
+		if found {
+			return actOnSubject(f, cfg, repoDir, match, nil)
+		}
+		fmt.Fprintf(os.Stderr, "forest: %s does not select %q now\n", redactSecretShaped(flowName), redactSecretShaped(subject))
 		for _, s := range subjects {
-			fmt.Fprintf(os.Stderr, "  candidate: %s\n", s.Key)
+			fmt.Fprintf(os.Stderr, "  candidate: %s\n", redactSecretShaped(s.Key))
 		}
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", flowName)
+	fmt.Fprintf(os.Stderr, "forest: no such flow: %s\n", redactSecretShaped(flowName))
 	return 2
+}
+
+func resolveSelectedSubject(subjects []Subject, name string) (Subject, bool, error) {
+	var matches []Subject
+	for _, s := range subjects {
+		if s.Key == name || s.Branch == name || (s.ID != "" && s.ID == name) {
+			matches = append(matches, s)
+		}
+	}
+	if len(matches) == 0 {
+		return Subject{}, false, nil
+	}
+	if len(matches) > 1 {
+		keys := make([]string, len(matches))
+		for i, s := range matches {
+			keys[i] = s.Key
+		}
+		return Subject{}, false, fmt.Errorf("subject %q is ambiguous across %s", name, strings.Join(keys, ", "))
+	}
+	return matches[0], true, nil
 }
 
 // failStatus maps a stage-prefixed error to the ledger's failure vocabulary.
