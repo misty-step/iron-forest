@@ -490,9 +490,18 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 	}
 	if !found {
 		var stats runStats
+		// The Builder's report keys to the Revision Select offered — the branch
+		// head the Builder published it for. The review may judge a later
+		// rebased head, so the report is read once against the offered Revision
+		// and carried across the rebase into the prompt.
+		rep, _, reportErr := readReport(repoDir, s.Revision)
+		if reportErr != nil {
+			out.Status = "notes_failed"
+			return out, fmt.Errorf("notes: report: %w", flowNoteError(reportErr))
+		}
 		// The durable winning Verdict decides whether the existing Host
 		// preparation becomes pending. A losing review cannot publish intent.
-		verdict, stats, err = verifierReview(repoDir, wtDir, it, baseSHA, runID, a)
+		verdict, stats, err = verifierReview(repoDir, wtDir, it, baseSHA, runID, a, rep)
 		out.addTokens(stats)
 		if err != nil {
 			// A mechanical prompt-delivery failure names itself prompt_failed so it
@@ -577,17 +586,20 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 	return out, nil
 }
 
-// verifierReview reviews one head and records the verdict as a note on it. It
-// returns the phase statistics so the ledger reports the work the review cost
-// in tokens; a discarded count makes every review look free.
-func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent) (verdictNote, runStats, error) {
+// verifierReview reviews one head and records the verdict as a note on it. rep
+// is the durable Builder report for the authored Revision, which the prompt
+// carries so the review reads the Builder's account of its choices, not just
+// the item and the diff. It returns the phase statistics so the ledger reports
+// the work the review cost in tokens; a discarded count makes every review look
+// free.
+func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent, rep report) (verdictNote, runStats, error) {
 	var out verdictNote
 	var stats runStats
 	diff, err := gitOut(wtDir, "diff", "origin/master..."+head)
 	if err != nil {
 		return out, stats, fmt.Errorf("review: diff: %w", err)
 	}
-	prompt, err := renderUserPrompt(a, reviewData(it, report{}, diff))
+	prompt, err := renderUserPrompt(a, reviewData(it, rep, diff))
 	if err != nil {
 		return out, stats, fmt.Errorf("review: prompt: %w", err)
 	}

@@ -802,8 +802,8 @@ func gateBaseRepo(t *testing.T, files map[string]string) (string, string) {
 	return wtDir, baseSHA
 }
 
-// writeReport writes a report.json into the worktree as a run artifact.
-func writeReport(t *testing.T, wtDir, body string) {
+// writeReportArtifact writes a report.json into the worktree as a run artifact.
+func writeReportArtifact(t *testing.T, wtDir, body string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(wtDir, "report.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -831,7 +831,7 @@ func TestGateRefusesReportNamingUnchangedFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "b.go"), []byte("package b2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeReport(t, wtDir, `{"summary":"s","changed_files":["a.go"]}`)
+	writeReportArtifact(t, wtDir, `{"summary":"s","changed_files":["a.go"]}`)
 
 	_, _, err := gate(wtDir, baseSHA, gateTestSchema(t), "")
 	if err == nil {
@@ -856,7 +856,7 @@ func TestGateRefusesReportOmittingChangedFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wtDir, "c.go"), []byte("package c2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeReport(t, wtDir, `{"summary":"s","changed_files":["b.go"]}`)
+	writeReportArtifact(t, wtDir, `{"summary":"s","changed_files":["b.go"]}`)
 
 	_, _, err := gate(wtDir, baseSHA, gateTestSchema(t), "")
 	if err == nil {

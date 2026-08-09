@@ -623,3 +623,105 @@ func TestMergeBlockedNamesEveryReason(t *testing.T) {
 		t.Error("auto_merge off does not block the merge")
 	}
 }
+
+// TestVerifierPromptCarriesBuilderReport pins item #121: a review prompt must
+// carry the Builder report that was recorded for the Revision, and a Revision
+// with no report must name the absence instead of rendering an empty heading.
+// The Builder persists its report as a durable note on the published head, so
+// the real Act path renders the summary when the note exists and the absence
+// sentence when it does not. Before the fix, flow_verifier.go handed the prompt
+// template a zero-valued report{}, so the {{.Report}} section always rendered
+// empty and the Verifier was told to read a report that was never supplied.
+func TestVerifierPromptCarriesBuilderReport(t *testing.T) {
+	const summary = "implemented the key rotation; could not touch the schema"
+	const absent = "No builder report was recorded for this Revision"
+	drive := func(t *testing.T, seedReport bool) string {
+		t.Helper()
+		repo := setupTestRepo(t)
+		branch := "forest/9-change"
+		runGitTest(t, repo, "checkout", "-q", "-b", branch)
+		rebaseTestWriteFile(t, filepath.Join(repo, "branch.txt"), "branch\n")
+		runGitTest(t, repo, "add", "branch.txt")
+		runGitTest(t, repo, "commit", "-q", "-m", "branch work")
+		runGitTest(t, repo, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+		head := remoteBranchHead(t, repo, branch)
+		runGitTest(t, repo, "checkout", "-q", "master")
+
+		writeAgentFixture(t, repo, "verifier", "verifier-model")
+		// Drive the real prompt template, whose Builder report section is what
+		// the card's defect made empty.
+		realPrompt, err := os.ReadFile(filepath.Join("agents", "verifier", "prompt.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(repo, DefaultAgentsDir, "verifier", "prompt.md"),
+			realPrompt, 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		if seedReport {
+			if err := writeReport(repo, head, report{
+				Summary: summary, ChangedFiles: []string{"branch.txt"}, Notes: "none",
+			}, testCommitIdentity()); err != nil {
+				t.Fatalf("seed report note: %v", err)
+			}
+		}
+
+		oldGH := ghJSON
+		ghJSON = func(args ...string) ([]byte, error) {
+			return []byte(`{"number":9,"title":"change","body":"","updatedAt":"u1","comments":[],"labels":[]}`), nil
+		}
+		defer func() { ghJSON = oldGH }()
+
+		gotPrompt := ""
+		oldRun := runPhase
+		runPhase = func(_ string, wtDir string, _ *Agent, prompt string, _ string) (runStats, error) {
+			gotPrompt = prompt
+			if err := os.WriteFile(filepath.Join(wtDir, "review.json"),
+				[]byte(`{"verdict":"changes","summary":"needs work","notes":"see above"}`), 0o644); err != nil {
+				return runStats{}, err
+			}
+			return runStats{}, nil
+		}
+		defer func() { runPhase = oldRun }()
+
+		cfg := defaultConfig()
+		cfg.Repo = "owner/repo"
+		cfg.Checks = []Check{{Name: "true", Run: "true"}}
+		cfg.Flows.Verifier.Agent = "verifier"
+		cfg.Flows.Verifier.AutoMerge = true
+		cfg.Projection = ProjectionConfig{}
+
+		out, err := (verifierFlow{}).Act(cfg, repo, Subject{Key: "branch-" + branch, Kind: "branch", Revision: head,
+			Label: branch, ID: "9", Branch: branch}, "run-1")
+		if err != nil {
+			t.Fatalf("Act: %v", err)
+		}
+		if out.Status != "reviewed" {
+			t.Fatalf("status = %q, want reviewed", out.Status)
+		}
+		if !strings.Contains(gotPrompt, "## Builder report") {
+			t.Fatalf("prompt lacks the Builder report section:\n%s", gotPrompt)
+		}
+		return gotPrompt
+	}
+
+	t.Run("with a report, the prompt carries the summary", func(t *testing.T) {
+		prompt := drive(t, true)
+		if !strings.Contains(prompt, summary) {
+			t.Fatalf("prompt does not contain the Builder summary %q:\n%s", summary, prompt)
+		}
+	})
+
+	t.Run("without a report, the prompt names the absence", func(t *testing.T) {
+		prompt := drive(t, false)
+		if !strings.Contains(prompt, absent) {
+			t.Fatalf("prompt does not name the missing report %q:\n%s", absent, prompt)
+		}
+		if strings.Contains(prompt, summary) {
+			t.Fatalf("prompt renders a report that was never recorded:\n%s", prompt)
+		}
+	})
+}

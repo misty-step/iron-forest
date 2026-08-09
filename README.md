@@ -23,6 +23,7 @@ checkout has one daemon process.
 - **Admission:** `refs/forest/claim/` and a per-owner file lock serialize one canonical Subject across processes and checkouts.
 - **Verdict:** `refs/notes/forest/verdict` stores a Verdict on the exact Revision reviewed.
 - **Checks:** `refs/notes/forest/checks` stores the result of Iron Forest's own `checks:` commands on that exact Revision.
+- **Report:** `refs/notes/forest/report` stores the Builder's Gate-checked report, carried into the Verifier's review prompt.
 - **Retirement:** `refs/forest/retirement/` stores `preparing`, `pending`, `observed`, or `landed` merge recovery until the Tracker Item and branch retire.
 - **Effect:** `refs/forest/attempt/effect-*` stores Revision-scoped write claims. Accepted Host merges and Tracker closes get separate acceptance claims.
 Manager and Fixer tag updates use Subject admission as intent. Repeating their exact add/remove operation is safe.

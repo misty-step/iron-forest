@@ -169,6 +169,13 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
+	// The report the Gate verified lives only in the worktree, which is removed
+	// when the run ends. Persist it as a note on the exact Revision, so the
+	// Verifier's review can carry the Builder's account of what it chose.
+	if err := writeReport(repoDir, publishedHead, rep, a.Commit); err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("notes: report: %w", flowNoteError(err))
+	}
 	body := builderProjectionBody(it, rep, changed)
 	if err := publishBuiltComment(
 		cfg, repoDir, it, branch, publishedHead,

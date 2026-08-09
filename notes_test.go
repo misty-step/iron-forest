@@ -127,6 +127,7 @@ func TestDurableNoteReadersRejectInvalidSemantics(t *testing.T) {
 		ref     string
 		body    string
 		verdict bool
+		report  bool
 	}{
 		{
 			name:    "Verdict decision",
@@ -151,6 +152,12 @@ func TestDurableNoteReadersRejectInvalidSemantics(t *testing.T) {
 			ref:  checksNotesRef,
 			body: `{"status":"unknown"}`,
 		},
+		{
+			name:   "Report summary",
+			ref:    reportNotesRef,
+			body:   `{"summary":"","changed_files":["a.go"]}`,
+			report: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,7 +168,9 @@ func TestDurableNoteReadersRejectInvalidSemantics(t *testing.T) {
 				t.Fatal(err)
 			}
 			var err error
-			if tc.verdict {
+			if tc.report {
+				_, _, err = readReport(work, sha)
+			} else if tc.verdict {
 				_, _, err = readVerdict(work, sha)
 			} else {
 				_, _, err = readChecks(work, sha)

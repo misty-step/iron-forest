@@ -46,6 +46,7 @@ type attemptsNote struct {
 const (
 	verdictNotesRef = "forest/verdict"
 	checksNotesRef  = "forest/checks"
+	reportNotesRef  = "forest/report"
 )
 
 var (
@@ -89,7 +90,7 @@ func withNotesLock(repoDir string, fn func() error) error {
 // lock used by note writers.
 func fetchNotes(repoDir string) error {
 	return withNotesLock(repoDir, func() error {
-		for _, ref := range []string{verdictNotesRef, checksNotesRef} {
+		for _, ref := range []string{verdictNotesRef, checksNotesRef, reportNotesRef} {
 			if err := fetchNoteRef(repoDir, ref); err != nil {
 				return err
 			}
@@ -156,6 +157,31 @@ func writeChecks(repoDir, sha string, c checksNote, id CommitIdentity) error {
 	c.Time = time.Now().UTC().Format(time.RFC3339)
 	return writeNote(repoDir, checksNotesRef, sha, c, id)
 }
+
+// readReport returns the durable Builder report for one exact commit, or ok
+// false when the Revision carries none. The note stores the same fields the
+// Gate validated in report.json, so a Verifier's prompt can carry the Builder's
+// own account of what it chose and what it could not do — the one thing the
+// body plus diff alone never supply.
+func readReport(repoDir, sha string) (report, bool, error) {
+	body, ok, err := readNote(repoDir, reportNotesRef, sha)
+	if err != nil || !ok {
+		return report{}, ok, err
+	}
+	var r report
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		return report{}, false, fmt.Errorf("%w: decode report note: %v", errNoteInvalid, err)
+	}
+	if strings.TrimSpace(r.Summary) == "" {
+		return report{}, false, fmt.Errorf("%w: report note has an empty summary", errNoteInvalid)
+	}
+	return r, true, nil
+}
+
+func writeReport(repoDir, sha string, r report, id CommitIdentity) error {
+	return writeNote(repoDir, reportNotesRef, sha, r, id)
+}
+
 func readNote(repoDir, ref, sha string) (body string, ok bool, err error) {
 	err = withNotesLock(repoDir, func() error {
 		// Readers use only the remote-confirmed snapshot. A local notes update
