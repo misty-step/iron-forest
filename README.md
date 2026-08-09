@@ -11,7 +11,7 @@ Each lane uses its own interval. The process excludes duplicate work on one Subj
 | Flow | Selector | Effects |
 | --- | --- | --- |
 | Builder | Tracker items with every configured required label, without a forest branch, and without configured exclude labels. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It may create a Projection. |
-| Verifier | Pending retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and attempts remain. | Runs the configured Checks, writes the Checks note, obtains an independent Verdict, recovers pending merge effects, and can merge an approved branch. |
+| Verifier | Pending retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and attempts remain, or one Host-preparation pass when Host merge is enabled and `auto_merge` is disabled. | Runs the configured Checks, writes the Checks note, obtains an independent Verdict, records pending Host retirement intent, recovers exact operator Host merges, and merges approved branches only when `auto_merge` is enabled. |
 | Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit. | Runs the Builder on the branch, passes the Gate, pushes the repair, and records the attempt. An exhausted branch gets `forest:failed` for a human. |
 | Manager | Unstarted Tracker items without configured exclude labels. | Picks one candidate and applies the ready label for the Builder. It withdraws branchless ready items that become excluded, blocked, failed, or stalled. |
 
@@ -22,11 +22,11 @@ checkout has one daemon process.
 - **Verdict:** `refs/notes/forest/verdict` stores a Verdict on the exact Revision reviewed.
 - **Checks:** `refs/notes/forest/checks` stores the result of Iron Forest's own `checks:` commands on that exact Revision.
 - **Retirement:** `refs/forest/retirement/` stores resumable merge effects until the Tracker item and source branch are retired.
-- **Ledger:** `.forest/runs.jsonl` is host telemetry outside git. It records each Run, Subject, Revision, Status, Verdict, and token count.
+- **Ledger:** `.forest/runs.jsonl` is host telemetry outside git. It records each Run's Flow, Subject, Revision, Status, Verdict, and measured `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning` classes. It never records or computes money.
 
 A new commit has no Verdict or Checks note, so Iron Forest needs no staleness comparison. Iron Forest never reads a Host's review or check state.
 
-A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
+A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. With Host mode and `auto_merge: false`, the Verifier makes one preparation pass, records pending retirement, and never requests a merge. After an operator merges the exact reviewed revision, the next pass observes that merge for recovery. Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
 
 ## Commands
 
@@ -143,7 +143,7 @@ Building the wrong thing is worse than not building: Iron Forest does not guess 
 stack. If a `checks:` command's tool is missing, the check fails and the note
 names the command that could not start.
 
-`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` makes an approved, passing branch eligible for Verifier merge when attempts remain; when false, that branch remains for an operator, while fresh branches still run Checks and review. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
+`flows.builder` selects items. Declaring `require_labels` turns selection from opt-out into opt-in, so an open item needs every declared label. An enabled Manager requires exactly `require_labels: [forest:ready]`; that label is its assignment signal. `flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` makes an approved, passing branch eligible for Verifier merge when attempts remain; when false, a native merge remains disabled, while Host mode gets one preparation pass that records pending retirement and never requests a merge. The next pass observes the exact operator merge and completes retirement. `flows.fixer.attempts` bounds repairs. Projection keys control the optional human surface.
 
 ## Requirements
 

@@ -18,6 +18,7 @@ const (
 	subjectItem       subjectKind = "item"
 	subjectBranch     subjectKind = "branch"
 	subjectRetirement subjectKind = "retirement"
+	subjectManager    subjectKind = "manager"
 )
 
 // A Subject is the one thing a flow acts on in a pass. Key stays stable across
@@ -35,10 +36,12 @@ type Subject struct {
 	Head     string // branch head commit
 }
 
-// An Outcome is what one Act call did. It becomes one ledger row. There is no
-// money in it: spend is bounded by the provider key, not counted here.
+// An Outcome is what one Act call did. It becomes one ledger row. Status is a
+// routing result for the Act call, not a closed enumeration; callers classify
+// it for progress, handoff, or failure summaries. Measured token classes are
+// preserved; no money is recorded or computed.
 type Outcome struct {
-	Status  string // done | reviewed | merged | fixed | skipped | blocked | <stage>_failed
+	Status  string // routing result
 	Branch  string
 	PRURL   string
 	Verdict string

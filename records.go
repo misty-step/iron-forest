@@ -243,7 +243,7 @@ func writeStalled(repoDir, flow, subject, revision string, terminal bool) error 
 // runCategory groups ledger statuses for operator summaries.
 func runCategory(status string) string {
 	switch status {
-	case "built", "reviewed", "merged", "fixed":
+	case "built", "reviewed", "merged", "fixed", "done", "reaped":
 		return "progress"
 	case "skipped":
 		return "other"

@@ -57,7 +57,7 @@ flows:
     agent: verifier
     interval_seconds: 30
     merge: squash
-    auto_merge: false        # start here; see step 8
+    auto_merge: false        # manual Host preparation; see step 8
   fixer:
     enabled: true
     agent: builder
@@ -72,7 +72,7 @@ flows:
 
 projection:
   enabled: true
-  merge_via_host: false
+  merge_via_host: true       # manual Host merge path; see step 8
 ```
 
 `checks:` is the whole stack declaration. Iron Forest never guesses a language.
@@ -217,9 +217,14 @@ Open one small, well-shaped item, label it `forest:ready`, and confirm
 
 ## 8. Watch the first item end to end
 
-With `auto_merge: false` the Verifier reviews and stops, and you merge. Read that
-first diff yourself. When a full pass has landed and you trust the checks, set
-`auto_merge: true`.
+For the manual Host path, keep `projection.merge_via_host: true` and
+`auto_merge: false`. After an approved, passing branch, the Verifier makes one
+preparation pass: it records a pending retirement and does not request a merge.
+The operator then merges the exact reviewed revision in the Host. On the next
+Verifier pass, Iron Forest observes that exact merge, lands the retirement,
+closes the Tracker item, and removes the source branch. Read that first diff
+yourself. When a full pass has landed and you trust the checks, set
+`auto_merge: true` if Iron Forest should request future Host merges.
 
 Expect these on a first run:
 

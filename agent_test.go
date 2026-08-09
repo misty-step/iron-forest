@@ -336,7 +336,7 @@ func TestLoadAgentRejectsPathAndIdentityOverrides(t *testing.T) {
 }
 
 func TestRunCategory(t *testing.T) {
-	for _, status := range []string{"built", "reviewed", "merged", "fixed"} {
+	for _, status := range []string{"built", "reviewed", "merged", "fixed", "done", "reaped"} {
 		if got := runCategory(status); got != "progress" {
 			t.Errorf("runCategory(%q) = %q, want progress", status, got)
 		}

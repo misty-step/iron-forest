@@ -46,7 +46,10 @@ including `forest.yaml` and `agents/`.
 Iron Forest runs its own commands from `checks:` and writes their results as git
 notes. It never reads a Host's review or check state.
 
-The Ledger records tokens only.
+The Ledger records host Run telemetry: time, Run ID, Flow, Subject, Revision,
+Tracker identity, branch, Projection URL, Status, Verdict, agent/model,
+definition and base revisions, errors, and measured `tokens_in`, `tokens_out`,
+`cache_read`, `cache_write`, and `reasoning`. It never records or computes money.
 
 ## Toolchain and branch
 

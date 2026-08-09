@@ -63,7 +63,7 @@ func TestCanonicalAdmissionIdentity(t *testing.T) {
 	if got, want := canonicalAdmissionKey(retirement), "item-hab-01"; got != want {
 		t.Fatalf("retirement admission key = %q, want %q", got, want)
 	}
-	if got, want := canonicalAdmissionKey(Subject{Key: managerSubject, Kind: "manager"}), managerSubject; got != want {
+	if got, want := canonicalAdmissionKey(Subject{Key: managerSubject, Kind: subjectManager}), managerSubject; got != want {
 		t.Fatalf("singleton admission key = %q, want %q", got, want)
 	}
 }

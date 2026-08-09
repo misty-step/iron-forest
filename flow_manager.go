@@ -13,7 +13,9 @@ import (
 
 // managerSubject is the Manager lane's singleton subject key. The lane owns one
 // slot in the ready queue, so it acts on at most one thing per pass and never
-// names an item before the model has judged it.
+// names an item before the model has judged it. Manager Subjects use
+// subjectManager as Kind and carry only this key, the plan Revision, and the
+// operator Label; item and branch payloads stay empty.
 const managerSubject = "manager"
 
 // managerFlow is the lane that keeps exactly one unstarted assignment in the
@@ -73,7 +75,7 @@ func (managerFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	}
 	return []Subject{{
 		Key:      managerSubject,
-		Kind:     "manager",
+		Kind:     subjectManager,
 		Revision: plan.revision,
 		Label:    plan.label,
 	}}, nil
