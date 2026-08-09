@@ -199,3 +199,48 @@ func TestBuilderActRevalidatesEligibilityAfterSelect(t *testing.T) {
 		t.Fatalf("stale Builder Subject published a branch: %s", out)
 	}
 }
+
+func TestBuilderRevalidatesRevisionBeforePublication(t *testing.T) {
+	repo := setupTestRepo(t)
+	writeAgentFixture(t, repo, "builder", "builder-model")
+	tk := newMemoryTracker()
+	it := Item{ID: "9", Title: "mutable item", UpdatedAt: "u1"}
+	tk.seed(it)
+	oldTracker := trackerFor
+	trackerFor = func(string) Tracker { return tk }
+	defer func() { trackerFor = oldTracker }()
+
+	oldRun := runPhase
+	runPhase = func(_ string, wtDir string, _ *Agent, _, _ string) (runStats, error) {
+		if err := os.WriteFile(filepath.Join(wtDir, "stale.txt"), []byte("stale\n"), 0o644); err != nil {
+			return runStats{}, err
+		}
+		body := `{"summary":"stale revision","changed_files":["stale.txt"],"notes":""}`
+		if err := os.WriteFile(filepath.Join(wtDir, "report.json"), []byte(body), 0o644); err != nil {
+			return runStats{}, err
+		}
+		tk.seed(Item{ID: it.ID, Title: it.Title, UpdatedAt: "u2"})
+		return runStats{}, nil
+	}
+	defer func() { runPhase = oldRun }()
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	out, err := (builderFlow{}).Act(cfg, repo, Subject{
+		Key: "item-9", Kind: subjectItem, Revision: it.UpdatedAt, ID: it.ID, Item: it,
+	}, "run-stale-publication")
+	if err != nil || out.Status != "stale" {
+		t.Fatalf("Builder after concurrent Item update = (%#v, %v), want stale", out, err)
+	}
+	if remote := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/forest/*"); remote != "" {
+		t.Fatalf("stale Builder Revision published a branch: %s", remote)
+	}
+	fresh, err := tk.Get(it.ID)
+	if err != nil || len(fresh.Comments) != 0 {
+		t.Fatalf("stale Builder Revision published a comment: (%#v, %v)", fresh, err)
+	}
+	subjects, err := (builderFlow{}).Select(cfg, repo)
+	if err != nil || len(subjects) != 1 || subjects[0].Revision != "u2" {
+		t.Fatalf("updated Item selection = (%#v, %v), want Revision u2", subjects, err)
+	}
+}

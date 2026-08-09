@@ -55,6 +55,18 @@ func (builderFlow) Select(cfg Config, repoDir string) ([]Subject, error) {
 	}
 	return subjects, nil
 }
+func eligibleBuilderItem(cfg Config, repoDir, id, revision string) (Item, bool, error) {
+	items, err := eligibleItems(cfg, repoDir)
+	if err != nil {
+		return Item{}, false, err
+	}
+	for _, it := range items {
+		if it.ID == id && it.UpdatedAt == revision {
+			return it, true, nil
+		}
+	}
+	return Item{}, false, nil
+}
 
 func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outcome, error) {
 	if s.Failure != nil {
@@ -63,18 +75,11 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	// The caller holds the canonical Item admission. Re-run the complete
 	// Selector now so a Tracker or durable-fact change after Select cannot start
 	// an agent on stale work.
-	items, err := eligibleItems(cfg, repoDir)
+	it, current, err := eligibleBuilderItem(cfg, repoDir, s.ID, s.Revision)
 	if err != nil {
 		return Outcome{Status: "item_failed"}, fmt.Errorf("revalidate item: %w", err)
 	}
-	var it Item
-	for _, fresh := range items {
-		if fresh.ID == s.ID && fresh.UpdatedAt == s.Revision {
-			it = fresh
-			break
-		}
-	}
-	if it.ID == "" {
+	if !current {
 		return Outcome{Status: "stale", BaseSHA: s.Revision}, nil
 	}
 	stalled, err := stalledOn(repoDir, "builder", s.Key, s.Revision)
@@ -138,6 +143,26 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "blocked"
 		out.BaseSHA = baseSHA
 		return out, fmt.Errorf("blocked: report carries credential-shaped prose; no branch or pull request published")
+	}
+	// Linearize publication after agent work and the Gate. A mutable Tracker
+	// Revision selected before the agent cannot authorize an external push.
+	it, current, err = eligibleBuilderItem(cfg, repoDir, s.ID, s.Revision)
+	if err != nil {
+		out.Status = "item_failed"
+		return out, fmt.Errorf("revalidate item before publication: %w", err)
+	}
+	if !current {
+		out.Status = "stale"
+		return out, nil
+	}
+	stalled, err = stalledOn(repoDir, "builder", s.Key, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("revalidate stalled %s before publication: %w", s.Key, err)
+	}
+	if stalled {
+		out.Status = "stale"
+		return out, nil
 	}
 	publishedHead, err := commitAndPush(repoDir, wtDir, branch, "", a.Commit, it)
 	if err != nil {

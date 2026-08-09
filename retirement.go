@@ -29,6 +29,16 @@ func (f verifierFlow) actRetirement(cfg Config, repoDir string, s Subject, runID
 		Branch: s.Branch, BaseSHA: s.Revision,
 		Agent: record.Agent, Model: record.Model, DefSHA: record.DefSHA,
 	}
+	stalled, err := stalledOn(repoDir, "verifier", s.Key, s.Revision)
+	if err != nil {
+		out.Status = "notes_failed"
+		return out, fmt.Errorf("revalidate stalled %s: %w", s.Key, err)
+	}
+	if stalled {
+		out.Status = "merge_failed"
+		return out, fmt.Errorf("%w: retirement Subject %q is braked",
+			errRetirementRecoveryHard, s.Key)
+	}
 	fact, err = recoverRetirementBuiltComment(cfg, repoDir, fact, s.Item)
 	if err != nil {
 		out.Status = "comment_failed"
@@ -476,8 +486,8 @@ func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) 
 		}
 		return fmt.Errorf("%w: %v", errFlowRetryable, err)
 	}
-	// A request claim exists before the Tracker close. An acceptance claim
-	// records the successful return before later cleanup can retry.
+	// A request claim exists before the idempotent Tracker close. An acceptance
+	// claim records success; a missing acceptance retries the reconciling port.
 	closeKey := effectAttemptKey("Tracker-close", it.ID, record.Revision)
 	acceptedCloseKey := effectAttemptKey("Tracker-close-accepted", it.ID, record.Revision)
 	closeClaim, err := readAttempts(repoDir, closeKey)
@@ -494,12 +504,14 @@ func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) 
 				errAttemptsInvalid)
 		}
 	} else {
-		if closeClaim != 0 {
-			return fmt.Errorf("%w: Tracker close for Item %q has an uncertain outcome",
-				errHostMergeUnavailable, it.ID)
+		if closeClaim != 0 && closeClaim != 1 {
+			return fmt.Errorf("%w: Tracker close has invalid request claim",
+				errAttemptsInvalid)
 		}
-		if err := claimEffect(repoDir, "Tracker-close", it.ID, record.Revision); err != nil {
-			return err
+		if closeClaim == 0 {
+			if err := claimEffect(repoDir, "Tracker-close", it.ID, record.Revision); err != nil {
+				return err
+			}
 		}
 		if closeErr := trackerFor(cfg.Repo).Close(it.ID); closeErr != nil {
 			if errors.Is(closeErr, errTrackerEffectNotApplied) {
@@ -516,8 +528,7 @@ func finishRetirement(cfg Config, repoDir string, fact retirementFact, it Item) 
 				errHostMergeUnavailable, it.ID, closeErr)
 		}
 		if err := claimEffect(repoDir, "Tracker-close-accepted", it.ID, record.Revision); err != nil {
-			return fmt.Errorf("%w: persist accepted Tracker close: %v",
-				errHostMergeUnavailable, err)
+			return fmt.Errorf("persist accepted Tracker close: %w", err)
 		}
 	}
 	branchEffects, err := listEffectRefs(repoDir, record.Branch)

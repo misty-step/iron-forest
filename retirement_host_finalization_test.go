@@ -245,6 +245,77 @@ func TestVerifierRetirementTrackerCloseRetriesExactItem(t *testing.T) {
 		t.Fatalf("retirement fact after exact Tracker retry = (found=%v, err=%v), want removed", found, err)
 	}
 }
+
+func TestVerifierRetirementRetriesAcceptedTrackerClosePersistence(t *testing.T) {
+	branch := "forest/54-close-acceptance"
+	repo, _, reviewed, _ := newVerifierBranch(t, branch)
+	agent := testVerifierAgent()
+	item := Item{ID: "54", Title: "close acceptance"}
+	if _, err := recordRetirement(repo, retirementRecord{
+		Branch: branch, Revision: reviewed, ItemID: item.ID, Transport: "git",
+		Strategy: "squash", Title: item.Title, State: "landed",
+		Agent: agent.Name, Model: agent.Model, DefSHA: agent.DefSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldTracker := trackerFor
+	trackerFor = func(repo string) Tracker { return githubTracker{repo: repo} }
+	defer func() { trackerFor = oldTracker }()
+	oldGH := ghJSON
+	defer func() { ghJSON = oldGH }()
+	closeCalls := 0
+	ghJSON = func(args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "close" {
+			closeCalls++
+			return []byte(`{}`), nil
+		}
+		return nil, errors.New("unexpected Tracker command")
+	}
+
+	closeKey := effectAttemptKey("Tracker-close", item.ID, reviewed)
+	acceptedKey := effectAttemptKey("Tracker-close-accepted", item.ID, reviewed)
+	origin := runGitTest(t, repo, "remote", "get-url", "origin")
+	hook := filepath.Join(origin, "hooks", "update")
+	acceptedRef := "refs/forest/attempt/" + acceptedKey
+	script := "#!/bin/sh\nif [ \"$1\" = '" + acceptedRef + "' ]; then exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultConfig()
+	cfg.Repo = "owner/repo"
+	subject := Subject{Key: retirementSubjectKey(branch), Kind: subjectRetirement,
+		Revision: reviewed, ID: item.ID, Branch: branch, Item: item}
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 0 {
+		t.Fatalf("accepted Tracker close persistence code = %d, want pending retry", code)
+	}
+	if stalled, err := stalledOn(repo, "verifier", subject.Key, reviewed); err != nil || stalled {
+		t.Fatalf("accepted Tracker close persistence brake = (%v, %v), want retryable", stalled, err)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("Tracker close calls after persistence failure = %d, want 1", closeCalls)
+	}
+	if attempts, err := readAttempts(repo, closeKey); err != nil || attempts != 1 {
+		t.Fatalf("Tracker close request claim = (%d, %v), want 1", attempts, err)
+	}
+	if attempts, err := readAttempts(repo, acceptedKey); err != nil || attempts != 0 {
+		t.Fatalf("Tracker close acceptance claim = (%d, %v), want 0", attempts, err)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := actOnSubject(verifierFlow{}, cfg, repo, subject, nil); code != 0 {
+		t.Fatalf("accepted Tracker close retry code = %d, want success", code)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("Tracker close calls after recovery = %d, want idempotent retry", closeCalls)
+	}
+	if _, found, err := readRetirement(repo, branch, reviewed); err != nil || found {
+		t.Fatalf("retirement fact after close acceptance retry = (found=%v, err=%v), want removed", found, err)
+	}
+}
 func TestMalformedTrackerCloseEvidenceRemainsTerminal(t *testing.T) {
 	for i, body := range []string{`malformed`, `{}`, `null`} {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
