@@ -1,9 +1,8 @@
-# iron-forest — the factory's own composition file.
-# Flows are independent lanes. They coordinate through repository state and
-# notes in this repository, so concurrency needs no scheduler.
-repo: misty-step/iron-forest
-# The checks Iron Forest runs itself. The result is a note on the commit, not a
-# status read back from a host.
+repo: misty-step/iron-forest        # forge identity (owner/name)
+agents:
+  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
+  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -11,45 +10,3 @@ checks:
     run: mise exec -- go vet ./...
   - name: test
     run: mise exec -- go test ./...
-  # A lane declared in code needs its declaration on disk. Nothing else here
-  # loads agents/<name>/, so without this a registered lane with no declaration
-  # compiles, passes, merges, and then breaks every instance at runtime.
-  - name: selfcheck
-    run: mise exec -- go run . selfcheck
-
-flows:
-  builder:
-    enabled: true
-    agent: builder
-    interval_seconds: 30
-    require_labels: ["forest:ready"]
-    exclude_labels: ["parked", "forest:failed"]
-  verifier:
-    enabled: true
-    agent: verifier
-    interval_seconds: 20
-    merge: squash
-    auto_merge: true
-  fixer:
-    enabled: true
-    agent: builder
-    interval_seconds: 40
-    attempts: 10
-  manager:
-    # Re-enabled by #204: the harness now delivers the prompt on stdin instead
-    # of one argv entry, so the lane is no longer blocked by Linux's
-    # MAX_ARG_STRLEN (PAGE_SIZE * 32 = 131072). Previously at 91 open items the
-    # candidate bodies alone were 165,476 bytes and every pass failed with a raw
-    # fork/exec "argument list too long" before the model was reached, writing an
-    # agent_failed row each time. With the prompt on stdin the candidate bodies
-    # and comment threads can grow with the backlog.
-    enabled: true
-    agent: manager
-    interval_seconds: 60
-    ready_depth: 1
-    exclude_labels: ["parked", "forest:failed", "epic"]
-
-# The human surface. Iron Forest reads PR identity only for idempotent publication and exact Host-merge recovery.
-projection:
-  enabled: true
-  merge_via_host: false

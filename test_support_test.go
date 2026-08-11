@@ -1,254 +1,188 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
-func runGitTest(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmdArgs := args
-	if dir != "" {
-		cmdArgs = append([]string{"-C", dir}, args...)
-	}
-	cmd := exec.Command("git", cmdArgs...)
-	cmd.Env = commitIdentityEnv(testCommitIdentity())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v: %s", cmdArgs, err, strings.TrimSpace(string(out)))
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func startTestProcess(t *testing.T, cmd *exec.Cmd) (<-chan error, func()) {
-	t.Helper()
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	waited := false
-	t.Cleanup(func() {
-		if !waited {
-			_ = cmd.Process.Kill()
-			<-done
-		}
-	})
-	return done, func() { waited = true }
-}
-
-func newRefGitRepo(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote.git")
-	repo := filepath.Join(root, "repo")
-	runGitTest(t, root, "init", "--bare", remote)
-	runGitTest(t, root, "init", repo)
-	runGitTest(t, repo, "remote", "add", "origin", remote)
-	return repo
-}
-
-// setupTestRepo builds a throwaway repository with a real origin, because
-// createWorktree resolves its base from the remote tip and a fixture without a
-// remote would prove nothing about the path the flows actually take.
-func setupTestRepo(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	origin := filepath.Join(root, "origin.git")
-	repo := filepath.Join(root, "work")
-	if err := os.MkdirAll(origin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, origin, "init", "--bare", "-b", "master")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, repo, "init", "-b", "master")
-	runGitTest(t, repo, "config", "user.email", "test@example.com")
-	runGitTest(t, repo, "config", "user.name", "test")
-	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, repo, "add", "file.txt")
-	runGitTest(t, repo, "commit", "-m", "init")
-	runGitTest(t, repo, "remote", "add", "origin", origin)
-	runGitTest(t, repo, "push", "-q", "-u", "origin", "master")
-	return repo
-}
-
-func notesTestRepository(t *testing.T) (remote, work, sha string) {
-	t.Helper()
-	root := t.TempDir()
-	remote = filepath.Join(root, "remote.git")
-	work = filepath.Join(root, "work")
-	runGitTest(t, "", "init", "--bare", "--initial-branch=master", remote)
-	runGitTest(t, "", "clone", remote, work)
-	runGitTest(t, work, "config", "user.name", "notes-test")
-	runGitTest(t, work, "config", "user.email", "notes-test@example.com")
-	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("first\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, work, "add", "file.txt")
-	runGitTest(t, work, "commit", "-m", "first")
-	runGitTest(t, work, "push", "-u", "origin", "HEAD:master")
-	sha = runGitTest(t, work, "rev-parse", "HEAD")
-	return remote, work, sha
-}
-
-func newAdmissionRepositories(t *testing.T) (repoA, repoB string) {
-	t.Helper()
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote.git")
-	repoA = filepath.Join(root, "a")
-	repoB = filepath.Join(root, "b")
-	runGitTest(t, root, "init", "--bare", "--initial-branch=master", remote)
-	runGitTest(t, root, "clone", remote, repoA)
-	runGitTest(t, root, "clone", remote, repoB)
-	return repoA, repoB
-}
-
-func writeAgentFixture(t *testing.T, repoDir, name, model string) {
-	t.Helper()
-	dir := filepath.Join(repoDir, DefaultAgentsDir, name)
+func writeTestDeclaration(t *testing.T, root, agent string) {
+	dir := filepath.Join(root, "agents", agent)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	yaml := "description: " + name + "\ncommit:\n  name: " + name + "\n  email: " + name + "@example.invalid\nmodel: " + model + "\ndeadline_seconds: 3600\n"
-	if err := os.WriteFile(filepath.Join(dir, "agent.yaml"), []byte(yaml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "agent.md"), []byte("---\nmodel: local\n---\nsystem\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "instructions.md"), []byte("do the work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte("{{.Task}}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "report.schema.json"), []byte("{\"type\":\"object\"}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "task.md"), []byte("task\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func rebaseTestWriteFile(t *testing.T, path, body string) {
+func runGit(t *testing.T, args ...string) []byte {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+	cmd := exec.Command("git", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
+	return output
 }
 
-func testCommitIdentity() CommitIdentity {
-	return CommitIdentity{Name: "forest-test", Email: "forest-test@example.com"}
-}
-
-func testVerifierAgent() *Agent {
-	return &Agent{
-		Name: "verifier", Model: "verifier-model", DefSHA: strings.Repeat("a", 16),
-		Commit: testCommitIdentity(),
-	}
-}
-
-// remoteBranchHead reads the head of one branch advertised by origin.
-func remoteBranchHead(t *testing.T, repo, branch string) string {
+func runGitDir(t *testing.T, dir string, args ...string) []byte {
 	t.Helper()
-	out := runGitTest(t, repo, "ls-remote", "origin", "refs/heads/"+branch)
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		t.Fatalf("origin branch %q not found", branch)
-	}
-	return fields[0]
-}
-
-// memoryTracker is an in-memory tracker used by tests. Open items live in the
-// map; closing one removes it, exactly as a host would stop returning it.
-type memoryTracker struct {
-	items map[string]Item
-}
-
-// newMemoryTracker returns an empty in-memory tracker.
-func newMemoryTracker() *memoryTracker {
-	return &memoryTracker{items: make(map[string]Item)}
-}
-
-// seed inserts or replaces one contract-valid item by id. Tests that exercise
-// revision validation use a raw Tracker stub instead of this behavioral fake.
-func (m *memoryTracker) seed(it Item) {
-	if it.UpdatedAt == "" {
-		it.UpdatedAt = "test-revision"
-	}
-	m.items[it.ID] = it
-}
-
-// ListOpen implements Tracker.
-func (m *memoryTracker) ListOpen() ([]Item, error) {
-	items := make([]Item, 0, len(m.items))
-	for _, it := range m.items {
-		items = append(items, it)
-	}
-	return items, nil
-}
-
-// Get implements Tracker.
-func (m *memoryTracker) Get(id string) (Item, error) {
-	it, ok := m.items[id]
-	if !ok {
-		return Item{}, fmt.Errorf("item %q not found", id)
-	}
-	return it, nil
-}
-
-// Comment implements Tracker.
-func (m *memoryTracker) Comment(id, body string) error {
-	it, err := m.Get(id)
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		t.Fatalf("git -C %s %v: %v\n%s", dir, args, err, output)
 	}
-	it.Comments = append(it.Comments, comment{Body: body})
-	m.items[id] = it
-	return nil
+	return output
 }
 
-// Close implements Tracker. Closing an absent item is idempotent because a
-// recovery can retry cleanup after an earlier Host close succeeded.
-func (m *memoryTracker) Close(id string) error {
-	delete(m.items, id)
-	return nil
+func configGit(t *testing.T, dir, name, email string) {
+	t.Helper()
+	runGitDir(t, dir, "config", "user.name", name)
+	runGitDir(t, dir, "config", "user.email", email)
 }
 
-// SetTags implements Tracker.
-func (m *memoryTracker) SetTags(id string, add, remove []string) error {
-	it, err := m.Get(id)
-	if err != nil {
-		return err
+func addNote(t *testing.T, root, ref, sha, payload, name, email string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", root, "-c", "user.name="+name, "-c", "user.email="+email, "notes", "--ref="+ref, "add", "-m", payload, sha)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add note: %v\n%s", err, output)
 	}
-	tags := make(map[string]bool, len(it.Tags)+len(add))
-	for _, t := range it.Tags {
-		tags[t] = true
-	}
-	for _, t := range remove {
-		delete(tags, t)
-	}
-	for _, t := range add {
-		tags[t] = true
-	}
-	it.Tags = it.Tags[:0]
-	for t := range tags {
-		it.Tags = append(it.Tags, t)
-	}
-	m.items[id] = it
-	return nil
 }
-func listRetirements(repoDir string) ([]retirementFact, error) {
-	facts, err := scanRetirements(repoDir)
-	if err != nil {
-		return nil, err
-	}
-	for _, fact := range facts {
-		if fact.ReadErr != nil {
-			return nil, fact.ReadErr
+
+func pollReviewNote(sha string) string {
+	return pollReviewNoteBranch(sha, "forest/4-work")
+}
+
+func pollReviewNoteBranch(sha, branch string) string {
+	return `{"schema":"forest.review-request.v1","issue":4,"branch":"` + branch + `","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
+}
+
+func processHeartbeatFixture(t *testing.T) (string, string) {
+	t.Helper()
+	state := t.TempDir()
+	heartbeat := filepath.Join(state, "heartbeat")
+	childPID := filepath.Join(state, "child-pid")
+	t.Setenv("HEARTBEAT", heartbeat)
+	t.Setenv("CHILD_PID", childPID)
+	t.Cleanup(func() {
+		body, err := os.ReadFile(childPID)
+		if err != nil {
+			return
 		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+		if err != nil || pid <= 1 {
+			return
+		}
+		process, err := os.FindProcess(pid)
+		if err == nil {
+			_ = process.Kill()
+		}
+	})
+	return state, heartbeat
+}
+
+func assertProcessQuiescent(t *testing.T, heartbeat, subject, stoppedBy string) {
+	t.Helper()
+	before, err := os.ReadFile(heartbeat)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("%s produced no heartbeat: %d bytes, %v", subject, len(before), err)
 	}
-	return facts, nil
+	time.Sleep(300 * time.Millisecond)
+	after, err := os.ReadFile(heartbeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("%s survived %s: heartbeat grew from %d to %d bytes", subject, stoppedBy, len(before), len(after))
+	}
+}
+
+func testClone(t *testing.T) (string, string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "clone")
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	runGit(t, "init", "--bare", origin)
+	runGit(t, "clone", origin, root)
+	configGit(t, root, "Builder", "builder@forest.invalid")
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte(`repo: owner/name
+agents:
+  builder: {poll: "forest poll builder", interval: 1, timeout: 1}
+checks:
+  - {name: test, run: "go test ./..."}
+`)
+	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "add", "file", "forest.yaml")
+	runGitDir(t, root, "commit", "-m", "initial")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/master")
+	return root, origin
+}
+
+func testGitTransportStopsDescendants(t *testing.T, name, wantOutput string, run func(context.Context, string) ([]byte, error)) {
+	t.Helper()
+	tests := []struct {
+		name       string
+		leaderTail string
+		timeout    time.Duration
+		wantErr    error
+	}{
+		{name: "leader success", leaderTail: "exit 0\n", timeout: 3 * time.Second},
+		{name: "cancellation", leaderTail: "trap '' TERM\nwhile :; do /bin/sleep 1; done\n", timeout: 100 * time.Millisecond, wantErr: context.DeadlineExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, toolDir := t.TempDir(), t.TempDir()
+			_, heartbeat := processHeartbeatFixture(t)
+			script := `#!/bin/sh
+set -eu
+(
+	trap '' HUP TERM
+	while :; do
+		printf x >> "$HEARTBEAT"
+		/bin/sleep 0.02
+	done
+) &
+child=$!
+printf '%s\n' "$child" > "$CHILD_PID"
+while [ ! -s "$HEARTBEAT" ]; do /bin/sleep 0.01; done
+printf '%s\n' ` + wantOutput + "\n" + test.leaderTail
+			if err := os.WriteFile(filepath.Join(toolDir, "git"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", toolDir)
+			ctx, cancel := context.WithTimeout(context.Background(), test.timeout)
+			started := time.Now()
+			output, err := run(ctx, root)
+			elapsed := time.Since(started)
+			cancel()
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("%s transport error=%v want %v", name, err, test.wantErr)
+			}
+			if string(output) != wantOutput+"\n" {
+				t.Fatalf("%s transport output=%q", name, output)
+			}
+			if elapsed >= 3*time.Second {
+				t.Fatalf("%s transport took %s", name, elapsed)
+			}
+			assertProcessQuiescent(t, heartbeat, name+" transport descendant", test.name)
+		})
+	}
+}
+
+func quoteShellPath(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
 }

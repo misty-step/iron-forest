@@ -1,46 +1,71 @@
 #!/usr/bin/env bash
-# Install the Iron Forest template unit and enable one instance per checkout.
+# Install the Iron Forest template unit in one explicit checkout mode.
 #
-#   deploy/install-service.sh              # enable this checkout
-#   deploy/install-service.sh landmark     # also enable the sibling checkout
+# Self-host mode builds and enables the factory source checkout:
+#   deploy/install-service.sh
 #
-# One organization runs one installation. Instance names are sibling directories
-# of the factory source, so the organization's checkout directory is the root and
-# no repository has to move.
+# Sibling mode builds the same factory source into one sibling managed checkout:
+#   deploy/install-service.sh <sibling-checkout-name>
+#
+# Each instance runs the selected checkout's forest.yaml.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 factory="$(cd "$here/.." && pwd)"
 root="$(dirname "$factory")"
-name="${1:-$(basename "$factory")}"
-target="$root/$name"
 unit="$HOME/.config/systemd/user/forest@.service"
+service_path="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin"
 
 die() { echo "$(basename "$0"): $*" >&2; exit 1; }
 
-[ -d "$target/.git" ] || die "no git checkout at $target"
+case "$#" in
+	0)
+		mode="self-host"
+		name="$(basename "$factory")"
+		target="$factory"
+		;;
+	1)
+		mode="sibling"
+		name="$1"
+		target="$root/$name"
+		[ "$target" != "$factory" ] || die "use no argument for self-host mode"
+		;;
+	*)
+		die "usage: $(basename "$0") [sibling-checkout-name]"
+		;;
+esac
+
+[ -d "$target/.git" ] || [ -f "$target/.git" ] || die "no git checkout at $target"
 [ -f "$target/forest.yaml" ] || die "no forest.yaml at $target; a managed repository declares its own factory"
 
-# Retire the single-instance unit this template replaces, so one machine never
-# runs two daemons against the same checkout.
+# Retire the single-instance unit this template replaces, and prove it is gone.
 if [ -f "$HOME/.config/systemd/user/forest.service" ]; then
-	systemctl --user disable --now forest.service >/dev/null 2>&1 || true
-	rm -f "$HOME/.config/systemd/user/forest.service"
+	disable_status=0
+	systemctl --user disable --now forest.service >/dev/null 2>&1 || disable_status=$?
+	legacy_status=0
+	legacy_state="$(systemctl --user is-active forest.service 2>/dev/null)" || legacy_status=$?
+	case "$legacy_state" in
+		inactive|unknown|not-found) ;;
+		*) die "legacy forest.service is not inactive or not-found (disable exit $disable_status, state $legacy_state, query exit $legacy_status)" ;;
+	esac
+	rm "$HOME/.config/systemd/user/forest.service"
 fi
 
 mkdir -p "$(dirname "$unit")"
-sed -e "s|@FOREST_ROOT@|$root|g" -e "s|@FACTORY_DIR@|$factory|g" \
+sed -e "s|@FOREST_ROOT@|$root|g" \
 	"$here/forest@.service" > "$unit"
 
-# Seed the binary from the factory source. A managed checkout is never built: it
-# may be in any language, and self-update rebuilds it from the factory source.
+# Build the Kernel from the factory source into the selected target.
 stamp="$(git -C "$factory" rev-parse --short HEAD)"
-(cd "$factory" && mise exec -- go build -ldflags "-X main.version=$stamp" -o "$target/forest" .)
+(cd "$factory" && mise exec -- go build -o "$target/forest" .)
+
+# Validate with the same trusted PATH that the service receives.
+(cd "$target" && PATH="$service_path" ./forest selfcheck)
 
 systemctl --user daemon-reload
 systemctl --user enable "forest@$name" >/dev/null
 systemctl --user restart "forest@$name"
 echo "$(basename "$0"): installed $unit"
-echo "  instance: forest@$name -> $target (source: $factory at $stamp)"
+echo "  instance: forest@$name -> $target (mode: $mode; source: $factory at $stamp)"
 echo "  status:   systemctl --user status 'forest@*'"
 echo "  logs:     journalctl --user -u 'forest@*' -f"

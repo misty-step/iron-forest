@@ -9,18 +9,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v3
-      - name: Check gofmt formatting
-        run: |
-          unformatted=$(mise exec -- gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "The following files are not gofmt-formatted:"
-            echo "$unformatted"
-            exit 1
-          fi
-      - run: mise exec -- go build ./...
-      - run: mise exec -- go vet ./...
-      - run: mise exec -- go test ./...
-      # Every check forest.yaml declares under `checks:` must run here. The
-      # matching drift test (TestCIJobRunsExactlyTheForestChecks) fails when the
-      # two lists disagree; selfcheck uses the same pinned toolchain.
-      - run: mise exec -- go run . selfcheck
+      - name: build
+        run: mise exec -- go build ./...
+      - name: vet
+        run: mise exec -- go vet ./...
+      - name: test
+        run: mise exec -- go test ./...

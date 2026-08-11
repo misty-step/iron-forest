@@ -1,262 +1,233 @@
 # Onboarding a managed repository
 
-One organization runs one installation, and one process per checkout
-(`docs/adr/0001`). Instance names are sibling directories of the factory source,
-so attaching a repository means placing its checkout beside this one and enabling
-one more unit.
-
-This checklist was written while attaching `misty-step/cantrip`, a Rust
-repository, to a machine already running `forest@iron-forest`. Every step below
-was needed; none is decoration.
+Iron Forest runs one Kernel process per repository. The Kernel uses that
+repository's `forest.yaml`, agent declarations, Git refs, and local Ledger.
+Self-host mode uses the factory source checkout as the managed repository.
+Sibling mode keeps a separate managed checkout beside the factory source.
 
 ## Prerequisites
 
-- `gh` authenticated for the target repository, with `repo` scope. The controller
-  is the only caller of the Tracker; an agent run never receives this credential.
-- An opencode provider route the agents can reach. On this machine that is Mint
-  markers in the opencode configuration.
-- The repository's own tools installed on the **host**. See step 5: a check child
-  has a scrubbed `PATH`, so "the host has cargo" is not sufficient by itself.
-- The checkout is a sibling of the factory source:
-  `<org-dir>/iron-forest` and `<org-dir>/<name>`.
+Install these tools on the host:
 
-## 1. Create the Tracker labels
+- Git with push access to the managed repository;
+- `gh` for the day-one GitHub adapter;
+- `mise` and the managed repository's declared check tools;
+- OMP with host-managed provider routing.
 
-Selection is opt-in through labels, and they do not exist in a new repository.
+The user service resolves these tools only through
+`%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin`.
+
+Configure forge access and OMP provider routing on the host. Do not put
+adapter configuration or credentials in `forest.yaml`, declarations, prompts,
+or commits. A trusted declaration has the host user's configured credentials,
+filesystem access, and
+network access. Worktree separation and timeout are not a security sandbox;
+stronger containment belongs to deployment.
+
+## 1. Create the ready label
+
+Selection starts only when an open Issue has the `forest:ready` label:
 
 ```sh
-gh label create forest:ready  -R owner/name --color 0e8a16 --description "promoted for the factory"
-gh label create forest:failed -R owner/name --color b60205 --description "factory needs a human"
-gh label create parked        -R owner/name --color cfd3d7 --description "not scheduled"
+gh label create forest:ready \
+  -R owner/name \
+  --color 0e8a16 \
+  --description "ready for Iron Forest"
 ```
 
-## 2. Declare the repository's factory
+Do not use a second scheduling label. The Builder Poll checks this label and
+checks that no matching remote `forest/<issue>-*` branch exists.
 
-Write `forest.yaml` at the root of the managed checkout. It declares that
-repository's own checks and lanes; there is no central policy.
+## 2. Declare the repository
+
+Write `forest.yaml` at the root of the managed checkout:
 
 ```yaml
 repo: owner/name
-checks:                      # the repository's own commands, in its own language
-  - name: fmt
-    run: cargo fmt --check
-  - name: clippy
-    run: cargo clippy --all-targets -- -D warnings
+agents:
+  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
+  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
+checks:
+  - name: build
+    run: mise exec -- go build ./...
+  - name: vet
+    run: mise exec -- go vet ./...
   - name: test
-    run: cargo test
-
-flows:
-  builder:
-    enabled: true
-    agent: builder
-    interval_seconds: 45
-    require_labels: ["forest:ready"]
-    exclude_labels: ["forest:failed", "parked"]
-  verifier:
-    enabled: true
-    agent: verifier
-    interval_seconds: 30
-    merge: squash
-    auto_merge: false        # manual Host preparation; see step 8
-  fixer:
-    enabled: true
-    agent: builder
-    interval_seconds: 45
-    attempts: 3
-  manager:
-    enabled: true
-    agent: manager
-    interval_seconds: 60
-    ready_depth: 1
-    exclude_labels: ["forest:failed", "parked", "epic"]
-
-projection:
-  enabled: true
-  merge_via_host: true       # manual Host merge path; see step 8
+    run: mise exec -- go test ./...
 ```
 
-`checks:` is the whole stack declaration. Iron Forest never guesses a language.
-A command that starts always writes a Checks note with its observed result. A
-check-environment construction failure starts no command and writes no note.
-The Host merge path supports only `merge: squash`. Native Git merges also support `merge: ff`.
+`repo` is the forge identity. `agents` maps each declaration to a Poll command,
+interval, and preparation-plus-execution timeout. Direct `forest poll`
+execution has a fixed 60-second deadline. The Scheduler gives its configured
+Poll command a separate 65-second bound. The supervisor preserves this full
+5-second difference as Poll shutdown grace. It lets the direct Poll stop
+Git/GitHub transport groups and remove private note snapshot refs before the
+supervisor force-stops its command group. Runner cleanup has a separate
+10-second bound. A completed dispatch starts an audit with a separate 60-second
+bound.
+The systemd service uses a separate 3900-second drain bound. This bound covers
+the shipped declarations' concurrent Runs, bounded Runner cleanup, and
+serialized post-dispatch audits. The model is
+in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
+list for this repository. Mirror these commands in `.github/workflows/ci.yml`
+in the same order.
 
-`exclude_labels` is repository policy. Add every label that marks a
-non-dispatchable item. For example, exclude an `epic` that groups leaf items.
+## 3. Add declarations
 
-## 3. Declare the agents
+Create one pair of files per shipped declaration:
 
-The managed repository carries its own `agents/` tree, because an agent
-declaration is data that belongs to the repository it works on.
-
-```
+```text
 agents/
   builder/
-    agent.yaml            # harness, model, commit identity, permissions, mcp
-    instructions.md       # system prompt
-    prompt.md             # user-prompt template
-    report.schema.json    # the output contract the Gate enforces
-    skills/               # optional, appended to the system prompt
+    agent.md
+    task.md
   verifier/
-    agent.yaml
-    instructions.md
-    prompt.md
-    report.schema.json
-  manager/
-    agent.yaml
-    instructions.md
-    prompt.md
-    report.schema.json
+    agent.md
+    task.md
+  fixer/
+    agent.md
+    task.md
 ```
 
-Copy this repository's `agents/` as a starting point. Change the model,
-permissions, commit identity, and language-specific skill. `commit.name` and
-`commit.email` author commits made by that agent. They do not change the Host
-account that pushes a branch or authors a pull request.
+`agent.md` starts with YAML frontmatter containing `model` and optional `tools`
+and `thinking`, then the system prompt. `task.md` is the standing user prompt.
+`model`, `tools`, and `thinking` belong to each declaration. The Kernel parses
+this format directly. Keep Git note and merge instructions in the prompts.
+Agents use native `git`; no coordination wrapper is required.
 
-Declare a positive `deadline_seconds`. Do not declare `steps` or
-`budget_seconds`; both fixed ceilings were deleted because they stop real work
-partway (`99b3b74`).
+## 4. Build and validate
 
-## 4. Keep the factory out of the repository's gates
+Choose one deployment mode.
 
-**No ignore or exclude entries are needed.** Per-run factory artifacts are kept
-out of the managed repository's working tree, so a managed repository needs no
-`.gitignore`, no `.trufflehog-exclude`, and no hook change to be worked by the
-factory.
+### Self-host mode
 
-The factory still uses opencode to run an agent, and opencode still wants a
-config root and per-provider packages. Where it gets them is what changed
-(#174). The factory now points opencode at a per-run config root **outside** the
-managed worktree through opencode's supported external-config mechanism
-(`XDG_CONFIG_HOME` in the run's child environment). Under that root:
-
-- the rendered agent declaration (`opencode/agents/<name>.md`) is written there,
-  not under the worktree's `.opencode/`,
-- the provider configuration a real run actually uses — the factory's own
-  `.opencode/opencode.json`, falling back to the operator's global opencode
-  config — is preserved there as `opencode/opencode.json`, so the run still
-  reaches a provider route, and
-- the `node_modules` opencode installs for its provider packages land under that
-  root as well.
-
-Nothing is placed in a working tree a hook or a filesystem scanner reads. The
-per-run root is removed when the run completes.
-
-A side effect of this placement: the rendered declaration cannot be staged by
-`git add -A` no matter what the managed repository's ignore rules are, because it
-does not live in the repository at all.
-
-If a repository already carries its own `.opencode/` — its own provider
-configuration, say — it is left untouched. The factory no longer writes there.
-To keep it that way, the run disables opencode's local project-config discovery
-for the managed worktree (`OPENCODE_DISABLE_PROJECT_CONFIG` in the child
-environment), so a `.opencode/opencode.json` the repository ships is not read
-and does not trigger an install into the managed tree.
-
-This was not always true. Before #174, the factory rendered `.opencode/agents/`
-and node_modules into the worktree. On Cantrip the `pre-push` hook ran
-`trufflehog filesystem .`, read 63 MB of third-party `effect` and `zod` test
-fixtures under `.opencode/node_modules`, found 11 findings, and refused every
-factory push. Needing a `.gitignore` workaround for that was the defect #174
-removed.
-
-## 5. Give the check child its toolchain
-
-Each check runs with a private `HOME` and a scrubbed `PATH`. Tools resolve two
-ways:
-
-- **mise-managed tools** with working shims are already reachable.
-- **host toolchain directories** must be named by the operator.
-
-For a rustup-based repository, add a per-instance systemd drop-in at
-`~/.config/systemd/user/forest@<name>.service.d/toolchain.conf`:
-
-```ini
-[Service]
-Environment=FOREST_CHECK_PATH=/home/you/.cargo/bin
-Environment=FOREST_CHECK_ENV=RUSTUP_HOME=/home/you/.rustup
-```
-
-`FOREST_CHECK_PATH` prepends directories to the check child's `PATH`.
-`FOREST_CHECK_ENV` adds allowlisted metadata; rustup's `cargo` proxy needs
-`RUSTUP_HOME` or it reports "no default toolchain is configured" under an empty
-`HOME`.
-
-`CARGO_HOME` is deliberately **not** allowlisted: `~/.cargo` holds
-`credentials.toml`. Both variables reach the check child only, never an agent
-run.
-
-Then `systemctl --user daemon-reload`.
-
-## 6. Install the unit
+The factory source checkout is also the managed repository. From that checkout,
+build with the pinned toolchain and validate its profile:
 
 ```sh
-cd <org-dir>/iron-forest
-./deploy/install-service.sh <name>
+mise exec -- go build -o forest .
+./forest selfcheck
+deploy/install-service.sh
 ```
 
-This seeds the binary into the managed checkout from the factory source and
-enables `forest@<name>`. The instance name is the checkout's directory name.
+The no-argument installer builds the factory source into the same checkout and
+enables its service instance.
+
+### Sibling mode
+
+The managed repository is a sibling of the factory source checkout and does not
+need the Iron Forest Go source. From the factory source checkout, build the
+Kernel into the sibling, validate there, and install that sibling instance:
 
 ```sh
-systemctl --user start forest@<name>
-systemctl --user status forest@<name>
-journalctl --user -u forest@<name> -f
+mise exec -- go build -o ../<sibling-directory-name>/forest .
+(cd ../<sibling-directory-name> && ./forest selfcheck)
+deploy/install-service.sh <sibling-directory-name>
+cd ../<sibling-directory-name>
 ```
 
-## 7. Prove selection before promoting work
+The one-argument installer always builds the Kernel from the factory source
+checkout into the named sibling. Before restarting either mode, the installer
+runs the target's selfcheck with
+`PATH=$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin`. This path is the
+HOME-expanded form of the service rule above. The installer stops on any
+selfcheck error. The Auditor needs a completed agent dispatch before it can
+validate remote Git evidence.
+
+The final `cd` keeps all later Kernel and observation commands in the managed
+repository.
+
+## 5. Start the Kernel
+
+The installer steps above enable and restart one user service for this
+repository. Do not start a second foreground Kernel. For a manual foreground
+deployment, skip the installer and start exactly one process from the managed
+checkout:
 
 ```sh
-cd <org-dir>/<name>
-./forest selfcheck      # config and agents, offline
-./forest agents         # models and declaration digests
-./forest list           # eligible items; empty until something is promoted
+./forest serve
 ```
 
-Open one small, well-shaped item, label it `forest:ready`, and confirm
-`forest list` shows it.
+Exit 0 dispatches work.
+Exit 1 is a healthy skip. Exit greater than 1, deadline expiry, or malformed
+behavior skips the tick and logs an error. `forest status` reports the trigger's
+consecutive Poll error count, last Poll exit code, and separate persisted Poll,
+Run, and Audit errors. A healthy Poll clears only its Poll error. A successful
+Run clears only its Run error. A successful Audit clears only its Audit error.
+The Auditor runs after a completed dispatch, not at startup or after an idle
+Poll skip.
 
-## 8. Watch the first item end to end
+Verifier and Fixer Poll enumeration is bounded at 500 entries per canonical
+notes tree. A larger tree or a note-enumeration transport-output overflow is a
+healthy exit-1 skip with an explicit log line. It does not mark the trigger
+unhealthy; the Auditor reports durable note growth as a bounded policy
+violation.
 
-For the manual Host path, keep `projection.merge_via_host: true` and
-`auto_merge: false`. For a live exact branch, the Verifier first records a
-`preparing` retirement before the Projection, Checks, or approval. The
-retirement Subject then runs normal Checks, review, or repair. Preparing recovery
-may create or reconcile the missing initial Projection; pending recovery never
-creates a new Projection. A durable winning approval upgrades it to `pending`
-without requesting a merge. If the branch advances, Iron Forest atomically
-moves the preparation fact before retrying on the next pass. The operator then
-merges the exact reviewed Revision in the Host. On the next Verifier pass, Iron
-Forest advances the fact to `observed` before reading approval notes. It lands
-the retirement only after approval and passing Checks, then closes the Tracker
-Item and removes the source branch. A note-read failure retains `observed` for
-retry. Read that first diff yourself. When a full pass has landed and you trust
-the Checks, set `auto_merge: true` if Iron Forest should request future Host
-merges.
-
-Expect these on a first run:
-
-- **A cold build is slow.** Cantrip's first pass peaked at 8.2 GB and 18 minutes
-  of CPU pulling its dependency tree. There is no step ceiling by design, so let
-  it finish. Wall time is bounded by each agent's `deadline_seconds`; a run that
-  outlives it is cancelled and recorded as `timeout_failed` (mechanical), and
-  its lane reopens on the next pass.
-- **Three failures on one revision park the item.** The repeat-failure brake is
-  a ref under `refs/forest/stalled/`. Fix the cause, then move the item's
-  revision — a comment is enough — and it becomes selectable again.
-- **The first termination signal drains the daemon.** It starts no new Effect and lets every active Effect finish.
-- **A second signal forces shutdown.** It kills managed process groups and exits without waiting for repository I/O. The next startup reaps linked worktrees.
-- **A shutdown is not an agent failure.** It keeps measured tokens but never advances the repeat-failure brake.
-- **A committed `forest.yaml` edit needs no restart.** Each Flow reads the file again before its next pass.
-
-## 9. Fleet commands
+Poll once and conditionally dispatch one declaration:
 
 ```sh
-systemctl --user list-units 'forest@*'          # every instance
-journalctl --user -u 'forest@*' -f              # one log stream
-systemctl --user disable --now forest@<name>    # detach one repository
+./forest once builder
+./forest poll builder
+./forest status
 ```
 
-Each instance has its own checkout, its own `forest.yaml`, its own lanes, and its
-own lock. One repository's stuck agent cannot stall another.
-Instances serialize builds from their shared factory source checkout.
+`once` evaluates the configured Builder Poll first. It dispatches only when that
+Poll exits 0. A healthy Poll skip exits 1 without an agent Run.
+
+## 6. Observe the first Subject
+
+After an Issue receives `forest:ready`, the Builder selects it and creates a
+`forest/<issue>-<slug>` branch. It writes a review-request note on the exact
+Revision and publishes the branch and note with one normal atomic push. A
+canonical note race permits at most three total atomic attempts; a branch race
+stops. The Builder may open a pull request as a human Projection.
+
+The Verifier selects that branch and runs every configured Check. For `changes`,
+it publishes Checks and Verdict together. A canonical note race permits at most
+three total atomic attempts. For `approve`, the Verifier makes exactly one
+non-retryable atomic attempt carrying Checks, Verdict, and the exact reviewed
+Revision's fast-forward `master` update. The Gate also requires the existing
+valid Builder-or-Fixer review-request for that Revision; the approve push does
+not republish it. No standalone master push is valid. If the Verdict is
+`changes`, the Fixer owns the branch, creates a new Revision, and publishes a
+fresh review request atomically. That note is the reject handoff back to the
+Verifier.
+
+From the managed checkout, use status and Git notes as the evidence surface:
+
+```sh
+./forest status
+git log --oneline --decorate --all
+git fetch origin \
+  refs/notes/forest/review-request:refs/notes/forest/review-request \
+  refs/notes/forest/checks:refs/notes/forest/checks \
+  refs/notes/forest/verdict:refs/notes/forest/verdict
+git notes --ref=refs/notes/forest/review-request show <revision>
+git notes --ref=refs/notes/forest/checks show <revision>
+git notes --ref=refs/notes/forest/verdict show <revision>
+```
+
+Pull requests and other forge artifacts are Projections. Git branches, commits,
+and notes remain authoritative. The first observed remote `master` tip becomes
+a trusted baseline and is not Gate-checked. In each bounded stable snapshot,
+Auditor ancestry and Gate checks target only the final observed remote
+`master` tip. Schema and actor checks cover each snapshotted
+`refs/notes/forest/*` entry within a 500-entry-per-ref capacity bound. Remote
+history cannot reveal a tip that advanced again between audits; such
+intermediate tips are not independently Gate-checked. The Auditor checks
+observable final Git state only. It cannot prove check execution, atomic push
+ordering, or force absence. It detects violations after a completed dispatch
+and does not block or enforce them.
+
+## 7. Change configuration safely
+
+Commit changes to `forest.yaml` or `agents/` through the same review Gate as
+code. Run `./forest selfcheck` after local configuration or declaration
+validation. A remote audit occurs only after a completed agent dispatch; Kernel
+startup and idle Poll skips do not audit. Keep `checks:` and
+`.github/workflows/ci.yml` aligned.
+
+Each `.forest/runs.jsonl` Ledger row records `run_id`, `agent`, `started`,
+`duration`, `exit`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
+`reasoning`. It never records or computes money.

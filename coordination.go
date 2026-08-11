@@ -1,0 +1,328 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	reviewRequestNoteRef = "refs/notes/forest/review-request"
+	checksNoteRef        = "refs/notes/forest/checks"
+	verdictNoteRef       = "refs/notes/forest/verdict"
+)
+
+func coordinationNoteRefs() []string {
+	return []string{reviewRequestNoteRef, checksNoteRef, verdictNoteRef}
+}
+
+type noteEntry struct {
+	Ref      string
+	Revision string
+	Payload  []byte
+	Author   string
+	Email    string
+}
+
+func validIdentity(entry noteEntry, roles ...string) bool {
+	for _, role := range roles {
+		var name, email string
+		switch role {
+		case "builder":
+			name, email = "Iron Forest Builder", "builder@forest.invalid"
+		case "fixer":
+			name, email = "Iron Forest Fixer", "fixer@forest.invalid"
+		case "verifier":
+			name, email = "Iron Forest Verifier", "verifier@forest.invalid"
+		default:
+			continue
+		}
+		if entry.Author == name && entry.Email == email {
+			return true
+		}
+	}
+	return false
+}
+
+func exactGitLine(output []byte) (string, error) {
+	if len(output) == 0 || output[len(output)-1] != '\n' {
+		return "", errors.New("git output is not one terminated line")
+	}
+	line := output[:len(output)-1]
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	if bytes.IndexAny(line, "\r\n") >= 0 {
+		return "", errors.New("git output is not one terminated line")
+	}
+	return string(line), nil
+}
+
+func isSHA(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') && !(character >= 'A' && character <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+type reviewRequest struct {
+	Schema   string `json:"schema"`
+	Issue    int    `json:"issue"`
+	Branch   string `json:"branch"`
+	Revision string `json:"revision"`
+	Time     string `json:"time"`
+}
+
+type checksNote struct {
+	Results []checkResult
+}
+
+type checkResult struct {
+	Name string `json:"name"`
+	OK   bool   `json:"ok"`
+	Exit int    `json:"exit"`
+}
+
+type checkResultPayload struct {
+	Name *string `json:"name"`
+	OK   *bool   `json:"ok"`
+	Exit *int    `json:"exit"`
+}
+
+type checksNotePayload struct {
+	Schema   string               `json:"schema"`
+	Revision string               `json:"revision"`
+	Results  []checkResultPayload `json:"results"`
+	Time     string               `json:"time"`
+}
+
+type verdictNote struct {
+	Schema   string `json:"schema"`
+	Revision string `json:"revision"`
+	Verdict  string `json:"verdict"`
+	Summary  string `json:"summary"`
+	Time     string `json:"time"`
+}
+
+type strictJSONShape struct {
+	fields  map[string]*strictJSONShape
+	element *strictJSONShape
+}
+
+func objectJSONShape(fields ...string) *strictJSONShape {
+	value := &strictJSONShape{}
+	shape := &strictJSONShape{fields: make(map[string]*strictJSONShape, len(fields))}
+	for _, field := range fields {
+		shape.fields[field] = value
+	}
+	return shape
+}
+
+func scanStrictJSON(decoder *json.Decoder, shape *strictJSONShape) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch delimiter := token.(type) {
+	case json.Delim:
+		switch delimiter {
+		case '{':
+			if shape == nil || shape.fields == nil {
+				return fmt.Errorf("invalid JSON object")
+			}
+			seen := make(map[string]struct{}, len(shape.fields))
+			for decoder.More() {
+				key, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				name, ok := key.(string)
+				if !ok {
+					return fmt.Errorf("invalid JSON object key")
+				}
+				child, allowed := shape.fields[name]
+				if !allowed {
+					return fmt.Errorf("unknown JSON object key")
+				}
+				if _, ok := seen[name]; ok {
+					return fmt.Errorf("duplicate JSON object key")
+				}
+				seen[name] = struct{}{}
+				if err := scanStrictJSON(decoder, child); err != nil {
+					return err
+				}
+			}
+			closing, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if closing != json.Delim('}') {
+				return fmt.Errorf("invalid JSON object")
+			}
+		case '[':
+			if shape == nil || shape.element == nil {
+				return fmt.Errorf("invalid JSON array")
+			}
+			for decoder.More() {
+				if err := scanStrictJSON(decoder, shape.element); err != nil {
+					return err
+				}
+			}
+			closing, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			if closing != json.Delim(']') {
+				return fmt.Errorf("invalid JSON array")
+			}
+		default:
+			return fmt.Errorf("invalid JSON delimiter %q", delimiter)
+		}
+	default:
+		if shape == nil || shape.fields != nil || shape.element != nil {
+			return fmt.Errorf("invalid JSON value")
+		}
+	}
+	return nil
+}
+
+func decodeStrictJSON(data []byte, target any, shape *strictJSONShape) error {
+	scanner := json.NewDecoder(bytes.NewReader(data))
+	if err := scanStrictJSON(scanner, shape); err != nil {
+		return err
+	}
+	if _, err := scanner.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("trailing JSON value")
+		}
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func validNoteTime(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	_, err := time.Parse(time.RFC3339Nano, value)
+	return err == nil
+}
+
+func decodeReview(data []byte, sha string) (reviewRequest, error) {
+	var note reviewRequest
+	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "issue", "branch", "revision", "time")); err != nil {
+		return note, err
+	}
+	if note.Schema != "forest.review-request.v1" || note.Revision != sha || note.Issue <= 0 || !validBranch(note.Branch, note.Issue) || !validNoteTime(note.Time) {
+		return note, fmt.Errorf("invalid review-request note")
+	}
+	return note, nil
+}
+
+func validBranch(branch string, issue int) bool {
+	if issue <= 0 || !strings.HasPrefix(branch, "forest/") {
+		return false
+	}
+	parts := strings.SplitN(strings.TrimPrefix(branch, "forest/"), "-", 2)
+	if len(parts) != 2 || parts[0] != strconv.Itoa(issue) || parts[1] == "" {
+		return false
+	}
+	slug := parts[1]
+	for index := range len(slug) {
+		character := slug[index]
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
+			continue
+		}
+		if character != '-' || index == 0 || index == len(slug)-1 || slug[index-1] == '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validatePollReviewRequestBranch(data []byte, sha, branch string) error {
+	note, err := decodeReview(data, sha)
+	if err != nil {
+		return err
+	}
+	if note.Branch != branch {
+		return fmt.Errorf("review-request branch %q does not match observed branch %q", note.Branch, branch)
+	}
+	return nil
+}
+
+func decodeChecks(data []byte, sha string) (checksNote, error) {
+	shape := objectJSONShape("schema", "revision", "results", "time")
+	shape.fields["results"] = &strictJSONShape{element: objectJSONShape("name", "ok", "exit")}
+	var payload checksNotePayload
+	if err := decodeStrictJSON(data, &payload, shape); err != nil {
+		return checksNote{}, err
+	}
+	if payload.Schema != "forest.checks.v1" || payload.Revision != sha || !validNoteTime(payload.Time) || len(payload.Results) == 0 {
+		return checksNote{}, fmt.Errorf("invalid checks note")
+	}
+	note := checksNote{Results: make([]checkResult, len(payload.Results))}
+	seen := make(map[string]bool, len(payload.Results))
+	for index, result := range payload.Results {
+		if result.Name == nil || result.OK == nil || result.Exit == nil {
+			return checksNote{}, fmt.Errorf("checks result fields are required")
+		}
+		note.Results[index] = checkResult{Name: *result.Name, OK: *result.OK, Exit: *result.Exit}
+		if strings.TrimSpace(*result.Name) == "" || seen[*result.Name] || *result.Exit < 0 || (*result.OK && *result.Exit != 0) {
+			return checksNote{}, fmt.Errorf("invalid checks result")
+		}
+		seen[*result.Name] = true
+	}
+	return note, nil
+}
+
+func decodeVerdict(data []byte, sha string) (verdictNote, error) {
+	var note verdictNote
+	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "revision", "verdict", "summary", "time")); err != nil {
+		return note, err
+	}
+	if note.Schema != "forest.verdict.v1" || note.Revision != sha || (note.Verdict != "approve" && note.Verdict != "changes") || strings.TrimSpace(note.Summary) == "" || !validNoteTime(note.Time) {
+		return note, fmt.Errorf("invalid verdict note")
+	}
+	return note, nil
+}
+
+func validateNoteEntry(entry noteEntry) error {
+	if !json.Valid(entry.Payload) {
+		return fmt.Errorf("malformed JSON note on %s for %s", entry.Ref, entry.Revision)
+	}
+	var err error
+	switch entry.Ref {
+	case reviewRequestNoteRef:
+		_, err = decodeReview(entry.Payload, entry.Revision)
+		if err == nil && !validIdentity(entry, "builder", "fixer") {
+			err = fmt.Errorf("wrong author identity on review-request %s", entry.Revision)
+		}
+	case checksNoteRef:
+		_, err = decodeChecks(entry.Payload, entry.Revision)
+		if err == nil && !validIdentity(entry, "verifier") {
+			err = fmt.Errorf("wrong author identity on checks %s", entry.Revision)
+		}
+	case verdictNoteRef:
+		_, err = decodeVerdict(entry.Payload, entry.Revision)
+		if err == nil && !validIdentity(entry, "verifier") {
+			err = fmt.Errorf("wrong author identity on verdict %s", entry.Revision)
+		}
+	default:
+		err = fmt.Errorf("unknown forest note ref %s", entry.Ref)
+	}
+	if err != nil {
+		return fmt.Errorf("invalid note %s for %s: %v", entry.Ref, entry.Revision, err)
+	}
+	return nil
+}
