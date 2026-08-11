@@ -226,6 +226,51 @@ func (t *mismatchTracker) SetTags(string, []string, []string) error {
 	return nil
 }
 
+type recordingCommentTracker struct {
+	*memoryTracker
+	bodies []string
+}
+
+func (t *recordingCommentTracker) Comment(id, body string) error {
+	t.bodies = append(t.bodies, body)
+	return t.memoryTracker.Comment(id, body)
+}
+
+func TestPublishTrackerCommentAppendsMarkerOnce(t *testing.T) {
+	_, repo, revision := notesTestRepository(t)
+	marker := "<!-- iron-forest:built revision=" + revision + " -->"
+	tracker := &recordingCommentTracker{memoryTracker: newMemoryTracker()}
+	tracker.seed(Item{ID: "9", Title: "change"})
+	item, err := tracker.Get("9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "Built branch `forest/9-change`.\n\n" + marker
+	if err := publishTrackerComment(repo, tracker, item, "Tracker-builder-comment", revision, body, marker); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if len(tracker.bodies) != 1 || strings.Count(tracker.bodies[0], marker) != 1 {
+		t.Fatalf("posted bodies = %#v, want one exact marker", tracker.bodies)
+	}
+	if err := publishTrackerComment(repo, tracker, item, "Tracker-builder-comment", revision, body, marker); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	if len(tracker.bodies) != 1 {
+		t.Fatalf("idempotent retry posted %d bodies, want one", len(tracker.bodies))
+	}
+}
+
+func TestWarnEffectRedactsCommentFailure(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	stderr := captureTestStderr(t, func() {
+		warnEffect("Issue comment", errors.New("Tracker rejected "+secret))
+	})
+	if strings.Contains(stderr, secret) || !strings.Contains(stderr, secretRedacted) ||
+		!strings.Contains(stderr, "Issue comment warning") {
+		t.Fatalf("warning = %q, want redacted Issue comment warning", stderr)
+	}
+}
+
 // TestBuilderSelectCarriesOpaqueID proves the controller path — not just the
 // worktree helpers — carries a non-numeric tracker id: builderFlow.Select reads
 // the tracker through the Tracker port and emits a Subject whose ID is the

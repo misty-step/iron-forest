@@ -211,23 +211,15 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 	stats, err := runPhase(repoDir, wtDir, a, prompt, trace)
 	out.addTokens(stats)
 	if err != nil {
-		// A mechanical prompt-delivery failure is not content to repair: the same
-		// prompt fails identically, so it parks (prompt_failed) instead of
-		// spending a Fixer attempt on an unchanged situation. A run that exceeded
-		// its declared deadline is the same shape: the same run keeps exceeding
-		// the same bound, so it parks (timeout_failed) rather than being repaired.
+		// A run that exceeded its declared deadline is mechanical. It parks as
+		// timeout_failed instead of spending a Fixer attempt.
 		out.Status = "agent_failed"
-		if isPromptDelivery(err) {
-			out.Status = "prompt_failed"
-		}
 		if isRunTimeout(err) {
 			out.Status = "timeout_failed"
 		}
 		return out, fmt.Errorf("agent: %w", err)
 	}
-	if _, _, err := gate(wtDir, baseSHA,
-		filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"),
-		trace); err != nil {
+	if _, _, err := gate(wtDir, baseSHA, a.ReportSchema, trace); err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
 	}
@@ -238,6 +230,10 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 		out.Status = "publish_failed"
 		return out, fmt.Errorf("publish: %w", err)
 	}
+	out.Status = "fixed"
+	warnEffect("Issue comment", publishFixedComment(
+		cfg, repoDir, it, s.Branch, publishedHead,
+	))
 	if count >= cfg.Flows.Fixer.Attempts {
 		if err := markFixerFailed(cfg.Repo, repoDir, publishedHead, it); err != nil {
 			out.Status = "tracker_failed"
@@ -248,7 +244,6 @@ func (fixerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Outco
 			return out, fmt.Errorf("record failed handoff brake: %w", err)
 		}
 	}
-	out.Status = "fixed"
 	return out, nil
 }
 
@@ -273,6 +268,18 @@ func fixerRevision(v verdictNote, c checksNote) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func publishFixedComment(cfg Config, repoDir string, it Item, branch, revision string) error {
+	return publishTrackerComment(
+		repoDir,
+		trackerFor(cfg.Repo),
+		it,
+		"Tracker-fixed-comment",
+		revision,
+		fmt.Sprintf("Fixed branch `%s`.", branch),
+		"<!-- iron-forest:fixed revision="+revision+" -->",
+	)
 }
 
 func markFixerFailed(repo, repoDir, revision string, it Item) error {

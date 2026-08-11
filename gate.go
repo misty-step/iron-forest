@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -8,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // report is the typed envelope the build agent must write before it stops.
@@ -21,12 +24,12 @@ type report struct {
 	ChangedFiles []string `json:"changed_files"`
 	Notes        string   `json:"notes"`
 }
-
 // review is the verdict the review agent must write.
 type review struct {
-	Verdict string `json:"verdict"` // approve | changes
-	Summary string `json:"summary"`
-	Notes   string `json:"notes"`
+	Verdict string   `json:"verdict"` // approve | changes
+	Summary string   `json:"summary"`
+	Changes []string `json:"changes"`
+	Notes   string   `json:"notes"`
 }
 
 // runArtifacts are the per-run ledger files the agent is allowed to write; the
@@ -45,7 +48,7 @@ var runArtifacts = []string{"report.json", "review.json"}
 // security boundary, because the code enforcing it was itself writable by any
 // run, and it blocked the factory from working on its own declarations. The
 // boundary that holds is independent review on the exact commit.
-func gate(wtDir, baseSHA, schemaPath, tracePath string) ([]string, report, error) {
+func gate(wtDir, baseSHA, schema, tracePath string) ([]string, report, error) {
 	var rep report
 	head, err := gitOut(wtDir, "rev-parse", "HEAD")
 	if err != nil {
@@ -70,7 +73,7 @@ func gate(wtDir, baseSHA, schemaPath, tracePath string) ([]string, report, error
 		return nil, rep, fmt.Errorf("agent produced no real changes")
 	}
 	repFile := filepath.Join(wtDir, "report.json")
-	if err := checkSchema(repFile, schemaPath); err != nil {
+	if err := checkSchema(repFile, schema); err != nil {
 		return nil, rep, reportMissingTrace(err, tracePath)
 	}
 	raw, err := os.ReadFile(repFile)
@@ -155,14 +158,14 @@ func traceTail(path string, n int) string {
 }
 
 // gateReview parses the review agent's review.json and validates its verdict.
-func gateReview(wtDir, schemaPath string) (review, error) {
+func gateReview(wtDir, schema string) (review, error) {
 	rvFile := filepath.Join(wtDir, "review.json")
 	var rv review
 	raw, err := os.ReadFile(rvFile)
 	if err != nil {
 		return rv, fmt.Errorf("review.json missing: %w", err)
 	}
-	if err := checkSchema(rvFile, schemaPath); err != nil {
+	if err := checkSchema(rvFile, schema); err != nil {
 		return rv, err
 	}
 	if err := json.Unmarshal(raw, &rv); err != nil {
@@ -560,95 +563,333 @@ func submoduleState(wtDir, path string) string {
 	if err != nil {
 		fmt.Fprintf(h, "status-error:%v", err)
 		return hex.EncodeToString(h.Sum(nil))
-	}
-	for _, line := range strings.Split(status, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if len(line) < 2 {
-			continue
-		}
-		// The first two columns are the index/working-tree status (" M " for a
-		// modified tracked file); "??" marks untracked scratch, which real checks
-		// may legitimately leave behind and which never changes the merged tree.
-		if strings.HasPrefix(line[:2], "??") {
-			continue
-		}
-		fmt.Fprintf(h, "%s;", line)
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// symlinkedAncestor reports whether any parent directory of rel, walking from
-// the worktree root down, is a symlink. os.Lstat only avoids following the final
-// component of a path, so a leaf beneath a symlinked parent would otherwise be
-// resolved through it into the link target. Refusing to follow keeps a verifier
-// from pointing a tracked directory at a huge external file and stalling or
-// exhausting the factory before the clean-tree refusal is emitted. It returns
-// false when a parent no longer exists, because the leaf that names it then
-// fingerprints as absent on its own.
-func symlinkedAncestor(wtDir, rel string) bool {
-	dir := filepath.Dir(rel)
-	for dir != "." && dir != "" && dir != string(filepath.Separator) {
-		fi, err := os.Lstat(filepath.Join(wtDir, dir))
-		if err != nil {
-			return false
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return true
-		}
-		dir = filepath.Dir(dir)
-	}
-	return false
-}
-
-// checkSchema validates a JSON run artifact against its declared JSON Schema:
-// the file parses, and every required property is present and non-empty.
+// checkSchema validates a JSON run artifact against the supported JSON Schema
+// subset. Cross-field rules belong to the typed reader that consumes the report.
 func checkSchema(file, schemaPath string) error {
-	sb, err := os.ReadFile(schemaPath)
+	schemaBytes, err := os.ReadFile(schemaPath)
 	if err != nil {
 		return fmt.Errorf("read schema %s: %w", schemaPath, err)
 	}
-	var s struct {
-		Required   []string `json:"required"`
-		Properties map[string]struct {
-			Type string `json:"type"`
-		} `json:"properties"`
+	schemaValue, err := decodeJSON(schemaBytes)
+	if err != nil {
+		return fmt.Errorf("schema %s: invalid JSON: %w", schemaPath, err)
 	}
-	if err := json.Unmarshal(sb, &s); err != nil {
+	schema, err := parseSchema(schemaValue, "$")
+	if err != nil {
 		return fmt.Errorf("schema %s: %w", schemaPath, err)
 	}
-	b, err := os.ReadFile(file)
+	reportBytes, err := os.ReadFile(file)
 	if err != nil {
 		return err
 	}
-	var v map[string]json.RawMessage
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
+	report, err := decodeJSON(reportBytes)
+	if err != nil {
+		return fmt.Errorf("%s: invalid JSON: %w", filepath.Base(file), err)
 	}
-	for _, name := range s.Required {
-		raw, ok := v[name]
-		if !ok {
-			return fmt.Errorf("%s missing required field %q", filepath.Base(file), name)
+	return validateSchemaValue(report, schema, filepath.Base(file))
+}
+
+// schemaNode is the small assertion vocabulary used by the declarations. The
+// remaining JSON Schema fields are annotations or cross-field rules handled by
+// typed readers.
+type schemaNode struct {
+	typ                  string
+	required             []string
+	properties           map[string]*schemaNode
+	additionalProperties bool
+	minLength            *big.Int
+	minItems             *big.Int
+	items                *schemaNode
+	enum                 []any
+	hasEnum              bool
+	constValue           any
+	hasConst             bool
+	minimum              *big.Rat
+}
+
+var schemaTypes = map[string]bool{
+	"object": true, "string": true, "integer": true, "boolean": true, "array": true,
+}
+
+func decodeJSON(data []byte) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("multiple JSON values")
 		}
-		switch s.Properties[name].Type {
-		case "string":
-			var sval string
-			if err := json.Unmarshal(raw, &sval); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func parseSchema(value any, path string) (*schemaNode, error) {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an object schema", path)
+	}
+	node := &schemaNode{additionalProperties: true}
+	if value, ok := obj["type"]; ok {
+		typ, ok := value.(string)
+		if !ok || !schemaTypes[typ] {
+			return nil, fmt.Errorf("%s.type must be one of object, string, integer, boolean, array", path)
+		}
+		node.typ = typ
+	}
+	if value, ok := obj["required"]; ok {
+		required, ok := value.([]any)
+		if !ok {
+			return nil, fmt.Errorf("%s.required must be an array of strings", path)
+		}
+		seen := make(map[string]bool, len(required))
+		for i, item := range required {
+			name, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s.required[%d] must be a string", path, i)
+			}
+			if seen[name] {
+				return nil, fmt.Errorf("%s.required[%d] duplicates %q", path, i, name)
+			}
+			seen[name] = true
+			node.required = append(node.required, name)
+		}
+	}
+	if value, ok := obj["properties"]; ok {
+		properties, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("%s.properties must be an object", path)
+		}
+		node.properties = make(map[string]*schemaNode, len(properties))
+		keys := make([]string, 0, len(properties))
+		for name := range properties {
+			keys = append(keys, name)
+		}
+		sort.Strings(keys)
+		for _, name := range keys {
+			child, err := parseSchema(properties[name], path+".properties."+name)
+			if err != nil {
+				return nil, err
+			}
+			node.properties[name] = child
+		}
+	}
+	if value, ok := obj["additionalProperties"]; ok {
+		additional, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("%s.additionalProperties must be a boolean", path)
+		}
+		node.additionalProperties = additional
+	}
+	var err error
+	if value, ok := obj["minLength"]; ok {
+		node.minLength, err = schemaNonNegativeInteger(value, path+".minLength")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if value, ok := obj["minItems"]; ok {
+		node.minItems, err = schemaNonNegativeInteger(value, path+".minItems")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if value, ok := obj["items"]; ok {
+		node.items, err = parseSchema(value, path+".items")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if value, ok := obj["enum"]; ok {
+		node.enum, ok = value.([]any)
+		if !ok || len(node.enum) == 0 {
+			return nil, fmt.Errorf("%s.enum must be a non-empty array", path)
+		}
+		node.hasEnum = true
+	}
+	if value, ok := obj["const"]; ok {
+		node.constValue = value
+		node.hasConst = true
+	}
+	if value, ok := obj["minimum"]; ok {
+		node.minimum, err = schemaNumber(value, path+".minimum")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return node, nil
+}
+
+func schemaNonNegativeInteger(value any, path string) (*big.Int, error) {
+	number, err := schemaNumber(value, path)
+	if err != nil {
+		return nil, err
+	}
+	if number.Sign() < 0 || number.Denom().Cmp(big.NewInt(1)) != 0 {
+		return nil, fmt.Errorf("%s must be a non-negative integer", path)
+	}
+	return new(big.Int).Set(number.Num()), nil
+}
+
+func schemaNumber(value any, path string) (*big.Rat, error) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a number", path)
+	}
+	rat, ok := new(big.Rat).SetString(string(number))
+	if !ok {
+		return nil, fmt.Errorf("%s must be a valid number", path)
+	}
+	return rat, nil
+}
+
+func validateSchemaValue(value any, schema *schemaNode, path string) error {
+	if schema.typ != "" && !matchesSchemaType(value, schema.typ) {
+		return fmt.Errorf("%s: expected %s", path, schema.typ)
+	}
+	if schema.hasConst && !jsonValuesEqual(value, schema.constValue) {
+		return fmt.Errorf("%s: must equal const value", path)
+	}
+	if schema.hasEnum {
+		valid := false
+		for _, candidate := range schema.enum {
+			if jsonValuesEqual(value, candidate) {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("%s: must equal one of the enum values", path)
+		}
+	}
+	switch typed := value.(type) {
+	case string:
+		if schema.minLength != nil && big.NewInt(int64(utf8.RuneCountInString(typed))).Cmp(schema.minLength) < 0 {
+			return fmt.Errorf("%s: length must be at least %s", path, schema.minLength.String())
+		}
+	case []any:
+		if schema.minItems != nil && new(big.Int).SetInt64(int64(len(typed))).Cmp(schema.minItems) < 0 {
+			return fmt.Errorf("%s: must contain at least %s items", path, schema.minItems.String())
+		}
+		if schema.items != nil {
+			for i, item := range typed {
+				if err := validateSchemaValue(item, schema.items, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+					return err
+				}
+			}
+		}
+	case map[string]any:
+		for _, name := range schema.required {
+			if _, ok := typed[name]; !ok {
+				return fmt.Errorf("%s: missing required field %q", path, name)
+			}
+		}
+		keys := make([]string, 0, len(typed))
+		for name := range typed {
+			keys = append(keys, name)
+		}
+		sort.Strings(keys)
+		for _, name := range keys {
+			child, known := schema.properties[name]
+			if !known {
+				if !schema.additionalProperties {
+					return fmt.Errorf("%s.%s: unknown field", path, name)
+				}
+				continue
+			}
+			if err := validateSchemaValue(typed[name], child, path+"."+name); err != nil {
 				return err
 			}
-			if strings.TrimSpace(sval) == "" {
-				return fmt.Errorf("%s field %q is empty", filepath.Base(file), name)
-			}
-		case "array":
-			var arr []json.RawMessage
-			if err := json.Unmarshal(raw, &arr); err != nil {
+		}
+	}
+	if schema.minimum != nil {
+		if number, ok := value.(json.Number); ok {
+			rat, err := schemaNumber(number, path)
+			if err != nil {
 				return err
 			}
-			if len(arr) == 0 {
-				return fmt.Errorf("%s field %q is empty", filepath.Base(file), name)
+			if rat.Cmp(schema.minimum) < 0 {
+				return fmt.Errorf("%s: must be at least %s", path, schema.minimum.RatString())
 			}
 		}
 	}
 	return nil
+}
+
+func matchesSchemaType(value any, typ string) bool {
+	switch typ {
+	case "object":
+		_, ok := value.(map[string]any)
+		return ok
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "integer":
+		number, ok := value.(json.Number)
+		if !ok {
+			return false
+		}
+		rat, err := schemaNumber(number, "number")
+		return err == nil && rat.Denom().Cmp(big.NewInt(1)) == 0
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "array":
+		_, ok := value.([]any)
+		return ok
+	default:
+		return false
+	}
+}
+
+func jsonValuesEqual(left, right any) bool {
+	switch leftValue := left.(type) {
+	case nil:
+		return right == nil
+	case bool:
+		rightValue, ok := right.(bool)
+		return ok && leftValue == rightValue
+	case string:
+		rightValue, ok := right.(string)
+		return ok && leftValue == rightValue
+	case json.Number:
+		rightValue, ok := right.(json.Number)
+		if !ok {
+			return false
+		}
+		leftNumber, leftErr := schemaNumber(leftValue, "number")
+		rightNumber, rightErr := schemaNumber(rightValue, "number")
+		return leftErr == nil && rightErr == nil && leftNumber.Cmp(rightNumber) == 0
+	case []any:
+		rightValue, ok := right.([]any)
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for i := range leftValue {
+			if !jsonValuesEqual(leftValue[i], rightValue[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		rightValue, ok := right.(map[string]any)
+		if !ok || len(leftValue) != len(rightValue) {
+			return false
+		}
+		for key, item := range leftValue {
+			other, ok := rightValue[key]
+			if !ok || !jsonValuesEqual(item, other) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func isRunArtifact(path string) bool {

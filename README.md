@@ -52,7 +52,7 @@ Run the binary from the repository root. The command surface is:
 | `forest run <flow> <subject>` | Run one Subject by exact key, branch, or item ID. Ambiguous exact matches are refused. |
 | `forest show <sha>` | Print the Verdict and Checks notes for a commit. |
 | `forest version` | Print the binary Revision. |
-| `forest selfcheck` | Verify configuration and agent declarations offline. |
+| `forest selfcheck` | Verify configuration, agents, pinned OpenCode, Bubblewrap, and user namespaces offline. |
 | `forest watch [--interval 2s]` | Show the operator board. |
 
 ## Configuration
@@ -63,11 +63,11 @@ Run the binary from the repository root. The command surface is:
 repo: owner/name                 # required; no default
 checks:
   - name: build
-    run: mise exec -- go build ./...
+    run: go build ./...
   - name: vet
-    run: mise exec -- go vet ./...
+    run: go vet ./...
   - name: test
-    run: mise exec -- go test ./...
+    run: go test ./...
 flows:
   builder:
     enabled: true
@@ -115,39 +115,47 @@ Attaching a second repository to a running installation is
 It never reads a Host check or review.
 Labels such as `exclude_labels` are Tracker inputs, not factory state.
 
+Every agent and check runs inside a required Bubblewrap namespace. The
+namespace exposes the worktree, private state, selected system files, validated
+toolchains, and private per-run build caches. It builds a read-only Git view
+from known history and diff metadata. It hides unrecognized Git administration
+files, configuration, hooks, and sibling worktrees. Bubblewrap's PID-1 reaper contains detached
+descendants. The trace drain observes the declared deadline.
+
+Agent declarations and provider configuration use rooted file reads. Symlinks
+cannot escape the repository. Provider configuration accepts only the declared
+Mint OpenRouter shape. The network remains shared because OpenCode must reach
+Mint. Iron Forest has no unsandboxed fallback.
+
 Each check runs in a child environment with a private `HOME` and a scrubbed
 `PATH`. Its tools resolve one of two ways, both stack-agnostic:
 
-- **mise-managed tools** with working shims are already reachable on the child
-  `PATH`.
-- **host toolchain directories** outside that `PATH` (for example rustup's
-  `~/.cargo/bin`) are reachable when the operator names them with the
-  `FOREST_CHECK_PATH` environment variable on the host running the Factory, a
-  platform path-list of directories to prepend to the child `PATH`. They sit
-  before the mise shims, so a working host binary wins over a dead shim.
+- **mise-managed tools** use the validated active mise root. Only its `installs`
+  and `shims` trees are mounted read-only.
+- **host toolchain executables** outside that `PATH` are staged when the operator
+  names their directories with `FOREST_CHECK_PATH`. Sibling files never enter
+  the namespace. The variable is a platform path-list, and these executables
+  precede mise shims.
 
-A host binary is often only a proxy that must read toolchain metadata to find
-its real driver (rustup's `cargo` needs `RUSTUP_HOME` to locate the default
-toolchain; with a private empty `HOME` and only the proxy on `PATH` it reports
-"no default is configured"). Name that metadata with `FOREST_CHECK_ENV` on the
-host running the Factory, a newline-separated list of `KEY=VALUE` pairs, one per
-line, added to the check child environment.
+A host executable can be a proxy that needs toolchain metadata. Name its root
+with `FOREST_CHECK_ENV`, a newline-separated list of `KEY=VALUE` pairs. Rustup
+receives only its `toolchains` tree. Iron Forest derives `RUSTUP_TOOLCHAIN` from
+validated non-secret settings instead of mounting the settings file.
 
 Both variables reach only the **check** child, never an agent run: the host
 toolchain mechanism is applied where a managed repo's `checks:` needs to find
 its declared tools, and is withheld from the opencode agent, so neither host
 binaries on `PATH` nor toolchain metadata can bleed into agent reach.
 
-`FOREST_CHECK_ENV` carries only a curated allowlist of metadata variables, and
-drops everything else. Today the single allowlisted variable is `RUSTUP_HOME`,
-which points at the rustup install root (settings and toolchains) and holds no
-credentials. A substring denylist would be unsound — `CI_JOB_JWT`,
-`AWS_ACCESS_KEY_ID`, `KUBECONFIG`, or `GIT_CONFIG_GLOBAL` could slip through,
-and `CARGO_HOME` deliberately is *not* allowlisted because `~/.cargo` holds
-`credentials.toml`, so pointing a check at it would expose the operator's
-registry token. An explicit allowlist is the only defensible boundary: it can
-never be fooled by an unlisted credential name or path, and it keeps the private
-`HOME`, the scrubbed `PATH`, and the managed caches authoritative.
+Iron Forest resolves each declared path before launch. It rejects protected
+roots and symlink escapes. It copies declared executable files into private
+read-only staging directories.
+
+`FOREST_CHECK_ENV` carries only a curated allowlist of metadata variables.
+Today the single variable is `RUSTUP_HOME`. Iron Forest exposes only its
+validated `toolchains` subtree. It never mounts `CARGO_HOME`, because
+`~/.cargo/credentials.toml` can hold a registry token. The allowlist keeps the
+private `HOME`, scrubbed `PATH`, and private caches authoritative.
 
 Building the wrong thing is worse than not building: Iron Forest does not guess a
 stack. If a `checks:` command's tool is missing, the check fails and the note
@@ -169,16 +177,20 @@ Projection keys control the optional human surface.
 
 ## Requirements
 
-- Go 1.26.5 through mise.
+- Go 1.26.5 and OpenCode 1.18.11 through mise.
+- Bubblewrap (`bwrap`) with unprivileged user namespaces enabled.
 - Git with access to the repository.
 - `gh`, the Host CLI used for Tracker items and Projections.
-- A provider key for the configured Runner.
-Provider usage is bounded by the provider key outside Iron Forest.
+- A tracked `.opencode/opencode.json` at the repository root. It must use the
+  Mint OpenRouter route `http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1`
+  and the marker `__mint.openrouter.ironforest__` (optionally with `Bearer `).
+  Ambient or global OpenCode configuration is not used.
 
 Build and run with the pinned toolchain:
 
 ```sh
-mise exec -- go build -o forest .
+mise install
+go build -o forest .
 ./forest serve --factory-dir /path/to/iron-forest
 ```
 

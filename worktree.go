@@ -58,7 +58,7 @@ func git(repo string, args ...string) error {
 }
 
 func gitOut(repo string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	cmd := exec.Command("git", hostGitArgs(repo, args...)...)
 	out, err := runOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
@@ -72,7 +72,7 @@ func gitOut(repo string, args ...string) (string, error) {
 // blank shifts every field left and eats the first character of the path, so
 // any caller parsing by column must use this instead of gitOut.
 func gitOutRaw(repo string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	cmd := exec.Command("git", hostGitArgs(repo, args...)...)
 	out, err := runOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
@@ -118,8 +118,7 @@ func gitAsCommitter(repo string, id CommitIdentity, args ...string) error {
 }
 
 func gitWithIdentityEnv(repo string, env []string, args ...string) error {
-	cmdArgs := []string{"-C", repo}
-	cmd := exec.Command("git", append(cmdArgs, args...)...)
+	cmd := exec.Command("git", hostGitArgs(repo, args...)...)
 	cmd.Env = env
 	out, err := runCombinedOutput(cmd)
 	if err != nil {

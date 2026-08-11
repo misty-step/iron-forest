@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,7 +14,18 @@ import (
 // and tests replace this function without invoking the host CLI.
 var projectionCommand = ghJSON
 
+func warnEffect(effect string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forest: %s warning: %s\n", effect, redactSecretShaped(err.Error()))
+	}
+}
+
+func warnProjection(err error) {
+	warnEffect("Projection", err)
+}
+
 var errHostMergePending = errors.New("Host merge is pending")
+
 var errHostMergeRequestFailed = errors.New("Host merge request failed")
 var errHostMergeAccepted = errors.New("Host merge request was accepted")
 var errHostMergeUnavailable = errors.New("Host merge request is unavailable")

@@ -6,11 +6,25 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+const testProviderConfig = `{"provider":{"mint":{"options":{"baseURL":"http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1","apiKey":"__mint.openrouter.ironforest__"}}}}`
+
+func testFactory(t *testing.T) string {
+	t.Helper()
+	factory := t.TempDir()
+	configDir := filepath.Join(factory, ".opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "opencode.json"), []byte(testProviderConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return factory
+}
 
 // TestRunPhaseKeepsConfigOutOfWorktree pins option 1 of #174 against opencode's
 // supported external configuration mechanism: the per-run config root is handed
@@ -25,17 +39,8 @@ import (
 func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
 	// The factory project's own .opencode/opencode.json is the provider config a
 	// real run actually uses; it must be preserved beside the rendered agent.
-	factory := t.TempDir()
-	factoryOC := filepath.Join(factory, ".opencode")
-	if err := os.MkdirAll(factoryOC, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
-	if err := os.WriteFile(filepath.Join(factoryOC, "opencode.json"), providerCfg, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	factory := testFactory(t)
 
-	marker := filepath.Join(t.TempDir(), "loaded.txt")
 	script := "#!/bin/sh\n" +
 		"if [ -z \"$XDG_CONFIG_HOME\" ]; then echo 'opencode: XDG_CONFIG_HOME not set' >&2; exit 1; fi\n" +
 		"base=\"$XDG_CONFIG_HOME/opencode\"\n" +
@@ -50,9 +55,10 @@ func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
 		// run's own config root, never in the managed worktree's .opencode/.
 		"mkdir -p \"$base/node_modules\"\n" +
 		"if [ -e \".opencode\" ]; then echo 'opencode: created project .opencode in the worktree' >&2; exit 1; fi\n" +
-		"printf 'loaded\\n' > " + marker + "\n" +
+		"printf 'loaded\n' > loaded.txt\n" +
 		"exit 0\n"
 	wt, trace := fakeOpencode(t, script)
+	marker := filepath.Join(wt, "loaded.txt")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
 	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
 		t.Fatalf("runPhase: %v", err)
@@ -82,17 +88,8 @@ func TestRunPhaseKeepsConfigOutOfWorktree(t *testing.T) {
 func TestRunPhaseIgnoresWorktreeProjectConfig(t *testing.T) {
 	// A managed repository that ships a .opencode/opencode.json of its own would
 	// otherwise be discovered as opencode's local project config.
-	factory := t.TempDir()
-	factoryOC := filepath.Join(factory, ".opencode")
-	if err := os.MkdirAll(factoryOC, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
-	if err := os.WriteFile(filepath.Join(factoryOC, "opencode.json"), providerCfg, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	factory := testFactory(t)
 
-	marker := filepath.Join(t.TempDir(), "loaded.txt")
 	script := "#!/bin/sh\n" +
 		// A real opencode with local project config discovery enabled reads the
 		// worktree's .opencode/opencode.json and installs node_modules beside it.
@@ -106,13 +103,14 @@ func TestRunPhaseIgnoresWorktreeProjectConfig(t *testing.T) {
 		"base=\"$XDG_CONFIG_HOME/opencode\"\n" +
 		"if [ ! -f \"$base/opencode.json\" ]; then echo 'opencode: provider config missing' >&2; exit 1; fi\n" +
 		"if [ ! -f \"$base/agents/probe.md\" ]; then echo 'opencode: agent probe failed to load' >&2; exit 1; fi\n" +
-		"printf 'loaded\\n' > " + marker + "\n" +
+		"printf 'loaded\n' > loaded.txt\n" +
 		"exit 0\n"
 
 	// The managed worktree starts by carrying its own project-local
 	// .opencode/opencode.json, exactly the shape the old per-worktree stub could
 	// not see. It must survive the run unchanged, with no factory artifact added.
 	wt, trace := fakeOpencode(t, script)
+	marker := filepath.Join(wt, "loaded.txt")
 	wtOC := filepath.Join(wt, ".opencode")
 	if err := os.MkdirAll(wtOC, 0o755); err != nil {
 		t.Fatal(err)
@@ -140,39 +138,26 @@ func TestRunPhaseIgnoresWorktreeProjectConfig(t *testing.T) {
 	}
 }
 
-// TestRunPhaseFallsBackToGlobalProviderConfig proves a factory that ships no
-// project .opencode/opencode.json still gets a usable run: the operator's global
-// opencode provider configuration is preserved as the fallback. The stub checks
-// that a provider config made it into the run config root without requiring the
-// factory project to carry one.
-func TestRunPhaseFallsBackToGlobalProviderConfig(t *testing.T) {
-	// The operator's global opencode provider configuration is the fallback when
-	// the factory ships no project config of its own.
-	xdg := t.TempDir()
-	opencfg := filepath.Join(xdg, "opencode")
-	if err := os.MkdirAll(opencfg, 0o755); err != nil {
+func TestRunPhaseRejectsCredentialProjectProviderConfig(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	factory := testFactory(t)
+	opencfg := filepath.Join(factory, ".opencode")
+	body := []byte(`{"provider":{"raw":{"options":{"apiKey":"` + secret + `"}}}}`)
+	if err := os.WriteFile(filepath.Join(opencfg, "opencode.json"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	providerCfg := []byte(`{"provider":{"mint":{"options":{"apiKey":"__mint.tests__"}}}}`)
-	if err := os.WriteFile(filepath.Join(opencfg, "opencode.json"), providerCfg, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("XDG_CONFIG_HOME", xdg)
 
-	marker := filepath.Join(t.TempDir(), "loaded.txt")
-	script := "#!/bin/sh\n" +
-		"base=\"$XDG_CONFIG_HOME/opencode\"\n" +
-		"if [ ! -f \"$base/opencode.json\" ]; then echo 'opencode: provider config missing' >&2; exit 1; fi\n" +
-		"printf 'ok\\n' > " + marker + "\n" +
-		"exit 0\n"
-	factory := t.TempDir() // ships no .opencode/opencode.json
-	wt, trace := fakeOpencode(t, script)
+	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf ran > executed.txt\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(factory, wt, a, "task", trace); err != nil {
-		t.Fatalf("runPhase: %v", err)
+	_, err := runPhase(factory, wt, a, "task", trace)
+	if err == nil || !strings.Contains(err.Error(), "Mint marker") {
+		t.Fatalf("runPhase error = %v, want provider credential refusal", err)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("stub did not confirm the fallback provider config: %v", err)
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("provider refusal leaked the credential: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "executed.txt")); !os.IsNotExist(err) {
+		t.Fatalf("Runner started with credential config: %v", err)
 	}
 }
 
@@ -193,7 +178,7 @@ func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
 	trace := filepath.Join(t.TempDir(), "run", "agent.jsonl")
 	fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase must fail when opencode cannot load the agent")
 	}
@@ -202,29 +187,28 @@ func TestRunPhaseFailsWhenAgentIsUnloadable(t *testing.T) {
 	}
 }
 
-// TestRunPhaseDeliversLargePromptViaStdin pins the #204 fix: a prompt larger
-// than Linux's single-argument ceiling (maxArgLen = 131072) must still reach the
-// agent. runPhase streamed the prompt as one argv entry, so anything over that
-// failed with a raw fork/exec "argument list too long" before opencode was
-// reached. The harness streams the full prompt on stdin and writes only a
-// redacted audit copy beside the trace. The stub captures both channels:
-// runPhase must succeed, stdin must receive the whole prompt, and argv and the
-// durable audit copy must retain no credential-shaped value.
+// TestRunPhaseDeliversLargePromptViaStdin pins #204: a prompt larger than
+// Linux's former single-argument transport limit must still reach the agent.
+// The harness streams the full prompt on stdin and writes only a redacted audit
+// copy beside the trace. The stub captures both channels.
 func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
-	const secret = "sk-AAAAAAAAAAAAAAAA"
+	const (
+		secret          = "sk-AAAAAAAAAAAAAAAA"
+		priorArgCeiling = 131072
+	)
 	big := strings.Repeat("prompt-payload", (200*1024)/len("prompt-payload")) + secret + "END-MARKER"
-	if len(big) <= maxArgLen {
-		t.Fatalf("test prompt is %d bytes, must exceed maxArgLen %d", len(big), maxArgLen)
+	if len(big) <= priorArgCeiling {
+		t.Fatalf("test prompt is %d bytes, want more than %d", len(big), priorArgCeiling)
 	}
-	stdinMarker := filepath.Join(t.TempDir(), "stdin.txt")
-	argvMarker := filepath.Join(t.TempDir(), "argv.txt")
 	script := "#!/bin/sh\n" +
-		"cat > '" + stdinMarker + "'\n" +
-		"printf '%s\\n' \"$@\" > '" + argvMarker + "'\n" +
+		"cat > stdin.txt\n" +
+		"printf '%s\n' \"$@\" > argv.txt\n" +
 		"exit 0\n"
 	wt, trace := fakeOpencode(t, script)
+	stdinMarker := filepath.Join(wt, "stdin.txt")
+	argvMarker := filepath.Join(wt, "argv.txt")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(t.TempDir(), wt, a, big, trace); err != nil {
+	if _, err := runPhase(testFactory(t), wt, a, big, trace); err != nil {
 		t.Fatalf("runPhase failed on a %d-byte prompt: %v", len(big), err)
 	}
 	got, err := os.ReadFile(stdinMarker)
@@ -256,13 +240,28 @@ func TestRunPhaseDeliversLargePromptViaStdin(t *testing.T) {
 		t.Errorf("durable prompt audit mode = %o, want 600", got)
 	}
 }
+
+func TestRunPhaseDoesNotMisclassifyPromptAuditWriteFailure(t *testing.T) {
+	wt, trace := fakeOpencode(t, "#!/bin/sh\nexit 0\n")
+	if err := os.MkdirAll(filepath.Dir(trace), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(trace+".prompt.txt", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
+	if err == nil || !strings.Contains(err.Error(), "write prompt audit") {
+		t.Fatalf("prompt audit collision error = %v, want original write failure", err)
+	}
+}
 func TestRunPhaseRedactsTraceButParsesOriginalEvent(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	event := `{"type":"step_finish","note":"` + secret + `","part":{"tokens":{"input":11,"output":7}}}`
 	script := "#!/bin/sh\nprintf '%s\\n' '" + event + "'\nexit 0\n"
 	wt, trace := fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	stats, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err != nil {
 		t.Fatalf("runPhase: %v", err)
 	}
@@ -278,34 +277,28 @@ func TestRunPhaseRedactsTraceButParsesOriginalEvent(t *testing.T) {
 	}
 }
 
-// TestPromptDeliveryErrorNamesSizeAndLimit pins requirement 3 of #204: a prompt
-// that cannot be delivered whole fails with a named error stating the prompt
-// size and the delivery ceiling, never the kernel's raw fork/exec "argument
-// list too long" message. Naming both makes a mechanical delivery failure
-// auditable and distinguishable from a content problem.
-func TestPromptDeliveryErrorNamesSizeAndLimit(t *testing.T) {
-	err := &promptDeliveryError{size: 134718, limit: maxArgLen}
-	msg := err.Error()
-	if !strings.Contains(msg, "134718") {
-		t.Errorf("error %q did not name the prompt size", msg)
-	}
-	if !strings.Contains(msg, strconv.Itoa(maxArgLen)) {
-		t.Errorf("error %q did not name the delivery ceiling %d", msg, maxArgLen)
-	}
-	if strings.Contains(msg, "fork/exec") || strings.Contains(msg, "argument list too long") {
-		t.Errorf("error %q leaked the raw kernel fork/exec message", msg)
-	}
-}
-
-// fakeOpencode puts an executable named "opencode" on PATH so runPhase drives
-// the stub instead of the real harness, and returns the trace path.
+// fakeOpencode installs a stub under the exact mise version selected by each
+// test factory, so runPhase exercises the same pinned resolution as production.
 func fakeOpencode(t *testing.T, script string) (string, string) {
 	t.Helper()
-	bin := t.TempDir()
+	data := filepath.Join(t.TempDir(), "mise")
+	bin := filepath.Join(data, "installs", "opencode", requiredOpenCodeVersion)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(data, "shims"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versionCheck := "if [ \"$1\" = \"--version\" ]; then printf '1.18.11\\n'; exit 0; fi\n"
+	if strings.HasPrefix(script, "#!/bin/sh\n") {
+		script = strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\n"+versionCheck, 1)
+	} else {
+		script = "#!/bin/sh\n" + versionCheck + script
+	}
 	if err := os.WriteFile(filepath.Join(bin, "opencode"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MISE_DATA_DIR", data)
 	wt := filepath.Join(t.TempDir(), "wt")
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatal(err)
@@ -321,7 +314,7 @@ func fakeOpencode(t *testing.T, script string) (string, string) {
 func TestRunPhaseFailsOnHarnessCrash(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'model call rejected\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a crashed harness")
 	}
@@ -336,7 +329,7 @@ func TestRunPhaseRedactsHarnessError(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nprintf 'provider rejected `"+secret+"`\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a crashed harness")
 	}
@@ -351,7 +344,7 @@ func TestRunPhaseFailsOnKilledHarness(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":1}}}\n'\nkill -KILL $$\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a signal-killed harness")
 	}
@@ -366,7 +359,7 @@ func TestRunPhaseFailsOnCrashAfterWork(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'model call rejected\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("runPhase returned nil error on a non-zero crash after work")
 	}
@@ -387,7 +380,7 @@ func TestRunPhaseFailsOnAnyNonZeroExit(t *testing.T) {
 	wt, trace := fakeOpencode(t,
 		"#!/bin/sh\nprintf '{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":2}}}\n'\nprintf 'ran out of steps\\n' >&2\nexit 1\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	stats, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err == nil {
 		t.Fatal("non-zero exit must fail the run")
 	}
@@ -401,7 +394,7 @@ func TestRunPhaseFailsOnAnyNonZeroExit(t *testing.T) {
 func TestRunPhaseSuccessWithoutSteps(t *testing.T) {
 	wt, trace := fakeOpencode(t, "#!/bin/sh\nexit 0\n")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	if _, err := runPhase(t.TempDir(), wt, a, "task", trace); err != nil {
+	if _, err := runPhase(testFactory(t), wt, a, "task", trace); err != nil {
 		t.Fatalf("clean zero exit must succeed: %v", err)
 	}
 }
@@ -416,7 +409,7 @@ func TestNoTokenClassDroppedBetweenTraceAndRow(t *testing.T) {
 	script := "#!/bin/sh\nprintf '%s\\n' '" + step + "'\nexit 0\n"
 	wt, trace := fakeOpencode(t, script)
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe"}
-	stats, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	stats, err := runPhase(testFactory(t), wt, a, "task", trace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,17 +524,17 @@ func TestHardStopKillsAgentDescendants(t *testing.T) {
 	}
 }
 
-// TestRunPhaseTimesOutPastDeclaredBound is the falsifier for #207: a run whose
-// agent and descendant produce output past its declared deadline must be
-// cancelled as one process group and reported as a timeout.
+// TestRunPhaseTimesOutPastDeclaredBound proves Bubblewrap's PID-1 reaper and
+// cancellation-aware trace drain stop a setsid descendant that keeps stdout
+// open after its direct parent exits.
 func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
-	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
 	wt, trace := fakeOpencode(t,
-		"#!/bin/sh\n(while :; do printf x >> '"+heartbeat+"'; sleep 0.05; done) &\n"+
+		"#!/bin/sh\nsetsid /bin/sh -c 'while :; do printf x >> heartbeat; sleep 0.05; done' &\n"+
 			"printf '{\"type\":\"shell\",\"content\":\"sleep\"}\\n'\nwait\n")
+	heartbeat := filepath.Join(wt, "heartbeat")
 	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe", DeadlineSeconds: 1}
 	start := time.Now()
-	_, err := runPhase(t.TempDir(), wt, a, "task", trace)
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("a run past its declared bound returned no error")
@@ -550,7 +543,7 @@ func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
 		t.Fatalf("error %v is not a runTimeoutError", err)
 	}
 	if elapsed > 15*time.Second {
-		t.Errorf("run was not cancelled at the bound: returned after %s, but the stub sleeps 30s", elapsed)
+		t.Errorf("run was not cancelled at the declared bound: returned after %s", elapsed)
 	}
 	if !strings.Contains(err.Error(), "deadline") {
 		t.Errorf("error %q did not name the deadline", err)
@@ -570,5 +563,41 @@ func TestRunPhaseTimesOutPastDeclaredBound(t *testing.T) {
 	}
 	if len(after) != len(before) {
 		t.Fatalf("agent descendant survived cancellation: heartbeat grew from %d to %d bytes", len(before), len(after))
+	}
+}
+
+func TestRunPhaseReapsDetachedDescendantWhenParentExits(t *testing.T) {
+	wt, trace := fakeOpencode(t,
+		"#!/bin/sh\nsetsid /bin/sh -c 'while :; do printf x >> heartbeat; sleep 0.05; done' &\n"+
+			"sleep 0.15\nexit 0\n")
+	heartbeat := filepath.Join(wt, "heartbeat")
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe", DeadlineSeconds: 5}
+	if _, err := runPhase(testFactory(t), wt, a, "task", trace); err != nil {
+		t.Fatalf("runPhase: %v", err)
+	}
+	before, err := os.ReadFile(heartbeat)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("detached descendant produced no heartbeat: %d bytes, %v", len(before), err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	after, err := os.ReadFile(heartbeat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("detached descendant survived namespace exit: heartbeat grew from %d to %d bytes", len(before), len(after))
+	}
+}
+
+func TestRunPhaseDeadlineSurvivesClosedTraceStream(t *testing.T) {
+	wt, trace := fakeOpencode(t, "#!/bin/sh\nexec 1>&-\nwhile :; do sleep 1; done\n")
+	a := &Agent{Name: "probe", Model: "probe-model", Instructions: "probe", DeadlineSeconds: 1}
+	started := time.Now()
+	_, err := runPhase(testFactory(t), wt, a, "task", trace)
+	if !isRunTimeout(err) {
+		t.Fatalf("closed trace stream error = %v, want run timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("closed trace stream held the Run past its deadline: %s", elapsed)
 	}
 }

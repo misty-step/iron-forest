@@ -812,12 +812,7 @@ func writeReport(t *testing.T, wtDir, body string) {
 
 func gateTestSchema(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "report.schema.json")
-	body := `{"type":"object","required":["summary","changed_files"],"properties":{"summary":{"type":"string"},"changed_files":{"type":"array"}}}`
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return `{"type":"object","required":["summary","changed_files"],"properties":{"summary":{"type":"string"},"changed_files":{"type":"array"}}}`
 }
 
 // TestGateRefusesReportNamingUnchangedFile pins that a report claiming a file
@@ -949,7 +944,6 @@ func TestAssertChecksCleanRefusesTrackedRewriteAllowsScratch(t *testing.T) {
 
 	// Stage a distinct rewrite, then restore only the working-tree bytes to
 	// HEAD. The index remains tainted while the visible file matches HEAD.
-	runGitTest(t, wtDir, "checkout", "--", "source.go")
 	if err := os.WriteFile(filepath.Join(wtDir, "source.go"), []byte("package main\n// staged\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

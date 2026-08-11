@@ -283,6 +283,10 @@ func cmdSelfcheck(repoDir string) int {
 		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
 		return 1
 	}
+	if _, err := readProviderConfig(repoDir); err != nil {
+		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
+		return 1
+	}
 	names, err := discoverAgents(repoDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
@@ -305,6 +309,10 @@ func cmdSelfcheck(repoDir string) int {
 			fmt.Fprintf(os.Stderr, "forest selfcheck: configured agent %s has no declaration\n", name)
 			return 1
 		}
+	}
+	if err := verifyChildSandbox(repoDir); err != nil {
+		fmt.Fprintln(os.Stderr, "forest selfcheck:", err)
+		return 1
 	}
 	fmt.Printf("forest %s selfcheck: ok\n", version)
 	return 0

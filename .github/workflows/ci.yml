@@ -9,6 +9,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v3
+      - name: Install child sandbox
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y bubblewrap
       - name: Check gofmt formatting
         run: |
           unformatted=$(mise exec -- gofmt -l .)

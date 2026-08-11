@@ -189,15 +189,9 @@ func (managerFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	// prevent.
 	out.addTokens(stats)
 	if err != nil {
-		// A mechanical prompt-delivery failure names itself prompt_failed rather
-		// than agent_failed: the same prompt fails identically, so it must park
-		// instead of spending a judge attempt it can never satisfy. A run that
-		// exceeded its declared deadline is the same shape: it parks
-		// (timeout_failed) instead of being re-judged.
+		// A run that exceeded its declared deadline is mechanical. It parks as
+		// timeout_failed instead of spending another Manager attempt.
 		out.Status = "agent_failed"
-		if isPromptDelivery(err) {
-			out.Status = "prompt_failed"
-		}
 		if isRunTimeout(err) {
 			out.Status = "timeout_failed"
 		}
@@ -543,8 +537,7 @@ func runManagerJudge(repoDir string, cands []Item, a *Agent, runID string) (mana
 	if err != nil {
 		return managerReport{}, stats, err
 	}
-	if err := checkSchema(filepath.Join(runDir, "report.json"),
-		filepath.Join(a.Dir, "report.schema.json")); err != nil {
+	if err := checkSchema(filepath.Join(runDir, "report.json"), a.ReportSchema); err != nil {
 		return managerReport{}, stats, err
 	}
 	rep, err := readManagerReportFile(runDir)

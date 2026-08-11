@@ -376,62 +376,6 @@ func TestActOnSubjectRedactsOperatorText(t *testing.T) {
 	}
 }
 
-// TestBuilderPromptDeliveryFailureParksNotFixes drives #204's mechanical
-// classification end to end. A prompt that cannot be delivered is a mechanical
-// failure: the same prompt fails identically on every retry, so it must be
-// named prompt_failed for an operator and must never become a Fixer subject
-// that spends a repair attempt on an unchanged situation. The builder flow
-// fails inside runPhase before it ever publishes a branch, so nothing on
-// origin offers the head to the Fixer and the attempt counter stays at zero.
-func TestBuilderPromptDeliveryFailureParksNotFixes(t *testing.T) {
-	repo := setupTestRepo(t)
-	writeAgentFixture(t, repo, "builder", "builder-model")
-
-	tk := newMemoryTracker()
-	tk.seed(Item{ID: "9", Title: "wide change", UpdatedAt: "u1"})
-	oldTracker := trackerFor
-	trackerFor = func(string) Tracker { return tk }
-	defer func() { trackerFor = oldTracker }()
-
-	oldRun := runPhase
-	runPhase = func(_ string, _ string, _ *Agent, userPrompt, tracePath string) (runStats, error) {
-		return runStats{}, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
-	}
-	defer func() { runPhase = oldRun }()
-
-	cfg := defaultConfig()
-	cfg.Repo = "owner/repo"
-	cfg.Projection = ProjectionConfig{}
-
-	it := Item{ID: "9", Title: "wide change", UpdatedAt: "u1"}
-	out, err := (builderFlow{}).Act(cfg, repo, Subject{
-		Key: "item-9", Kind: "item", Revision: "u1", ID: "9", Item: it,
-	}, "run-prompt")
-	if err == nil {
-		t.Fatalf("a prompt-delivery failure returned no error: %#v", out)
-	}
-	if !isPromptDelivery(err) {
-		t.Fatalf("error %v does not wrap a promptDeliveryError", err)
-	}
-	if out.Status != "prompt_failed" {
-		t.Fatalf("prompt-delivery status = %q, want prompt_failed (mechanical)", out.Status)
-	}
-
-	// The mechanical failure must not enter the Fixer. Because the run never
-	// published a branch, the Fixer has nothing to repair on origin, and no
-	// repair attempt was spent on the subject.
-	subjects, err := (fixerFlow{}).Select(cfg, repo)
-	if err != nil {
-		t.Fatalf("fixer Select: %v", err)
-	}
-	if len(subjects) != 0 {
-		t.Fatalf("a prompt-delivery failure was offered to the Fixer: %#v", subjects)
-	}
-	if n, err := readAttempts(repo, "branch-forest/9-wide-change"); err != nil || n != 0 {
-		t.Fatalf("fixer attempts = (%d, %v), want 0; a mechanical failure must not spend a repair attempt", n, err)
-	}
-}
-
 // TestBuilderTimeoutFailureParksNotFixes drives #207's mechanical classification
 // end to end. A run that exceeds its declared wall-clock deadline is a
 // mechanical failure: the same run keeps exceeding the same declared bound, so
@@ -702,5 +646,20 @@ func TestUpdateGateWaitsForEveryActiveFlow(t *testing.T) {
 	case <-updateDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("source update loop did not stop")
+	}
+}
+
+func TestLoadLedgerRejectsMalformedRowWithLineNumber(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runs.jsonl")
+	if err := os.WriteFile(path, []byte(`{"flow":"builder"}`+"\n"+`{malformed}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, invalid, err := loadLedger(path)
+	if err == nil || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("malformed Ledger error = %v, want line 2", err)
+	}
+	if rows != nil || invalid != 0 {
+		t.Fatalf("malformed Ledger returned rows=%#v invalid=%d, want no totals", rows, invalid)
 	}
 }

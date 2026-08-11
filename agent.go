@@ -5,13 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -63,7 +66,12 @@ type Agent struct {
 	// the item. The wall-time bound that ends every stall lives in
 	// DeadlineSeconds, which is required and finite.
 	Permission map[string]string `yaml:"permission"`
-	MCP        []McpSpec         `yaml:"mcp"`
+	// BashAllow names command patterns that may use OpenCode's shell tool.
+	// A present empty list denies the shell. The child sandbox remains the
+	// security boundary because an allowed compiler or Git command can execute
+	// other programs.
+	BashAllow []string  `yaml:"bash_allow"`
+	MCP       []McpSpec `yaml:"mcp"`
 
 	Instructions string
 	PromptTmpl   string
@@ -74,6 +82,111 @@ type Agent struct {
 func validAgentName(name string) bool {
 	return name != "" && name != "." && name != ".." &&
 		filepath.Base(name) == name && !strings.ContainsAny(name, `/\`)
+}
+
+func bashPatternPrefix(pattern string) (string, error) {
+	if pattern == "" || pattern != strings.TrimSpace(pattern) ||
+		strings.ContainsAny(pattern, "\r\n") || !strings.HasSuffix(pattern, " *") {
+		return "", fmt.Errorf("bash_allow pattern %q must be a plain command prefix ending in \" *\"", pattern)
+	}
+	prefix := strings.TrimSuffix(pattern, " *")
+	if prefix == "" || strings.Join(strings.Fields(prefix), " ") != prefix {
+		return "", fmt.Errorf("bash_allow pattern %q must use single spaces", pattern)
+	}
+	for _, r := range prefix {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' || strings.ContainsRune(`._+:/%@=,- `, r) {
+			continue
+		}
+		return "", fmt.Errorf("bash_allow pattern %q contains a shell metacharacter", pattern)
+	}
+	return prefix, nil
+}
+
+func validateBashAllow(patterns []string) error {
+	seen := make(map[string]struct{}, len(patterns))
+	for _, pattern := range patterns {
+		if _, err := bashPatternPrefix(pattern); err != nil {
+			return err
+		}
+		if _, exists := seen[pattern]; exists {
+			return fmt.Errorf("bash_allow pattern %q is duplicated", pattern)
+		}
+		seen[pattern] = struct{}{}
+	}
+	return nil
+}
+
+// bashPermissionNode preserves rule order because OpenCode applies the last
+// matching rule. Named commands follow the catch-all deny. Shell operators
+// follow every allow and therefore cannot smuggle a second command through a
+// broad command prefix. Bubblewrap still contains every allowed executable.
+func bashPermissionNode(patterns []string) *yaml.Node {
+	node := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	add := func(pattern, effect string) {
+		style := yaml.SingleQuotedStyle
+		if strings.ContainsAny(pattern, "\r\n") {
+			style = yaml.DoubleQuotedStyle
+		}
+		node.Content = append(node.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: pattern, Style: style},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: effect},
+		)
+	}
+	add("*", "deny")
+	for _, pattern := range patterns {
+		add(pattern, "allow")
+	}
+	for _, pattern := range []string{
+		"*\n*", "*\r*", "*;*", "*|*", "*&*", "*`*", "*$(*", "*>*", "*<*", "*!*",
+	} {
+		add(pattern, "deny")
+	}
+	return node
+}
+
+// readRepositoryFile opens one regular file through an os.Root. The rooted
+// lookup rejects every symlink that escapes the repository before any Host
+// bytes can enter an agent declaration or per-run provider configuration.
+func readRepositoryFile(repoDir, path string) ([]byte, error) {
+	rel, err := filepath.Rel(repoDir, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("repository file %q is outside %q", path, repoDir)
+	}
+	root, err := os.OpenRoot(repoDir)
+	if err != nil {
+		return nil, fmt.Errorf("open repository root: %w", err)
+	}
+	defer root.Close()
+	info, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("repository file %q must not be a symbolic link", rel)
+	}
+	file, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("repository file %q is not regular", rel)
+	}
+	return io.ReadAll(file)
+}
+
+const maxAgentDeadlineSeconds = int64(1<<63-1) / int64(time.Second)
+
+func agentDeadline(seconds int) (time.Duration, error) {
+	if seconds <= 0 || int64(seconds) > maxAgentDeadlineSeconds {
+		return 0, fmt.Errorf("deadline_seconds must be positive and fit a time.Duration")
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 func loadAgent(repoDir, name string) (*Agent, error) {
 	if !validAgentName(name) {
@@ -88,7 +201,7 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 		return nil, fmt.Errorf("agent %s: declaration path is not a directory", name)
 	}
 	a := &Agent{Dir: dir, Name: name}
-	b, err := os.ReadFile(filepath.Join(dir, "agent.yaml"))
+	b, err := readRepositoryFile(repoDir, filepath.Join(dir, "agent.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %s: %w", name, err)
 	}
@@ -107,17 +220,18 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if a.Harness == "" {
 		a.Harness = "opencode"
 	}
+	if a.Harness != "opencode" {
+		return nil, fmt.Errorf("agent %s: harness %q is unsupported", name, a.Harness)
+	}
 	// No default model: a default would name one operator's provider route and
 	// silently spend on it. The declaration owns this choice.
 	if a.Model == "" {
 		return nil, fmt.Errorf("agent %s: model is required", name)
 	}
-	// The wall-clock deadline is required and finite: a run that never ends
-	// holds a lane forever (see #207), so a declaration that omits it or sets it
-	// to zero cannot be loaded. Every loaded agent therefore carries a positive,
-	// bounded run, and no configuration can create an unbounded one.
-	if a.DeadlineSeconds <= 0 {
-		return nil, fmt.Errorf("agent %s: deadline_seconds is required and must be a positive number of seconds", name)
+	// A positive declaration can still overflow time.Duration during conversion.
+	// Validate the exact duration here so every loaded agent has a real bound.
+	if _, err := agentDeadline(a.DeadlineSeconds); err != nil {
+		return nil, fmt.Errorf("agent %s: %w", name, err)
 	}
 	if strings.TrimSpace(a.Commit.Name) == "" || strings.TrimSpace(a.Commit.Email) == "" {
 		return nil, fmt.Errorf("agent %s: commit.name and commit.email are required", name)
@@ -128,7 +242,16 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 	if a.Mode == "" {
 		a.Mode = "primary"
 	}
-	ins, err := os.ReadFile(filepath.Join(dir, "instructions.md"))
+	if _, hasBashPermission := a.Permission["bash"]; hasBashPermission {
+		return nil, fmt.Errorf("agent %s: permission.bash is unsupported; declare bash_allow", name)
+	}
+	if a.BashAllow == nil {
+		a.BashAllow = []string{}
+	}
+	if err := validateBashAllow(a.BashAllow); err != nil {
+		return nil, fmt.Errorf("agent %s: %w", name, err)
+	}
+	ins, err := readRepositoryFile(repoDir, filepath.Join(dir, "instructions.md"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %s instructions.md: %w", name, err)
 	}
@@ -136,7 +259,7 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 		return nil, fmt.Errorf("agent %s instructions.md is empty", name)
 	}
 	a.Instructions = string(ins)
-	prompt, err := os.ReadFile(filepath.Join(dir, "prompt.md"))
+	prompt, err := readRepositoryFile(repoDir, filepath.Join(dir, "prompt.md"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %s prompt.md: %w", name, err)
 	}
@@ -147,7 +270,7 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 		return nil, fmt.Errorf("agent %s prompt.md: %w", name, err)
 	}
 	a.PromptTmpl = string(prompt)
-	schema, err := os.ReadFile(filepath.Join(dir, "report.schema.json"))
+	schema, err := readRepositoryFile(repoDir, filepath.Join(dir, "report.schema.json"))
 	if err != nil {
 		return nil, fmt.Errorf("agent %s report.schema.json: %w", name, err)
 	}
@@ -158,7 +281,10 @@ func loadAgent(repoDir, name string) (*Agent, error) {
 		return nil, fmt.Errorf("agent %s report.schema.json must be a JSON object schema", name)
 	}
 	a.ReportSchema = string(schema)
-	a.DefSHA = composeDigest(repoDir, name)
+	a.DefSHA, err = composeDigest(repoDir, name)
+	if err != nil {
+		return nil, fmt.Errorf("agent %s digest: %w", name, err)
+	}
 	return a, nil
 }
 
@@ -188,34 +314,44 @@ func discoverAgents(repoDir string) ([]string, error) {
 	return names, nil
 }
 
-// composeDigest fingerprints the whole agent definition: every file under
-// agents/<name>/ plus forest.yaml. It is the per-run composition digest that
-// makes a run reproducible and comparable.
-func composeDigest(repoDir, name string) string {
+// composeDigest fingerprints the whole agent definition plus forest.yaml. It
+// walks through os.Root, so an extra tracked symlink cannot make the controller
+// hash a Host file outside the declaration.
+func composeDigest(repoDir, name string) (string, error) {
 	h := sha256.New()
 	dir := filepath.Join(repoDir, DefaultAgentsDir, name)
-	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(repoDir, p)
-		if err != nil {
-			return nil
-		}
-		h.Write([]byte(rel))
-		f, err := os.Open(p)
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-		_, _ = io.Copy(h, f)
-		return nil
-	})
-	if b, err := os.ReadFile(filepath.Join(repoDir, "forest.yaml")); err == nil {
-		h.Write([]byte{0})
-		h.Write(b)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
+	defer root.Close()
+	if err := fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("declaration file %q must not be a symbolic link", path)
+		}
+		body, err := root.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		h.Write([]byte(filepath.Join(DefaultAgentsDir, name, filepath.FromSlash(path))))
+		h.Write(body)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	if body, err := readRepositoryFile(repoDir, filepath.Join(repoDir, "forest.yaml")); err == nil {
+		h.Write([]byte{0})
+		h.Write(body)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
 // renderMarkdown writes the agent's opencode markdown declaration into cfgDir's
@@ -234,12 +370,15 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	perm := make(map[string]string, len(a.Permission))
+	perm := make(map[string]any, len(a.Permission)+1)
 	for k, v := range a.Permission {
 		perm[k] = v
 	}
-	// Deny every declared-but-disabled MCP so the agent cannot reach it even
-	// though the global opencode config still declares the server.
+	if a.BashAllow != nil {
+		perm["bash"] = bashPermissionNode(a.BashAllow)
+	}
+	// Deny every declared-but-disabled MCP, even if a later provider
+	// configuration makes matching tool names available.
 	for _, m := range a.MCP {
 		if !m.Enabled {
 			perm["mcp__"+m.Name+"__*"] = "deny"
@@ -247,12 +386,12 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 		}
 	}
 	type frontmatter struct {
-		Description string            `yaml:"description"`
-		Model       string            `yaml:"model"`
-		Variant     string            `yaml:"variant,omitempty"`
-		Mode        string            `yaml:"mode"`
-		Temperature *float64          `yaml:"temperature,omitempty"`
-		Permission  map[string]string `yaml:"permission"`
+		Description string         `yaml:"description"`
+		Model       string         `yaml:"model"`
+		Variant     string         `yaml:"variant,omitempty"`
+		Mode        string         `yaml:"mode"`
+		Temperature *float64       `yaml:"temperature,omitempty"`
+		Permission  map[string]any `yaml:"permission"`
 	}
 	fm, err := yaml.Marshal(frontmatter{
 		Description: a.Description, Model: a.Model, Variant: a.Variant, Mode: a.Mode,
@@ -267,9 +406,9 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 	sb.WriteString("---\n")
 	sb.WriteString(strings.TrimSpace(a.Instructions))
 	for _, sf := range agentSkills(a.Dir) {
-		b, err := os.ReadFile(sf)
+		b, err := readRepositoryFile(a.Dir, sf)
 		if err != nil {
-			continue
+			return fmt.Errorf("render skill %s: %w", filepath.Base(sf), err)
 		}
 		sb.WriteString("\n\n# Skill: " + filepath.Base(sf) + "\n")
 		sb.WriteString(strings.TrimSpace(string(b)))
@@ -291,9 +430,9 @@ func renderMarkdown(cfgDir string, a *Agent) error {
 // actually uses is preserved) nor leaves a dependency in a working tree a hook
 // or a filesystem scanner reads. The directory is created outside every worktree
 // and the caller removes it when the run completes.
-func newRunConfigDir(repoDir string, a *Agent) (string, error) {
-	cfgDir, err := os.MkdirTemp("", "forest-opencode-config-")
-	if err != nil {
+func newRunConfigDir(home, repoDir string, a *Agent) (string, error) {
+	cfgDir := filepath.Join(home, "config")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		return "", err
 	}
 	ok := false
@@ -309,6 +448,12 @@ func newRunConfigDir(repoDir string, a *Agent) (string, error) {
 	if err := preserveProviderConfig(ocDir, repoDir); err != nil {
 		return "", err
 	}
+	if a.BashAllow != nil {
+		shell := filepath.Join(home, "bin", "forest-shell")
+		if err := configureRunShell(filepath.Join(ocDir, "opencode.json"), shell); err != nil {
+			return "", err
+		}
+	}
 	if err := renderMarkdown(ocDir, a); err != nil {
 		return "", err
 	}
@@ -316,60 +461,232 @@ func newRunConfigDir(repoDir string, a *Agent) (string, error) {
 	return cfgDir, nil
 }
 
-// preserveProviderConfig copies the provider configuration a real run actually
-// uses into cfgDir as opencode.json, so the per-run config root keeps the
-// provider route the run needs under XDG_CONFIG_HOME. The first source is the
-// factory project's own .opencode/opencode.json (the one this program ships and
-// where the operator declares the provider route and key alias); if the factory
-// ships none, the operator's global opencode config is the fallback. Every
-// source is outside every worktree, so a managed repository never has to carry
-// it. A configuration the run can supply from elsewhere (for example the managed
-// repository's own project config) does not require one here: a missing file is
-// tolerated, not an error.
-func preserveProviderConfig(cfgDir, repoDir string) error {
-	src := projectProviderConfigPath(repoDir)
-	if src == "" {
-		src = openCodeProviderConfigPath()
-	}
-	if src == "" {
-		return nil
-	}
-	b, err := os.ReadFile(src)
+// readProviderConfig reads and sanitizes the repository-owned provider route.
+// It never consults an operator's ambient OpenCode configuration.
+func readProviderConfig(repoDir string) ([]byte, error) {
+	src := filepath.Join(repoDir, ".opencode", "opencode.json")
+	body, err := readRepositoryFile(repoDir, src)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read provider config %s: %w", src, err)
+		return nil, fmt.Errorf("read provider config %s: %w", src, err)
 	}
-	if err := os.WriteFile(filepath.Join(cfgDir, "opencode.json"), b, 0o600); err != nil {
+	clean, err := sanitizeProviderConfig(body)
+	if err != nil {
+		return nil, fmt.Errorf("validate provider config %s: %w", src, err)
+	}
+	return clean, nil
+}
+
+// preserveProviderConfig copies the validated repository route into the
+// private per-run config root.
+func preserveProviderConfig(cfgDir, repoDir string) error {
+	clean, err := readProviderConfig(repoDir)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "opencode.json"), clean, 0o600); err != nil {
 		return fmt.Errorf("stage opencode provider config into run config: %w", err)
 	}
 	return nil
 }
 
-// projectProviderConfigPath returns the factory project's own opencode provider
-// configuration — the one a real run actually uses when opencode reads its
-// global config — or "" when the factory ships none.
-func projectProviderConfigPath(repoDir string) string {
-	p := filepath.Join(repoDir, ".opencode", "opencode.json")
-	if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
-		return p
+func configureRunShell(path, shell string) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read staged opencode config: %w", err)
 	}
-	return ""
+	var config map[string]any
+	if err := json.Unmarshal(body, &config); err != nil {
+		return fmt.Errorf("decode staged opencode config: %w", err)
+	}
+	config["shell"] = shell
+	body, err = json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode staged opencode config: %w", err)
+	}
+	if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write staged opencode config: %w", err)
+	}
+	return nil
+}
+func sanitizeProviderConfig(body []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("decode provider config: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("decode provider config: trailing content")
+	}
+	if err := validateProviderOptions(value); err != nil {
+		return nil, err
+	}
+	clean, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode provider config: %w", err)
+	}
+	return append(clean, '\n'), nil
 }
 
-// openCodeProviderConfigPath returns the operator's global opencode provider
-// configuration path, or "" when the process has no usable config directory. It
-// honours XDG_CONFIG_HOME and otherwise falls back to the user's ~/.config.
-func openCodeProviderConfigPath() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "opencode", "opencode.json")
+// Iron Forest stages only a Mint-routed OpenRouter provider declaration. A
+// strict allowlist prevents unrelated OpenCode configuration from crossing the
+// repository-to-Runner boundary under an innocent-looking field name.
+func validateProviderOptions(value any) error {
+	root, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("provider config root must be an object")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	for key, field := range root {
+		switch key {
+		case "$schema":
+			if schema, ok := field.(string); !ok || schema != "https://opencode.ai/config.json" {
+				return fmt.Errorf("provider config $schema is not supported")
+			}
+		case "provider":
+		default:
+			return fmt.Errorf("provider config field %q is not supported", key)
+		}
 	}
-	return filepath.Join(home, ".config", "opencode", "opencode.json")
+	providers, exists := root["provider"]
+	if !exists {
+		return fmt.Errorf("provider config requires a provider object")
+	}
+	providerMap, ok := providers.(map[string]any)
+	if !ok || len(providerMap) == 0 {
+		return fmt.Errorf("provider config provider field must be a non-empty object")
+	}
+	for name, declaration := range providerMap {
+		spec, ok := declaration.(map[string]any)
+		if !ok {
+			return fmt.Errorf("provider %q declaration must be an object", name)
+		}
+		for key, field := range spec {
+			switch key {
+			case "npm":
+				if npm, ok := field.(string); !ok || npm != "@ai-sdk/openai-compatible" {
+					return fmt.Errorf("provider %q npm package is not supported", name)
+				}
+			case "name":
+				if display, ok := field.(string); !ok || strings.TrimSpace(display) == "" {
+					return fmt.Errorf("provider %q name must be a non-empty string", name)
+				}
+			case "options":
+			case "models":
+				if err := validateProviderModels(name, field); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("provider %q field %q is not supported", name, key)
+			}
+		}
+		rawOptions, exists := spec["options"]
+		if !exists {
+			return fmt.Errorf("provider %q requires Mint options", name)
+		}
+		options, ok := rawOptions.(map[string]any)
+		if !ok {
+			return fmt.Errorf("provider %q options must be an object", name)
+		}
+		var baseURL, credential bool
+		for key, option := range options {
+			switch normalizedProviderKey(key) {
+			case "baseurl":
+				const prefix = "http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/"
+				text, ok := option.(string)
+				if !ok || !strings.HasPrefix(text, prefix) || strings.ContainsAny(text, "@?#\r\n") {
+					return fmt.Errorf("provider %q baseURL must use the Mint OpenRouter proxy", name)
+				}
+				baseURL = true
+			case "headers":
+				headers, ok := option.(map[string]any)
+				if !ok || len(headers) == 0 {
+					return fmt.Errorf("provider %q headers must be a non-empty object", name)
+				}
+				for header, value := range headers {
+					text, ok := value.(string)
+					if !ok || !mintConfigValue(text) {
+						return fmt.Errorf("provider %q header %q must contain only a Mint marker", name, header)
+					}
+				}
+				credential = true
+			default:
+				if !providerCredentialField(key) {
+					return fmt.Errorf("provider %q option %q is not supported", name, key)
+				}
+				text, ok := option.(string)
+				if !ok || !mintConfigValue(text) {
+					return fmt.Errorf("credential field %q must contain only a Mint marker", key)
+				}
+				credential = true
+			}
+		}
+		if !baseURL || !credential {
+			return fmt.Errorf("provider %q requires a Mint baseURL and credential marker", name)
+		}
+	}
+	return nil
+}
+
+func validateProviderModels(provider string, value any) error {
+	models, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("provider %q models must be an object", provider)
+	}
+	for model, declaration := range models {
+		spec, ok := declaration.(map[string]any)
+		if !ok {
+			return fmt.Errorf("provider %q model %q must be an object", provider, model)
+		}
+		for key, field := range spec {
+			switch key {
+			case "name":
+				if name, ok := field.(string); !ok || strings.TrimSpace(name) == "" {
+					return fmt.Errorf("provider %q model %q name must be a non-empty string", provider, model)
+				}
+			case "maxTokens":
+				if tokens, ok := field.(json.Number); !ok || strings.HasPrefix(tokens.String(), "-") {
+					return fmt.Errorf("provider %q model %q maxTokens must be a non-negative number", provider, model)
+				}
+			default:
+				return fmt.Errorf("provider %q model %q field %q is not supported", provider, model, key)
+			}
+		}
+	}
+	return nil
+}
+
+func normalizedProviderKey(key string) string {
+	var normalized strings.Builder
+	for _, r := range strings.ToLower(key) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			normalized.WriteRune(r)
+		}
+	}
+	return normalized.String()
+}
+
+func providerCredentialField(key string) bool {
+	key = normalizedProviderKey(key)
+	return key == "key" || key == "authorization" || key == "proxyauthorization" ||
+		key == "cookie" || strings.Contains(key, "apikey") ||
+		strings.HasSuffix(key, "token") || strings.HasSuffix(key, "secret") ||
+		strings.HasSuffix(key, "secretkey") || strings.HasSuffix(key, "password") ||
+		strings.HasSuffix(key, "privatekey") || strings.HasSuffix(key, "accesskey") ||
+		strings.HasSuffix(key, "signingkey") || strings.HasSuffix(key, "clientkey") ||
+		strings.HasSuffix(key, "clientcertificate") || strings.HasSuffix(key, "certificate") ||
+		strings.HasSuffix(key, "pem") || strings.HasSuffix(key, "tlskey") ||
+		strings.HasSuffix(key, "auth") || strings.HasSuffix(key, "credential") ||
+		strings.HasSuffix(key, "credentials") || strings.HasSuffix(key, "signature")
+}
+
+const requiredProviderMarker = "__mint.openrouter.ironforest__"
+
+func mintConfigValue(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) > len("Bearer ") && strings.EqualFold(value[:len("Bearer ")], "Bearer ") {
+		value = strings.TrimSpace(value[len("Bearer "):])
+	}
+	return value == requiredProviderMarker
 }
 
 // agentSkills lists the agent's skill markdown files in stable order.
@@ -379,14 +696,10 @@ func agentSkills(dir string) []string {
 	return files
 }
 
-// renderUserPrompt renders the agent's prompt.md template with per-run data,
-// or a task-only default when the agent declares no template.
+// renderUserPrompt renders the loaded agent's prompt.md template.
 func renderUserPrompt(a *Agent, data map[string]any) (string, error) {
 	src := a.PromptTmpl
-	if strings.TrimSpace(src) == "" {
-		src = "{{.Task}}"
-	}
-	tmpl, err := template.New(a.Name + "-prompt").Parse(src)
+	tmpl, err := template.New(a.Name + "-prompt").Option("missingkey=error").Parse(src)
 	if err != nil {
 		return "", fmt.Errorf("agent %s prompt.md: %w", a.Name, err)
 	}

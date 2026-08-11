@@ -13,10 +13,11 @@ was needed; none is decoration.
 
 - `gh` authenticated for the target repository, with `repo` scope. The controller
   is the only caller of the Tracker; an agent run never receives this credential.
-- An opencode provider route the agents can reach. On this machine that is Mint
-  markers in the opencode configuration.
-- The repository's own tools installed on the **host**. See step 5: a check child
-  has a scrubbed `PATH`, so "the host has cargo" is not sufficient by itself.
+- OpenCode 1.18.11 installed from this factory's `.mise.toml` with
+  `mise install`. Each Run rejects an ambient or differently selected binary.
+- Bubblewrap with unprivileged user namespaces enabled.
+- The repository's own tools installed on the **Host**. See step 5: a check
+  child has a scrubbed `PATH`, so "the Host has cargo" is not sufficient.
 - The checkout is a sibling of the factory source:
   `<org-dir>/iron-forest` and `<org-dir>/<name>`.
 
@@ -117,6 +118,18 @@ Declare a positive `deadline_seconds`. Do not declare `steps` or
 `budget_seconds`; both fixed ceilings were deleted because they stop real work
 partway (`99b3b74`).
 
+Declare `bash_allow` for each agent. Each entry has the form
+`"<literal-command> *"`. It permits that command with or without arguments.
+An empty list denies the shell. An omitted list also denies it. Do not combine
+the list with `permission.bash`.
+
+OpenCode 1.18.11 requests `mise *` because its permission parser has no `mise`
+entry. Declare that prefix and each command that mise may launch. The private
+shell accepts `mise exec --` only when the nested command matches another
+entry. It rejects other nested commands, shell syntax, traversal, and absolute
+paths outside the worktree before `exec`. The required Bubblewrap namespace
+contains each allowed process and every child process it starts.
+
 ## 4. Keep the factory out of the repository's gates
 
 **No ignore or exclude entries are needed.** Per-run factory artifacts are kept
@@ -132,12 +145,24 @@ managed worktree through opencode's supported external-config mechanism
 
 - the rendered agent declaration (`opencode/agents/<name>.md`) is written there,
   not under the worktree's `.opencode/`,
-- the provider configuration a real run actually uses — the factory's own
-  `.opencode/opencode.json`, falling back to the operator's global opencode
-  config — is preserved there as `opencode/opencode.json`, so the run still
-  reaches a provider route, and
-- the `node_modules` opencode installs for its provider packages land under that
-  root as well.
+- the required tracked provider source is exactly
+  `<managed-repository>/.opencode/opencode.json`; it is copied there as
+  `opencode/opencode.json`; operator-global configuration never enters the
+  run,
+- the `node_modules` packages that opencode installs land under that root.
+
+Commit `.opencode/opencode.json` in the managed repository. Selfcheck rejects a
+missing, invalid, or symlinked file before a Run; an ambient or global
+OpenCode configuration cannot replace it. The file must declare the approved
+Mint route and marker:
+
+```text
+baseURL: http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1
+marker: __mint.openrouter.ironforest__
+```
+
+The marker may carry the `Bearer ` prefix when it appears in an authorization
+header. Unknown provider fields fail closed.
 
 Nothing is placed in a working tree a hook or a filesystem scanner reads. The
 per-run root is removed when the run completes.
@@ -208,7 +233,7 @@ journalctl --user -u forest@<name> -f
 
 ```sh
 cd <org-dir>/<name>
-./forest selfcheck      # config and agents, offline
+./forest selfcheck      # config, agents, and local sandbox; offline
 ./forest agents         # models and declaration digests
 ./forest list           # eligible items; empty until something is promoted
 ```

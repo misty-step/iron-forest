@@ -24,6 +24,7 @@ const (
 var (
 	errSubjectRevisionStale   = errors.New("Subject Revision is stale")
 	errFlowRetryable          = errors.New("Flow operation is retryable")
+	errReviewOutputInvalid     = errors.New("review output is invalid")
 	errControlEvidenceInvalid = errors.New("durable control evidence is invalid")
 )
 

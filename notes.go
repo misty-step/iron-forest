@@ -167,7 +167,7 @@ func readNote(repoDir, ref, sha string) (body string, ok bool, err error) {
 }
 
 func readNoteUnlocked(repoDir, ref, sha string) (string, bool, error) {
-	cmd := exec.Command("git", "-C", repoDir, "notes", "--ref="+ref, "show", sha)
+	cmd := exec.Command("git", hostGitArgs(repoDir, "notes", "--ref="+ref, "show", sha)...)
 	out, err := runCombinedOutput(cmd)
 	if err != nil {
 		if noNote(err, out) {

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -69,33 +70,12 @@ func TestCIJobRunsExactlyTheForestChecks(t *testing.T) {
 	sort.Strings(want)
 	sort.Strings(have)
 
-	missing := difference(want, have)
-	extra := difference(have, want)
-	if len(missing) != 0 || len(extra) != 0 {
+	if !slices.Equal(want, have) {
 		t.Fatalf(
 			"forest.yaml checks and .github/workflows/ci.yml differ:\n"+
-				"  in forest.yaml but not CI: %v\n"+
-				"  in CI but not forest.yaml: %v",
-			missing, extra,
+				"  forest.yaml: %v\n"+
+				"  CI: %v",
+			want, have,
 		)
 	}
-}
-
-// difference returns the strings present in a but absent from b, both sorted.
-func difference(a, b []string) []string {
-	var out []string
-	for _, s := range a {
-		if _, ok := set(b)[s]; !ok {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-func set(ss []string) map[string]bool {
-	m := make(map[string]bool, len(ss))
-	for _, s := range ss {
-		m[s] = true
-	}
-	return m
 }

@@ -101,14 +101,16 @@ func TestManagerPromptOrderDoesNotDependOnTrackerLabelOrder(t *testing.T) {
 	}
 }
 
-func TestManagerJudgeEnforcesDeclaredReportSchema(t *testing.T) {
+func TestManagerJudgeUsesLoadedReportSchemaSnapshot(t *testing.T) {
 	repo := t.TempDir()
 	agentDir := t.TempDir()
-	schema := `{"type":"object","required":["pick","reason"],"properties":{"pick":{"type":"string"},"reason":{"type":"string"}}}`
-	if err := os.WriteFile(filepath.Join(agentDir, "report.schema.json"), []byte(schema), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "report.schema.json"), []byte(`{"type":"object"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := &Agent{Dir: agentDir, Name: "manager", PromptTmpl: "{{.Task}}"}
+	a := &Agent{
+		Dir: agentDir, Name: "manager", PromptTmpl: "{{.Task}}",
+		ReportSchema: `{"type":"object","required":["pick","reason"],"properties":{"pick":{"type":"string"},"reason":{"type":"string"}}}`,
+	}
 	oldRun := runPhase
 	runPhase = func(_ string, runDir string, _ *Agent, _, _ string) (runStats, error) {
 		return runStats{}, os.WriteFile(filepath.Join(runDir, "report.json"), []byte(`{"pick":"1"}`), 0o644)

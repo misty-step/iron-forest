@@ -280,6 +280,37 @@ func TestGitCommitIgnoresAmbientIdentity(t *testing.T) {
 		t.Fatalf("commit identities = %q, want %q", got, want)
 	}
 }
+
+func TestHostGitWrappersDisableConfiguredHooks(t *testing.T) {
+	repo := setupTestRepo(t)
+	hookDir := filepath.Join(repo, "configured-hooks")
+	marker := filepath.Join(repo, "hook-marker")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"post-checkout", "pre-commit"} {
+		hook := filepath.Join(hookDir, name)
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf ran > hook-marker\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGitTest(t, repo, "config", "core.hooksPath", "configured-hooks")
+	if err := git(repo, "checkout", "-q", "-b", "forest/hooks-disabled"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "hook-input"), []byte("change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := git(repo, "add", "hook-input"); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitCommit(repo, testCommitIdentity(), "hook isolation"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("repository hook marker = %v, want no marker", err)
+	}
+}
 func TestGitCommitRedactsMessage(t *testing.T) {
 	const secret = "sk-AAAAAAAAAAAAAAAA"
 	repo := setupTestRepo(t)

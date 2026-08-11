@@ -30,8 +30,17 @@ func validHex(value string, bytes int) bool {
 	return false
 }
 
+func hostGitArgs(repoDir string, args ...string) []string {
+	commandArgs := make([]string, 0, len(args)+4)
+	commandArgs = append(commandArgs, "-c", "core.hooksPath=/dev/null")
+	if repoDir != "" {
+		commandArgs = append(commandArgs, "-C", repoDir)
+	}
+	return append(commandArgs, args...)
+}
+
 func gitCommand(repoDir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
+	cmd := exec.Command("git", hostGitArgs(repoDir, args...)...)
 	out, err := runCombinedOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -55,7 +64,7 @@ func refWriteError(err error) error {
 }
 
 func writeBlob(repoDir, content string) (string, error) {
-	cmd := exec.Command("git", "-C", repoDir, "hash-object", "-w", "--stdin")
+	cmd := exec.Command("git", hostGitArgs(repoDir, "hash-object", "-w", "--stdin")...)
 	cmd.Stdin = strings.NewReader(content)
 	out, err := runCombinedOutput(cmd)
 	if err != nil {

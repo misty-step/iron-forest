@@ -16,16 +16,14 @@ temperature: 0.2
 # step ceiling. Runs that exceed this are cancelled and recorded as
 # timeout_failed.
 deadline_seconds: 3600
-# The Manager writes only report.json in its throwaway run directory. The harness
-# supplies no repository context or credentials. Built-in web and MCP tools are
-# denied; bash remains available for local reasoning, so the instruction forbids network use.
+# The Manager writes only report.json in its throwaway run directory. It has no
+# repository context, credentials, network tools, MCP tools, or shell commands.
 permission:
   read: allow
   edit: allow
   glob: allow
   grep: allow
   list: allow
-  bash: allow
   lsp: allow
   webfetch: deny
   websearch: deny
@@ -34,6 +32,7 @@ permission:
   todowrite: deny
   external_directory: deny
   question: deny
+bash_allow: []
 # Exa remains declared for shared wiring but disabled for this offline lane.
 mcp:
   - name: exa

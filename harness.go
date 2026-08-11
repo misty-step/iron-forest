@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,15 +16,6 @@ import (
 	"syscall"
 	"time"
 )
-
-// maxArgLen is the Linux ceiling on a single argv entry: MAX_ARG_STRLEN is
-// PAGE_SIZE * 32, or 131072 bytes on a 4 KiB page. It is not ARG_MAX (4 MiB
-// here). A prompt passed as one argv argument trips it with a raw fork/exec
-// "argument list too long" before the agent is reached, so the harness never
-// delivers a prompt through argv: it streams the prompt on stdin, which has no
-// such per-entry ceiling. The value is named so a delivery failure can state
-// the limit it is designed around.
-const maxArgLen = 131072
 
 type runProcess struct {
 	cmd  *exec.Cmd
@@ -101,6 +93,22 @@ func waitRunCommand(cmd *exec.Cmd) error {
 	return err
 }
 
+func waitRunCommandContext(ctx context.Context, cmd *exec.Cmd) error {
+	done := make(chan error, 1)
+	go func() {
+		done <- waitRunCommand(cmd)
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			_ = killRunProcessGroup(cmd.Process.Pid)
+		}
+		return <-done
+	}
+}
+
 func runCommand(cmd *exec.Cmd) error {
 	if err := startManagedCommand(cmd); err != nil {
 		return err
@@ -164,32 +172,6 @@ func hardStopRunCommands() []error {
 	return errs
 }
 
-// promptDeliveryError reports a prompt that could not be delivered whole to the
-// agent. It names both the prompt size and the delivery ceiling so the failure
-// is auditable, and it deliberately replaces the kernel's raw fork/exec
-// "argument list too long" message. A delivery failure is mechanical: the same
-// prompt will keep failing identically, so treating it as content to repair
-// would spend Fixer attempts on an unchanged situation. The durable stalled
-// brake parks it instead.
-type promptDeliveryError struct {
-	size  int
-	limit int
-}
-
-func (e *promptDeliveryError) Error() string {
-	return fmt.Sprintf("prompt of %d bytes cannot be delivered whole; the delivery ceiling is %d bytes", e.size, e.limit)
-}
-
-// isPromptDelivery reports whether err is, or wraps, a promptDeliveryError. A
-// flow uses it to classify a mechanical prompt-delivery failure apart from a
-// content or agent failure: the same prompt keeps failing identically, so it
-// must park (name prompt_failed) instead of spending Fixer attempts on an
-// unchanged situation.
-func isPromptDelivery(err error) bool {
-	var pde *promptDeliveryError
-	return errors.As(err, &pde)
-}
-
 // runTimeoutError reports a run that exceeded its declared wall-clock deadline
 // and was cancelled. It is mechanical: the same run keeps exceeding the same
 // declared bound, so it is never a content rejection a Fixer attempt could
@@ -245,14 +227,12 @@ type runStats struct {
 	reasoning  int64
 }
 
-// runPhase executes one named agent with opencode in a worktree and streams its
+// runPhase executes one named agent with OpenCode in a worktree and streams its
 // JSON event stream into the trace file. The prompt is written to a .prompt.txt
-// file beside the trace and streamed to opencode on stdin, so its size is
-// bounded by the model's context, not by Linux's per-argument ceiling (see
-// maxArgLen). repoDir is the factory project: the provider configuration the
-// run actually needs is read from its
-// .opencode/opencode.json and staged into the run's external config root. The
-// run is unbounded in steps: no step ceiling, because a fixed bound is a guess
+// file beside the trace and streamed to OpenCode on stdin, so only the model
+// context bounds its size. repoDir is the factory project whose provider
+// configuration is staged into the run's external config root.
+// The run is unbounded in steps: no step ceiling, because a fixed bound is a guess
 // about how much work an item needs, and a wrong guess stops real work partway
 // and reports it as a gate failure. Wall time carries the agent's declared
 // deadline_seconds: loadAgent guarantees every loaded agent has a positive,
@@ -263,10 +243,41 @@ type runStats struct {
 // failed: the error carries the exit status and stderr so a crash or truncation
 // is never mistaken for work the gate can publish.
 //
-// runPhase is a package variable (see the indirection below) so a test can
-// force a promptDeliveryError and drive a flow's mechanical classification end
-// to end; the concrete implementation is runPhaseImpl.
+// runPhase is a package variable so failure-path tests can substitute the
+// harness without launching a provider. The concrete implementation follows.
 var runPhase = runPhaseImpl
+
+type traceScanResult struct {
+	stats     runStats
+	lastTrace string
+	err       error
+}
+
+func scanRunTrace(stdout io.Reader, trace io.StringWriter) traceScanResult {
+	var result traceScanResult
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		traceLine := redactSecretShaped(string(line))
+		if _, err := trace.WriteString(traceLine + "\n"); err != nil {
+			result.err = err
+			return result
+		}
+		if len(line) > 0 {
+			result.lastTrace = traceLine
+		}
+		if step, ok := parseStepFinish(line); ok {
+			result.stats.tokensIn += step.tokensIn
+			result.stats.tokensOut += step.tokensOut
+			result.stats.cacheRead += step.cacheRead
+			result.stats.cacheWrite += step.cacheWrite
+			result.stats.reasoning += step.reasoning
+		}
+	}
+	result.err = scanner.Err()
+	return result
+}
 
 // runPhaseImpl is the concrete implementation behind runPhase.
 func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string) (runStats, error) {
@@ -295,13 +306,17 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if a.DeadlineSeconds > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(a.DeadlineSeconds)*time.Second)
+		deadline, err := agentDeadline(a.DeadlineSeconds)
+		if err != nil {
+			return stats, err
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), deadline)
 	} else {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
 	defer cancel()
 
-	env, cleanup, err := childEnvironment()
+	env, cleanup, err := childEnvironment(repoDir, wtDir, a)
 	if err != nil {
 		return stats, err
 	}
@@ -310,13 +325,13 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	// The opencode config root lives outside the worktree so the managed
 	// repository's working tree never carries a factory artifact a hook or a
 	// working-tree secret scanner would read. The rendered agent declaration and
-	// the provider configuration the factory project actually uses both land in
-	// the run's global opencode config directory, and opencode is pointed at that
-	// root with XDG_CONFIG_HOME set in the child environment. The node_modules
+	// repository-declared provider configuration both land in the run's global
+	// opencode config directory, and opencode receives that root through
+	// XDG_CONFIG_HOME. The node_modules
 	// opencode installs for its provider packages also lands in that root, never
 	// under the worktree's .opencode/. The root is per-run and removed when the
 	// run is done.
-	cfgDir, err := newRunConfigDir(repoDir, a)
+	cfgDir, err := newRunConfigDir(childEnvValue(env, "HOME"), repoDir, a)
 	if err != nil {
 		return stats, err
 	}
@@ -331,23 +346,27 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	// whether it happens to ship a .opencode of its own.
 	env = append(env, "OPENCODE_DISABLE_PROJECT_CONFIG=1")
 
-	// The full prompt is delivered to opencode on its stdin, never as an argv
-	// entry: Linux caps one argument at maxArgLen, so a large prompt passed on
-	// the command line fails with a raw fork/exec "argument list too long"
-	// before opencode is reached. Stdin has no such per-entry ceiling, so the
-	// prompt's only remaining bound is the model's context. A redacted copy is
-	// written beside the trace so a run stays auditable without retaining
-	// credential-shaped values from mutable Tracker or repository content.
+	// The full prompt goes to OpenCode on stdin, never in argv. A redacted copy
+	// stays beside the trace for audit without retaining credential-shaped text
+	// from mutable Tracker or repository content.
 	promptPath := filepath.Join(filepath.Dir(tracePath), filepath.Base(tracePath)+".prompt.txt")
 	if err := os.WriteFile(promptPath, []byte(redactSecretShaped(userPrompt)), 0o600); err != nil {
-		return stats, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
+		return stats, fmt.Errorf("write prompt audit: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "opencode", "run",
+	sandbox, err := prepareChildSandbox(repoDir, wtDir, env)
+	if err != nil {
+		return stats, err
+	}
+	if err := validateSandboxOpenCode(ctx, sandbox); err != nil {
+		return stats, err
+	}
+	cmd, err := sandbox.commandWithFiles(ctx, nil, "opencode", "run",
 		"--format", "json", "--model", a.Model, "--agent", a.Name,
 		"--auto")
-	cmd.Dir = wtDir
-	cmd.Env = env
+	if err != nil {
+		return stats, err
+	}
 	cmd.Stdin = strings.NewReader(userPrompt)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -357,12 +376,7 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 		return stats, err
 	}
 	if err := startManagedCommand(cmd); err != nil {
-		// With stdin delivery an argument-limit start error is not expected, but
-		// if one ever surfaces it must be named, never the raw fork/exec text.
-		if errors.Is(err, syscall.E2BIG) {
-			return stats, &promptDeliveryError{size: len(userPrompt), limit: maxArgLen}
-		}
-		return stats, err
+		return stats, fmt.Errorf("start agent: %w", err)
 	}
 	waited := false
 	defer func() {
@@ -371,40 +385,40 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 		}
 	}()
 
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
-	lastTrace := ""
-	for sc.Scan() {
-		line := sc.Bytes()
-		traceLine := redactSecretShaped(string(line))
-		if _, err := trace.WriteString(traceLine + "\n"); err != nil {
-			return stats, err
+	scanDone := make(chan traceScanResult, 1)
+	go func() {
+		scanDone <- scanRunTrace(stdout, trace)
+	}()
+
+	var scan traceScanResult
+	var waitErr error
+	select {
+	case scan = <-scanDone:
+		if scan.err != nil {
+			abortRunCommand(cmd)
+			waited = true
+		} else {
+			waitErr = waitRunCommandContext(ctx, cmd)
+			waited = true
 		}
-		if len(line) > 0 {
-			lastTrace = traceLine
-		}
-		if st, ok := parseStepFinish(line); ok {
-			stats.tokensIn += st.tokensIn
-			stats.tokensOut += st.tokensOut
-			stats.cacheRead += st.cacheRead
-			stats.cacheWrite += st.cacheWrite
-			stats.reasoning += st.reasoning
-		}
+	case <-ctx.Done():
+		// Bubblewrap's default PID-1 reaper owns the complete child namespace.
+		// Killing the managed Bubblewrap process therefore kills a descendant
+		// even after setsid, and Wait closes StdoutPipe so a detached writer
+		// cannot hold this trace drain past the declared deadline.
+		abortRunCommand(cmd)
+		waited = true
+		scan = <-scanDone
 	}
-	waitErr := waitRunCommand(cmd)
-	waited = true
-	// A deadline expiry is detected before any exit-status reading: when the
-	// context's timer fires, exec.CommandContext kills the child and Wait returns
-	// because of that cancellation, not because of anything the agent did. That
-	// is a mechanical stop, so name it timeout and record where the run stopped.
+	stats = scan.stats
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return stats, &runTimeoutError{
 			elapsed:   time.Since(started),
-			lastEvent: traceEventLabel(lastTrace),
+			lastEvent: traceEventLabel(scan.lastTrace),
 		}
 	}
-	if sc.Err() != nil {
-		return stats, sc.Err()
+	if scan.err != nil {
+		return stats, scan.err
 	}
 	if waitErr != nil {
 		// A non-zero exit is a crash or a truncation. Record the status and
@@ -414,50 +428,61 @@ func runPhaseImpl(repoDir, wtDir string, a *Agent, userPrompt, tracePath string)
 	return stats, nil
 }
 
-const childSystemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+const childSystemPath = "/usr/sbin:/usr/bin:/sbin:/bin"
 
-// childEnvironment gives each run a private home so operator configuration and
-// credentials stay unreachable. The home sits outside the worktree: the worktree
-// is committed with `git add -A`, so a tool that writes to $HOME there would put
-// its cache directories into the published branch. It preserves only the pinned
-// toolchain and caches the factory needs. It omits the operator's credential
-// variables, home, agent sockets, and session bus. A private failing `gh`
-// shadows every Host PATH entry, so normal lookup cannot query a keyring token.
-// Non-Go tools the managed repo declares reach the check child through
-// mise-managed tools or the host toolchain mechanism (see checkEnvironment).
-// An agent run gets neither, so host toolchain reach stays scoped to checks.
-func childEnvironment() ([]string, func(), error) {
-	return childBaseEnv(false)
+// childEnvironment gives one agent run a private home, repository-pinned
+// toolchains, and a shell that accepts only plain bash_allow commands.
+func childEnvironment(repoDir, wtDir string, a *Agent) ([]string, func(), error) {
+	if err := validatePinnedTools(repoDir); err != nil {
+		return nil, func() {}, err
+	}
+	env, cleanup, err := childBaseEnv(false, wtDir)
+	if err != nil {
+		return nil, cleanup, err
+	}
+	home := childEnvValue(env, "HOME")
+	miseSource, err := hostMiseDataDir()
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := stagePinnedOpenCode(home, miseSource); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := stagePinnedToolDrivers(home); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	if a != nil && a.BashAllow != nil {
+		if err := installAgentShell(home, a.BashAllow); err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+	}
+	return env, cleanup, nil
 }
 
-// checkEnvironment is the child environment for a runChecks run: the common
-// environment plus the operator-declared host toolchain mechanism that lets a
-// managed repo's checks: reach a non-Go toolchain whose driver lives outside
-// the scrubbed PATH. The mechanism is applied only here and never to an agent
-// run (see childEnvironment), so neither host binaries on PATH nor allowlisted
-// toolchain metadata escape into an opencode run. Host toolchain directories
-// are named in FOREST_CHECK_PATH (see checkHostBins); toolchain metadata a host
-// proxy must read to resolve its real driver arrives via FOREST_CHECK_ENV (see
-// checkHostEnv). It is a variable so a test can force a preflight failure and
-// drive the durable-fact path end to end.
-var checkEnvironment = func() ([]string, func(), error) {
-	return childBaseEnv(true)
+// checkEnvironment adds operator-declared Host toolchain inputs only for
+// declared checks. Agent runs never receive those paths or metadata.
+var checkEnvironment = func(repoDir, wtDir string) ([]string, func(), error) {
+	if err := validatePinnedTools(repoDir); err != nil {
+		return nil, func() {}, err
+	}
+	return childBaseEnv(true, wtDir)
 }
 
 // childBaseEnv builds the child environment used by every run. When
 // hostToolchain is true (check runs only), the operator-declared host toolchain
-// directories and metadata are applied: FOREST_CHECK_PATH directories go on the
-// child PATH ahead of the mise shims so a working host driver resolves before a
-// dead shim, and allowlisted FOREST_CHECK_ENV metadata is appended. Agent runs
-// pass false and get neither.
-func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
-	mise, err := exec.LookPath("mise")
+// directories and allowlisted metadata are added. Agent runs receive neither.
+func childBaseEnv(hostToolchain bool, forbiddenRoots ...string) ([]string, func(), error) {
+	mise, err := locateRequiredExecutable("mise")
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("locate mise: %w", err)
+		return nil, func() {}, err
 	}
-	home, err := os.MkdirTemp("", "forest-home-")
+	home, err := createPrivateChildHome(forbiddenRoots...)
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("create child home: %w", err)
+		return nil, func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(home) }
 	binDir := filepath.Join(home, "bin")
@@ -465,13 +490,26 @@ func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("create child command directory: %w", err)
 	}
+	runtimeDir := filepath.Join(home, "run")
+	miseConfigDir := filepath.Join(home, "mise-config")
+	miseStateDir := filepath.Join(home, "state", "mise")
+	cacheDir := filepath.Join(home, "cache")
+	miseCacheDir := filepath.Join(cacheDir, "mise")
+	goModCache := filepath.Join(cacheDir, "go-mod")
+	goBuildCache := filepath.Join(cacheDir, "go-build")
+	for _, path := range []string{runtimeDir, miseConfigDir, miseStateDir, miseCacheDir, goModCache, goBuildCache} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("create private child directory: %w", err)
+		}
+	}
 	// gh can read an operating-system keyring even with a private HOME and no
 	// token variables. Shadow normal child lookup before any Host path.
 	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte("#!/bin/sh\nexit 127\n"), 0o555); err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("block gh for child: %w", err)
 	}
-	if err := os.Symlink(mise, filepath.Join(binDir, "mise")); err != nil {
+	if err := copySandboxExecutable(mise, filepath.Join(binDir, "mise")); err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("stage mise for child: %w", err)
 	}
@@ -480,27 +518,310 @@ func childBaseEnv(hostToolchain bool) ([]string, func(), error) {
 	if hostToolchain {
 		hostBins = checkHostBins()
 	}
-	miseDataDir, miseShims := miseLocations(mise)
 	env := []string{
 		"HOME=" + home,
-		"PATH=" + childPath(binDir, miseShims, hostBins),
-		"MISE_CONFIG_DIR=" + filepath.Join(binDir, "config"),
-		"MISE_DATA_DIR=" + miseDataDir,
-		"GOMODCACHE=" + goModuleCache(),
-		// The compiler caches hold build products, never credentials. Leaving
-		// them under the per-run HOME made every declared check compile the
-		// world: measured 22s cold against about 1s warm.
-		"GOCACHE=" + goBuildCache(),
+		"XDG_RUNTIME_DIR=" + runtimeDir,
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=" + filepath.Join(runtimeDir, "no-session-bus"),
+		"SSH_AUTH_SOCK=" + filepath.Join(runtimeDir, "no-ssh-agent"),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+		"PATH=" + childPath(binDir, hostBins),
+		"MISE_CONFIG_DIR=" + miseConfigDir,
+		"MISE_DATA_DIR=" + filepath.Join(home, "mise"),
+		"MISE_STATE_DIR=" + miseStateDir,
+		"MISE_CACHE_DIR=" + miseCacheDir,
+		"GOMODCACHE=" + goModCache,
+		"GOCACHE=" + goBuildCache,
 	}
-	// Operator-declared host toolchain metadata (see checkHostEnv) is appended
-	// after the private environment only for check runs. checkHostEnv drops any
-	// key outside the allowlist, so FOREST_CHECK_ENV can never shadow the
-	// private HOME, the scrubbed PATH, or a managed cache, nor introduce a
-	// credential by value or by path.
 	if hostToolchain {
 		env = append(env, checkHostEnv()...)
 	}
 	return env, cleanup, nil
+}
+
+func createPrivateChildHome(forbiddenRoots ...string) (string, error) {
+	var lastErr error
+	for _, base := range []string{os.TempDir(), "/tmp", "/var/tmp"} {
+		resolvedBase, err := filepath.EvalSymlinks(base)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		blocked := false
+		for _, root := range forbiddenRoots {
+			if root == "" {
+				continue
+			}
+			resolvedRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				return "", fmt.Errorf("resolve private-home exclusion %q: %w", root, err)
+			}
+			if sandboxPathWithin(resolvedRoot, resolvedBase) {
+				blocked = true
+				break
+			}
+		}
+		if blocked {
+			continue
+		}
+		home, err := os.MkdirTemp(resolvedBase, "forest-home-")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		overlap := false
+		for _, root := range forbiddenRoots {
+			if root == "" {
+				continue
+			}
+			resolvedRoot, _ := filepath.EvalSymlinks(root)
+			if sandboxPathWithin(resolvedRoot, home) || sandboxPathWithin(home, resolvedRoot) {
+				overlap = true
+				break
+			}
+		}
+		if overlap {
+			_ = os.RemoveAll(home)
+			continue
+		}
+		return home, nil
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("create child home outside protected paths: %w", lastErr)
+	}
+	return "", fmt.Errorf("create child home outside protected paths: no safe temporary root")
+}
+
+const (
+	requiredGoVersion       = "1.26.5"
+	requiredOpenCodeVersion = "1.18.11"
+)
+
+func validatePinnedTools(repoDir string) error {
+	body, err := readRepositoryFile(repoDir, ".mise.toml")
+	if err != nil {
+		return fmt.Errorf("read pinned tool declaration: %w", err)
+	}
+	found := make(map[string]string)
+	section := ""
+	for _, raw := range strings.Split(string(body), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(line[1 : len(line)-1])
+			continue
+		}
+		if section != "tools" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !ok || key != "go" && key != "opencode" {
+			continue
+		}
+		if len(value) < 2 || value[0] != value[len(value)-1] ||
+			value[0] != '"' && value[0] != '\'' {
+			return fmt.Errorf("pinned tool %s must use a literal version", key)
+		}
+		if _, exists := found[key]; exists {
+			return fmt.Errorf("pinned tool %s is declared more than once", key)
+		}
+		found[key] = value[1 : len(value)-1]
+	}
+	for tool, version := range map[string]string{
+		"go": requiredGoVersion, "opencode": requiredOpenCodeVersion,
+	} {
+		if found[tool] != version {
+			return fmt.Errorf("pinned tool %s version %q does not match required %s", tool, found[tool], version)
+		}
+	}
+	return nil
+}
+
+func hostMiseDataDir() (string, error) {
+	mise, err := locateRequiredExecutable("mise")
+	if err != nil {
+		return "", err
+	}
+	dataDir, _ := miseLocations(mise)
+	return validateMiseDataDir(dataDir)
+}
+
+func pinnedMiseInstall(miseData, tool, version string) (string, error) {
+	expected := filepath.Join(miseData, "installs", tool, version)
+	root, err := filepath.EvalSymlinks(expected)
+	if err != nil {
+		return "", fmt.Errorf("resolve pinned %s installation: %w", tool, err)
+	}
+	if !sandboxPathWithin(filepath.Join(miseData, "installs", tool), root) {
+		return "", fmt.Errorf("pinned %s installation %q escapes mise data", tool, root)
+	}
+	if info, err := os.Stat(root); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("pinned %s installation %q is not a directory", tool, root)
+	}
+	return root, nil
+}
+
+func stagePinnedOpenCode(home, miseData string) error {
+	source, err := locatePinnedOpenCode(miseData)
+	if err != nil {
+		return err
+	}
+	if err := copySandboxExecutable(source, filepath.Join(home, "bin", "opencode")); err != nil {
+		return fmt.Errorf("stage opencode for child: %w", err)
+	}
+	return nil
+}
+
+func locatePinnedOpenCode(miseData string) (string, error) {
+	installRoot, err := pinnedMiseInstall(miseData, "opencode", requiredOpenCodeVersion)
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range []string{
+		filepath.Join(installRoot, "opencode"),
+		filepath.Join(installRoot, "bin", "opencode"),
+	} {
+		source, err := validateExecutablePath("opencode", candidate)
+		if err == nil && sandboxPathWithin(installRoot, source) {
+			return source, nil
+		}
+	}
+	return "", fmt.Errorf("locate opencode in pinned installation %q", installRoot)
+}
+
+func stagePinnedToolDrivers(home string) error {
+	for _, name := range []string{"go", "gofmt"} {
+		script := fmt.Sprintf(
+			"#!/bin/sh\nexec \"$MISE_DATA_DIR/installs/go/%s/bin/%s\" \"$@\"\n",
+			requiredGoVersion, name,
+		)
+		if err := os.WriteFile(filepath.Join(home, "bin", name), []byte(script), 0o555); err != nil {
+			return fmt.Errorf("stage pinned %s driver: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func validateOpenCodeVersionOutput(out []byte) error {
+	if version := strings.TrimSpace(string(out)); version != requiredOpenCodeVersion {
+		return fmt.Errorf("opencode version %q does not match required %s", version, requiredOpenCodeVersion)
+	}
+	return nil
+}
+
+func validateSandboxOpenCode(parent context.Context, sandbox childSandbox) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	cmd, err := sandbox.commandWithFiles(ctx, nil, "opencode", "--version")
+	if err != nil {
+		return err
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("verify sandboxed opencode version: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return validateOpenCodeVersionOutput(out)
+}
+
+func installAgentShell(home string, allow []string) error {
+	if err := validateBashAllow(allow); err != nil {
+		return fmt.Errorf("install agent shell: %w", err)
+	}
+	var arms, nestedArms strings.Builder
+	hasMise := false
+	for _, pattern := range allow {
+		prefix, _ := bashPatternPrefix(pattern)
+		if strings.Fields(prefix)[0] == "mise" {
+			hasMise = true
+			continue
+		}
+		arms.WriteString("  '" + prefix + "'|'" + prefix + " '*) ;;\n")
+		nestedArms.WriteString("      '" + prefix + "'|'" + prefix + " '*) ;;\n")
+	}
+	if hasMise {
+		arms.WriteString("  'mise exec -- '*)\n")
+		arms.WriteString("    nested=${cmd#mise exec -- }\n")
+		arms.WriteString("    case \"$nested\" in\n")
+		arms.WriteString(nestedArms.String())
+		arms.WriteString("      *) echo \"forest: denied nested shell command: $cmd\" >&2; exit 126 ;;\n")
+		arms.WriteString("    esac ;;\n")
+	}
+	arms.WriteString("  *) echo \"forest: denied shell command: $cmd\" >&2; exit 126 ;;\n")
+	script := `#!/bin/sh
+cmd=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -c|-lc|-ic|-rc)
+      shift
+      cmd=${1-}
+      break ;;
+  esac
+  shift
+done
+[ -n "$cmd" ] || { echo 'forest: denied shell invocation without a command' >&2; exit 126; }
+safe=$(printf '%s' "$cmd" | LC_ALL=C tr -cd 'A-Za-z0-9._+:/%@=, -')
+[ "$safe" = "$cmd" ] || { echo "forest: denied shell metacharacter: $cmd" >&2; exit 126; }
+set -f
+set -- $cmd
+wt=$PWD
+for word in "$@"; do
+  path=$word
+    case "$path" in
+      -?..|-?../*|-?/*) path=${path#-?} ;;
+    esac
+  while :; do
+    case "$path" in
+      ..|../*|*/..|*/../*)
+        echo "forest: denied path outside worktree: $cmd" >&2
+        exit 126 ;;
+      /*)
+        case "$path" in
+          "$wt"|"$wt"/*) ;;
+          *) echo "forest: denied path outside worktree: $cmd" >&2; exit 126 ;;
+        esac ;;
+    esac
+    case "$path" in
+      *=*) path=${path#*=} ;;
+      *) break ;;
+    esac
+  done
+done
+case "$cmd" in
+` + arms.String() + `esac
+exec "$@"
+`
+	path := filepath.Join(home, "bin", "forest-shell")
+	if err := os.WriteFile(path, []byte(script), 0o555); err != nil {
+		return fmt.Errorf("install agent shell: %w", err)
+	}
+	return nil
+}
+
+func locateRequiredExecutable(name string) (string, error) {
+	source, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("locate %s: %w", name, err)
+	}
+	return validateExecutablePath(name, source)
+}
+
+func validateExecutablePath(name, source string) (string, error) {
+	if !filepath.IsAbs(source) {
+		return "", fmt.Errorf("locate %s: executable path %q is not absolute", name, source)
+	}
+	source, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return "", fmt.Errorf("locate %s: resolve executable: %w", name, err)
+	}
+	info, err := os.Stat(source)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("locate %s: resolved path %q is not a regular executable", name, source)
+	}
+	return source, nil
 }
 
 // checkHostBins reads the operator-declared host toolchain directories from
@@ -580,32 +901,6 @@ func childPath(binDir, miseShims string, hostBins []string) string {
 	dirs = append(dirs, hostBins...)
 	dirs = append(dirs, miseShims, childSystemPath)
 	return strings.Join(dirs, string(os.PathListSeparator))
-}
-
-func goModuleCache() string {
-	if cache := os.Getenv("GOMODCACHE"); cache != "" {
-		return cache
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home, _ = os.UserHomeDir()
-	}
-	gopath := os.Getenv("GOPATH")
-	if gopath == "" {
-		gopath = filepath.Join(home, "go")
-	}
-	return filepath.Join(gopath, "pkg", "mod")
-}
-
-func goBuildCache() string {
-	if cache := os.Getenv("GOCACHE"); cache != "" {
-		return cache
-	}
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		return filepath.Join(os.Getenv("HOME"), ".cache", "go-build")
-	}
-	return filepath.Join(dir, "go-build")
 }
 
 func miseLocations(mise string) (string, string) {

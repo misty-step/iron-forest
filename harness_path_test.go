@@ -37,6 +37,136 @@ func TestCheckHostBinsParsesPathList(t *testing.T) {
 	}
 }
 
+func TestLocateRequiredExecutableRejectsRelativePath(t *testing.T) {
+	root := t.TempDir()
+	tools := filepath.Join(root, "tools")
+	if err := os.Mkdir(tools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeDriver(t, tools, "mise", "#!/bin/sh\nexit 0\n")
+	t.Chdir(root)
+	t.Setenv("PATH", "tools")
+	t.Setenv("GODEBUG", "execerrdot=0")
+	if _, err := locateRequiredExecutable("mise"); err == nil ||
+		!strings.Contains(err.Error(), "is not absolute") {
+		t.Fatalf("relative mise lookup error = %v, want refusal", err)
+	}
+}
+
+func TestValidateOpenCodeVersionRejectsWrongVersion(t *testing.T) {
+	tools := t.TempDir()
+	path := writeDriver(t, tools, "opencode", "#!/bin/sh\nprintf '1.18.10\\n'\n")
+	if err := validateOpenCodeVersion(path); err == nil ||
+		!strings.Contains(err.Error(), "does not match required 1.18.11") {
+		t.Fatalf("wrong opencode version error = %v, want refusal", err)
+	}
+}
+
+func TestChildEnvironmentIgnoresSameVersionAmbientOpenCode(t *testing.T) {
+	tools := t.TempDir()
+	sentinel := filepath.Join(t.TempDir(), "ambient-ran")
+	writeDriver(t, tools, "opencode", "#!/bin/sh\n"+
+		"touch "+sentinel+"\nprintf '1.18.11\\n'\n")
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	env, cleanup, err := childEnvironment(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("ambient opencode ran during pinned staging: %v", err)
+	}
+	staged := filepath.Join(envValue(t, env, "HOME"), "bin", "opencode")
+	cmd := exec.Command(staged, "--version")
+	cmd.Env = []string{"PATH=" + childSystemPath}
+	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != requiredOpenCodeVersion {
+		t.Fatalf("staged opencode = (%q, %v), want %s", out, err, requiredOpenCodeVersion)
+	}
+}
+
+func runAgentShell(t *testing.T, allow []string, worktree, command string) ([]byte, error) {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := installAgentShell(home, allow); err != nil {
+		t.Fatal(err)
+	}
+	mise, err := locateRequiredExecutable("mise")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(home, "bin", "forest-shell"), "-c", command)
+	cmd.Dir = worktree
+	cmd.Env = []string{"PATH=" + filepath.Dir(mise) + string(os.PathListSeparator) + childSystemPath}
+	return cmd.CombinedOutput()
+}
+
+func TestAgentShellAllowsOnlyPlainNamedCommandsInsideWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	if out, err := runAgentShell(t, []string{"true *"}, worktree, "true"); err != nil {
+		t.Fatalf("bare allowlisted command = (%q, %v), want pass", out, err)
+	}
+	if out, err := runAgentShell(t, []string{"printf *"}, worktree, "printf ALLOWED"); err != nil ||
+		string(out) != "ALLOWED" {
+		t.Fatalf("allowlisted command = (%q, %v), want ALLOWED", out, err)
+	}
+	repo, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runAgentShell(
+		t,
+		[]string{"go version *", "mise *"},
+		repo,
+		"mise exec -- go version",
+	); err != nil || !strings.Contains(string(out), "go version go1.26.5") {
+		t.Fatalf("allowlisted nested toolchain command = (%q, %v), want pinned Go", out, err)
+	}
+	inside := filepath.Join(worktree, "inside")
+	if out, err := runAgentShell(t, []string{"touch *"}, worktree, "touch "+inside); err != nil {
+		t.Fatalf("inside-worktree command = (%q, %v), want pass", out, err)
+	}
+	if _, err := os.Stat(inside); err != nil {
+		t.Fatalf("allowlisted inside-worktree write did not run: %v", err)
+	}
+}
+
+func TestAgentShellRejectsUnlistedSyntaxAndOutsidePaths(t *testing.T) {
+	worktree := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	tests := []struct {
+		name    string
+		allow   []string
+		command string
+	}{
+		{"unlisted", []string{"printf *"}, "curl https://example.com"},
+		{"chain", []string{"printf *", "touch *"}, "printf OK; touch " + outside},
+		{"redirection", []string{"printf *"}, "printf OK > " + outside},
+		{"absolute-path", []string{"touch *"}, "touch " + outside},
+		{"traversal", []string{"touch *"}, "touch ../outside"},
+		{"absolute-equals", []string{"touch *"}, "touch " + outside + "=name"},
+		{"traversal-equals", []string{"touch *"}, "touch ../outside=name"},
+		{"attached-absolute-path", []string{"git *"}, "git -C" + filepath.Dir(outside) + " status"},
+		{"attached-traversal", []string{"git *"}, "git -C../outside status"},
+		{"nested-unlisted", []string{"true *", "mise *"}, "mise exec -- curl https://example.com"},
+		{"nested-shell", []string{"true *", "mise *"}, "mise exec -- /bin/sh -c true"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := runAgentShell(t, test.allow, worktree, test.command)
+			if err == nil || !strings.Contains(string(out), "forest: denied") {
+				t.Fatalf("shell command = (%q, %v), want denial", out, err)
+			}
+			if _, err := os.Stat(outside); !os.IsNotExist(err) {
+				t.Fatalf("denied command reached outside path: %v", err)
+			}
+		})
+	}
+}
+
 // TestChildPathHostToolchainWinsOverDeadShim pins child PATH resolution for a
 // non-Go driver layout: a working host binary on a declared toolchain directory
 // resolves before a dead mise shim that would otherwise shadow it.
@@ -80,6 +210,22 @@ func TestChildPathHostToolchainWinsOverDeadShim(t *testing.T) {
 	}
 }
 
+func TestStageHostExecutablesRejectsEscapingSymlink(t *testing.T) {
+	source := t.TempDir()
+	outside := writeDriver(t, t.TempDir(), "host-only", "#!/bin/sh\nprintf host-only\n")
+	if err := os.Symlink(outside, filepath.Join(source, "leak")); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if _, err := stageHostExecutables(home, 0, source); err == nil ||
+		!strings.Contains(err.Error(), "escapes FOREST_CHECK_PATH") {
+		t.Fatalf("escaping Host executable error = %v, want refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "host-bin", "0", "leak")); !os.IsNotExist(err) {
+		t.Fatalf("escaping Host executable reached staging: %v", err)
+	}
+}
+
 // TestRunChecksFindsHostToolchainDriver is the integration pin: a managed-repo
 // check whose driver lives only on a host toolchain directory succeeds at
 // process spawn once the operator declares that directory in FOREST_CHECK_PATH.
@@ -101,6 +247,28 @@ func TestRunChecksFindsHostToolchainDriver(t *testing.T) {
 	}
 	if !strings.Contains(note.Results[0].Output, "fake-cargo-ok") {
 		t.Fatalf("check output = %q, want the fake driver to have run", note.Results[0].Output)
+	}
+}
+
+func TestRunChecksUsesSandboxShellWhenHostPathOmitsSystemBins(t *testing.T) {
+	mise, err := exec.LookPath("mise")
+	if err != nil {
+		t.Fatal(err)
+	}
+	miseData, _ := miseLocations(mise)
+	hostPath := t.TempDir()
+	if err := os.Symlink(mise, filepath.Join(hostPath, "mise")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MISE_DATA_DIR", miseData)
+	t.Setenv("PATH", hostPath)
+
+	note, err := runChecks(Config{Checks: []Check{{Name: "shell", Run: "printf ok"}}}, t.TempDir(), "run-shell")
+	if err != nil {
+		t.Fatalf("runChecks returned error: %v", err)
+	}
+	if note.Status != "pass" || note.Results[0].Output != "ok" {
+		t.Fatalf("sandbox shell result = %+v, want pass", note)
 	}
 }
 
@@ -194,7 +362,7 @@ func TestHostToolchainMechanismScopedToChecks(t *testing.T) {
 	t.Setenv("FOREST_CHECK_PATH", toolchain)
 	t.Setenv("FOREST_CHECK_ENV", "RUSTUP_HOME=/host/.rustup")
 
-	agent, cleanup, err := childEnvironment()
+	agent, cleanup, err := childEnvironment(nil)
 	if err != nil {
 		t.Fatalf("childEnvironment returned error: %v", err)
 	}
@@ -236,6 +404,7 @@ func TestHostToolchainMechanismScopedToChecks(t *testing.T) {
 // FOREST_CHECK_ENV supplies the allowlisted metadata. A CARGO_HOME entry is also
 // present to prove the allowlist drops it (it would point at ~/.cargo, which
 // holds credentials.toml) without breaking the allowlisted RUSTUP_HOME lookup.
+
 func TestRunChecksHostProxyResolvesWithMetadata(t *testing.T) {
 	cargoBin := filepath.Join(t.TempDir(), "cargo", "bin")
 	rustupHome := filepath.Join(t.TempDir(), ".rustup")
@@ -245,13 +414,18 @@ func TestRunChecksHostProxyResolvesWithMetadata(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(
+		filepath.Join(rustupHome, "settings.toml"),
+		[]byte("default_toolchain = \"stable-x86_64-unknown-linux-gnu\"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
 	writeDriver(t, cargoBin, "cargo",
 		"#!/bin/sh\n"+
 			": \"${RUSTUP_HOME:=$HOME/.rustup}\"\n"+
-			"for tc in \"$RUSTUP_HOME\"/toolchains/*/bin; do\n"+
-			"\t[ -d \"$tc\" ] || continue\n"+
-			"\tif [ -x \"$tc/cargo-real\" ]; then exec \"$tc/cargo-real\" \"$@\"; fi\n"+
-			"done\n"+
+			"tc=\"$RUSTUP_HOME/toolchains/$RUSTUP_TOOLCHAIN/bin\"\n"+
+			"if [ -x \"$tc/cargo-real\" ]; then exec \"$tc/cargo-real\" \"$@\"; fi\n"+
 			"echo 'error: no default toolchain configured' >&2\n"+
 			"exit 1\n")
 	writeDriver(t, realBin, "cargo-real", "#!/bin/sh\necho real-driver-ok\n")
@@ -272,5 +446,41 @@ func TestRunChecksHostProxyResolvesWithMetadata(t *testing.T) {
 	}
 	if !strings.Contains(note.Results[0].Output, "real-driver-ok") {
 		t.Fatalf("check output = %q, want the real driver behind the proxy to have run", note.Results[0].Output)
+	}
+}
+func TestStageToolchainDataRejectsCrossMountSymlink(t *testing.T) {
+	for _, target := range []string{"/etc/passwd", "/workspace/host-only"} {
+		t.Run(target, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), ".rustup")
+			toolchains := filepath.Join(root, "toolchains", "stable", "bin")
+			if err := os.MkdirAll(toolchains, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(toolchains, "host-link")); err != nil {
+				t.Fatal(err)
+			}
+			_, err := stageToolchainData(t.TempDir(), "rustup-data", root, root, "toolchains")
+			if err == nil || !strings.Contains(err.Error(), "reaches another sandbox mount") {
+				t.Fatalf("cross-mount toolchain link error = %v, want refusal", err)
+			}
+		})
+	}
+}
+
+func TestRustupDefaultToolchainRejectsTraversalSelector(t *testing.T) {
+	for _, value := range []string{".", ".."} {
+		t.Run(value, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), ".rustup")
+			if err := os.MkdirAll(filepath.Join(root, "toolchains"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := []byte("default_toolchain = \"" + value + "\"\n")
+			if err := os.WriteFile(filepath.Join(root, "settings.toml"), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := rustupDefaultToolchain(root); got != "" {
+				t.Fatalf("default toolchain %q resolved to %q, want refusal", value, got)
+			}
+		})
 	}
 }

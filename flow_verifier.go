@@ -420,7 +420,7 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 		out.Status = "checks_environment_failed"
 		return out, fmt.Errorf("review snapshot: %w", err)
 	}
-	checks, checkErr := runChecks(cfg, wtDir, runID)
+	checks, checkErr := runChecks(cfg, wtDir, runID, repoDir)
 	// A preflight failure means no declared check ran because the child
 	// environment could not be built. There is nothing to record, so no Checks
 	// note exists, and the
@@ -495,15 +495,9 @@ func (verifierFlow) actBranch(cfg Config, repoDir string, s Subject, runID strin
 		verdict, stats, err = verifierReview(repoDir, wtDir, it, baseSHA, runID, a)
 		out.addTokens(stats)
 		if err != nil {
-			// A mechanical prompt-delivery failure names itself prompt_failed so it
-			// is never misread as a review verdict the Fixer should repair; the
-			// same prompt fails identically, so it parks instead. A review run
-			// that exceeded its declared deadline parks the same way
-			// (timeout_failed), never as a verdict to act on.
+			// A review that exceeded its declared deadline is mechanical. It
+			// parks as timeout_failed, never as a Verdict to act on.
 			out.Status = "review_failed"
-			if isPromptDelivery(err) {
-				out.Status = "prompt_failed"
-			}
 			if isRunTimeout(err) {
 				out.Status = "timeout_failed"
 			}
@@ -613,7 +607,7 @@ func verifierReview(repoDir, wtDir string, it Item, head, runID string, a *Agent
 	if phaseErr != nil {
 		return out, stats, fmt.Errorf("review: %w", phaseErr)
 	}
-	rv, err := gateReview(wtDir, filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"))
+	rv, err := gateReview(wtDir, a.ReportSchema)
 	if err != nil {
 		return out, stats, fmt.Errorf("review: %w", err)
 	}

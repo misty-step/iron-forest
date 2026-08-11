@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,79 @@ func renderCfg(t *testing.T, prefix string) string {
 	return dir
 }
 
+func TestValidateProviderConfigAllowsOnlyMintCredentialValues(t *testing.T) {
+	for _, body := range []string{
+		`{"provider":{"p":{"options":{"baseURL":"http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1","apiKey":"__mint.openrouter.ironforest__"}}}}`,
+		`{"provider":{"p":{"options":{"baseURL":"http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1","headers":{"Authorization":"Bearer __mint.openrouter.ironforest__"}}}}}`,
+		`{"provider":{"p":{"options":{"baseURL":"http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1","apiKey":"__mint.openrouter.ironforest__"},"models":{"m":{"maxTokens":4096}}}}}`,
+	} {
+		if _, err := sanitizeProviderConfig([]byte(body)); err != nil {
+			t.Errorf("safe provider config rejected: %v", err)
+		}
+	}
+	for _, body := range []string{
+		`{"provider":{"p":{"options":{"apiKey":"sk-AAAAAAAAAAAAAAAA"}}}}`,
+		`{"provider":{"p":{"options":{"headers":{"Authorization":"operator-token"}}}}}`,
+		`{"provider":{"p":{"options":{"clientSecret":"plain-secret"}}}}`,
+		`{"provider":{"p":{"options":{"clientKey":"-----BEGIN PRIVATE KEY-----"}}}}`,
+		`{"provider":{"p":{"options":{"clientCertificate":"raw-pem"}}}}`,
+		`{"provider":{"p":{"options":{"headers":{"Cookie":"session=operator-secret"}}}}}`,
+		`{"provider":{"p":{"options":{"baseURL":"http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1","apiKey":"__mint.github.default__"}}}}`,
+		`{"buildMetadata":"host-only"}`,
+	} {
+		if _, err := sanitizeProviderConfig([]byte(body)); err == nil {
+			t.Errorf("credential provider config accepted: %s", body)
+		}
+	}
+}
+
+func TestSanitizeProviderConfigDropsSupersededDuplicateBytes(t *testing.T) {
+	const secret = "sk-AAAAAAAAAAAAAAAA"
+	body := []byte(`{"provider":{"p":{"options":{"baseURL":"http://mint.tail5f5eb4.ts.net:4949/proxy/https/openrouter.ai/api/v1","apiKey":"` + secret + `","apiKey":"__mint.openrouter.ironforest__"}}}}`)
+	clean, err := sanitizeProviderConfig(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(clean), secret) {
+		t.Fatalf("sanitized provider config retained superseded credential bytes: %s", clean)
+	}
+	if !strings.Contains(string(clean), requiredProviderMarker) {
+		t.Fatalf("sanitized provider config lost the required Mint marker: %s", clean)
+	}
+}
+
+func TestPreserveProviderConfigRejectsEscapingSymlink(t *testing.T) {
+	repoDir := t.TempDir()
+	configDir := filepath.Join(repoDir, ".opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "host.json")
+	if err := os.WriteFile(outside, []byte(`{"buildMetadata":"host-only"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(configDir, "opencode.json")); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := preserveProviderConfig(target, repoDir); err == nil {
+		t.Fatal("preserveProviderConfig accepted a provider config symlink outside the repository")
+	}
+	if _, err := os.Stat(filepath.Join(target, "opencode.json")); !os.IsNotExist(err) {
+		t.Fatalf("escaping provider config reached the run root: %v", err)
+	}
+}
+
+func TestPreserveProviderConfigRejectsMissingDeclaration(t *testing.T) {
+	target := t.TempDir()
+	if err := preserveProviderConfig(target, t.TempDir()); err == nil {
+		t.Fatal("preserveProviderConfig accepted a missing project provider declaration")
+	}
+	if _, err := os.Stat(filepath.Join(target, "opencode.json")); !os.IsNotExist(err) {
+		t.Fatalf("missing provider declaration created run config: %v", err)
+	}
+}
+
 func TestRenderMarkdownCarriesVariant(t *testing.T) {
 	cfgDir := renderCfg(t, "forest-opencode-config-")
 	wtDir := t.TempDir()
@@ -53,6 +127,63 @@ func TestRenderMarkdownCarriesVariant(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(wtDir, ".opencode")); !os.IsNotExist(err) {
 		t.Fatalf("renderMarkdown wrote .opencode into the worktree: %v", err)
+	}
+}
+
+func TestRenderMarkdownBoundsBashByNamedCommands(t *testing.T) {
+	cfgDir := renderCfg(t, "forest-opencode-config-")
+	a := &Agent{
+		Name: "builder", Model: "m", Mode: "primary", Instructions: "do work",
+		BashAllow: []string{"git *", "mise *"},
+	}
+	if err := renderMarkdown(cfgDir, a); err != nil {
+		t.Fatal(err)
+	}
+	md := rendered(t, cfgDir, "builder")
+	for _, want := range []string{
+		"'*': deny", "'git *': allow", "'mise *': allow",
+		"'*;*': deny", "'*|*': deny", "'*>*': deny",
+	} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("rendered bash permission lacks %q:\n%s", want, md)
+		}
+	}
+	if allow, deny := strings.Index(md, "'git *': allow"), strings.Index(md, "'*;*': deny"); allow >= deny {
+		t.Fatalf("operator denial must follow command allows:\n%s", md)
+	}
+	if strings.Contains(md, "bash: allow") {
+		t.Fatalf("rendered agent retained an unbounded shell:\n%s", md)
+	}
+
+	empty := renderCfg(t, "forest-opencode-config-")
+	if err := renderMarkdown(empty, &Agent{
+		Name: "manager", Model: "m", Mode: "primary", Instructions: "pick",
+		BashAllow: []string{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if md := rendered(t, empty, "manager"); !strings.Contains(md, "'*': deny") {
+		t.Fatalf("empty bash_allow did not deny the shell:\n%s", md)
+	}
+}
+
+func TestNewRunConfigSelectsAgentShell(t *testing.T) {
+	home := t.TempDir()
+	cfgDir, err := newRunConfigDir(home, testFactory(t), &Agent{
+		Name: "probe", Model: "m", Mode: "primary", Instructions: "probe",
+		BashAllow: []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(cfgDir)
+	body, err := os.ReadFile(filepath.Join(cfgDir, "opencode", "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `"shell": "` + filepath.Join(home, "bin", "forest-shell") + `"`
+	if !strings.Contains(string(body), want) {
+		t.Fatalf("run config lacks agent shell %q:\n%s", want, body)
 	}
 }
 
@@ -170,6 +301,42 @@ func TestLoadAgentAndDigestChanges(t *testing.T) {
 	}
 }
 
+func TestLoadAgentRejectsDeclarationSymlinks(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"agent.yaml", "description: builder\ncommit:\n  name: builder\n  email: builder@example.invalid\nmodel: builder-model\ndeadline_seconds: 3600\n"},
+		{"instructions.md", "outside instructions\n"},
+		{"prompt.md", "{{.Task}}\n"},
+		{"report.schema.json", `{"type":"object"}`},
+		{filepath.Join("skills", "outside.md"), "outside skill\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			writeAgentFixture(t, repoDir, "builder", "builder-model")
+			target := filepath.Join(repoDir, DefaultAgentsDir, "builder", test.name)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(t.TempDir(), filepath.Base(test.name))
+			if err := os.WriteFile(outside, []byte(test.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, target); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadAgent(repoDir, "builder"); err == nil {
+				t.Fatalf("loadAgent accepted escaping declaration symlink %s", test.name)
+			}
+		})
+	}
+}
+
 func TestDeclaredAgentsLoad(t *testing.T) {
 	repoDir, err := os.Getwd()
 	if err != nil {
@@ -185,6 +352,7 @@ func TestDeclaredAgentsLoad(t *testing.T) {
 		"fixer":    cfg.Flows.Fixer.Agent,
 		"manager":  cfg.Flows.Manager.Agent,
 	}
+	cfgDir := renderCfg(t, "forest-opencode-config-")
 	for _, f := range flowsFor() {
 		name, ok := agents[f.Name()]
 		if !ok || name == "" {
@@ -194,8 +362,17 @@ func TestDeclaredAgentsLoad(t *testing.T) {
 		if err != nil {
 			t.Fatalf("flow %q loadAgent(%q): %v", f.Name(), name, err)
 		}
-		if a.Name != name || a.Model == "" || a.DefSHA == "" {
+		if a.Name != name || a.Model == "" || a.DefSHA == "" || a.BashAllow == nil {
 			t.Fatalf("incomplete %s declaration for flow %s: %#v", name, f.Name(), a)
+		}
+		if f.Name() != "manager" && !slices.Contains(a.BashAllow, "mise *") {
+			t.Fatalf("agent %s lacks OpenCode 1.18.11's mise permission prefix", name)
+		}
+		if err := renderMarkdown(cfgDir, a); err != nil {
+			t.Fatalf("render %s declaration: %v", name, err)
+		}
+		if md := rendered(t, cfgDir, name); strings.Contains(md, "bash: allow") {
+			t.Fatalf("declared agent %s retained an unbounded shell:\n%s", name, md)
 		}
 	}
 }
@@ -235,6 +412,42 @@ func TestLoadAgentRejectsAdditionalYAMLDocument(t *testing.T) {
 	}
 }
 
+func TestLoadAgentRejectsAmbiguousOrUnboundedBashAllow(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"permission-conflict", "permission:\n  bash: deny\nbash_allow:\n  - \"git *\"\n"},
+		{"empty-permission-conflict", "permission:\n  bash: \"\"\nbash_allow:\n  - \"git *\"\n"},
+		{"null-permission-conflict", "permission:\n  bash:\nbash_allow:\n  - \"git *\"\n"},
+		{"wildcard-command", "bash_allow:\n  - \"*\"\n"},
+		{"duplicate", "bash_allow:\n  - \"git *\"\n  - \"git *\"\n"},
+		{"metacharacter", "bash_allow:\n  - \"git;curl *\"\n"},
+		{"unsupported-harness", "harness: other\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			writeAgentFixture(t, repoDir, "builder", "builder-model")
+			path := filepath.Join(repoDir, DefaultAgentsDir, "builder", "agent.yaml")
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString(test.body); err != nil {
+				_ = f.Close()
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadAgent(repoDir, "builder"); err == nil {
+				t.Fatalf("loadAgent accepted %s:\n%s", test.name, test.body)
+			}
+		})
+	}
+}
+
 func TestLoadAgentRejectsMalformedPromptAndSchema(t *testing.T) {
 	tests := []struct {
 		file string
@@ -257,13 +470,14 @@ func TestLoadAgentRejectsMalformedPromptAndSchema(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsMissingOrZeroDeadline(t *testing.T) {
-	// A run that never ends holds a lane forever (see #207), so an agent whose
-	// declaration omits deadline_seconds or sets it to zero must not load: every
-	// loaded agent has to carry a positive, finite wall-clock bound. Without
-	// this guard a missing line would default to zero and silently open an
-	// unbounded run.
-	for _, deadline := range []string{"", "deadline_seconds: 0\n"} {
+func TestLoadRejectsInvalidDeadline(t *testing.T) {
+	// Zero is unbounded, and an oversized positive value overflows
+	// time.Duration. Neither value can give a Run its declared wall-clock bound.
+	for _, deadline := range []string{
+		"",
+		"deadline_seconds: 0\n",
+		"deadline_seconds: 9223372036854775807\n",
+	} {
 		repoDir := t.TempDir()
 		writeAgentFixture(t, repoDir, "builder", "builder-model")
 		body := "description: builder\ncommit:\n  name: builder\n  email: builder@example.invalid\n" +

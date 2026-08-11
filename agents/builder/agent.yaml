@@ -15,13 +15,15 @@ temperature: 0.2
 # (see #207). Time-bound only; there is no step ceiling. Runs that exceed this
 # are cancelled and recorded as timeout_failed.
 deadline_seconds: 3600
+# OpenCode rejects every shell command outside this list. The run shell rejects
+# shell syntax and paths outside the worktree before it executes an allowed
+# command. Bubblewrap contains commands and every process they start.
 permission:
   read: allow
   edit: allow
   glob: allow
   grep: allow
   list: allow
-  bash: allow
   lsp: allow
   todowrite: allow
   webfetch: deny
@@ -30,6 +32,16 @@ permission:
   skill: deny
   external_directory: deny
   question: ask
+bash_allow:
+  - "git *"
+  - "gofmt *"
+  - "go build *"
+  - "go test *"
+  - "go vet *"
+  - "go fmt *"
+  # OpenCode 1.18.11 has no BashArity entry for mise, so every mise command
+  # requests this exact permission prefix.
+  - "mise *"
 # Exa remains declared for shared wiring but disabled for this offline lane.
 mcp:
   - name: exa

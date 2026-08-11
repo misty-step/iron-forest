@@ -1,9 +1,9 @@
 # verifier: one worktree change to an independent verdict.
 #
 # This lane reads the proposed diff and may write only review.json.
-# Built-in web and MCP tools are denied. Bash remains available for local review,
-# so the standing instruction, empty child HOME, and absent credentials forbid network use.
-# The verifier uses a different model family from the Builder.
+# Built-in web and MCP tools are denied. The run shell accepts only plain
+# declared commands inside the worktree, and Bubblewrap contains each process.
+# The Verifier uses a different model family from the Builder.
 description: "The Verifier reviews one change against its item and writes review.json."
 commit:
   name: "Iron Forest Verifier"
@@ -22,7 +22,6 @@ permission:
   glob: allow
   grep: allow
   list: allow
-  bash: allow
   lsp: allow
   webfetch: deny
   websearch: deny
@@ -31,6 +30,15 @@ permission:
   todowrite: deny
   external_directory: deny
   question: deny
+bash_allow:
+  - "git status *"
+  - "git diff *"
+  - "go build *"
+  - "go test *"
+  - "go vet *"
+  # OpenCode 1.18.11 requests the broad mise prefix. The private run shell
+  # permits mise to launch only the other commands declared above.
+  - "mise *"
 mcp:
   - name: exa
     type: remote

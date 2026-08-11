@@ -279,7 +279,11 @@ func publishTrackerComment(
 	if err := claimEffect(repoDir, kind, it.ID, revision); err != nil {
 		return err
 	}
-	if err := t.Comment(it.ID, body+"\n\n"+marker); err != nil {
+	commentBody := body
+	if marker != "" && !strings.Contains(body, marker) {
+		commentBody += "\n\n" + marker
+	}
+	if err := t.Comment(it.ID, commentBody); err != nil {
 		current, readErr := validatedTrackerItem(t, it.ID)
 		if readErr != nil {
 			if errors.Is(readErr, errTrackerEvidenceInvalid) {

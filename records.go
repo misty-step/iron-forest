@@ -85,9 +85,9 @@ func (r *runRecord) UnmarshalJSON(data []byte) error {
 // nowRFC returns the UTC timestamp used by ledger records.
 func nowRFC() string { return time.Now().UTC().Format(time.RFC3339) }
 
-// loadLedger reads every run from the append-only ledger at path. Unparseable
-// lines are skipped and counted so one bad artifact never breaks the whole
-// report. An empty ledger is a valid state and yields zero runs without error.
+// loadLedger reads every run from the append-only ledger at path. Blank lines
+// are ignored, while a malformed nonblank row fails the load with its line
+// number. An empty ledger is a valid state and yields zero runs without error.
 // This is the single loader every reader of the run ledger uses.
 func loadLedger(path string) ([]runRecord, int, error) {
 	f, err := os.Open(path)
@@ -101,23 +101,23 @@ func loadLedger(path string) ([]runRecord, int, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var out []runRecord
-	var invalid int
+	lineNumber := 0
 	for sc.Scan() {
+		lineNumber++
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
 			continue
 		}
 		var r runRecord
 		if err := json.Unmarshal(line, &r); err != nil {
-			invalid++
-			continue
+			return nil, 0, fmt.Errorf("parse ledger line %d: %w", lineNumber, err)
 		}
 		out = append(out, r)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, 0, fmt.Errorf("read ledger: %w", err)
 	}
-	return out, invalid, nil
+	return out, 0, nil
 }
 
 // ledgerPath is the run ledger for a checkout.

@@ -112,24 +112,16 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 	}
 	out.addTokens(stats)
 	if err != nil {
-		// A mechanical delivery failure is not a content or agent failure: the
-		// same prompt keeps failing identically, so it must be named prompt_failed
-		// and park rather than look like work a Fixer attempt could repair.
 		// A run that exceeded its declared deadline is likewise mechanical: the
 		// same run keeps exceeding the same bound, so it parks (timeout_failed)
 		// rather than look like a rejected change to repair.
 		out.Status = "agent_failed"
-		if isPromptDelivery(err) {
-			out.Status = "prompt_failed"
-		}
 		if isRunTimeout(err) {
 			out.Status = "timeout_failed"
 		}
 		return out, fmt.Errorf("agent: %w", err)
 	}
-	changed, rep, err := gate(wtDir, baseSHA,
-		filepath.Join(repoDir, DefaultAgentsDir, a.Name, "report.schema.json"),
-		trace)
+	changed, rep, err := gate(wtDir, baseSHA, a.ReportSchema, trace)
 	if err != nil {
 		out.Status = "gate_failed"
 		return out, fmt.Errorf("gate: %w", err)
@@ -170,12 +162,10 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		return out, fmt.Errorf("publish: %w", err)
 	}
 	body := builderProjectionBody(it, rep, changed)
-	if err := publishBuiltComment(
+	out.Status = "built"
+	warnEffect("Issue comment", publishBuiltComment(
 		cfg, repoDir, it, branch, publishedHead,
-	); err != nil {
-		out.Status = "comment_failed"
-		return out, fmt.Errorf("comment: %w", err)
-	}
+	))
 	if cfg.Projection.MergeViaHost {
 		if _, err := recordPreparingHostRetirement(cfg, repoDir, branch, publishedHead, it); err != nil {
 			out.Status = "projection_failed"
@@ -187,7 +177,6 @@ func (builderFlow) Act(cfg Config, repoDir string, s Subject, runID string) (Out
 		out.Status = "projection_failed"
 		return out, fmt.Errorf("projection: %w", err)
 	}
-	out.Status = "built"
 	out.PRURL = url
 	return out, nil
 }

@@ -91,10 +91,50 @@ func TestRunUpdateCheckHonorsFactorySourceLock(t *testing.T) {
 	}
 }
 
+func TestSelfcheckRejectsMissingOrInvalidProviderConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing", want: "read provider config"},
+		{name: "invalid", body: `{}`, want: "provider config requires a provider object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			config := "repo: owner/repo\nchecks:\n  - name: test\n    run: \"true\"\n"
+			if err := os.WriteFile(filepath.Join(repo, "forest.yaml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.body != "" {
+				providerDir := filepath.Join(repo, ".opencode")
+				if err := os.MkdirAll(providerDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(providerDir, "opencode.json"), []byte(tc.body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code := 0
+			_, stderr := captureOutput(t, func() { code = cmdSelfcheck(repo) })
+			if code != 1 || !strings.Contains(stderr, tc.want) {
+				t.Fatalf("selfcheck provider %s = code %d stderr %q", tc.name, code, stderr)
+			}
+		})
+	}
+}
+
 func TestSelfcheckRejectsUnusedMalformedAgent(t *testing.T) {
 	repo := t.TempDir()
 	config := "repo: owner/repo\nchecks:\n  - name: test\n    run: \"true\"\n"
 	if err := os.WriteFile(filepath.Join(repo, "forest.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	providerDir := filepath.Join(repo, ".opencode")
+	if err := os.MkdirAll(providerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(providerDir, "opencode.json"), []byte(testProviderConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"builder", "verifier", "manager"} {
