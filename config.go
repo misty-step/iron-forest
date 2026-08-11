@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -160,6 +160,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("agent %q timeout: %w", name, err)
 		}
 	}
+	if len(c.Checks) == 0 {
+		return errors.New("checks must not be empty")
+	}
 	seen := make(map[string]struct{}, len(c.Checks))
 	for i, check := range c.Checks {
 		name := strings.TrimSpace(check.Name)
@@ -182,6 +185,6 @@ func agentNames(cfg Config) []string {
 	for name := range cfg.Agents {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }

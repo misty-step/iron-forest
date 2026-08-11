@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -21,6 +22,189 @@ type Runner struct {
 	Root    string
 	GitPath string
 	OMPPath string
+}
+
+const (
+	trustedTransportOutputLimit = 1 << 20
+	runLogHalfLimit             = 1 << 20
+	completedRunLogRetention    = 32
+	runLogTruncationMarker      = "\n--- Iron Forest Run log truncated; retained first 1 MiB and last 1 MiB ---\n"
+)
+
+var (
+	errTrustedTransportOutputOverflow = errors.New("trusted transport output exceeded 1 MiB")
+	runLogRegistry                    = struct {
+		sync.Mutex
+		active map[string]struct{}
+	}{active: make(map[string]struct{})}
+)
+
+type boundedTransportOutput struct {
+	data     []byte
+	overflow bool
+}
+
+func (output *boundedTransportOutput) Write(data []byte) (int, error) {
+	size := len(data)
+	retained := min(size, trustedTransportOutputLimit-len(output.data))
+	output.data = append(output.data, data[:retained]...)
+	output.overflow = output.overflow || retained != size
+	return size, nil
+}
+
+func (output *boundedTransportOutput) err() error {
+	if output.overflow {
+		return errTrustedTransportOutputOverflow
+	}
+	return nil
+}
+
+type boundedRunLog struct {
+	file      *os.File
+	first     int
+	tail      []byte
+	tailLen   int
+	tailNext  int
+	truncated bool
+	writeErr  error
+}
+
+func openBoundedRunLog(path string) (*boundedRunLog, error) {
+	runLogRegistry.Lock()
+	defer runLogRegistry.Unlock()
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	log := &boundedRunLog{file: file, tail: make([]byte, runLogHalfLimit)}
+	runLogRegistry.active[path] = struct{}{}
+	return log, nil
+}
+
+func (log *boundedRunLog) Write(data []byte) (int, error) {
+	size := len(data)
+	if remaining := runLogHalfLimit - log.first; remaining > 0 {
+		retained := min(len(data), remaining)
+		log.writeFile(data[:retained])
+		log.first += retained
+		data = data[retained:]
+	}
+	log.retainTail(data)
+	return size, nil
+}
+
+func (log *boundedRunLog) retainTail(data []byte) {
+	for len(data) > 0 {
+		if log.tailLen < len(log.tail) {
+			retained := copy(log.tail[log.tailLen:], data)
+			log.tailLen += retained
+			data = data[retained:]
+			if len(data) == 0 {
+				return
+			}
+		}
+		log.truncated = true
+		retained := copy(log.tail[log.tailNext:], data)
+		log.tailNext = (log.tailNext + retained) % len(log.tail)
+		data = data[retained:]
+	}
+}
+
+func (log *boundedRunLog) writeFile(data []byte) {
+	written, err := log.file.Write(data)
+	if written != len(data) {
+		err = errors.Join(err, io.ErrShortWrite)
+	}
+	log.writeErr = errors.Join(log.writeErr, err)
+}
+
+func (log *boundedRunLog) Finalize() error {
+	if log.truncated {
+		log.writeFile([]byte(runLogTruncationMarker))
+		log.writeFile(log.tail[log.tailNext:])
+		log.writeFile(log.tail[:log.tailNext])
+	} else {
+		log.writeFile(log.tail[:log.tailLen])
+	}
+	return errors.Join(log.writeErr, log.file.Close())
+}
+
+func completeRunLog(path string) error {
+	runLogRegistry.Lock()
+	defer runLogRegistry.Unlock()
+	delete(runLogRegistry.active, path)
+	return pruneCompletedRunLogs(filepath.Dir(path))
+}
+
+type completedRunLog struct {
+	name    string
+	path    string
+	modTime time.Time
+}
+
+func pruneCompletedRunLogs(dir string) error {
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	logs := make([]completedRunLog, 0, completedRunLogRetention)
+	var pruneErr error
+	for {
+		entries, readErr := directory.ReadDir(64)
+		for _, entry := range entries {
+			path := filepath.Join(dir, entry.Name())
+			if _, active := runLogRegistry.active[path]; active || !isReservedRunLogName(entry.Name()) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				pruneErr = errors.Join(pruneErr, err)
+				continue
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			current := completedRunLog{name: entry.Name(), path: path, modTime: info.ModTime()}
+			if len(logs) < completedRunLogRetention {
+				logs = append(logs, current)
+				continue
+			}
+			oldest := 0
+			for offset, candidate := range logs[1:] {
+				if newerRunLog(logs[oldest], candidate) {
+					oldest = offset + 1
+				}
+			}
+			remove := current
+			if newerRunLog(current, logs[oldest]) {
+				remove, logs[oldest] = logs[oldest], current
+			}
+			if err := os.Remove(remove.path); err != nil {
+				pruneErr = errors.Join(pruneErr, err)
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				pruneErr = errors.Join(pruneErr, readErr)
+			}
+			break
+		}
+	}
+	return errors.Join(pruneErr, directory.Close())
+}
+
+func newerRunLog(left, right completedRunLog) bool {
+	if left.modTime.Equal(right.modTime) {
+		return left.name > right.name
+	}
+	return left.modTime.After(right.modTime)
+}
+
+func isReservedRunLogName(name string) bool {
+	if !strings.HasSuffix(name, ".log") {
+		return false
+	}
+	return isReservedRunID(strings.TrimSuffix(name, ".log"))
 }
 
 func NewRunner(root string) *Runner {
@@ -39,11 +223,10 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return record, err
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	logFile, err := openBoundedRunLog(logPath)
 	if err != nil {
 		return record, err
 	}
-	defer logFile.Close()
 
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -52,21 +235,29 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	if prepareErr != nil {
 		var cleanupErr error
 		if worktreeMayExist {
-			cleanupErr = r.cleanupWorktree(worktree)
+			cleanupErr = r.cleanupWorktree(worktree, runID)
 			if cleanupErr != nil {
 				cleanupErr = fmt.Errorf("cleanup worktree: %w", cleanupErr)
 				_, _ = fmt.Fprintln(logFile, cleanupErr)
 			}
 		}
 		record.Exit = runContextExit(ctx, runCtx, 1)
-		record.Duration = time.Now().Sub(started).Seconds()
+		record.Duration = time.Since(started).Seconds()
 		_, _ = fmt.Fprintf(logFile, "prepare worktree: %v\n", prepareErr)
+		finalizeErr := logFile.Finalize()
+		if finalizeErr != nil {
+			finalizeErr = fmt.Errorf("finalize Run log: %w", finalizeErr)
+		}
+		retentionErr := completeRunLog(logPath)
+		if retentionErr != nil {
+			retentionErr = fmt.Errorf("retain completed Run logs: %w", retentionErr)
+		}
 		appendErr := AppendRun(r.Root, record)
-		return record, errors.Join(prepareErr, cleanupErr, appendErr)
+		return record, errors.Join(prepareErr, cleanupErr, finalizeErr, retentionErr, appendErr)
 	}
 
 	invokeErr := r.invoke(runCtx, worktree, declaration, timeoutSeconds, logFile, &record)
-	cleanupErr := r.cleanupWorktree(worktree)
+	cleanupErr := r.cleanupWorktree(worktree, runID)
 	if cleanupErr != nil {
 		cleanupErr = fmt.Errorf("cleanup worktree: %w", cleanupErr)
 		_, _ = fmt.Fprintln(logFile, cleanupErr)
@@ -74,21 +265,34 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	record.Duration = time.Now().Sub(started).Seconds()
+	record.Duration = time.Since(started).Seconds()
+	finalizeErr := logFile.Finalize()
+	if finalizeErr != nil {
+		finalizeErr = fmt.Errorf("finalize Run log: %w", finalizeErr)
+		if record.Exit == 0 {
+			record.Exit = 1
+		}
+	}
 	usage, usageErr := parseOMPUsage(logPath)
 	if usageErr != nil {
 		usageErr = fmt.Errorf("parse OMP usage: %w", usageErr)
 		if record.Exit == 0 {
 			record.Exit = 1
 		}
-		_, _ = fmt.Fprintln(logFile, usageErr)
 	} else {
 		record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
 		record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
 		record.Reasoning = usage.Reasoning
 	}
+	retentionErr := completeRunLog(logPath)
+	if retentionErr != nil {
+		retentionErr = fmt.Errorf("retain completed Run logs: %w", retentionErr)
+		if record.Exit == 0 {
+			record.Exit = 1
+		}
+	}
 	appendErr := AppendRun(r.Root, record)
-	if err := errors.Join(invokeErr, cleanupErr, usageErr, appendErr); err != nil {
+	if err := errors.Join(invokeErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
 		return record, err
 	}
 	if record.Exit != 0 {
@@ -125,21 +329,21 @@ const (
 	cleanupRemoveExecutionTimeout     = 2 * time.Second
 	cleanupFilesystemExecutionTimeout = time.Second
 	cleanupPruneExecutionTimeout      = time.Second
-	cleanupReservedSlack              = cleanupTimeout -
-		cleanupRemoveExecutionTimeout -
-		cleanupFilesystemExecutionTimeout -
-		cleanupPruneExecutionTimeout -
-		3*processStopWorstCase
+	runnerPrivateNotesPrefix          = "refs/notes/forest/private/"
 )
 
-func (r *Runner) cleanupWorktree(path string) error {
+func (r *Runner) cleanupWorktree(path, runID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	return r.removeWorktree(ctx, path)
+	return r.removeWorktree(ctx, path, runID)
 }
 
-func (r *Runner) removeWorktree(ctx context.Context, path string) error {
+func (r *Runner) removeWorktree(ctx context.Context, path, runID string) error {
 	removeCtx, cancelRemove := context.WithTimeout(ctx, cleanupRemoveExecutionTimeout)
+	privateErr := r.cleanupPrivateRefs(removeCtx, runID)
+	if privateErr != nil {
+		privateErr = fmt.Errorf("delete private notes refs: %w", privateErr)
+	}
 	_, removeErr := r.git(removeCtx, r.Root, "worktree", "remove", "--force", path)
 	cancelRemove()
 	if removeErr != nil {
@@ -157,7 +361,34 @@ func (r *Runner) removeWorktree(ctx context.Context, path string) error {
 	if pruneErr != nil {
 		pruneErr = fmt.Errorf("git worktree prune: %w", pruneErr)
 	}
-	return errors.Join(removeErr, filesystemErr, pruneErr)
+	return errors.Join(privateErr, removeErr, filesystemErr, pruneErr)
+}
+
+func (r *Runner) cleanupPrivateRefs(ctx context.Context, runID string) error {
+	prefix := runnerPrivateNotesPrefix + runID + "/"
+	output, listErr := r.git(ctx, r.Root, "for-each-ref", "--format=%(refname)", prefix)
+	if listErr != nil {
+		listErr = fmt.Errorf("enumerate: %w", listErr)
+	}
+	var commands strings.Builder
+	var invalidErr error
+	for _, ref := range strings.Fields(string(output)) {
+		if !strings.HasPrefix(ref, prefix) {
+			invalidErr = errors.Join(invalidErr, fmt.Errorf("ref outside run prefix: %s", ref))
+			continue
+		}
+		commands.WriteString("delete ")
+		commands.WriteString(ref)
+		commands.WriteByte('\n')
+	}
+	var deleteErr error
+	if commands.Len() > 0 {
+		_, deleteErr = r.gitInput(ctx, r.Root, strings.NewReader(commands.String()), "update-ref", "--no-deref", "--stdin")
+		if deleteErr != nil {
+			deleteErr = fmt.Errorf("delete: %w", deleteErr)
+		}
+	}
+	return errors.Join(listErr, invalidErr, deleteErr)
 }
 
 func (r *Runner) removeFilesystem(ctx context.Context, path string) error {
@@ -170,12 +401,17 @@ func (r *Runner) removeFilesystem(ctx context.Context, path string) error {
 }
 
 func (r *Runner) git(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return r.gitInput(ctx, dir, nil, args...)
+}
+
+func (r *Runner) gitInput(ctx context.Context, dir string, input io.Reader, args ...string) ([]byte, error) {
 	path, err := trustedExecutable(r.Root, r.GitPath)
 	if err != nil {
 		return nil, err
 	}
 	command := exec.Command(path, args...)
 	command.Dir = dir
+	command.Stdin = input
 	return processGroupOutput(ctx, command)
 }
 
@@ -193,10 +429,10 @@ func processGroupOutput(ctx context.Context, command *exec.Cmd) ([]byte, error) 
 		return nil, errors.Join(ctx.Err(), err, writer.Close(), reader.Close())
 	}
 	writerCloseErr := writer.Close()
-	var output bytes.Buffer
+	output := &boundedTransportOutput{}
 	read := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(&output, reader)
+		_, err := io.Copy(output, reader)
 		read <- err
 	}()
 	wait := make(chan error, 1)
@@ -204,13 +440,13 @@ func processGroupOutput(ctx context.Context, command *exec.Cmd) ([]byte, error) 
 	var runErr, cleanupErr error
 	select {
 	case runErr = <-wait:
-		cleanupErr = stopResidualProcessGroup(command.Process.Pid)
+		cleanupErr = stopResidualProcessGroup(command.Process.Pid, processStopGrace)
 		if contextErr := ctx.Err(); contextErr != nil {
 			runErr = errors.Join(contextErr, runErr)
 		}
 	case <-ctx.Done():
 		runErr = ctx.Err()
-		cleanupErr = stopProcessGroup(command.Process.Pid, wait)
+		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
 	}
 	var readerCloseErr error
 	if cleanupErr != nil {
@@ -220,10 +456,43 @@ func processGroupOutput(ctx context.Context, command *exec.Cmd) ([]byte, error) 
 	if cleanupErr == nil {
 		readerCloseErr = reader.Close()
 	}
-	return output.Bytes(), errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr)
+	return output.data, errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, output.err())
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, timeoutSeconds int, logFile *os.File, record *RunRecord) error {
+func soleExitCode(err error, code int) bool {
+	leaves, matching := 0, 0
+	var visit func(error)
+	visit = func(err error) {
+		switch current := err.(type) {
+		case nil:
+			return
+		case interface{ Unwrap() []error }:
+			children := current.Unwrap()
+			if len(children) == 0 {
+				leaves++
+			}
+			for _, child := range children {
+				visit(child)
+			}
+		case interface{ Unwrap() error }:
+			if child := current.Unwrap(); child != nil {
+				visit(child)
+			} else {
+				leaves++
+			}
+		default:
+			leaves++
+			exitErr, ok := current.(*exec.ExitError)
+			if ok && exitErr.ProcessState != nil && exitErr.ProcessState.ExitCode() == code {
+				matching++
+			}
+		}
+	}
+	visit(err)
+	return leaves == 1 && matching == 1
+}
+
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
 		return err
@@ -243,54 +512,81 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	args = append(args, declaration.TaskPrompt)
 	command := exec.Command(path, args...)
 	command.Dir = worktree
-	command.Stdout = logFile
-	command.Stderr = logFile
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runnerEnvironment(r.Root, name, email)
+	command.Env, err = runnerEnvironment(r.Root, name, email, record.RunID)
 	if err != nil {
 		record.Exit = 127
 		return err
 	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		record.Exit = 127
+		return fmt.Errorf("open OMP output pipe: %w", err)
+	}
+	command.Stdout = writer
+	command.Stderr = writer
 	if err := command.Start(); err != nil {
 		record.Exit = 127
-		return fmt.Errorf("start omp: %w", err)
+		return errors.Join(fmt.Errorf("start omp: %w", err), writer.Close(), reader.Close())
 	}
+	writerCloseErr := writer.Close()
+	read := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(logFile, reader)
+		read <- err
+	}()
 	wait := make(chan error, 1)
 	go func() { wait <- command.Wait() }()
+	var runErr, cleanupErr error
+	timedOut := false
 	select {
-	case err := <-wait:
-		var cleanupErr error
-		record.Exit, err = processResult(ctx, err)
-		cleanupErr = stopResidualProcessGroup(command.Process.Pid)
+	case waitErr := <-wait:
+		record.Exit, runErr = processResult(ctx, waitErr)
+		cleanupErr = stopResidualProcessGroup(command.Process.Pid, processStopGrace)
 		if cleanupErr != nil && record.Exit == 0 {
 			record.Exit = 1
 		}
-		return errors.Join(err, cleanupErr)
 	case <-ctx.Done():
-		cleanupErr := stopProcessGroup(command.Process.Pid, wait)
+		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
 		record.Exit = contextExit(ctx.Err())
 		if record.Exit == 124 {
-			_, _ = fmt.Fprintln(logFile, "omp wall-clock timeout")
-			return errors.Join(fmt.Errorf("omp timed out after %ds", timeoutSeconds), cleanupErr)
+			timedOut = true
+			runErr = fmt.Errorf("omp timed out after %ds", timeoutSeconds)
+		} else {
+			runErr = ctx.Err()
 		}
-		return errors.Join(ctx.Err(), cleanupErr)
 	}
+	var readerCloseErr error
+	if cleanupErr != nil {
+		readerCloseErr = reader.Close()
+	}
+	readErr := <-read
+	if cleanupErr == nil {
+		readerCloseErr = reader.Close()
+	}
+	if timedOut {
+		_, _ = fmt.Fprintln(logFile, "omp wall-clock timeout")
+	}
+	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr)
+	if err != nil && record.Exit == 0 {
+		record.Exit = 1
+	}
+	return err
 }
 
 const (
 	processStopGrace       = time.Second
 	processGroupProbeLimit = 250 * time.Millisecond
 	processGroupProbeStep  = 10 * time.Millisecond
-	processStopWorstCase   = processStopGrace + 2*processGroupProbeLimit
 )
 
-func stopProcessGroup(pid int, wait <-chan error) error {
+func stopProcessGroup(pid int, wait <-chan error, grace time.Duration) error {
 	if processGroupExists(pid) {
 		_ = syscall.Kill(-pid, syscall.SIGTERM)
 	}
-	timer := time.NewTimer(processStopGrace)
+	timer := time.NewTimer(grace)
 	defer timer.Stop()
 	select {
 	case <-wait:
@@ -312,12 +608,12 @@ func stopProcessGroup(pid int, wait <-chan error) error {
 	return nil
 }
 
-func stopResidualProcessGroup(pid int) error {
+func stopResidualProcessGroup(pid int, grace time.Duration) error {
 	if !processGroupExists(pid) {
 		return nil
 	}
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	if waitProcessGroupQuiescence(pid, processStopGrace) {
+	if waitProcessGroupQuiescence(pid, grace) {
 		return nil
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
@@ -427,13 +723,13 @@ func trustedExecutable(root, name string) (string, error) {
 	return resolved, nil
 }
 
-func runnerEnvironment(root, name, email string) ([]string, error) {
+func runnerEnvironment(root, name, email, runID string) ([]string, error) {
 	path, err := trustedPath(root)
 	if err != nil {
 		return nil, err
 	}
-	blocked := []string{"PATH=", "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL="}
-	environment := make([]string, 0, len(os.Environ())+5)
+	blocked := []string{"PATH=", "FOREST_RUN_ID=", "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL="}
+	environment := make([]string, 0, len(os.Environ())+6)
 	for _, value := range os.Environ() {
 		keep := true
 		for _, prefix := range blocked {
@@ -452,6 +748,7 @@ func runnerEnvironment(root, name, email string) ([]string, error) {
 		"GIT_AUTHOR_EMAIL="+email,
 		"GIT_COMMITTER_NAME="+name,
 		"GIT_COMMITTER_EMAIL="+email,
+		"FOREST_RUN_ID="+runID,
 	), nil
 }
 

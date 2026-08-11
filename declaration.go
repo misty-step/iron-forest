@@ -125,10 +125,13 @@ func loadDeclaration(root, name string) (Declaration, error) {
 	if len(bytes.TrimSpace(taskData)) == 0 {
 		return Declaration{}, fmt.Errorf("agent %s task.md is empty", name)
 	}
+	if strings.TrimSpace(body) == "" {
+		return Declaration{}, fmt.Errorf("agent %s system prompt is empty", name)
+	}
 	return Declaration{
 		Name:         name,
 		Model:        strings.TrimSpace(string(metadata.Model)),
-		Tools:        append([]string(nil), tools...),
+		Tools:        tools,
 		Thinking:     strings.TrimSpace(thinking),
 		SystemPrompt: body,
 		TaskPrompt:   string(taskData),

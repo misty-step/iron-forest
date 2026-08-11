@@ -12,65 +12,146 @@ import (
 	"time"
 )
 
+const runnerPrivateRefSetup = `revision=$(git rev-parse HEAD)
+git update-ref "refs/notes/forest/private/$FOREST_RUN_ID/$ROLE/$NOTE_KIND/$revision/publication" "$revision"
+git update-ref "refs/notes/forest/private/$FOREST_RUN_ID/$ROLE/$NOTE_KIND/$revision/base" "$revision"
+`
+
 func TestRunnerWorktreeOMPAndLedger(t *testing.T) {
-	root, _ := testClone(t)
-	omp := filepath.Join(t.TempDir(), "omp")
-	argsFile := filepath.Join(t.TempDir(), "args")
-	t.Setenv("ARGS_FILE", argsFile)
-	t.Setenv("GIT_AUTHOR_NAME", "Wrong")
-	t.Setenv("GIT_AUTHOR_EMAIL", "wrong@example.invalid")
-	t.Setenv("GIT_COMMITTER_NAME", "Wrong")
-	t.Setenv("GIT_COMMITTER_EMAIL", "wrong@example.invalid")
-	script := `#!/bin/sh
+	for _, test := range []struct {
+		role, name, email, noteKind string
+	}{
+		{role: "builder", name: "Iron Forest Builder", email: "builder@forest.invalid", noteKind: "review-request"},
+		{role: "verifier", name: "Iron Forest Verifier", email: "verifier@forest.invalid", noteKind: "checks"},
+		{role: "fixer", name: "Iron Forest Fixer", email: "fixer@forest.invalid", noteKind: "review-request"},
+	} {
+		t.Run(test.role, func(t *testing.T) {
+			root, _ := testClone(t)
+			state := t.TempDir()
+			omp := filepath.Join(state, "omp")
+			argsFile := filepath.Join(state, "args")
+			identityFile := filepath.Join(state, "identity")
+			t.Setenv("ARGS_FILE", argsFile)
+			t.Setenv("IDENTITY_FILE", identityFile)
+			t.Setenv("ROLE", test.role)
+			t.Setenv("NOTE_KIND", test.noteKind)
+			canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			runGitDir(t, root, "update-ref", "refs/notes/forest/"+test.noteKind, canonical)
+			t.Setenv("GIT_AUTHOR_NAME", "Wrong")
+			t.Setenv("GIT_AUTHOR_EMAIL", "wrong@example.invalid")
+			t.Setenv("GIT_COMMITTER_NAME", "Wrong")
+			t.Setenv("GIT_COMMITTER_EMAIL", "wrong@example.invalid")
+			t.Setenv("FOREST_RUN_ID", "wrong-run")
+			script := `#!/bin/sh
 set -eu
 printf '%s\n' "$@" > "$ARGS_FILE"
 printf identity > identity.txt
 git add identity.txt
 git commit -m identity >/dev/null
-test "$(git log -1 --format='%an <%ae>')" = "Iron Forest Verifier <verifier@forest.invalid>"
-printf '%s\n' '{"type":"message_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
+git log -1 --format='%an%n%ae%n%cn%n%ce' > "$IDENTITY_FILE"
+` + runnerPrivateRefSetup + `printf '%s\n' '{"type":"message_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
 printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
 printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"cacheRead":17,"cacheWrite":19}}}'
 `
-	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+			if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runner := NewRunner(root)
+			runner.OMPPath = omp
+			record, err := runner.Run(context.Background(), Declaration{Name: test.role, Model: "local", Tools: StringList{"read", "bash"}, SystemPrompt: "system", TaskPrompt: "Reply"}, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.Exit != 0 || record.TokensIn != 13 || record.TokensOut != 16 || record.CacheRead != 22 || record.CacheWrite != 26 {
+				t.Fatalf("record=%#v", record)
+			}
+			identityBytes, err := os.ReadFile(identityFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := strings.Split(strings.TrimSpace(string(identityBytes)), "\n")
+			if len(identity) != 4 || identity[0] != test.name || identity[1] != test.email || identity[2] != test.name || identity[3] != test.email {
+				t.Fatalf("Git actor=%q, want author and committer %s <%s>", identity, test.name, test.email)
+			}
+			config := string(runGitDir(t, root, "config", "--get-regexp", `^user\.(name|email)$`))
+			if !strings.Contains(config, "user.name Builder\n") || !strings.Contains(config, "user.email builder@forest.invalid\n") {
+				t.Fatalf("root Git actor changed:\n%s", config)
+			}
+			args, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply"} {
+				if !strings.Contains(string(args), value) {
+					t.Fatalf("OMP args missing %q:\n%s", value, args)
+				}
+			}
+			assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, test.noteKind)
+			rows, err := ReadLedger(root)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("ledger rows=%v err=%v", rows, err)
+			}
+			logInfo, err := os.Stat(forestPath(root, "runs", record.RunID+".log"))
+			if err != nil || logInfo.Mode().Perm() != 0o600 {
+				t.Fatalf("run log mode=%v info=%v, want 0600", err, logInfo)
+			}
+			entries, err := os.ReadDir(forestPath(root, "worktrees"))
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("worktrees not cleaned: entries=%v err=%v", entries, err)
+			}
+		})
 	}
-	runner := NewRunner(root)
-	runner.OMPPath = omp
-	decl := Declaration{Name: "verifier", Model: "local", Tools: StringList{"read", "bash"}, SystemPrompt: "system", TaskPrompt: "Reply"}
-	record, err := runner.Run(context.Background(), decl, 10)
-	if err != nil {
-		t.Fatal(err)
+}
+
+func assertRunnerPrivateRefsClean(t *testing.T, root, runID, revision, noteKind string, remaining ...string) {
+	t.Helper()
+	refs := strings.Fields(string(runGitDir(t, root, "for-each-ref", "--format=%(refname)", "refs/notes/forest/private/")))
+	if got, want := strings.Join(refs, "\n"), strings.Join(remaining, "\n"); got != want {
+		t.Fatalf("private refs=%v, want %v after cleaning run %s", refs, remaining, runID)
 	}
-	if record.Exit != 0 || record.TokensIn != 13 || record.TokensOut != 16 || record.CacheRead != 22 || record.CacheWrite != 26 {
-		t.Fatalf("record=%#v", record)
+	canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "refs/notes/forest/"+noteKind)))
+	if canonical != revision {
+		t.Fatalf("canonical %s ref=%s, want %s", noteKind, canonical, revision)
 	}
-	if name := strings.TrimSpace(string(runGitDir(t, root, "config", "--get", "user.name"))); name != "Builder" {
-		t.Fatalf("root user.name=%q", name)
-	}
-	if email := strings.TrimSpace(string(runGitDir(t, root, "config", "--get", "user.email"))); email != "builder@forest.invalid" {
-		t.Fatalf("root user.email=%q", email)
-	}
-	args, err := os.ReadFile(argsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply"} {
-		if !strings.Contains(string(args), value) {
-			t.Fatalf("OMP args missing %q:\n%s", value, args)
-		}
-	}
-	rows, err := ReadLedger(root)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("ledger rows=%v err=%v", rows, err)
-	}
-	logInfo, err := os.Stat(forestPath(root, "runs", record.RunID+".log"))
-	if err != nil || logInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("run log mode=%v info=%v, want 0600", err, logInfo)
-	}
-	entries, err := os.ReadDir(forestPath(root, "worktrees"))
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("worktrees not cleaned: entries=%v err=%v", entries, err)
+}
+
+func TestRunnerCleansPrivateRefsAfterAgentFailureAndCancellation(t *testing.T) {
+	for name, cancelRun := range map[string]bool{"failure": false, "cancellation": true} {
+		t.Run(name, func(t *testing.T) {
+			root, _ := testClone(t)
+			omp := filepath.Join(t.TempDir(), "omp")
+			t.Setenv("ROLE", "builder")
+			t.Setenv("NOTE_KIND", "review-request")
+			canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			runGitDir(t, root, "update-ref", "refs/notes/forest/review-request", canonical)
+			behavior := "exit 7\n"
+			wantExit := 7
+			if cancelRun {
+				behavior = "while :; do /bin/sleep 1; done\n"
+				wantExit = 130
+			}
+			script := "#!/bin/sh\nset -eu\n" + runnerPrivateRefSetup +
+				"printf '%s\\n' '{\"usage\":{\"input\":1}}'\n" + behavior
+			if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runner := NewRunner(root)
+			runner.OMPPath = omp
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if cancelRun {
+				timer := time.AfterFunc(2*time.Second, cancel)
+				defer timer.Stop()
+			}
+			record, err := runner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+			if record.Exit != wantExit || err == nil {
+				t.Fatalf("record=%#v err=%v, want exit %d", record, err, wantExit)
+			}
+			if cancelRun && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation err=%v", err)
+			}
+			assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, "review-request")
+		})
 	}
 }
 
@@ -127,6 +208,23 @@ func TestRunnerRejectsUsageWithoutRecognizedAlias(t *testing.T) {
 				t.Fatalf("drifted usage ledger=%v err=%v, want one failing row", rows, ledgerErr)
 			}
 		})
+	}
+}
+
+func TestOMPUsageParser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "omp.jsonl")
+	data := `{"message":{"usage":{"input":3,"output":5,"cacheRead":7,"cacheWrite":11,"reasoning":13}}}
+{"message":{"usage":{"input":17,"output":19,"cacheRead":23,"cacheWrite":29,"reasoning":31}}}
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := parseOMPUsage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.TokensIn != 17 || usage.TokensOut != 19 || usage.CacheRead != 23 || usage.CacheWrite != 29 || usage.Reasoning != 31 {
+		t.Fatalf("usage=%#v", usage)
 	}
 }
 
@@ -285,46 +383,6 @@ func TestRunnerRejectsOverflowingDirectTimeout(t *testing.T) {
 	rows, readErr := ReadLedger(root)
 	if readErr != nil || len(rows) != 0 {
 		t.Fatalf("overflow timeout ledger=%v err=%v", rows, readErr)
-	}
-}
-
-func processHeartbeatFixture(t *testing.T) (string, string) {
-	t.Helper()
-	state := t.TempDir()
-	heartbeat := filepath.Join(state, "heartbeat")
-	childPID := filepath.Join(state, "child-pid")
-	t.Setenv("HEARTBEAT", heartbeat)
-	t.Setenv("CHILD_PID", childPID)
-	t.Cleanup(func() {
-		body, err := os.ReadFile(childPID)
-		if err != nil {
-			return
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
-		if err != nil || pid <= 1 {
-			return
-		}
-		process, err := os.FindProcess(pid)
-		if err == nil {
-			_ = process.Kill()
-		}
-	})
-	return state, heartbeat
-}
-
-func assertProcessQuiescent(t *testing.T, heartbeat, subject, stoppedBy string) {
-	t.Helper()
-	before, err := os.ReadFile(heartbeat)
-	if err != nil || len(before) == 0 {
-		t.Fatalf("%s produced no heartbeat: %d bytes, %v", subject, len(before), err)
-	}
-	time.Sleep(300 * time.Millisecond)
-	after, err := os.ReadFile(heartbeat)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after) != len(before) {
-		t.Fatalf("%s survived %s: heartbeat grew from %d to %d bytes", subject, stoppedBy, len(before), len(after))
 	}
 }
 
@@ -589,7 +647,7 @@ exec "$REAL_GIT" "$@"
 	}
 }
 
-func TestRunnerReportsJoinedCleanupErrorsAfterFilesystemAndRegistryCleanup(t *testing.T) {
+func TestRunnerJoinsCleanupErrorsAndPreservesConcurrentRunRefs(t *testing.T) {
 	root, _ := testClone(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -598,6 +656,12 @@ func TestRunnerReportsJoinedCleanupErrorsAfterFilesystemAndRegistryCleanup(t *te
 	pruneMarker := filepath.Join(t.TempDir(), "pruned")
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("PRUNE_MARKER", pruneMarker)
+	t.Setenv("ROLE", "builder")
+	t.Setenv("NOTE_KIND", "review-request")
+	canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	runGitDir(t, root, "update-ref", "refs/notes/forest/review-request", canonical)
+	otherRef := "refs/notes/forest/private/live-run/verifier/checks/" + canonical + "/publication"
+	runGitDir(t, root, "update-ref", otherRef, canonical)
 	gitWrapper := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 if [ "$1" = worktree ] && [ "$2" = remove ]; then exit 9; fi
@@ -612,7 +676,8 @@ exec "$REAL_GIT" "$@"
 		t.Fatal(err)
 	}
 	omp := filepath.Join(t.TempDir(), "omp")
-	if err := os.WriteFile(omp, []byte("#!/bin/sh\nprintf '%s\\n' '{\"usage\":{\"input\":1}}'\n"), 0o755); err != nil {
+	ompScript := "#!/bin/sh\nset -eu\n" + runnerPrivateRefSetup + "printf '%s\\n' '{\"usage\":{\"input\":1}}'\n"
+	if err := os.WriteFile(omp, []byte(ompScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
@@ -626,6 +691,7 @@ exec "$REAL_GIT" "$@"
 			t.Fatalf("cleanup error %q missing %q", err, want)
 		}
 	}
+	assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, "review-request", otherRef)
 	worktree := forestPath(root, "worktrees", record.RunID)
 	if _, statErr := os.Stat(worktree); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("failed Git remove left filesystem residue: %v", statErr)
@@ -678,7 +744,7 @@ exec "$REAL_GIT" "$@"
 	runner := NewRunner(root)
 	runner.GitPath = gitWrapper
 	started := time.Now()
-	err = runner.cleanupWorktree(worktree)
+	err = runner.cleanupWorktree(worktree, "delayed-remove")
 	if err == nil || !strings.Contains(err.Error(), "git worktree remove") || !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("delayed cleanup err=%v", err)
 	}
@@ -735,7 +801,7 @@ exec "$REAL_GIT" "$@"
 	runner := NewRunner(root)
 	runner.GitPath = gitWrapper
 	started := time.Now()
-	err = runner.cleanupWorktree(worktree)
+	err = runner.cleanupWorktree(worktree, "blocked-delete")
 	if err == nil || !strings.Contains(err.Error(), "git worktree remove") || !strings.Contains(err.Error(), "remove worktree path") || !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("blocked cleanup err=%v", err)
 	}
@@ -848,35 +914,7 @@ func TestProcessResultHonorsCanceledContext(t *testing.T) {
 	}
 }
 
-func testClone(t *testing.T) (string, string) {
-	t.Helper()
-	root := filepath.Join(t.TempDir(), "clone")
-	origin := filepath.Join(t.TempDir(), "origin.git")
-	runGit(t, "init", "--bare", origin)
-	runGit(t, "clone", origin, root)
-	configGit(t, root, "Builder", "builder@forest.invalid")
-	if err := os.WriteFile(filepath.Join(root, "file"), []byte("initial\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	config := []byte(`repo: owner/name
-agents:
-  builder: {poll: "forest poll builder", interval: 1, timeout: 1}
-checks:
-  - {name: test, run: "go test ./..."}
-`)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, root, "add", "file", "forest.yaml")
-	runGitDir(t, root, "commit", "-m", "initial")
-	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/master")
-	return root, origin
-}
-
 func TestRunnerCleanupStopsTermIgnoringRemoveAndFilesystemGroupsBeforePrune(t *testing.T) {
-	if cleanupReservedSlack < time.Second {
-		t.Fatalf("cleanup slack=%s want at least one second", cleanupReservedSlack)
-	}
 	root, _ := testClone(t)
 	worktree := forestPath(root, "worktrees", "blocked-both")
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
@@ -923,7 +961,7 @@ while :; do /bin/sleep 1; done
 	runner := NewRunner(root)
 	runner.GitPath = gitWrapper
 	started := time.Now()
-	err := runner.cleanupWorktree(worktree)
+	err := runner.cleanupWorktree(worktree, "blocked-both")
 	elapsed := time.Since(started)
 	if err == nil {
 		t.Fatal("cleanup unexpectedly succeeded")

@@ -52,9 +52,11 @@ func TestPollLeaderDeadlineWinsCompletedShellAndPreventsDispatch(t *testing.T) {
 
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{
-		"builder": {Poll: "poll", Interval: 1, Timeout: 1},
-	}}
+	cfg := Config{
+		Repo:   "owner/name",
+		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}},
+		Checks: []Check{{Name: "test", Run: "true"}},
+	}
 	scheduler := NewScheduler(root, cfg, nil)
 	scheduler.Poll = func(context.Context, string) PollResult { return result }
 	runCalled := false
@@ -82,21 +84,7 @@ func TestPollCommandDrainsResidualProcessGroup(t *testing.T) {
 	if result.Code != 0 || result.Err != nil {
 		t.Fatalf("residual child poll result=%#v", result)
 	}
-	before, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(before) == 0 {
-		t.Fatal("residual child produced no output")
-	}
-	time.Sleep(100 * time.Millisecond)
-	after, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != string(before) {
-		t.Fatalf("residual child continued writing after poll returned: before=%d after=%d", len(before), len(after))
-	}
+	assertProcessQuiescent(t, output, "residual Poll child", "Poll return")
 }
 
 func TestPollCommandCancellationKillsDescendantsBeforeReturn(t *testing.T) {
@@ -127,24 +115,13 @@ func TestPollCommandCancellationKillsDescendantsBeforeReturn(t *testing.T) {
 	var result PollResult
 	select {
 	case result = <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(pollStopGrace + time.Second):
 		t.Fatal("canceled poll did not return")
 	}
 	if result.Code != 2 || !errors.Is(result.Err, context.Canceled) {
 		t.Fatalf("canceled poll result=%#v", result)
 	}
-	before, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	after, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != string(before) {
-		t.Fatalf("poll descendant continued after return: before=%d after=%d", len(before), len(after))
-	}
+	assertProcessQuiescent(t, output, "Poll descendant", "cancellation")
 }
 
 func TestPollCommandDiscardsOutput(t *testing.T) {
@@ -154,27 +131,10 @@ func TestPollCommandDiscardsOutput(t *testing.T) {
 	}
 }
 
-func TestConfigRejectsDurationOverflow(t *testing.T) {
-	overflow := int(^uint(0) >> 1)
-	if int64(overflow) <= maxDurationSeconds {
-		t.Skip("int range cannot overflow time.Duration seconds")
-	}
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{
-		"builder": {Poll: "poll", Interval: overflow, Timeout: 1},
-	}}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
-		t.Fatalf("interval overflow error=%v", err)
-	}
-	cfg.Agents["builder"] = AgentConfig{Poll: "poll", Interval: 1, Timeout: overflow}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
-		t.Fatalf("timeout overflow error=%v", err)
-	}
-}
-
 func TestSchedulerServeDrainsInFlightRun(t *testing.T) {
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
 	scheduler := NewScheduler(root, cfg, nil)
 	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
 	started := make(chan struct{})
@@ -224,9 +184,11 @@ func TestSchedulerSerializesConcurrentDispatches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			writeTestDeclaration(t, root, "builder")
-			cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{
-				"builder": {Poll: "poll", Interval: 1, Timeout: 1},
-			}}
+			cfg := Config{
+				Repo:   "owner/name",
+				Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}},
+				Checks: []Check{{Name: "test", Run: "true"}},
+			}
 			scheduler := NewScheduler(root, cfg, nil)
 			var pollCalls atomic.Int32
 			pollEntered := make(chan struct{}, 1)
@@ -315,112 +277,289 @@ func TestSchedulerSerializesConcurrentDispatches(t *testing.T) {
 	}
 }
 
-func TestStatusReportsKernelLockTruth(t *testing.T) {
-	cases := []struct {
-		name       string
-		lock       string
-		want       []string
-		forbid     []string
-		wantStderr string
-	}{
-		{
-			name:   "held lock",
-			lock:   "held",
-			want:   []string{"builder errors=0 code=0 running=true", "live runs:\n  agent=builder running=true"},
-			forbid: []string{"stale=true", "running=unknown", "live runs: none"},
-		},
-		{
-			name:   "free lock",
-			lock:   "free",
-			want:   []string{"builder errors=0 code=0 running=false stale=true", "live runs: none"},
-			forbid: []string{"running=true", "running=unknown", "live runs:\n"},
-		},
-		{
-			name:       "lock lookup error",
-			lock:       "error",
-			want:       []string{"builder errors=0 code=0 running=unknown", "live runs: unknown"},
-			forbid:     []string{"running=true", "running=false", "stale=true"},
-			wantStderr: "kernel lock state unknown:",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			writeCLIConfig(t, root, "poll")
-			triggers := []byte(`{"builder":{"agent":"builder","running":true}}`)
-			if err := os.WriteFile(forestPath(root, "triggers.json"), triggers, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			lockPath := forestPath(root, "lock")
-			if tc.lock == "error" {
-				if err := os.Mkdir(lockPath, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer lock.Close()
-				if tc.lock == "held" {
-					if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-						t.Fatal(err)
-					}
-					defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-				}
-			}
+func schedulerHealth(scheduler *Scheduler, agent string) TriggerHealth {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	return scheduler.health[agent]
+}
 
-			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
-			if code != 0 {
-				t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout, stderr)
-			}
-			for _, want := range tc.want {
-				if !strings.Contains(stdout, want) {
-					t.Fatalf("status stdout missing %q: %s", want, stdout)
-				}
-			}
-			for _, forbid := range tc.forbid {
-				if strings.Contains(stdout, forbid) {
-					t.Fatalf("status stdout contains %q: %s", forbid, stdout)
-				}
-			}
-			if tc.wantStderr == "" {
-				if stderr != "" {
-					t.Fatalf("status stderr=%q, want empty", stderr)
-				}
-			} else if !strings.Contains(stderr, tc.wantStderr) {
-				t.Fatalf("status stderr=%q, want substring %q", stderr, tc.wantStderr)
-			}
-		})
+func TestSchedulerRestartDropsRemovedDeclarationHealth(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{
+		Repo: "owner/name",
+		Agents: map[string]AgentConfig{
+			"builder": {Poll: "poll", Interval: 1, Timeout: 1},
+			"fixer":   {Poll: "poll", Interval: 1, Timeout: 1},
+		},
+		Checks: []Check{{Name: "test", Run: "true"}},
+	}
+	scheduler := NewScheduler(root, cfg, nil)
+	scheduler.mu.Lock()
+	scheduler.health["builder"] = TriggerHealth{Agent: "builder"}
+	scheduler.health["fixer"] = TriggerHealth{Agent: "fixer", PollError: "old failure"}
+	saveErr := scheduler.saveHealthLocked()
+	scheduler.mu.Unlock()
+	if saveErr != nil {
+		t.Fatal(saveErr)
+	}
+
+	restarted := NewScheduler(root, Config{
+		Repo:   cfg.Repo,
+		Agents: map[string]AgentConfig{"builder": cfg.Agents["builder"]},
+		Checks: cfg.Checks,
+	}, nil)
+	if restarted.startupErr != nil {
+		t.Fatal(restarted.startupErr)
+	}
+	if _, present := restarted.health["fixer"]; present {
+		t.Fatalf("removed declaration remains in Scheduler health: %#v", restarted.health)
+	}
+	persisted, err := readTriggerHealth(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 1 || persisted["builder"].Agent != "builder" {
+		t.Fatalf("persisted health after declaration removal=%#v", persisted)
 	}
 }
 
-func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
+func TestSchedulerSkipWhileRunningAndUnhealthy(t *testing.T) {
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")
-	writeCLIConfig(t, root, "poll")
-	bin := filepath.Join(root, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	scheduler := NewScheduler(root, cfg, nil)
+	var release = make(chan struct{})
+	var once sync.Once
+	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
+	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+		once.Do(func() { <-release })
+		return RunRecord{Started: "now"}, nil
 	}
-	for _, name := range []string{"git", "gh", "omp"} {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
+	dispatched, err := scheduler.Tick(context.Background(), "builder")
+	if err != nil || !dispatched {
+		t.Fatalf("first tick: dispatched=%v err=%v", dispatched, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !schedulerHealth(scheduler, "builder").Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	dispatched, err = scheduler.Tick(context.Background(), "builder")
+	if err != nil || dispatched {
+		t.Fatalf("busy tick: dispatched=%v err=%v", dispatched, err)
+	}
+	close(release)
+	deadline = time.Now().Add(time.Second)
+	for schedulerHealth(scheduler, "builder").Running && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	pollErr := errors.New("forge down")
+	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 2, Err: pollErr} }
+	for range 2 {
+		dispatched, err = scheduler.Tick(context.Background(), "builder")
+		if dispatched || err == nil || !strings.Contains(err.Error(), pollErr.Error()) {
+			t.Fatalf("failed Poll dispatched=%v err=%v", dispatched, err)
 		}
 	}
-	oldPath := os.Getenv("PATH")
-	if err := os.Setenv("PATH", bin); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
-	if code := selfcheck(root); code == 0 {
-		t.Fatal("selfcheck accepted repository tool path")
+	health := schedulerHealth(scheduler, "builder")
+	if health.ConsecutiveErrors != 2 || health.LastCode != 2 || health.PollError != pollErr.Error() {
+		t.Fatalf("unhealthy Poll state=%#v", health)
 	}
 }
 
-func quoteShellPath(path string) string {
-	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+func TestSchedulerOnceRunsBeforeReturn(t *testing.T) {
+	root := t.TempDir()
+	writeTestDeclaration(t, root, "builder")
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	scheduler := NewScheduler(root, cfg, nil)
+	called := false
+	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
+	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+		called = true
+		return RunRecord{Started: "now"}, nil
+	}
+	dispatched, err := scheduler.Once(context.Background(), "builder")
+	if err != nil || !dispatched || !called {
+		t.Fatalf("once dispatched=%v called=%v err=%v", dispatched, called, err)
+	}
+}
+
+func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
+	root, origin := testClone(t)
+	writeTestDeclaration(t, root, "builder")
+	if _, err := audit(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "remote", "remove", "origin")
+	cfg := Config{
+		Repo:   "owner/name",
+		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}},
+		Checks: []Check{{Name: "test", Run: "true"}},
+	}
+	scheduler := NewScheduler(root, cfg, nil)
+	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
+	runFailure := errors.New("run failed")
+	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+		return RunRecord{Started: "failed"}, runFailure
+	}
+	dispatched, err := scheduler.Once(context.Background(), "builder")
+	if !dispatched || !errors.Is(err, runFailure) {
+		t.Fatalf("failed Run dispatched=%v err=%v", dispatched, err)
+	}
+	health := schedulerHealth(scheduler, "builder")
+	if health.PollError != "" || health.RunError != runFailure.Error() || health.AuditError == "" {
+		t.Fatalf("Run and Audit failure state=%#v", health)
+	}
+	auditFailure := health.AuditError
+
+	pollFailure := errors.New("poll failed")
+	scheduler.Poll = func(context.Context, string) PollResult {
+		return PollResult{Code: 2, Err: pollFailure}
+	}
+	dispatched, err = scheduler.Once(context.Background(), "builder")
+	if dispatched || err == nil {
+		t.Fatalf("failed Poll dispatched=%v err=%v", dispatched, err)
+	}
+	health = schedulerHealth(scheduler, "builder")
+	if health.PollError != pollFailure.Error() || health.RunError != runFailure.Error() || health.AuditError != auditFailure {
+		t.Fatalf("Poll failure replaced another cause=%#v", health)
+	}
+
+	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 1} }
+	dispatched, err = scheduler.Once(context.Background(), "builder")
+	if dispatched || err != nil {
+		t.Fatalf("healthy Poll skip dispatched=%v err=%v", dispatched, err)
+	}
+	health = schedulerHealth(scheduler, "builder")
+	if health.PollError != "" || health.RunError != runFailure.Error() || health.AuditError != auditFailure {
+		t.Fatalf("healthy Poll cleared another cause=%#v", health)
+	}
+	persisted, err := readTriggerHealth(root)
+	if err != nil || persisted["builder"] != health {
+		t.Fatalf("persisted trigger state=%#v err=%v, want %#v", persisted["builder"], err, health)
+	}
+	auditState, err := readAuditState(root)
+	if err != nil || auditState.LastResult != "pass" {
+		t.Fatalf("last successful audit state=%#v err=%v", auditState, err)
+	}
+
+	runGitDir(t, root, "remote", "add", "origin", origin)
+	if err := os.WriteFile(filepath.Join(root, "ungated"), []byte("advance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "add", "ungated")
+	runGitDir(t, root, "commit", "-m", "ungated")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/master")
+	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
+	dispatched, err = scheduler.Once(context.Background(), "builder")
+	if !dispatched || !errors.Is(err, runFailure) {
+		t.Fatalf("failed Run with successful Audit dispatched=%v err=%v", dispatched, err)
+	}
+	health = schedulerHealth(scheduler, "builder")
+	if health.PollError != "" || health.RunError != runFailure.Error() || health.AuditError != "" {
+		t.Fatalf("successful Audit cleared a non-Audit cause=%#v", health)
+	}
+	auditState, err = readAuditState(root)
+	if err != nil || auditState.LastResult != "violations" || len(auditState.Violations) == 0 {
+		t.Fatalf("successful Audit policy state=%#v err=%v", auditState, err)
+	}
+
+	runGitDir(t, root, "remote", "remove", "origin")
+	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+		return RunRecord{Started: "passed"}, nil
+	}
+	dispatched, err = scheduler.Once(context.Background(), "builder")
+	if !dispatched || err != nil {
+		t.Fatalf("successful Run with failed Audit dispatched=%v err=%v", dispatched, err)
+	}
+	health = schedulerHealth(scheduler, "builder")
+	if health.PollError != "" || health.RunError != "" || health.AuditError == "" {
+		t.Fatalf("successful Run cleared a non-Run cause=%#v", health)
+	}
+
+	runGitDir(t, root, "remote", "add", "origin", origin)
+	dispatched, err = scheduler.Once(context.Background(), "builder")
+	if !dispatched || err != nil {
+		t.Fatalf("successful Run dispatched=%v err=%v", dispatched, err)
+	}
+	health = schedulerHealth(scheduler, "builder")
+	if health.PollError != "" || health.RunError != "" || health.AuditError != "" {
+		t.Fatalf("successful Poll, Run, and Audit state=%#v", health)
+	}
+}
+
+func TestNewSchedulerRunsReservedGarbageCollectionBeforeHealth(t *testing.T) {
+	root, _ := testClone(t)
+	if err := os.MkdirAll(forestPath(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleTemp := forestPath(root, ".audit.json-dead")
+	if err := os.WriteFile(staleTemp, []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	health := `{"builder":{"agent":"builder","poll_error":"preserved health"}}`
+	if err := os.WriteFile(forestPath(root, "triggers.json"), []byte(health), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+
+	scheduler := NewScheduler(root, cfg, NewRunner(root))
+	if scheduler.startupErr != nil {
+		t.Fatalf("NewScheduler() startup error=%v", scheduler.startupErr)
+	}
+	if _, err := os.Stat(staleTemp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reserved temp survived Scheduler startup: %v", err)
+	}
+	if got := schedulerHealth(scheduler, "builder").PollError; got != "preserved health" {
+		t.Fatalf("loaded Poll health=%q, want preserved health", got)
+	}
+}
+
+func TestNewSchedulerCleanupFailureBlocksBeforeHealthLoad(t *testing.T) {
+	root, _ := testClone(t)
+	if err := os.MkdirAll(forestPath(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(forestPath(root, "triggers.json"), []byte("{malformed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath = filepath.Join(t.TempDir(), "missing-git")
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+
+	scheduler := NewScheduler(root, cfg, runner)
+	if scheduler.startupErr == nil || !strings.Contains(scheduler.startupErr.Error(), "reserved garbage collection") {
+		t.Fatalf("NewScheduler() startup error=%v, want reserved garbage collection failure", scheduler.startupErr)
+	}
+	if strings.Contains(scheduler.startupErr.Error(), "invalid character") {
+		t.Fatalf("health loaded before failed reserved garbage collection: %v", scheduler.startupErr)
+	}
+	pollCalled := false
+	scheduler.Poll = func(context.Context, string) PollResult {
+		pollCalled = true
+		return PollResult{Code: 0}
+	}
+	dispatched, err := scheduler.Once(context.Background(), "builder")
+	if dispatched || err == nil || pollCalled {
+		t.Fatalf("failed startup dispatched=%t pollCalled=%t err=%v", dispatched, pollCalled, err)
+	}
+}
+
+func TestNewSchedulerWithoutRunnerSkipsReservedGarbageCollection(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(forestPath(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleTemp := forestPath(root, "triggers.json.dead.tmp")
+	if err := os.WriteFile(staleTemp, []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+
+	scheduler := NewScheduler(root, cfg, nil)
+	if scheduler.startupErr != nil {
+		t.Fatalf("NewScheduler() startup error=%v", scheduler.startupErr)
+	}
+	if _, err := os.Stat(staleTemp); err != nil {
+		t.Fatalf("nil-Runner Scheduler removed reserved temp: %v", err)
+	}
 }

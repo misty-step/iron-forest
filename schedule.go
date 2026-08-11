@@ -8,14 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
 func runPollCommand(ctx context.Context, command string) PollResult {
-	pollCtx, cancel := context.WithTimeout(ctx, pollTimeout)
+	pollCtx, cancel := context.WithTimeout(ctx, pollCommandTimeout)
 	defer cancel()
 	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -31,7 +30,7 @@ func runPollCommand(ctx context.Context, command string) PollResult {
 		return finishPollLeader(pollCtx, cmd.Process.Pid, err)
 	case <-pollCtx.Done():
 		result.Code = 2
-		result.Err = errors.Join(pollCtx.Err(), stopProcessGroup(cmd.Process.Pid, wait))
+		result.Err = errors.Join(pollCtx.Err(), stopResidualProcessGroup(cmd.Process.Pid, pollStopGrace))
 		return result
 	}
 }
@@ -53,14 +52,19 @@ func finishPollLeader(pollCtx context.Context, pid int, waitErr error) PollResul
 		}
 		result.Err = waitErr
 	}
-	if err := stopResidualProcessGroup(pid); err != nil {
+	if err := stopResidualProcessGroup(pid, pollStopGrace); err != nil {
 		result.Code = 2
 		result.Err = errors.Join(result.Err, err)
 	}
 	return result
 }
 
-const pollTimeout = 60 * time.Second
+const (
+	directPollTimeout  = 60 * time.Second
+	pollCommandTimeout = directPollTimeout + 5*time.Second
+	pollStopGrace      = pollCommandTimeout - directPollTimeout
+	auditTimeout       = 60 * time.Second
+)
 
 type PollResult struct {
 	Code int
@@ -71,7 +75,9 @@ type TriggerHealth struct {
 	Agent             string `json:"agent"`
 	ConsecutiveErrors int    `json:"consecutive_errors"`
 	LastCode          int    `json:"last_code"`
-	LastError         string `json:"last_error,omitempty"`
+	PollError         string `json:"poll_error,omitempty"`
+	RunError          string `json:"run_error,omitempty"`
+	AuditError        string `json:"audit_error,omitempty"`
 	LastRun           string `json:"last_run,omitempty"`
 	Running           bool   `json:"running"`
 }
@@ -88,8 +94,6 @@ type Scheduler struct {
 	startupErr error
 }
 
-const auditTimeout = 60 * time.Second
-
 func NewScheduler(root string, cfg Config, runner *Runner) *Scheduler {
 	s := &Scheduler{Root: root, Config: cfg, health: make(map[string]TriggerHealth), inFlight: make(map[string]bool), Poll: runPollCommand}
 	if err := cfg.Validate(); err != nil {
@@ -98,6 +102,10 @@ func NewScheduler(root string, cfg Config, runner *Runner) *Scheduler {
 	}
 	if runner != nil {
 		s.Run = runner.Run
+		if err := cleanupReservedResidue(root, runner); err != nil {
+			s.startupErr = fmt.Errorf("reserved garbage collection: %w", err)
+			return s
+		}
 	}
 	values, err := readTriggerHealth(root)
 	if err != nil && !os.IsNotExist(err) {
@@ -106,6 +114,10 @@ func NewScheduler(root string, cfg Config, runner *Runner) *Scheduler {
 	}
 	stale := false
 	for name, health := range values {
+		if _, configured := cfg.Agents[name]; !configured {
+			stale = true
+			continue
+		}
 		if health.Running {
 			health.Running = false
 			stale = true
@@ -184,11 +196,13 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, in
 	health := s.health[agent]
 	health.Agent = agent
 	health.LastCode = result.Code
-	health.LastError = ""
+	health.PollError = ""
 	if result.Code > 1 {
 		health.ConsecutiveErrors++
 		if result.Err != nil {
-			health.LastError = result.Err.Error()
+			health.PollError = result.Err.Error()
+		} else {
+			health.PollError = fmt.Sprintf("exit %d", result.Code)
 		}
 	} else {
 		health.ConsecutiveErrors = 0
@@ -200,7 +214,7 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, in
 		return Declaration{}, 0, nil, false, fmt.Errorf("persist trigger state: %w", persistErr)
 	}
 	if result.Code > 1 {
-		return Declaration{}, 0, nil, false, fmt.Errorf("poll %s failed (exit %d): %v", agent, result.Code, result.Err)
+		return Declaration{}, 0, nil, false, fmt.Errorf("poll %s failed (exit %d): %s", agent, result.Code, health.PollError)
 	}
 	if result.Code != 0 {
 		return Declaration{}, 0, nil, false, nil
@@ -250,12 +264,11 @@ func (s *Scheduler) completeRun(agent string, record RunRecord, runErr error) er
 	health.Running = false
 	health.LastRun = record.Started
 	if runErr != nil {
-		health.LastError = runErr.Error()
-	} else if auditMessage != "" {
-		health.LastError = auditMessage
+		health.RunError = runErr.Error()
 	} else {
-		health.LastError = ""
+		health.RunError = ""
 	}
+	health.AuditError = auditMessage
 	s.health[agent] = health
 	return s.saveHealthLocked()
 }
@@ -331,12 +344,9 @@ func (s *Scheduler) saveHealthLocked() error {
 }
 
 func auditSummary(ctx context.Context, root string) string {
-	result, err := audit(ctx, root)
+	_, err := audit(ctx, root)
 	if err != nil {
 		return err.Error()
-	}
-	if len(result.Violations) > 0 {
-		return fmt.Sprintf("audit violations: %s", strings.Join(result.Violations, "; "))
 	}
 	return ""
 }

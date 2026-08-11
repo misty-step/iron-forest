@@ -130,19 +130,30 @@ func poll(root, agent string) int {
 		return 2
 	}
 	poller := NewPoller(root, cfg.Repo)
-	ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(signalCtx, directPollTimeout)
 	defer cancel()
+	return pollAgent(ctx, poller, agent)
+}
+
+func pollAgent(ctx context.Context, poller *Poller, agent string) int {
+	var code int
 	switch agent {
 	case "builder":
-		return poller.builder(ctx)
+		code = poller.builder(ctx)
 	case "verifier":
-		return poller.verifier(ctx)
+		code = poller.verifier(ctx)
 	case "fixer":
-		return poller.fixer(ctx)
+		code = poller.fixer(ctx)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown poll agent %q\n", agent)
 		return 2
 	}
+	if ctx.Err() != nil {
+		return 2
+	}
+	return code
 }
 
 func status(root string) int {
@@ -184,8 +195,14 @@ func status(root string) int {
 		if value.Running && lockErr == nil && !lockHeld {
 			fmt.Print(" stale=true")
 		}
-		if value.LastError != "" {
-			fmt.Printf(" error=%s", value.LastError)
+		if value.PollError != "" {
+			fmt.Printf(" poll_error=%s", value.PollError)
+		}
+		if value.RunError != "" {
+			fmt.Printf(" run_error=%s", value.RunError)
+		}
+		if value.AuditError != "" {
+			fmt.Printf(" audit_error=%s", value.AuditError)
 		}
 		fmt.Println()
 	}
@@ -213,20 +230,22 @@ func status(root string) int {
 		return 2
 	}
 	fmt.Printf("last audit: %s master=%s\n", state.LastResult, state.LastMaster)
-	for _, violation := range state.Violations {
+	shown := min(len(state.Violations), 10)
+	fmt.Printf("audit violations: total=%d", len(state.Violations))
+	if omitted := len(state.Violations) - shown; omitted > 0 {
+		fmt.Printf(" omitted=%d", omitted)
+	}
+	fmt.Println()
+	for _, violation := range state.Violations[:shown] {
 		fmt.Printf("audit violation: %s\n", violation)
 	}
-	records, err := ReadLedger(root)
+	records, err := ReadLedgerTail(root, 10)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
 	fmt.Println("recent runs:")
-	start := len(records) - 10
-	if start < 0 {
-		start = 0
-	}
-	for _, record := range records[start:] {
+	for _, record := range records {
 		fmt.Printf("  %s agent=%s exit=%d duration=%.3f\n", record.RunID, record.Agent, record.Exit, record.Duration)
 	}
 	return 0

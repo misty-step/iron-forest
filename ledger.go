@@ -8,17 +8,32 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-var (
-	ledgerMu        sync.Mutex
-	ledgerWriteFile = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
-	ledgerSyncFile  = func(file *os.File) error { return file.Sync() }
-	ledgerCloseFile = func(file *os.File) error { return file.Close() }
-)
+var ledgerMu sync.Mutex
+
+type ledgerFileOps struct {
+	writeFile  func(*os.File, []byte) (int, error)
+	syncFile   func(*os.File) error
+	closeFile  func(*os.File) error
+	renameFile func(string, string) error
+	removeFile func(string) error
+}
+
+func defaultLedgerFileOps() ledgerFileOps {
+	return ledgerFileOps{
+		writeFile:  (*os.File).Write,
+		syncFile:   (*os.File).Sync,
+		closeFile:  (*os.File).Close,
+		renameFile: os.Rename,
+		removeFile: os.Remove,
+	}
+}
 
 type Usage struct {
 	TokensIn   int64 `json:"tokens_in"`
@@ -53,144 +68,291 @@ func lockLedger(file *os.File, operation int) error {
 }
 
 func AppendRun(root string, record RunRecord) error {
+	return appendRun(root, record, defaultLedgerFileOps())
+}
+
+func appendRun(root string, record RunRecord, files ledgerFileOps) (err error) {
 	if record.Started == "" {
 		record.Started = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	data, err := json.Marshal(record)
+	row, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
+	row = append(row, '\n')
 
 	ledgerMu.Lock()
 	defer ledgerMu.Unlock()
 	path := ledgerPath(root)
 	dir := filepath.Dir(path)
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		if !os.IsExist(err) {
+	if err := os.Mkdir(dir, 0o755); err == nil {
+		if err := syncLedgerDirectory(filepath.Dir(dir), files); err != nil {
 			return err
 		}
-	} else if err := syncLedgerDirectory(filepath.Dir(dir)); err != nil {
+	} else if !os.IsExist(err) {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0o644)
-	created := err == nil
-	if os.IsExist(err) {
-		file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
-	}
-	if err != nil {
-		return err
-	}
-	if err := lockLedger(file, syscall.LOCK_EX); err != nil {
-		closeErr := ledgerCloseFile(file)
-		namespaceErr := restoreLedgerNamespace(path, created)
-		return errors.Join(err, closeErr, namespaceErr)
-	}
-	info, err := file.Stat()
-	if err != nil {
-		namespaceErr := restoreLedgerNamespace(path, created)
-		closeErr := ledgerCloseFile(file)
-		return errors.Join(err, namespaceErr, closeErr)
-	}
-	previousLength := info.Size()
 
-	written, writeErr := ledgerWriteFile(file, data)
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := lockLedger(directory, syscall.LOCK_EX); err != nil {
+		return errors.Join(err, files.closeFile(directory))
+	}
+	defer func() {
+		err = errors.Join(err, files.closeFile(directory))
+	}()
+
+	if err := cleanupLedgerTemps(directory, path, files); err != nil {
+		return err
+	}
+
+	previous, mode, existed, err := openLedgerForAppend(path, files)
+	if err != nil {
+		return err
+	}
+	if previous != nil {
+		defer func() {
+			if previous != nil {
+				err = errors.Join(err, files.closeFile(previous))
+			}
+		}()
+	}
+	var rollback *os.File
+	if existed {
+		rollback, err = os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			err = errors.Join(err, rollback.Close())
+		}()
+	}
+
+	tempPath, err := writeLedgerTemp(dir, path, mode, files, func(temp *os.File) error {
+		if previous != nil {
+			if err := scanLedger(previous, func(row []byte, _ RunRecord) error {
+				return writeLedgerBytes(temp, row, files)
+			}); err != nil {
+				return err
+			}
+			current := previous
+			previous = nil
+			if err := files.closeFile(current); err != nil {
+				return err
+			}
+		}
+		return writeLedgerBytes(temp, row, files)
+	})
+	if err != nil {
+		return err
+	}
+	if err := files.renameFile(tempPath, path); err != nil {
+		return errors.Join(err, files.removeFile(tempPath))
+	}
+	if err := files.syncFile(directory); err != nil {
+		return errors.Join(err, rollbackPublishedLedger(directory, path, rollback, mode, existed, files))
+	}
+	if !existed {
+		if err := syncLedgerDirectory(filepath.Dir(dir), files); err != nil {
+			return errors.Join(err, rollbackPublishedLedger(directory, path, rollback, mode, existed, files))
+		}
+	}
+	return nil
+}
+
+func cleanupLedgerTemps(directory *os.File, path string, files ledgerFileOps) error {
+	dir := filepath.Dir(path)
+	entries, err := directory.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	prefix := "." + filepath.Base(path) + "-"
+	var cleanupErr error
+	removed := false
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		if err := files.removeFile(filepath.Join(dir, entry.Name())); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+			continue
+		}
+		removed = true
+	}
+	if removed {
+		cleanupErr = errors.Join(cleanupErr, files.syncFile(directory))
+	}
+	return cleanupErr
+}
+
+func openLedgerForAppend(path string, files ledgerFileOps) (*os.File, os.FileMode, bool, error) {
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, 0o644, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, err
+	}
+	info, statErr := file.Stat()
+	if statErr != nil {
+		return nil, 0, true, errors.Join(statErr, files.closeFile(file))
+	}
+	return file, info.Mode().Perm(), true, nil
+}
+
+func writeLedgerTemp(dir, path string, mode os.FileMode, files ledgerFileOps, write func(*os.File) error) (string, error) {
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return "", err
+	}
+	tempPath := file.Name()
+	if err := file.Chmod(mode); err != nil {
+		return "", discardOpenLedgerTemp(file, err, files)
+	}
+	if err := write(file); err != nil {
+		return "", discardOpenLedgerTemp(file, err, files)
+	}
+	if err := files.syncFile(file); err != nil {
+		return "", discardOpenLedgerTemp(file, err, files)
+	}
+	if err := files.closeFile(file); err != nil {
+		return "", errors.Join(err, files.removeFile(tempPath))
+	}
+	return tempPath, nil
+}
+
+func writeLedgerBytes(file *os.File, data []byte, files ledgerFileOps) error {
+	written, err := files.writeFile(file, data)
 	if written != len(data) {
-		writeErr = errors.Join(writeErr, io.ErrShortWrite)
+		err = errors.Join(err, io.ErrShortWrite)
 	}
-	if writeErr != nil {
-		return rollbackLedger(file, path, previousLength, created, writeErr)
-	}
-	if err := ledgerSyncFile(file); err != nil {
-		return rollbackLedger(file, path, previousLength, created, err)
-	}
-	if created {
-		if err := syncLedgerDirectory(dir); err != nil {
-			return rollbackLedger(file, path, previousLength, created, err)
-		}
-		if err := syncLedgerDirectory(filepath.Dir(dir)); err != nil {
-			return rollbackLedger(file, path, previousLength, created, err)
-		}
-	}
-	return commitLedger(file, path, previousLength, created)
+	return err
 }
 
-func restoreOpenLedger(file *os.File, length int64) error {
-	truncateErr := file.Truncate(length)
-	syncErr := ledgerSyncFile(file)
-	return errors.Join(truncateErr, syncErr)
+func discardOpenLedgerTemp(file *os.File, cause error, files ledgerFileOps) error {
+	return errors.Join(cause, files.closeFile(file), files.removeFile(file.Name()))
 }
 
-func rollbackLedger(file *os.File, path string, length int64, created bool, cause error) error {
-	restoreErr := restoreOpenLedger(file, length)
-	namespaceErr := restoreLedgerNamespace(path, created)
-	closeErr := ledgerCloseFile(file)
-	return errors.Join(cause, restoreErr, namespaceErr, closeErr)
-}
-
-func commitLedger(file *os.File, path string, length int64, created bool) error {
-	guardFD, err := syscall.Dup(int(file.Fd()))
-	if err != nil {
-		return rollbackLedger(file, path, length, created, err)
+func rollbackPublishedLedger(directory *os.File, path string, previous *os.File, mode os.FileMode, existed bool, files ledgerFileOps) error {
+	if !existed {
+		return errors.Join(files.removeFile(path), files.syncFile(directory))
 	}
-	guard := os.NewFile(uintptr(guardFD), file.Name())
-	if err := ledgerCloseFile(file); err != nil {
-		restoreErr := restoreOpenLedger(guard, length)
-		namespaceErr := restoreLedgerNamespace(path, created)
-		closeErr := ledgerCloseFile(guard)
-		return errors.Join(err, restoreErr, namespaceErr, closeErr)
-	}
-	return guard.Close()
-}
-
-func restoreLedgerNamespace(path string, created bool) error {
-	if !created {
-		return nil
-	}
-	if err := os.Remove(path); err != nil {
+	if _, err := previous.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	return syncLedgerDirectory(filepath.Dir(path))
+	tempPath, err := writeLedgerTemp(filepath.Dir(path), path, mode, files, func(temp *os.File) error {
+		return scanLedger(previous, func(row []byte, _ RunRecord) error {
+			return writeLedgerBytes(temp, row, files)
+		})
+	})
+	if err != nil {
+		return err
+	}
+	if err := files.renameFile(tempPath, path); err != nil {
+		return errors.Join(err, files.removeFile(tempPath))
+	}
+	return files.syncFile(directory)
 }
 
-func syncLedgerDirectory(path string) error {
+func scanLedger(reader io.Reader, visit func([]byte, RunRecord) error) error {
+	input := bufio.NewReader(reader)
+	for rowNumber := 1; ; rowNumber++ {
+		row, err := input.ReadBytes('\n')
+		if errors.Is(err, io.EOF) {
+			if len(row) == 0 {
+				return nil
+			}
+			return fmt.Errorf("parse ledger row %d: missing newline", rowNumber)
+		}
+		if err != nil {
+			return fmt.Errorf("read ledger row %d: %w", rowNumber, err)
+		}
+		if len(row) == 1 {
+			return fmt.Errorf("parse ledger row %d: empty row", rowNumber)
+		}
+		var record RunRecord
+		if err := json.Unmarshal(row[:len(row)-1], &record); err != nil {
+			return fmt.Errorf("parse ledger row %d: %w", rowNumber, err)
+		}
+		if err := visit(row, record); err != nil {
+			return err
+		}
+	}
+}
+
+func syncLedgerDirectory(path string, files ledgerFileOps) error {
 	dir, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	syncErr := ledgerSyncFile(dir)
-	closeErr := ledgerCloseFile(dir)
+	syncErr := files.syncFile(dir)
+	closeErr := files.closeFile(dir)
 	return errors.Join(syncErr, closeErr)
 }
 
 func ReadLedger(root string) ([]RunRecord, error) {
+	return readLedger(root, -1)
+}
+
+func ReadLedgerTail(root string, limit int) ([]RunRecord, error) {
+	if limit < 0 {
+		return nil, errors.New("ledger tail limit must be non-negative")
+	}
+	return readLedger(root, limit)
+}
+
+func readLedger(root string, limit int) (records []RunRecord, err error) {
 	ledgerMu.Lock()
 	defer ledgerMu.Unlock()
-	file, err := os.Open(ledgerPath(root))
+	path := ledgerPath(root)
+	directory, err := os.Open(filepath.Dir(path))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := lockLedger(file, syscall.LOCK_SH); err != nil {
-		return nil, errors.Join(err, file.Close())
+	if err := lockLedger(directory, syscall.LOCK_SH); err != nil {
+		return nil, errors.Join(err, directory.Close())
 	}
-	defer file.Close()
-	var records []RunRecord
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if len(scanner.Bytes()) == 0 {
-			continue
-		}
-		var record RunRecord
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
-			return nil, fmt.Errorf("parse ledger row: %w", err)
-		}
-		records = append(records, record)
+	defer func() {
+		err = errors.Join(err, directory.Close())
+	}()
+
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, nil
 	}
-	if err := scanner.Err(); err != nil {
+	if err != nil {
 		return nil, err
+	}
+	if limit > 0 {
+		records = make([]RunRecord, 0, limit)
+	}
+	next := 0
+	scanErr := scanLedger(file, func(_ []byte, record RunRecord) error {
+		switch {
+		case limit < 0:
+			records = append(records, record)
+		case limit == 0:
+		case len(records) < limit:
+			records = append(records, record)
+		default:
+			records[next] = record
+			next = (next + 1) % limit
+		}
+		return nil
+	})
+	closeErr := file.Close()
+	if err := errors.Join(scanErr, closeErr); err != nil {
+		return nil, err
+	}
+	if next != 0 {
+		slices.Reverse(records[:next])
+		slices.Reverse(records[next:])
+		slices.Reverse(records)
 	}
 	return records, nil
 }
