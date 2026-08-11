@@ -1,66 +1,24 @@
 # Iron Forest
 
-Iron Forest is a self-hosted system that turns Tracker items into reviewed code changes.
-Four independent Flows run in one process and coordinate through git facts and Tracker labels.
+Iron Forest is a self-hosted software factory. It is a small deterministic
+Kernel plus an agent-owned profile, shipped as an appliance. The Kernel handles
+mechanics. The profile declares what agents think and do.
 
-## Flows
+The default profile has Builder, Verifier, and Fixer declarations. A Builder
+turns a ready Tracker Issue into a branch. A Verifier checks and reviews the
+exact Revision. A Fixer repairs a rejected Revision and sends it back for
+review.
 
-Each Flow selects a Subject, performs its Effect, and records a Run.
-Each lane uses its own interval. Admission excludes duplicate work on one Subject across processes and checkouts.
-After each pass, a lane resumes selection after the prior Subject. A retrying Subject cannot starve later work.
+## Quick start
 
-| Flow | Selector | Effects |
-| --- | --- | --- |
-| Builder | Open Tracker items with every required label, without a forest branch, retirement fact, exclude label, or Builder stall at the current Revision. | Creates an isolated worktree, runs the Builder, checks the Gate, and pushes a branch. It publishes the Revision-marked Tracker comment before Host mode records `preparing` recovery state. |
-| Verifier | Recovery retirements; forest branches without a Verdict and without a failing Checks note; approved branches with passing Checks when `auto_merge` is enabled and Fixer attempts remain, or one Host-preparation pass when Host merge is enabled and `auto_merge` is disabled. | Runs the configured Checks, refreshes durable notes, obtains an independent Verdict, upgrades Host retirement intent, recovers exact operator Host merges, and merges approved branches only when `auto_merge` is enabled. |
-| Fixer | Branches with a rejected Verdict or failed Checks below the attempt limit, plus exhausted branches whose human handoff is incomplete. | Runs the Builder on the branch and passes the Gate. One atomic push publishes both the repair and attempt count. An exhausted branch gets `forest:failed` for a human. |
-| Manager | Open Tracker items without a forest branch, retirement fact, ready label, configured exclude label, open blocker, or Builder stall. | Fills the configured ready depth one candidate per pass. It withdraws branchless ready items that become excluded, blocked, failed, or stalled. |
-
-## State
-
-Git stores durable decisions. One installation can run any Flow, and each
-checkout has one daemon process.
-- **Admission:** `refs/forest/claim/` and a per-owner file lock serialize one canonical Subject across processes and checkouts.
-- **Verdict:** `refs/notes/forest/verdict` stores a Verdict on the exact Revision reviewed.
-- **Checks:** `refs/notes/forest/checks` stores the result of Iron Forest's own `checks:` commands on that exact Revision.
-- **Retirement:** `refs/forest/retirement/` stores `preparing`, `pending`, `observed`, or `landed` merge recovery until the Tracker Item and branch retire.
-- **Effect:** `refs/forest/attempt/effect-*` stores Revision-scoped write claims. Accepted Host merges and Tracker closes get separate acceptance claims.
-Manager and Fixer tag updates use Subject admission as intent. Repeating their exact add/remove operation is safe.
-- **Ledger:** `.forest/runs.jsonl` is host telemetry outside git. It records each Run's Flow, Subject, Revision, Status, and review verdict under `review`. It also records measured `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning` classes. It never records or computes money.
-
-A new commit has no Verdict or Checks note, so Iron Forest needs no staleness comparison. Iron Forest never reads a Host's review or check state.
-
-A pull request is an optional Projection for people. `projection.enabled` controls it. Set `projection.merge_via_host` for a protected target branch; this Host path supports only squash merge. Host mode publishes the Builder comment before `preparing` can suppress branch selection. The retirement fact records that completed Effect and upgrades to `pending` after the durable winning Verdict.
-With `auto_merge: false`, the Verifier never requests a merge. A Host merge advances `preparing` or `pending` to `observed` before approval-note read. A merge found without prior intent first records `observed`, then recovers any missing Builder comment. A Verifier-confirmed request advances `pending` directly to `landed`. A read failure retains `observed`. Recovery lands it only after approval and passing Checks.
-Iron Forest reads pull request identity only for idempotent publication and Host retirement recovery. It never treats Host review or check state as a Verdict or Gate.
-Projected Checks and Verdicts use a `COMMENT` review whose `commit_id` is the exact Revision.
-Host merge acceptance is recorded separately from its write claim. Recovery observes an accepted request without issuing it again.
-Completed retirement removes its fact, attempt record, Subject brakes, and Effect claims in one atomic compare-and-delete transaction.
-
-If branch loss hides a Projection before approval is readable, `preparing`, `pending`, or `observed` retirement blocks duplicate Builder work until exact Host state and durable approval join.
-
-## Commands
-
-Run the binary from the repository root. The command surface is:
-
-| Command | Purpose |
-| --- | --- |
-| `forest list` | Print eligible Tracker items. |
-| `forest agents` | List declarations under `agents/` and their digests. |
-| `forest stats [--json]` | Aggregate `.forest/runs.jsonl`; use `--json` for machine output. |
-| `forest serve [--factory-dir <path>] [--flow <name>]...` | Run all enabled Flows, or only the named Flows. |
-| `forest run <flow> <subject>` | Run one Subject by exact key, branch, or item ID. Ambiguous exact matches are refused. |
-| `forest show <sha>` | Print the Verdict and Checks notes for a commit. |
-| `forest version` | Print the binary Revision. |
-| `forest selfcheck` | Verify configuration and agent declarations offline. |
-| `forest watch [--interval 2s]` | Show the operator board. |
-
-## Configuration
-
-`forest.yaml` uses these keys. This is an example composition.
+Create `forest.yaml` in the repository root:
 
 ```yaml
-repo: owner/name                 # required; no default
+repo: misty-step/iron-forest
+agents:
+  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
+  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -68,135 +26,151 @@ checks:
     run: mise exec -- go vet ./...
   - name: test
     run: mise exec -- go test ./...
-flows:
-  builder:
-    enabled: true
-    agent: builder
-    interval_seconds: 30
-    require_labels: [forest:ready]
-    exclude_labels: [parked, forest:failed]
-  verifier:
-    enabled: true
-    agent: verifier
-    interval_seconds: 20
-    merge: squash
-    auto_merge: false
-  fixer:
-    enabled: true
-    agent: builder
-    interval_seconds: 40
-    attempts: 2
-  manager:
-    enabled: true
-    agent: manager
-    interval_seconds: 60
-    ready_depth: 1
-    exclude_labels: [parked, forest:failed]
-projection:
-  enabled: true
-  merge_via_host: false
 ```
 
-`repo` names the Tracker repository. There is no `protected` key: `docs/adr/0003`
-removed it, so the Gate rejects nothing by path and independent review on the
-exact commit is what decides whether a change lands.
+Declare each agent with OMP-compatible files:
 
-Each `agents/<name>/agent.yaml` declares `commit.name` and `commit.email`.
-Builder and Fixer commits use their acting agent's identity. Verifier rebases
-preserve each original author and use the Verifier as committer. A native Git
-squash commit uses the Verifier identity. A Host-projected merge retains the
-Host platform's attribution. The authenticated Host account still pushes
-branches and authors pull requests. A distinct Host actor needs its own
-account or application credential.
+```text
+agents/<name>/agent.md
+agents/<name>/task.md
+```
 
-Attaching a second repository to a running installation is
-`docs/onboarding-managed-repo.md`.
+`agent.md` uses YAML frontmatter with required `model` and optional `tools` and
+`thinking`, followed by the system prompt. `task.md` is the standing user
+prompt. `model`, `tools`, and `thinking` belong to the declaration. OMP provider
+routing is host-managed, not repository configuration.
 
-It never reads a Host check or review.
-Labels such as `exclude_labels` are Tracker inputs, not factory state.
+This quick start uses self-host mode: the factory source checkout is also the
+managed repository. For a separate sibling managed checkout, use the
+[onboarding guide](docs/onboarding-managed-repo.md); its installer builds the
+Kernel from the factory source into that sibling.
 
-Each check runs in a child environment with a private `HOME` and a scrubbed
-`PATH`. Its tools resolve one of two ways, both stack-agnostic:
-
-- **mise-managed tools** with working shims are already reachable on the child
-  `PATH`.
-- **host toolchain directories** outside that `PATH` (for example rustup's
-  `~/.cargo/bin`) are reachable when the operator names them with the
-  `FOREST_CHECK_PATH` environment variable on the host running the Factory, a
-  platform path-list of directories to prepend to the child `PATH`. They sit
-  before the mise shims, so a working host binary wins over a dead shim.
-
-A host binary is often only a proxy that must read toolchain metadata to find
-its real driver (rustup's `cargo` needs `RUSTUP_HOME` to locate the default
-toolchain; with a private empty `HOME` and only the proxy on `PATH` it reports
-"no default is configured"). Name that metadata with `FOREST_CHECK_ENV` on the
-host running the Factory, a newline-separated list of `KEY=VALUE` pairs, one per
-line, added to the check child environment.
-
-Both variables reach only the **check** child, never an agent run: the host
-toolchain mechanism is applied where a managed repo's `checks:` needs to find
-its declared tools, and is withheld from the opencode agent, so neither host
-binaries on `PATH` nor toolchain metadata can bleed into agent reach.
-
-`FOREST_CHECK_ENV` carries only a curated allowlist of metadata variables, and
-drops everything else. Today the single allowlisted variable is `RUSTUP_HOME`,
-which points at the rustup install root (settings and toolchains) and holds no
-credentials. A substring denylist would be unsound — `CI_JOB_JWT`,
-`AWS_ACCESS_KEY_ID`, `KUBECONFIG`, or `GIT_CONFIG_GLOBAL` could slip through,
-and `CARGO_HOME` deliberately is *not* allowlisted because `~/.cargo` holds
-`credentials.toml`, so pointing a check at it would expose the operator's
-registry token. An explicit allowlist is the only defensible boundary: it can
-never be fooled by an unlisted credential name or path, and it keeps the private
-`HOME`, the scrubbed `PATH`, and the managed caches authoritative.
-
-Building the wrong thing is worse than not building: Iron Forest does not guess a
-stack. If a `checks:` command's tool is missing, the check fails and the note
-names the command that could not start.
-
-`flows.builder` selects items. Declaring `require_labels` changes selection from opt-out to opt-in. An open Item then needs every declared label.
-
-An enabled Manager requires `require_labels: [forest:ready]`. This label is its assignment signal.
-
-`flows.verifier.merge` is `squash` or `ff`. `flows.verifier.auto_merge` lets the Verifier merge an approved, passing branch.
-
-When automatic merge is off, a native merge stays disabled. Host mode records `preparing` after the Builder comment and requests no merge.
-
-A Host merge found through inspection advances to `observed` before approval-note read. A Verifier-confirmed merge advances from `pending` to `landed`.
-
-`flows.fixer.attempts` bounds repairs. The Verifier gates branch merges with the same branch attempt record.
-
-Projection keys control the optional human surface.
-
-## Requirements
-
-- Go 1.26.5 through mise.
-- Git with access to the repository.
-- `gh`, the Host CLI used for Tracker items and Projections.
-- A provider key for the configured Runner.
-Provider usage is bounded by the provider key outside Iron Forest.
-
-Build and run with the pinned toolchain:
+Build with the pinned toolchain and validate local configuration:
 
 ```sh
 mise exec -- go build -o forest .
-./forest serve --factory-dir /path/to/iron-forest
+./forest selfcheck
 ```
 
-Omit `--factory-dir` to disable self-update.
+`forest selfcheck` validates `forest.yaml` and declaration frontmatter locally.
+The read-only Auditor runs after each completed agent dispatch. Starting the
+Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
 
-`forest serve` reads `forest.yaml` before each Flow pass. A committed configuration change takes effect without a process restart.
+Start the Kernel:
 
-The first termination signal stops new Effects and lets current Effects finish. A second signal kills managed process groups and exits without waiting for repository I/O. The next startup reaps linked worktrees before any Flow starts.
+```sh
+./forest serve
+```
 
-Self-update waits until every Flow Effect is idle. It installs the tested binary and exits so the service supervisor can restart it. Deployed instances also serialize access to their shared factory source checkout.
+Use exactly one Kernel checkout and process per repository. Its OS lock rejects
+a second process in that checkout. It does not coordinate another checkout or
+clone. Every Poll has a fixed 60-second deadline. The configured declaration timeout
+separately bounds worktree preparation and agent execution. Runner cleanup has
+a separate 10-second bound. A completed dispatch starts an audit with a
+separate 60-second bound. The systemd unit has a separate 3900-second service
+drain bound. This bound covers the shipped declarations' concurrent Runs,
+bounded Runner cleanup, and serialized post-dispatch audits.
+The user service receives
+`PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin`. Before restart, the
+installer runs selfcheck with the equivalent `$HOME`-expanded path.
 
-## Ledger and board
+A trusted declaration runs with the operating-system user's configured
+credentials and filesystem access. Worktree separation and time bounds are
+operational boundaries, not a security sandbox. Stronger credential and process
+containment belongs to the deployment substrate.
 
-`forest stats` reads `.forest/runs.jsonl` and prints totals and breakdowns. `forest stats --json` emits machine-readable ledger data.
-`Status` is a Flow routing result. Summaries classify `built`, `reviewed`, `merged`, `fixed`, `done`, and `reaped` as progress. They classify any `*_failed` value as failed. Every other value is other.
+## Git coordination
 
-`forest watch` reads Runs, tracked worktrees, git HEAD, and daemon state.
-It shows each Flow and recent Effects.
+Git is the coordination authority. Branches, commits, and notes under
+`refs/notes/forest/*` hold workflow state. GitHub is the day-one forge adapter;
+pull requests are disposable human Projections, never authority.
+
+Every record binds to an exact Revision. The schema and writer sets are defined
+in [ADR 0009](docs/adr/0009-git-coordination-authority.md): Builder and Fixer
+write review requests, while Verifier writes Checks and Verdict notes.
+
+Notes are write-once. Agents write each JSON payload to a temporary file, add it
+with `git notes ... add -F`, and never use force. Builder and Fixer publish the
+branch and review-request note through one normal `git push --atomic`. Their
+canonical note race recovery permits at most three total atomic attempts; a
+branch race stops. For a `changes` Verdict, the Verifier publishes Checks and
+Verdict together and permits at most three total atomic attempts after a
+canonical note race. For `approve`, the Verifier makes exactly one
+non-retryable atomic attempt carrying Checks, Verdict, and the exact
+fast-forward `master` advance. The existing review-request remains durable Gate
+evidence; no standalone master push is valid. See [ADR
+0009](docs/adr/0009-git-coordination-authority.md) for the absent-ref and
+bounded retry protocol.
+
+Agents own workflow Effects. The Kernel never writes workflow notes or merges a
+branch. See [managed-repository onboarding](docs/onboarding-managed-repo.md)
+for the operator procedure.
+
+## Poll protocol
+
+A Poll is a yes-or-no trigger. It passes no context; the agent selects its
+Subject during the Run. Builder, Verifier, and Fixer each have a disjoint Poll
+command. Exit 0 dispatches work, exit 1 is a healthy skip, and exit greater
+than 1, timeout, or malformed behavior records an unhealthy trigger. See
+[ADR 0012](docs/adr/0012-poll-trigger-protocol.md) and the
+[onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
+
+## Merge Gate
+
+The Gate requires exactly one valid Builder-or-Fixer review-request, passing
+Checks, and an approving Verdict for the same exact Revision, plus a
+fast-forward of `master` to that Revision. The approve publication is one atomic
+push containing Checks, Verdict, and the exact `master` advance. The existing
+review-request is not republished. The merge never uses force. The Gate is a
+profile contract. Except for the trusted first `master` baseline, the Auditor
+checks its observable final state after the Effect; it does not enforce it. See [ADR
+0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md) for the Gate and its
+accepted client-side risks.
+
+## Auditor and trust boundary
+
+The Kernel Auditor is read-only. The first observed remote `master` tip becomes
+a trusted baseline and is not Gate-checked. In each bounded stable snapshot,
+ancestry and Gate checks target only the final observed remote `master` tip.
+Schema and actor checks still cover every entry in every snapshotted
+`refs/notes/forest/*` ref, including the baseline snapshot. Remote history
+cannot reveal a tip that advanced again between audits; such intermediate tips
+are not independently Gate-checked. The audit covers only observable final Git
+state. It cannot prove check execution, atomic push ordering, or force absence.
+
+The Auditor runs after a completed dispatch. It logs violations and marks the
+last audit as `violations` in `forest status`; it never blocks a merge. Startup
+and idle Poll skips do not start an audit.
+
+Day-one worktree separation and time bounds do not hide operating-system
+credentials, filesystem access, or network access from a trusted declaration.
+Deployment supplies any stronger process or credential containment.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `forest serve` | Poll and dispatch enabled declarations. |
+| `forest once <agent>` | Poll once, then dispatch that declaration only when the Poll exits 0. |
+| `forest poll <agent>` | Evaluate one declaration's trigger. |
+| `forest status` | Show trigger health, live runs, the last audit result, and recent runs. |
+| `forest selfcheck` | Validate `forest.yaml` and declarations locally. |
+
+## Development
+
+Use `master` as the target branch. The repository's `checks:` commands must
+match `.github/workflows/ci.yml`.
+
+```sh
+mise exec -- go build ./...
+mise exec -- go vet ./...
+mise exec -- go test ./...
+```
+
+The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
+`agent`), timing (`started` and `duration`), `exit`, and the token classes
+`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning`. It never
+records or computes money.
 
 ## License
 

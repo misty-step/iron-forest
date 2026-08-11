@@ -1,14 +1,7 @@
 # iron-forest systemd --user template unit.
 #
-# One instance per managed checkout: `systemctl --user start forest@<name>`,
-# where <name> is a sibling directory of the factory source. One organization
-# runs one installation, and the organization's checkout directory is its root.
-#
-# Instances share the factory source and nothing else: separate process, config,
-# refs, worktrees and ledger. A stuck agent in one repository cannot stall
-# another, which is why this needs no supervisor and no central policy.
-#
-# @FOREST_ROOT@ and @FACTORY_DIR@ are replaced by deploy/install-service.sh.
+# One instance runs one managed checkout: `systemctl --user start forest@<name>`.
+# @FOREST_ROOT@ is replaced by deploy/install-service.sh.
 
 [Unit]
 Description=iron-forest factory daemon for %i
@@ -18,13 +11,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@FOREST_ROOT@/%i
-ExecStart=@FOREST_ROOT@/%i/forest serve --factory-dir @FACTORY_DIR@
+ExecStart=@FOREST_ROOT@/%i/forest serve
 Restart=always
 RestartSec=10
-# A draining pass must finish its in-flight agent before systemd stops it.
-TimeoutStopSec=infinity
-# mise shims keep the pinned toolchain available to self-update.
-Environment=PATH=%h/.local/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
+# Signal only the Kernel first; systemd may kill the cgroup after the drain bound.
+KillMode=mixed
+# 3900 seconds covers concurrent declared Runs, Runner cleanup, and serialized audits.
+TimeoutStopSec=3900
+# Match install-service.sh's selfcheck PATH; ExecStart names the managed binary absolutely.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target

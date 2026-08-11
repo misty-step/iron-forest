@@ -7,265 +7,181 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
-	"strings"
 )
 
-const (
-	// DefaultAgentsDir is where agent declarations live, one directory each.
-	DefaultAgentsDir = "agents"
-	// WorkspaceDir holds the ledger, traces, and per-run worktrees.
-	WorkspaceDir = ".forest"
-	// BranchPrefix names every branch a flow creates.
-	BranchPrefix = "forest/"
+const workspaceName = ".forest"
 
-	// failedLabel is the human hint a lane leaves when a subject needs a person.
-	// It is a tracker convenience, never state the factory reads back.
-	failedLabel = "forest:failed"
-	// readyTag is the opt-in label the Manager lays on one unstarted item so the
-	// Builder (which requires it) can act. It is exactly the tag forest.yaml
-	// declares for the Builder's require_labels.
-	readyTag = "forest:ready"
-)
+var repoNamePattern = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
-// configPath is the composition file for a checkout.
-func configPath(repoDir string) string { return filepath.Join(repoDir, "forest.yaml") }
-
-// workspaceDir is where a checkout keeps its ledger, traces, and worktrees.
-func workspaceDir(repoDir string) string { return filepath.Join(repoDir, WorkspaceDir) }
-
-// Config is forest.yaml: the work source, the checks the factory runs itself,
-// the flows that are on, and the optional human-facing projection. It withholds
-// no path from an agent; docs/adr/0003 removed the protected-path list.
 type Config struct {
-	Repo       string           `yaml:"repo"`
-	Checks     []Check          `yaml:"checks"`
-	Flows      Flows            `yaml:"flows"`
-	Projection ProjectionConfig `yaml:"projection"`
+	Repo   string                 `yaml:"repo"`
+	Agents map[string]AgentConfig `yaml:"agents"`
+	Checks []Check                `yaml:"checks"`
 }
 
-// Check is one command the factory runs itself against a worktree. The result
-// is a fact the factory writes to a note, not a status it reads from a host.
+type AgentConfig struct {
+	Poll     string `yaml:"poll"`
+	Interval int    `yaml:"interval"`
+	Timeout  int    `yaml:"timeout"`
+}
+
 type Check struct {
 	Name string `yaml:"name"`
 	Run  string `yaml:"run"`
 }
 
-// Flows declares the lanes. Each lane runs independently, on its own clock,
-// coordinating through repository state and notes.
-type Flows struct {
-	Builder  BuilderFlowCfg  `yaml:"builder"`
-	Verifier VerifierFlowCfg `yaml:"verifier"`
-	Fixer    FixerFlowCfg    `yaml:"fixer"`
-	Manager  ManagerFlowCfg  `yaml:"manager"`
-}
+type yamlInt int
 
-// FlowCfg is what every lane declares: whether it is on, which agent it runs,
-// and how long it sleeps between passes.
-type FlowCfg struct {
-	Enabled     bool   `yaml:"enabled"`
-	Agent       string `yaml:"agent"`
-	IntervalSec int    `yaml:"interval_seconds"`
-}
-
-// BuilderFlowCfg turns tracker items into branches. ExcludeLabels are the
-// tracker-side signals that make an item ineligible; they are a convenience of
-// the current tracker, not part of the factory's state. RequireLabels, when
-// non-empty, switches selection from opt-out to opt-in: an open item is
-// eligible only when it carries every required label. ExcludeLabels
-// composes with the opt-in, so a braked item stays ineligible. An empty
-// RequireLabels keeps the opt-out selection unchanged.
-type BuilderFlowCfg struct {
-	FlowCfg       `yaml:",inline"`
-	ExcludeLabels []string `yaml:"exclude_labels"`
-	RequireLabels []string `yaml:"require_labels"`
-}
-
-// VerifierFlowCfg reviews branches and owns the merge. Merge names the history
-// shape: squash keeps one commit per subject on the target branch; ff keeps the
-// branch's own commits and refuses when the branch is behind. AutoMerge gates
-// the merge effect itself, so a factory can review without merging.
-type VerifierFlowCfg struct {
-	FlowCfg   `yaml:",inline"`
-	Merge     string `yaml:"merge"`
-	AutoMerge bool   `yaml:"auto_merge"`
-}
-
-// FixerFlowCfg repairs branches that were rejected or failed their checks.
-// Attempts bounds how many repairs one branch may receive before it waits for
-// a human.
-type FixerFlowCfg struct {
-	FlowCfg  `yaml:",inline"`
-	Attempts int `yaml:"attempts"`
-}
-
-// ManagerFlowCfg keeps unstarted assignments in the ready queue. It judges
-// only the candidate set that deterministic code has filtered and applies one
-// ready label to one pick per pass. ReadyDepth is the number of unbranched,
-// ready-labeled items the lane keeps in flight. ExcludeLabels are Tracker
-// signals that make an item ineligible, as for the Builder Flow.
-type ManagerFlowCfg struct {
-	FlowCfg       `yaml:",inline"`
-	ReadyDepth    int      `yaml:"ready_depth"`
-	ExcludeLabels []string `yaml:"exclude_labels"`
-}
-
-// ProjectionConfig is the optional human surface. Iron Forest reads pull-request
-// identity for idempotent publication and exact Host-merge recovery. It never
-// treats Host reviews or checks as factory state. MergeViaHost supports a
-// protected target branch where only the Host may merge.
-type ProjectionConfig struct {
-	Enabled      bool `yaml:"enabled"`
-	MergeViaHost bool `yaml:"merge_via_host"`
-}
-
-func defaultConfig() Config {
-	return Config{
-		Flows: Flows{
-			Builder: BuilderFlowCfg{
-				FlowCfg:       FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 30},
-				ExcludeLabels: []string{"parked", failedLabel},
-			},
-			Verifier: VerifierFlowCfg{
-				FlowCfg: FlowCfg{Enabled: true, Agent: "verifier", IntervalSec: 20},
-				Merge:   "squash", AutoMerge: false,
-			},
-			Fixer: FixerFlowCfg{
-				FlowCfg: FlowCfg{Enabled: true, Agent: "builder", IntervalSec: 40},
-				// A repair loop that keeps producing new commits is working, so this
-				// ceiling is a runaway guard, not a policy on how many passes a fix
-				// may take. Progress on one revision is bounded separately.
-				Attempts: 10,
-			},
-			// The Manager is opt-in: it is disabled until an operator declares it.
-			// Its report contract (a single "pick") is the Manager's own, so an
-			// omitted agent defaults to the manager declaration, never the builder
-			// whose one-file report that lane cannot read.
-			Manager: ManagerFlowCfg{
-				FlowCfg:       FlowCfg{Enabled: false, Agent: "manager", IntervalSec: 60},
-				ReadyDepth:    1,
-				ExcludeLabels: []string{"parked", failedLabel},
-			},
-		},
-		Projection: ProjectionConfig{Enabled: true, MergeViaHost: false},
+func (i *yamlInt) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
+		return fmt.Errorf("must be a YAML integer scalar, got %s", value.ShortTag())
 	}
+	decoded, err := strconv.ParseInt(value.Value, 0, strconv.IntSize)
+	if err != nil {
+		return fmt.Errorf("YAML integer scalar %q is outside the Go int range: %w", value.Value, err)
+	}
+	*i = yamlInt(decoded)
+	return nil
+}
+
+type configYAML struct {
+	Repo   yamlString                      `yaml:"repo"`
+	Agents map[*yamlString]agentConfigYAML `yaml:"agents"`
+	Checks []checkYAML                     `yaml:"checks"`
+}
+
+type agentConfigYAML struct {
+	Poll     yamlString `yaml:"poll"`
+	Interval yamlInt    `yaml:"interval"`
+	Timeout  yamlInt    `yaml:"timeout"`
+}
+
+type checkYAML struct {
+	Name yamlString `yaml:"name"`
+	Run  yamlString `yaml:"run"`
+}
+
+func configPath(root string) string { return filepath.Join(root, "forest.yaml") }
+func forestPath(root string, parts ...string) string {
+	return filepath.Join(append([]string{root, workspaceName}, parts...)...)
 }
 
 func loadConfig(path string) (Config, error) {
-	cfg := defaultConfig()
-	b, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, fmt.Errorf("read %s: %w", path, err)
+		return Config{}, err
 	}
-	// Unknown keys are a configuration error, not a default. A retired setting
-	// left in place would otherwise look effective while doing nothing.
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
-		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	return decodeConfig(data, path)
+}
+
+func decodeConfig(data []byte, source string) (Config, error) {
+	var document configYAML
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&document); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", source, err)
 	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
 		if err != nil {
-			return cfg, fmt.Errorf("parse %s: %w", path, err)
+			return Config{}, fmt.Errorf("parse %s: %w", source, err)
 		}
-		return cfg, fmt.Errorf("parse %s: multiple YAML documents are not allowed", path)
+		return Config{}, fmt.Errorf("parse %s: multiple YAML documents", source)
 	}
-	if cfg.Repo == "" {
-		return cfg, fmt.Errorf("%s: repo is required", path)
-	}
-	parts := strings.Split(cfg.Repo, "/")
-	if strings.TrimSpace(cfg.Repo) != cfg.Repo || strings.ContainsAny(cfg.Repo, " \t\r\n") ||
-		strings.HasSuffix(strings.ToLower(cfg.Repo), ".git") ||
-		len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return cfg, fmt.Errorf("%s: repo must have canonical owner/name form", path)
-	}
-	d := defaultConfig()
-	// The checks are the gate, and only this repository knows how to build and
-	// test itself. A factory that guessed a toolchain would verify the wrong
-	// thing, so an undeclared gate is a configuration error.
-	if len(cfg.Checks) == 0 {
-		return cfg, fmt.Errorf("%s: at least one check is required", path)
-	}
-	if cfg.Flows.Builder.Agent == "" {
-		cfg.Flows.Builder.Agent = d.Flows.Builder.Agent
-	}
-	if cfg.Flows.Verifier.Agent == "" {
-		cfg.Flows.Verifier.Agent = d.Flows.Verifier.Agent
-	}
-	if cfg.Flows.Fixer.Agent == "" {
-		cfg.Flows.Fixer.Agent = d.Flows.Fixer.Agent
-	}
-	if cfg.Flows.Manager.Agent == "" {
-		cfg.Flows.Manager.Agent = d.Flows.Manager.Agent
-	}
-	if cfg.Flows.Builder.IntervalSec <= 0 {
-		cfg.Flows.Builder.IntervalSec = d.Flows.Builder.IntervalSec
-	}
-	if cfg.Flows.Verifier.IntervalSec <= 0 {
-		cfg.Flows.Verifier.IntervalSec = d.Flows.Verifier.IntervalSec
-	}
-	if cfg.Flows.Fixer.IntervalSec <= 0 {
-		cfg.Flows.Fixer.IntervalSec = d.Flows.Fixer.IntervalSec
-	}
-	switch cfg.Flows.Verifier.Merge {
-	case "":
-		cfg.Flows.Verifier.Merge = d.Flows.Verifier.Merge
-	case "squash", "ff":
-	default:
-		return cfg, fmt.Errorf("%s: merge must be squash or ff, got %q", path, cfg.Flows.Verifier.Merge)
-	}
-	if cfg.Projection.MergeViaHost && cfg.Flows.Verifier.Merge != "squash" {
-		return cfg, fmt.Errorf("%s: merge_via_host supports only squash merge", path)
-	}
-	if cfg.Projection.MergeViaHost && !cfg.Projection.Enabled {
-		return cfg, fmt.Errorf("%s: merge_via_host requires projection.enabled", path)
-	}
-	if cfg.Flows.Fixer.Attempts <= 0 {
-		cfg.Flows.Fixer.Attempts = d.Flows.Fixer.Attempts
-	}
-	if cfg.Flows.Manager.IntervalSec <= 0 {
-		cfg.Flows.Manager.IntervalSec = d.Flows.Manager.IntervalSec
-	}
-	if cfg.Flows.Manager.ReadyDepth <= 0 {
-		cfg.Flows.Manager.ReadyDepth = d.Flows.Manager.ReadyDepth
-	}
-	if len(cfg.Flows.Manager.ExcludeLabels) == 0 {
-		cfg.Flows.Manager.ExcludeLabels = d.Flows.Manager.ExcludeLabels
-	}
-	if cfg.Flows.Manager.Enabled {
-		if len(cfg.Flows.Builder.RequireLabels) != 1 || cfg.Flows.Builder.RequireLabels[0] != readyTag {
-			return cfg, fmt.Errorf("%s: enabled Manager requires Builder require_labels [%s]", path, readyTag)
-		}
-		for _, label := range cfg.Flows.Builder.ExcludeLabels {
-			if label == readyTag {
-				return cfg, fmt.Errorf("%s: enabled Manager requires %s to remain eligible for Builder", path, readyTag)
+	cfg := Config{Repo: string(document.Repo)}
+	if document.Agents != nil {
+		cfg.Agents = make(map[string]AgentConfig, len(document.Agents))
+		for name, agent := range document.Agents {
+			if name == nil {
+				return Config{}, fmt.Errorf("parse %s: agent name must be a YAML string scalar, got !!null", source)
 			}
-		}
-		for _, label := range cfg.Flows.Manager.ExcludeLabels {
-			if label == readyTag {
-				return cfg, fmt.Errorf("%s: enabled Manager cannot exclude its assignment label %s", path, readyTag)
-			}
-		}
-		for _, builderLabel := range cfg.Flows.Builder.ExcludeLabels {
-			inManager := false
-			for _, managerLabel := range cfg.Flows.Manager.ExcludeLabels {
-				if managerLabel == builderLabel {
-					inManager = true
-					break
-				}
-			}
-			if !inManager {
-				return cfg, fmt.Errorf("%s: enabled Manager exclude_labels must include Builder exclusion %q",
-					path, builderLabel)
+			cfg.Agents[string(*name)] = AgentConfig{
+				Poll:     string(agent.Poll),
+				Interval: int(agent.Interval),
+				Timeout:  int(agent.Timeout),
 			}
 		}
 	}
-	for i, c := range cfg.Checks {
-		if strings.TrimSpace(c.Name) == "" || strings.TrimSpace(c.Run) == "" {
-			return cfg, fmt.Errorf("%s: checks[%d] needs a non-empty name and run", path, i)
+	if document.Checks != nil {
+		cfg.Checks = make([]Check, len(document.Checks))
+		for i, check := range document.Checks {
+			cfg.Checks[i] = Check{Name: string(check.Name), Run: string(check.Run)}
 		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("validate %s: %w", source, err)
 	}
 	return cfg, nil
+}
+
+const maxDurationSeconds = (1<<63 - 1) / int64(time.Second)
+
+func durationFromSeconds(seconds int) (time.Duration, error) {
+	if seconds <= 0 {
+		return 0, fmt.Errorf("seconds must be greater than zero")
+	}
+	if int64(seconds) > maxDurationSeconds {
+		return 0, fmt.Errorf("seconds overflow time.Duration: %d", seconds)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func (c Config) Validate() error {
+	if !repoNamePattern.MatchString(c.Repo) {
+		return fmt.Errorf("repo must have owner/name shape: %q", c.Repo)
+	}
+	if len(c.Agents) == 0 {
+		return errors.New("agents must not be empty")
+	}
+	for name, agent := range c.Agents {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("agent name must not be empty")
+		}
+		if strings.TrimSpace(agent.Poll) == "" {
+			return fmt.Errorf("agent %q poll is required", name)
+		}
+		if agent.Interval <= 0 {
+			return fmt.Errorf("agent %q interval must be greater than zero", name)
+		}
+		if _, err := durationFromSeconds(agent.Interval); err != nil {
+			return fmt.Errorf("agent %q interval: %w", name, err)
+		}
+		if agent.Timeout <= 0 {
+			return fmt.Errorf("agent %q timeout must be greater than zero", name)
+		}
+		if _, err := durationFromSeconds(agent.Timeout); err != nil {
+			return fmt.Errorf("agent %q timeout: %w", name, err)
+		}
+	}
+	seen := make(map[string]struct{}, len(c.Checks))
+	for i, check := range c.Checks {
+		name := strings.TrimSpace(check.Name)
+		if name == "" {
+			return fmt.Errorf("check %d name is required", i+1)
+		}
+		if strings.TrimSpace(check.Run) == "" {
+			return fmt.Errorf("check %q run is required", name)
+		}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("check %q is duplicated", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
+func agentNames(cfg Config) []string {
+	names := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

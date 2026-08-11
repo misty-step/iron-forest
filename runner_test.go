@@ -1,58 +1,322 @@
 package main
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestRunChecksHardStopKillsDescendants(t *testing.T) {
-	defer func() {
-		runProcesses.Lock()
-		runProcesses.stopping = false
-		runProcesses.Unlock()
-	}()
-	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
-	stop := make(chan error, 1)
-	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			if body, err := os.ReadFile(heartbeat); err == nil && len(body) > 0 {
-				break
-			}
-			if time.Now().After(deadline) {
-				stop <- errors.New("check descendant did not start")
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
+func TestRunnerWorktreeOMPAndLedger(t *testing.T) {
+	root, _ := testClone(t)
+	omp := filepath.Join(t.TempDir(), "omp")
+	argsFile := filepath.Join(t.TempDir(), "args")
+	t.Setenv("ARGS_FILE", argsFile)
+	t.Setenv("GIT_AUTHOR_NAME", "Wrong")
+	t.Setenv("GIT_AUTHOR_EMAIL", "wrong@example.invalid")
+	t.Setenv("GIT_COMMITTER_NAME", "Wrong")
+	t.Setenv("GIT_COMMITTER_EMAIL", "wrong@example.invalid")
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$ARGS_FILE"
+printf identity > identity.txt
+git add identity.txt
+git commit -m identity >/dev/null
+test "$(git log -1 --format='%an <%ae>')" = "Iron Forest Verifier <verifier@forest.invalid>"
+printf '%s\n' '{"type":"message_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
+printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
+printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"cacheRead":17,"cacheWrite":19}}}'
+`
+	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.OMPPath = omp
+	decl := Declaration{Name: "verifier", Model: "local", Tools: StringList{"read", "bash"}, SystemPrompt: "system", TaskPrompt: "Reply"}
+	record, err := runner.Run(context.Background(), decl, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Exit != 0 || record.TokensIn != 13 || record.TokensOut != 16 || record.CacheRead != 22 || record.CacheWrite != 26 {
+		t.Fatalf("record=%#v", record)
+	}
+	if name := strings.TrimSpace(string(runGitDir(t, root, "config", "--get", "user.name"))); name != "Builder" {
+		t.Fatalf("root user.name=%q", name)
+	}
+	if email := strings.TrimSpace(string(runGitDir(t, root, "config", "--get", "user.email"))); email != "builder@forest.invalid" {
+		t.Fatalf("root user.email=%q", email)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply"} {
+		if !strings.Contains(string(args), value) {
+			t.Fatalf("OMP args missing %q:\n%s", value, args)
 		}
-		if errs := hardStopRunCommands(); len(errs) != 0 {
-			stop <- fmt.Errorf("hard stop: %v", errs)
+	}
+	rows, err := ReadLedger(root)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("ledger rows=%v err=%v", rows, err)
+	}
+	logInfo, err := os.Stat(forestPath(root, "runs", record.RunID+".log"))
+	if err != nil || logInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("run log mode=%v info=%v, want 0600", err, logInfo)
+	}
+	entries, err := os.ReadDir(forestPath(root, "worktrees"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("worktrees not cleaned: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
+	root, _ := testClone(t)
+	omp := filepath.Join(t.TempDir(), "omp")
+	if err := os.WriteFile(omp, []byte("#!/bin/sh\nprintf '%s\\n' '{\"usage\":{\"input\":-1}}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.OMPPath = omp
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	if err == nil || !strings.Contains(err.Error(), "parse OMP usage") || !strings.Contains(err.Error(), "nonnegative") {
+		t.Fatalf("invalid usage record=%#v err=%v", record, err)
+	}
+	if record.Exit != 1 {
+		t.Fatalf("invalid usage exit=%d, want 1", record.Exit)
+	}
+	rows, ledgerErr := ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
+		t.Fatalf("invalid usage ledger=%v err=%v, want one failing row", rows, ledgerErr)
+	}
+	if rows[0].TokensIn != 0 || rows[0].TokensOut != 0 || rows[0].CacheRead != 0 || rows[0].CacheWrite != 0 || rows[0].Reasoning != 0 {
+		t.Fatalf("invalid usage leaked into ledger: %#v", rows[0])
+	}
+	if _, statErr := os.Stat(forestPath(root, "worktrees", record.RunID)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("invalid usage worktree survived: %v", statErr)
+	}
+}
+
+func TestRunnerRejectsUsageWithoutRecognizedAlias(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		usage string
+	}{
+		{name: "empty", usage: `{}`},
+		{name: "unknown only", usage: `{"future_tokens":1}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _ := testClone(t)
+			omp := filepath.Join(t.TempDir(), "omp")
+			script := "#!/bin/sh\nprintf '%s\\n' '{\"usage\":" + test.usage + "}'\n"
+			if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runner := NewRunner(root)
+			runner.OMPPath = omp
+			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+			if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "parse OMP usage") {
+				t.Fatalf("drifted usage record=%#v err=%v", record, err)
+			}
+			rows, ledgerErr := ReadLedger(root)
+			if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
+				t.Fatalf("drifted usage ledger=%v err=%v, want one failing row", rows, ledgerErr)
+			}
+		})
+	}
+}
+
+func TestParseOMPUsageAggregatesTurnsAfterLargeRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "omp.jsonl")
+	data := `{"type":"message_update","payload":"` + strings.Repeat("x", 128*1024) + `"}` + "\n" +
+		`{"type":"message_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}` + "\n" +
+		`{"type":"turn_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}` + "\n" +
+		`{"type":"turn_end","message":{"usage":{"input":11,"output":13,"cacheRead":17,"cacheWrite":19,"reasoningTokens":23}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := parseOMPUsage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage != (Usage{TokensIn: 13, TokensOut: 16, CacheRead: 22, CacheWrite: 26, Reasoning: 23}) {
+		t.Fatalf("usage=%#v", usage)
+	}
+}
+
+func TestParseOMPUsagePreservesExactIntegers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "omp.jsonl")
+	data := `{"usage":{"input":9007199254740993,"output":9223372036854775807,"cacheRead":0}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := parseOMPUsage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.TokensIn != 9007199254740993 || usage.TokensOut != 9223372036854775807 {
+		t.Fatalf("usage=%#v", usage)
+	}
+}
+
+func TestParseOMPUsageRejectsInvalidNumbers(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "fraction", value: "1.5"},
+		{name: "negative", value: "-1"},
+		{name: "int64 overflow", value: "9223372036854775808"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "omp.jsonl")
+			data := `{"usage":{"input":` + test.value + `}}`
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if usage, err := parseOMPUsage(path); err == nil {
+				t.Fatalf("accepted usage %#v", usage)
+			}
+		})
+	}
+}
+
+func TestParseOMPUsageRejectsEveryAggregateOverflow(t *testing.T) {
+	for _, key := range []string{"input", "output", "cacheRead", "cacheWrite", "reasoning"} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "omp.jsonl")
+			data := `{"type":"turn_end","message":{"usage":{"` + key + `":9223372036854775807}}}` + "\n" +
+				`{"type":"turn_end","message":{"usage":{"` + key + `":1}}}`
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if usage, err := parseOMPUsage(path); err == nil {
+				t.Fatalf("accepted overflowing %s usage %#v", key, usage)
+			}
+		})
+	}
+}
+
+func TestParseOMPUsageAllowsEveryAggregateMaxPlusZero(t *testing.T) {
+	const max = int64(^uint64(0) >> 1)
+	for _, key := range []string{"input", "output", "cacheRead", "cacheWrite", "reasoning"} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "omp.jsonl")
+			data := `{"type":"turn_end","message":{"usage":{"` + key + `":9223372036854775807}}}` + "\n" +
+				`{"type":"turn_end","message":{"usage":{"` + key + `":0}}}`
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			usage, err := parseOMPUsage(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got int64
+			switch key {
+			case "input":
+				got = usage.TokensIn
+			case "output":
+				got = usage.TokensOut
+			case "cacheRead":
+				got = usage.CacheRead
+			case "cacheWrite":
+				got = usage.CacheWrite
+			case "reasoning":
+				got = usage.Reasoning
+			}
+			if got != max {
+				t.Fatalf("%s max-plus-zero=%d, want %d", key, got, max)
+			}
+		})
+	}
+}
+
+func TestRunnerDirectTimeoutBoundaries(t *testing.T) {
+	for _, timeoutSeconds := range []int{-1, 0} {
+		t.Run(strconv.Itoa(timeoutSeconds), func(t *testing.T) {
+			root, _ := testClone(t)
+			record, err := NewRunner(root).Run(context.Background(), Declaration{Name: "builder"}, timeoutSeconds)
+			if err == nil || record != (RunRecord{}) {
+				t.Fatalf("timeout %d record=%#v err=%v", timeoutSeconds, record, err)
+			}
+			rows, ledgerErr := ReadLedger(root)
+			if ledgerErr != nil || len(rows) != 0 {
+				t.Fatalf("timeout %d ledger=%v err=%v", timeoutSeconds, rows, ledgerErr)
+			}
+		})
+	}
+	t.Run("1", func(t *testing.T) {
+		root, _ := testClone(t)
+		omp := filepath.Join(t.TempDir(), "omp")
+		if err := os.WriteFile(omp, []byte("#!/bin/sh\nprintf '%s\\n' '{\"usage\":{\"input\":0}}'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runner := NewRunner(root)
+		runner.OMPPath = omp
+		record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
+		if err != nil || record.Exit != 0 {
+			t.Fatalf("timeout 1 record=%#v err=%v", record, err)
+		}
+		rows, ledgerErr := ReadLedger(root)
+		if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 {
+			t.Fatalf("timeout 1 ledger=%v err=%v", rows, ledgerErr)
+		}
+	})
+}
+
+func TestRunnerRejectsOverflowingDirectTimeout(t *testing.T) {
+	if int64(^uint(0)>>1) <= maxDurationSeconds {
+		t.Skip("int cannot represent an overflowing duration")
+	}
+	root, _ := testClone(t)
+	timeoutSeconds := int(maxDurationSeconds + 1)
+	record, err := NewRunner(root).Run(context.Background(), Declaration{Name: "builder"}, timeoutSeconds)
+	if err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("overflow timeout record=%#v err=%v", record, err)
+	}
+	if record != (RunRecord{}) {
+		t.Fatalf("overflow timeout started a run: %#v", record)
+	}
+	rows, readErr := ReadLedger(root)
+	if readErr != nil || len(rows) != 0 {
+		t.Fatalf("overflow timeout ledger=%v err=%v", rows, readErr)
+	}
+}
+
+func processHeartbeatFixture(t *testing.T) (string, string) {
+	t.Helper()
+	state := t.TempDir()
+	heartbeat := filepath.Join(state, "heartbeat")
+	childPID := filepath.Join(state, "child-pid")
+	t.Setenv("HEARTBEAT", heartbeat)
+	t.Setenv("CHILD_PID", childPID)
+	t.Cleanup(func() {
+		body, err := os.ReadFile(childPID)
+		if err != nil {
 			return
 		}
-		stop <- nil
-	}()
+		pid, err := strconv.Atoi(strings.TrimSpace(string(body)))
+		if err != nil || pid <= 1 {
+			return
+		}
+		process, err := os.FindProcess(pid)
+		if err == nil {
+			_ = process.Kill()
+		}
+	})
+	return state, heartbeat
+}
 
-	note, err := runChecks(Config{Checks: []Check{{
-		Name: "blocking",
-		Run:  "(while :; do printf x >> '" + heartbeat + "'; sleep 0.05; done) & wait",
-	}}}, t.TempDir(), "run-hard-stop")
-	if err != nil {
-		t.Fatalf("runChecks: %v", err)
-	}
-	if stopErr := <-stop; stopErr != nil {
-		t.Fatal(stopErr)
-	}
-	if note.Status != "fail" {
-		t.Fatalf("hard-stopped check status = %q, want fail", note.Status)
-	}
+func assertProcessQuiescent(t *testing.T, heartbeat, subject, stoppedBy string) {
+	t.Helper()
 	before, err := os.ReadFile(heartbeat)
 	if err != nil || len(before) == 0 {
-		t.Fatalf("check descendant produced no heartbeat: %d bytes, %v", len(before), err)
+		t.Fatalf("%s produced no heartbeat: %d bytes, %v", subject, len(before), err)
 	}
 	time.Sleep(300 * time.Millisecond)
 	after, err := os.ReadFile(heartbeat)
@@ -60,173 +324,635 @@ func TestRunChecksHardStopKillsDescendants(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(after) != len(before) {
-		t.Fatalf("check descendant survived hard stop: heartbeat grew from %d to %d bytes", len(before), len(after))
+		t.Fatalf("%s survived %s: heartbeat grew from %d to %d bytes", subject, stoppedBy, len(before), len(after))
 	}
 }
 
-func TestRunChecksAllPassing(t *testing.T) {
-	cfg := Config{Checks: []Check{
-		{Name: "first", Run: "exit 0"},
-		{Name: "second", Run: "printf ok"},
-	}}
+func TestRunnerStopsGroupChildAfterLeaderSuccess(t *testing.T) {
+	root, _ := testClone(t)
+	omp := filepath.Join(t.TempDir(), "omp")
+	_, heartbeat := processHeartbeatFixture(t)
+	script := `#!/bin/sh
+set -eu
+(
+    trap '' HUP TERM
+    while :; do
+        printf x >> "$HEARTBEAT"
+        sleep 0.02
+    done
+) &
+child=$!
+while [ ! -s "$HEARTBEAT" ]; do sleep 0.01; done
+printf '%s\n' "$child" > "$CHILD_PID"
+printf '%s\n' '{"usage":{"input":0}}'
+exit 0
+`
+	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.OMPPath = omp
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	if err != nil || record.Exit != 0 {
+		t.Fatalf("leader-success record=%#v err=%v", record, err)
+	}
+	assertProcessQuiescent(t, heartbeat, "group child", "successful leader")
+	rows, ledgerErr := ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 {
+		t.Fatalf("leader-success ledger=%v err=%v, want one success row", rows, ledgerErr)
+	}
+}
 
-	note, err := runChecks(cfg, t.TempDir(), "run-pass")
+func TestRunnerTerminatesTimedOutProcessTree(t *testing.T) {
+	root, _ := testClone(t)
+	omp := filepath.Join(t.TempDir(), "omp")
+	marker := filepath.Join(t.TempDir(), "term")
+	t.Setenv("MARKER", marker)
+	script := "#!/bin/sh\ntrap 'printf term > \"$MARKER\"; exit 0' TERM\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.OMPPath = omp
+	started := time.Now()
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
+	if err == nil || record.Exit != 124 || time.Since(started) > 4*time.Second {
+		t.Fatalf("timeout record=%#v err=%v elapsed=%v", record, err, time.Since(started))
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "term" {
+		t.Fatalf("TERM marker=%q err=%v", data, err)
+	}
+}
+
+func TestRunnerKillsGroupChildAfterLeaderExitsOnTERM(t *testing.T) {
+	root, _ := testClone(t)
+	omp := filepath.Join(t.TempDir(), "omp")
+	state, heartbeat := processHeartbeatFixture(t)
+	marker := filepath.Join(state, "leader-term")
+	t.Setenv("TERM_MARKER", marker)
+	script := `#!/bin/sh
+set -eu
+trap 'printf leader-term > "$TERM_MARKER"; exit 0' TERM
+(
+    trap '' TERM
+    printf '%s\n' "$$" > "$CHILD_PID"
+    while :; do
+        printf x >> "$HEARTBEAT"
+        sleep 0.02
+    done
+) &
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.OMPPath = omp
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
+	if err == nil || record.Exit != 124 {
+		t.Fatalf("leader-stop record=%#v err=%v", record, err)
+	}
+	rows, ledgerErr := ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 124 {
+		t.Fatalf("leader-stop ledger=%v err=%v, want one timeout row", rows, ledgerErr)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "leader-term" {
+		t.Fatalf("leader TERM marker=%q err=%v", data, err)
+	}
+	assertProcessQuiescent(t, heartbeat, "group child", "leader stop")
+}
+
+func TestRunnerGitStopsRealDescendantAfterLeaderSuccess(t *testing.T) {
+	root, _ := testClone(t)
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	_, heartbeat := processHeartbeatFixture(t)
+	script := `#!/bin/sh
+set -eu
+(
+	trap '' HUP TERM
+	while :; do
+		printf x >> "$HEARTBEAT"
+		sleep 0.02
+	done
+) &
+child=$!
+printf '%s\n' "$child" > "$CHILD_PID"
+while [ ! -s "$HEARTBEAT" ]; do sleep 0.01; done
+printf '%s\n' git-output
+exit 0
+`
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath = gitWrapper
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	output, err := runner.git(ctx, root, "--version")
 	if err != nil {
-		t.Fatalf("runChecks returned error: %v", err)
+		t.Fatal(err)
 	}
-	if note.Status != "pass" {
-		t.Fatalf("status = %q, want pass", note.Status)
+	if string(output) != "git-output\n" {
+		t.Fatalf("Git output=%q, want leader output", output)
 	}
-	if note.RunID != "run-pass" {
-		t.Fatalf("run id = %q, want run-pass", note.RunID)
+	assertProcessQuiescent(t, heartbeat, "Git descendant", "leader success")
+}
+
+func TestRunnerGitCancellationEscalatesForRealDescendant(t *testing.T) {
+	root, _ := testClone(t)
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	state, heartbeat := processHeartbeatFixture(t)
+	termMarker := filepath.Join(state, "term")
+	t.Setenv("TERM_MARKER", termMarker)
+	script := `#!/bin/sh
+set -eu
+(
+	trap 'printf term > "$TERM_MARKER"' TERM
+	while :; do
+		printf x >> "$HEARTBEAT"
+		sleep 0.02 || :
+	done
+) &
+child=$!
+printf '%s\n' "$child" > "$CHILD_PID"
+while [ ! -s "$HEARTBEAT" ]; do sleep 0.01; done
+printf '%s\n' git-started
+trap 'sleep 0.2; exit 0' TERM
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := time.Parse(time.RFC3339, note.Time); err != nil {
-		t.Fatalf("time = %q is not RFC3339: %v", note.Time, err)
+	runner := NewRunner(root)
+	runner.GitPath = gitWrapper
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	output, err := runner.git(ctx, root, "fetch")
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 3*time.Second {
+		t.Fatalf("Git cancellation output=%q err=%v elapsed=%v", output, err, time.Since(started))
 	}
-	if len(note.Results) != 2 {
-		t.Fatalf("results = %d, want 2", len(note.Results))
+	if string(output) != "git-started\n" {
+		t.Fatalf("Git cancellation output=%q, want pre-cancellation output", output)
 	}
-	for _, result := range note.Results {
-		if result.Code != 0 {
-			t.Errorf("%s exit code = %d, want 0", result.Name, result.Code)
+	if data, readErr := os.ReadFile(termMarker); readErr != nil || string(data) != "term" {
+		t.Fatalf("Git descendant TERM marker=%q err=%v", data, readErr)
+	}
+	assertProcessQuiescent(t, heartbeat, "Git descendant", "cancellation")
+}
+
+func TestRunnerTimeoutIncludesPreparation(t *testing.T) {
+	root, _ := testClone(t)
+	slowGit := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(slowGit, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath = slowGit
+	started := time.Now()
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 1)
+	if err == nil || record.Exit != 124 || time.Since(started) > 3*time.Second {
+		t.Fatalf("prepare timeout record=%#v err=%v elapsed=%v", record, err, time.Since(started))
+	}
+	rows, readErr := ReadLedger(root)
+	if readErr != nil || len(rows) != 1 || rows[0].Exit != 124 {
+		t.Fatalf("ledger=%v err=%v", rows, readErr)
+	}
+}
+
+func TestRunnerCleansWorktreeWhenAddOutlivesDeadline(t *testing.T) {
+	root, _ := testClone(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "worktree-added")
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("WORKTREE_ADDED", marker)
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+if [ "$1" = worktree ] && [ "$2" = add ]; then
+	"$REAL_GIT" "$@"
+	: > "$WORKTREE_ADDED"
+	exec /bin/sleep 10
+fi
+exec "$REAL_GIT" "$@"
+`
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath = gitWrapper
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 1)
+	if err == nil || record.Exit != 124 {
+		t.Fatalf("prepare timeout record=%#v err=%v", record, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("worktree add did not complete before timeout: %v", err)
+	}
+	worktree := forestPath(root, "worktrees", record.RunID)
+	if _, err := os.Stat(worktree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial worktree path survived: %v", err)
+	}
+	if list := string(runGitDir(t, root, "worktree", "list", "--porcelain")); strings.Contains(list, worktree) {
+		t.Fatalf("partial worktree registration survived:\n%s", list)
+	}
+}
+
+func TestRunnerPreservesPreparationAndCleanupErrors(t *testing.T) {
+	root, _ := testClone(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REAL_GIT", realGit)
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+if [ "$1" = worktree ] && [ "$2" = add ]; then exit 7; fi
+if [ "$1" = worktree ] && [ "$2" = remove ]; then exit 9; fi
+exec "$REAL_GIT" "$@"
+`
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath = gitWrapper
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 10)
+	if err == nil || record.Exit != 1 {
+		t.Fatalf("prepare failure record=%#v err=%v", record, err)
+	}
+	for _, want := range []string{"add worktree", "exit status 7", "cleanup worktree", "exit status 9"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
 		}
 	}
 }
 
-func TestRunChecksCannotUseOperatorCredentials(t *testing.T) {
-	t.Setenv("GH_TOKEN", "operator-token")
-	t.Setenv("GITHUB_TOKEN", "operator-token")
-	t.Setenv("FOREST_OPERATOR_SECRET", "operator-secret")
-	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")
-	t.Setenv("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh")
-	hostBin := t.TempDir()
-	writeDriver(t, hostBin, "gh", "#!/bin/sh\nexit 0\n")
-	t.Setenv("FOREST_CHECK_PATH", hostBin)
-	cfg := Config{Checks: []Check{{
-		Name: "credential-isolation",
-		Run: `printf 'gh=%s bus=%s ssh=%s\n' "$(command -v gh || true)" "$DBUS_SESSION_BUS_ADDRESS" "$SSH_AUTH_SOCK"; ` +
-			`test -z "$GH_TOKEN" && test -z "$GITHUB_TOKEN" && test -z "$FOREST_OPERATOR_SECRET" && ` +
-			`test -z "$DBUS_SESSION_BUS_ADDRESS" && test -z "$SSH_AUTH_SOCK" && ` +
-			`test "$(command -v gh)" = "$HOME/bin/gh" && ! gh auth token >/dev/null 2>&1 && ! gh api user >/dev/null 2>&1`,
-	}}}
-	note, err := runChecks(cfg, t.TempDir(), "run-isolated")
-	if err != nil {
-		t.Fatalf("runChecks returned error: %v", err)
-	}
-	if note.Status != "pass" {
-		t.Fatalf("status = %q, want pass; output = %q", note.Status, note.Results[0].Output)
-	}
-	t.Logf("credential lookup output: %q", note.Results[0].Output)
-}
-
-func TestRunChecksExecutesDeclaredBuild(t *testing.T) {
-	repoDir, err := os.Getwd()
+func TestRunnerReportsJoinedCleanupErrorsAfterFilesystemAndRegistryCleanup(t *testing.T) {
+	root, _ := testClone(t)
+	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	note, err := runChecks(Config{Checks: []Check{{
-		Name: "build",
-		Run:  "mise exec -- go build ./...",
-	}}}, repoDir, "run-build")
-	if err != nil {
-		t.Fatalf("runChecks returned error: %v", err)
+	pruneMarker := filepath.Join(t.TempDir(), "pruned")
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("PRUNE_MARKER", pruneMarker)
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+if [ "$1" = worktree ] && [ "$2" = remove ]; then exit 9; fi
+if [ "$1" = worktree ] && [ "$2" = prune ]; then
+	"$REAL_GIT" "$@"
+	: > "$PRUNE_MARKER"
+	exit 11
+fi
+exec "$REAL_GIT" "$@"
+`
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if note.Status != "pass" || len(note.Results) != 1 || note.Results[0].Code != 0 {
-		t.Fatalf("declared build = %+v, want pass", note)
+	omp := filepath.Join(t.TempDir(), "omp")
+	if err := os.WriteFile(omp, []byte("#!/bin/sh\nprintf '%s\\n' '{\"usage\":{\"input\":1}}'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath, runner.OMPPath = gitWrapper, omp
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 10)
+	if err == nil || record.Exit != 1 {
+		t.Fatalf("cleanup record=%#v err=%v", record, err)
+	}
+	for _, want := range []string{"git worktree remove", "exit status 9", "git worktree prune", "exit status 11"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("cleanup error %q missing %q", err, want)
+		}
+	}
+	worktree := forestPath(root, "worktrees", record.RunID)
+	if _, statErr := os.Stat(worktree); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed Git remove left filesystem residue: %v", statErr)
+	}
+	if _, statErr := os.Stat(pruneMarker); statErr != nil {
+		t.Fatalf("Git registry prune was not attempted: %v", statErr)
+	}
+	if list := string(runGitDir(t, root, "worktree", "list", "--porcelain")); strings.Contains(list, worktree) {
+		t.Fatalf("failed Git remove left registry residue:\n%s", list)
+	}
+	rows, readErr := ReadLedger(root)
+	if readErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
+		t.Fatalf("ledger=%v err=%v", rows, readErr)
 	}
 }
 
-func TestRunChecksContinuesAfterFailure(t *testing.T) {
-	wtDir := t.TempDir()
-	later := filepath.Join(wtDir, "later.txt")
-	cfg := Config{Checks: []Check{
-		{Name: "first", Run: "printf failed; exit 7"},
-		{Name: "later", Run: "touch later.txt"},
-	}}
-
-	note, err := runChecks(cfg, wtDir, "run-fail")
+func TestRunnerPrunesRegistryAfterRemoveConsumesCleanupShare(t *testing.T) {
+	root, _ := testClone(t)
+	worktree := forestPath(root, "worktrees", "delayed-remove")
+	if err := os.MkdirAll(filepath.Dir(worktree), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "worktree", "add", "--detach", worktree, "HEAD")
+	realGit, err := exec.LookPath("git")
 	if err != nil {
-		t.Fatalf("runChecks returned error: %v", err)
+		t.Fatal(err)
 	}
-	if note.Status != "fail" {
-		t.Fatalf("status = %q, want fail", note.Status)
+	removeMarker := filepath.Join(t.TempDir(), "remove-started")
+	pruneMarker := filepath.Join(t.TempDir(), "pruned")
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("REMOVE_MARKER", removeMarker)
+	t.Setenv("PRUNE_MARKER", pruneMarker)
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+if [ "$1" = worktree ] && [ "$2" = remove ]; then
+	: > "$REMOVE_MARKER"
+	exec /bin/sleep 30
+fi
+if [ "$1" = worktree ] && [ "$2" = prune ]; then
+	"$REAL_GIT" "$@"
+	: > "$PRUNE_MARKER"
+	exit 0
+fi
+exec "$REAL_GIT" "$@"
+`
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if len(note.Results) != 2 {
-		t.Fatalf("results = %d, want 2", len(note.Results))
+	runner := NewRunner(root)
+	runner.GitPath = gitWrapper
+	started := time.Now()
+	err = runner.cleanupWorktree(worktree)
+	if err == nil || !strings.Contains(err.Error(), "git worktree remove") || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("delayed cleanup err=%v", err)
 	}
-	if note.Results[0].Code != 7 || note.Results[1].Code != 0 {
-		t.Fatalf("result codes = [%d %d], want [7 0]", note.Results[0].Code, note.Results[1].Code)
+	if elapsed := time.Since(started); elapsed >= cleanupTimeout {
+		t.Fatalf("cleanup took %s, want less than %s", elapsed, cleanupTimeout)
 	}
-	if _, err := os.Stat(later); err != nil {
-		t.Fatalf("later check did not run: %v", err)
+	if _, statErr := os.Stat(removeMarker); statErr != nil {
+		t.Fatalf("delayed remove did not start: %v", statErr)
+	}
+	if _, statErr := os.Stat(pruneMarker); statErr != nil {
+		t.Fatalf("bounded registry prune was not attempted: %v", statErr)
+	}
+	if _, statErr := os.Stat(worktree); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("delayed remove left filesystem residue: %v", statErr)
+	}
+	if list := string(runGitDir(t, root, "worktree", "list", "--porcelain")); strings.Contains(list, worktree) {
+		t.Fatalf("delayed remove left registry residue:\n%s", list)
 	}
 }
 
-func TestRunChecksPreflightFailureHasNoStatus(t *testing.T) {
-	oldEnv := checkEnvironment
-	checkEnvironment = func() ([]string, func(), error) {
-		return nil, func() {}, errors.New("locate mise: missing")
+func TestRunnerStopsBlockedFilesystemDeletionAndStillPrunes(t *testing.T) {
+	root, _ := testClone(t)
+	worktree := forestPath(root, "worktrees", "blocked-delete")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	defer func() { checkEnvironment = oldEnv }()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removePID := filepath.Join(t.TempDir(), "remove-pid")
+	pruneMarker := filepath.Join(t.TempDir(), "pruned")
+	t.Setenv("REMOVE_PID", removePID)
+	t.Setenv("PRUNE_MARKER", pruneMarker)
+	rmDir := t.TempDir()
+	rmWrapper := filepath.Join(rmDir, "rm")
+	if err := os.WriteFile(rmWrapper, []byte("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$REMOVE_PID\"\nexec /bin/sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", rmDir)
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+if [ "$1" = worktree ] && [ "$2" = remove ]; then exit 9; fi
+if [ "$1" = worktree ] && [ "$2" = prune ]; then
+	: > "$PRUNE_MARKER"
+	exit 0
+fi
+exec "$REAL_GIT" "$@"
+`
+	t.Setenv("REAL_GIT", realGit)
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath = gitWrapper
+	started := time.Now()
+	err = runner.cleanupWorktree(worktree)
+	if err == nil || !strings.Contains(err.Error(), "git worktree remove") || !strings.Contains(err.Error(), "remove worktree path") || !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("blocked cleanup err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= cleanupTimeout {
+		t.Fatalf("blocked cleanup took %s, want less than %s", elapsed, cleanupTimeout)
+	}
+	pidBytes, err := os.ReadFile(removePID)
+	if err != nil {
+		t.Fatalf("filesystem deletion did not start: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("filesystem deletion pid %q: %v", pidBytes, err)
+	}
+	if processGroupExists(pid) {
+		t.Fatalf("filesystem deletion process group %d survived", pid)
+	}
+	if _, statErr := os.Stat(pruneMarker); statErr != nil {
+		t.Fatalf("bounded registry prune was not attempted: %v", statErr)
+	}
+	if _, statErr := os.Stat(worktree); statErr != nil {
+		t.Fatalf("blocked filesystem residue was not preserved for retry: %v", statErr)
+	}
+}
 
-	note, err := runChecks(Config{Checks: []Check{{Name: "true", Run: "true"}}}, t.TempDir(), "run-preflight")
+func TestTrustedPathExcludesManagedCheckout(t *testing.T) {
+	root := t.TempDir()
+	safe := t.TempDir()
+	t.Setenv("PATH", root+string(os.PathListSeparator)+safe)
+	got, err := trustedPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != safe {
+		t.Fatalf("trusted PATH=%q, want %q", got, safe)
+	}
+	shadow := filepath.Join(root, "omp")
+	if err := os.WriteFile(shadow, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trustedExecutable(root, shadow); err == nil {
+		t.Fatal("repository executable accepted")
+	}
+}
+
+func TestToolEntrypointsRejectRepositoryExecutablesThroughSymlinkedPath(t *testing.T) {
+	root := t.TempDir()
+	repositoryBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(repositoryBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "gh", "omp", "rm"} {
+		if err := os.WriteFile(filepath.Join(repositoryBin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := t.TempDir()
+	pathEntry := filepath.Join(outside, "bin")
+	if err := os.Symlink(repositoryBin, pathEntry); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", pathEntry)
+	runner := NewRunner(root)
+	poller := NewPoller(root, "owner/name")
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "git", run: func() error {
+			_, err := runner.git(context.Background(), root, "--version")
+			return err
+		}},
+		{name: "poller git", run: func() error {
+			_, err := poller.run(context.Background(), "git", "--version")
+			return err
+		}},
+		{name: "gh", run: func() error {
+			_, err := poller.gh(context.Background(), "--version")
+			return err
+		}},
+		{name: "omp", run: func() error {
+			_, err := runner.ompExecutable()
+			return err
+		}},
+		{name: "rm", run: func() error {
+			return runner.removeFilesystem(context.Background(), filepath.Join(root, "worktrees", "missing"))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); err == nil {
+				t.Fatalf("accepted repository %s executable", test.name)
+			}
+		})
+	}
+}
+
+func TestProcessResultHonorsCanceledContext(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if exit, err := processResult(canceled, nil); exit != 130 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled exit=%d err=%v", exit, err)
+	}
+	deadline, stop := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer stop()
+	<-deadline.Done()
+	if exit, err := processResult(deadline, nil); exit != 124 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline exit=%d err=%v", exit, err)
+	}
+}
+
+func testClone(t *testing.T) (string, string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "clone")
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	runGit(t, "init", "--bare", origin)
+	runGit(t, "clone", origin, root)
+	configGit(t, root, "Builder", "builder@forest.invalid")
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte(`repo: owner/name
+agents:
+  builder: {poll: "forest poll builder", interval: 1, timeout: 1}
+checks:
+  - {name: test, run: "go test ./..."}
+`)
+	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "add", "file", "forest.yaml")
+	runGitDir(t, root, "commit", "-m", "initial")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/master")
+	return root, origin
+}
+
+func TestRunnerCleanupStopsTermIgnoringRemoveAndFilesystemGroupsBeforePrune(t *testing.T) {
+	if cleanupReservedSlack < time.Second {
+		t.Fatalf("cleanup slack=%s want at least one second", cleanupReservedSlack)
+	}
+	root, _ := testClone(t)
+	worktree := forestPath(root, "worktrees", "blocked-both")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	gitPID := filepath.Join(state, "git-pid")
+	rmPID := filepath.Join(state, "rm-pid")
+	pruneMarker := filepath.Join(state, "pruned")
+	t.Setenv("GIT_PID", gitPID)
+	t.Setenv("RM_PID", rmPID)
+	t.Setenv("PRUNE_MARKER", pruneMarker)
+
+	gitWrapper := filepath.Join(t.TempDir(), "git")
+	gitScript := `#!/bin/sh
+set -eu
+if [ "$1" = worktree ] && [ "$2" = remove ]; then
+	printf '%s\n' "$$" > "$GIT_PID"
+	trap '' TERM
+	while :; do /bin/sleep 1; done
+fi
+if [ "$1" = worktree ] && [ "$2" = prune ]; then
+	: > "$PRUNE_MARKER"
+	exit 11
+fi
+exit 12
+`
+	if err := os.WriteFile(gitWrapper, []byte(gitScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rmDir := t.TempDir()
+	rmWrapper := filepath.Join(rmDir, "rm")
+	rmScript := `#!/bin/sh
+set -eu
+printf '%s\n' "$$" > "$RM_PID"
+trap '' TERM
+while :; do /bin/sleep 1; done
+`
+	if err := os.WriteFile(rmWrapper, []byte(rmScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", rmDir)
+
+	runner := NewRunner(root)
+	runner.GitPath = gitWrapper
+	started := time.Now()
+	err := runner.cleanupWorktree(worktree)
+	elapsed := time.Since(started)
 	if err == nil {
-		t.Fatal("runChecks returned no error for a preflight failure")
+		t.Fatal("cleanup unexpectedly succeeded")
 	}
-	if note.Status != "" {
-		t.Fatalf("preflight note status = %q, want empty so no pass is written", note.Status)
+	for _, want := range []string{"git worktree remove", "remove worktree path", "git worktree prune", "exit status 11"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("cleanup error %q missing %q", err, want)
+		}
 	}
-	if len(note.Results) != 0 {
-		t.Fatalf("preflight note has %d results, want none: no declared check ran", len(note.Results))
+	if strings.Count(err.Error(), context.DeadlineExceeded.Error()) < 2 {
+		t.Fatalf("cleanup error did not join both execution deadlines: %v", err)
 	}
-}
-
-func TestRunChecksKeepsOutputTail(t *testing.T) {
-	cfg := Config{Checks: []Check{{
-		Name: "output",
-		Run:  "head -c 5000 /dev/zero | tr '\\0' x; printf tail-marker",
-	}}}
-
-	note, err := runChecks(cfg, t.TempDir(), "run-output")
-	if err != nil {
-		t.Fatalf("runChecks returned error: %v", err)
+	if elapsed >= cleanupTimeout-time.Second {
+		t.Fatalf("cleanup took %s, want at least one second before %s bound", elapsed, cleanupTimeout)
 	}
-	if len(note.Results) != 1 {
-		t.Fatalf("results = %d, want 1", len(note.Results))
+	if _, statErr := os.Stat(pruneMarker); statErr != nil {
+		t.Fatalf("registry prune was not attempted: %v", statErr)
 	}
-	output := note.Results[0].Output
-	if len(output) != checkOutputTailBytes {
-		t.Fatalf("output bytes = %d, want %d", len(output), checkOutputTailBytes)
-	}
-	if !strings.HasSuffix(output, "tail-marker") {
-		t.Fatalf("output tail lost marker: %q", output[len(output)-len("tail-marker"):])
-	}
-}
-
-func TestRunChecksCommandFailureIsResult(t *testing.T) {
-	cfg := Config{Checks: []Check{{Name: "missing", Run: "command-that-does-not-exist-iron-forest"}}}
-
-	note, err := runChecks(cfg, t.TempDir(), "run-missing")
-	if err != nil {
-		t.Fatalf("runChecks returned error for failed command: %v", err)
-	}
-	if note.Status != "fail" {
-		t.Fatalf("status = %q, want fail", note.Status)
-	}
-	if len(note.Results) != 1 || note.Results[0].Code == 0 {
-		t.Fatalf("results = %+v, want one nonzero result", note.Results)
-	}
-}
-
-func TestChecksSummaryNamesFailures(t *testing.T) {
-	got := checksSummary(checksNote{
-		Status: "fail",
-		Results: []checkResult{
-			{Name: "build", Code: 0},
-			{Name: "test", Code: 1},
-		},
-	})
-	if got != "checks fail: test(exit 1)" {
-		t.Fatalf("summary = %q, want checks fail: test(exit 1)", got)
+	for name, path := range map[string]string{"Git remove": gitPID, "filesystem rm": rmPID} {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("%s did not start: %v", name, readErr)
+		}
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(body)))
+		if parseErr != nil {
+			t.Fatalf("%s pid %q: %v", name, body, parseErr)
+		}
+		if processGroupExists(pid) {
+			t.Fatalf("%s process group %d survived cleanup", name, pid)
+		}
 	}
 }

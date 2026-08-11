@@ -1,233 +1,307 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"strings"
-
-	"github.com/misty-step/iron-forest/core"
+	"syscall"
 )
 
-func main() {
-	os.Exit(run(os.Args[1:]))
-}
+func main() { os.Exit(runCLI(os.Args[1:])) }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `forest
-
-  forest list                         print eligible tracker items
-  forest agents                       list declared agents and digests
-  forest stats [--json]              aggregate the run ledger
-  forest serve [--flow <name>]... [--factory-dir <path>]
-                                      run enabled flows
-  forest run <flow> <subject>        run one selected subject
-  forest show <sha>                  print verdict and checks notes
-  forest version                     print the binary revision
-  forest selfcheck                   verify config and agents offline
-  forest watch [--interval 2s]       show the operator board`)
-}
-
-func run(args []string) int {
+func runCLI(args []string) int {
 	if len(args) == 0 {
-		usage()
+		printUsage()
 		return 2
 	}
-	repoDir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
-		return 1
-	}
-	api := NewCore(repoDir)
-	// Route config validation through the core API, but keep the pre-#176
-	// ordering: load forest.yaml before dispatching any command, so every
-	// surface (including stats, agents, show, version, selfcheck, and watch)
-	// fails with the same "forest: <err>" before parsing flags or touching
-	// state.
-	if _, err := api.Config(); err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
-		return 1
-	}
-	switch args[0] {
-	case "list":
-		return cmdList(api)
-	case "agents":
-		return cmdAgents(api)
-	case "stats":
-		return cmdStats(api, args[1:])
-	case "serve":
-		cfg, code := repoConfig(repoDir)
-		if code != 0 {
-			return code
-		}
-		var names []string
-		for i := 1; i < len(args); i++ {
-			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "forest: serve: expected a value after %q\n", args[i])
-				return 2
-			}
-			switch args[i] {
-			case "--flow":
-				names = append(names, args[i+1])
-			case "--factory-dir":
-				factoryDir = args[i+1]
-			default:
-				fmt.Fprintf(os.Stderr, "forest: serve: expected --flow or --factory-dir, got %q\n", args[i])
-				return 2
-			}
-			i++
-		}
-		return serve(cfg, repoDir, names)
-	case "run":
-		cfg, code := repoConfig(repoDir)
-		if code != 0 {
-			return code
-		}
-		if len(args) != 3 {
-			usage()
+	command := args[0]
+	switch command {
+	case "serve", "status", "selfcheck":
+		if len(args) != 1 {
+			printUsage()
 			return 2
 		}
-		return runOnce(cfg, repoDir, args[1], args[2])
-	case "show":
+	case "once", "poll":
 		if len(args) != 2 {
-			usage()
+			printUsage()
 			return 2
 		}
-		return cmdShow(api, args[1])
-	case "version":
-		fmt.Printf("forest %s\n", version)
-		return 0
-	case "selfcheck":
-		return cmdSelfcheck(repoDir)
-	case "watch":
-		return cmdWatch(api, repoDir, args[1:])
 	default:
-		usage()
+		fmt.Fprintf(os.Stderr, "unknown command %q\n", command)
+		printUsage()
+		return 2
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	switch command {
+	case "serve":
+		return serve(root)
+	case "once":
+		return once(root, args[1])
+	case "poll":
+		return poll(root, args[1])
+	case "status":
+		return status(root)
+	default:
+		return selfcheck(root)
+	}
+}
+
+func printUsage() {
+	fmt.Fprintln(os.Stderr, "usage: forest serve | once <agent> | poll <agent> | status | selfcheck")
+}
+
+func withLock(root string, fn func() int) int {
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	file, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		fmt.Fprintln(os.Stderr, "another Kernel is already running")
+		return 2
+	}
+	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+func serve(root string) int {
+	return withLock(root, func() int {
+		cfg, err := loadConfig(configPath(root))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		for _, name := range agentNames(cfg) {
+			if _, err := loadDeclaration(root, name); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 2
+			}
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		scheduler := NewScheduler(root, cfg, NewRunner(root))
+		if err := scheduler.Serve(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		return 0
+	})
+}
+
+func once(root, agent string) int {
+	return withLock(root, func() int {
+		cfg, err := loadConfig(configPath(root))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		scheduler := NewScheduler(root, cfg, NewRunner(root))
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		dispatched, err := scheduler.Once(ctx, agent)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if dispatched {
+			return 0
+		}
+		return 1
+	})
+}
+
+func poll(root, agent string) int {
+	cfg, err := loadConfig(configPath(root))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	poller := NewPoller(root, cfg.Repo)
+	ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+	defer cancel()
+	switch agent {
+	case "builder":
+		return poller.builder(ctx)
+	case "verifier":
+		return poller.verifier(ctx)
+	case "fixer":
+		return poller.fixer(ctx)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown poll agent %q\n", agent)
 		return 2
 	}
 }
 
-// repoConfig loads forest.yaml for the live-run commands that need it.
-func repoConfig(repoDir string) (Config, int) {
-	cfg, err := loadConfig(filepath.Join(repoDir, "forest.yaml"))
+func status(root string) int {
+	cfg, err := loadConfig(configPath(root))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
-		return Config{}, 1
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
-	return cfg, 0
-}
-
-func cmdList(api core.API) int {
-	// Ask the lane, not the tracker: an operator needs to know what the Builder
-	// will take, which is narrower than what the tracker calls eligible. The
-	// core API returns exactly that backlog.
-	items, err := api.Items()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
-		return 1
+	fmt.Println("triggers:")
+	lockHeld, lockErr := kernelLockHeld(root)
+	if lockErr != nil {
+		fmt.Fprintf(os.Stderr, "kernel lock state unknown: %v\n", lockErr)
 	}
-	for _, it := range items {
-		fmt.Printf("#%s\t%s\n", it.ID, it.Title)
+	names := agentNames(cfg)
+	health, healthErr := readTriggerHealth(root)
+	known := healthErr == nil && len(health) == len(names)
+	for _, name := range names {
+		_, present := health[name]
+		known = known && present
 	}
-	return 0
-}
-
-func cmdAgents(api core.API) int {
-	agents, err := api.Agents()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest:", err)
-		return 1
+	if healthErr == nil && !known {
+		healthErr = errors.New("trigger state does not match configured agents")
 	}
-	if len(agents) == 0 {
-		fmt.Println("forest: no agents declared under agents/")
-		return 0
+	if healthErr != nil && !os.IsNotExist(healthErr) {
+		fmt.Fprintf(os.Stderr, "trigger state unknown: %v\n", healthErr)
 	}
-	for _, a := range agents {
-		if a.Err != "" {
-			fmt.Fprintln(os.Stderr, "forest:", a.Err)
+	for _, name := range names {
+		value, present := health[name]
+		if !known || !present {
+			fmt.Printf("  %s state=unknown\n", name)
 			continue
 		}
-		fmt.Printf("%s\tmodel=%s%s mode=%s author=%s <%s> def_sha=%s\n",
-			a.Name, a.Model, variantSuffix(a.Variant), a.Mode,
-			a.CommitName, a.CommitEmail, a.DefSHA)
-		fmt.Printf("  %s\n", a.Description)
-		var mcps []string
-		for _, m := range a.Mcps {
-			state := "off"
-			if m.Enabled {
-				state = "on"
+		fmt.Printf("  %s errors=%d code=%d running=", name, value.ConsecutiveErrors, value.LastCode)
+		if lockErr != nil {
+			fmt.Print("unknown")
+		} else {
+			fmt.Printf("%t", lockHeld && value.Running)
+		}
+		if value.Running && lockErr == nil && !lockHeld {
+			fmt.Print(" stale=true")
+		}
+		if value.LastError != "" {
+			fmt.Printf(" error=%s", value.LastError)
+		}
+		fmt.Println()
+	}
+	if !known || lockErr != nil {
+		fmt.Println("live runs: unknown")
+	} else {
+		anyLive := false
+		for _, value := range health {
+			anyLive = anyLive || lockHeld && value.Running
+		}
+		if !anyLive {
+			fmt.Println("live runs: none")
+		} else {
+			fmt.Println("live runs:")
+			for agent, value := range health {
+				if lockHeld && value.Running {
+					fmt.Printf("  agent=%s running=true\n", agent)
+				}
 			}
-			mcps = append(mcps, fmt.Sprintf("%s(%s)", m.Name, state))
 		}
-		if len(mcps) > 0 {
-			fmt.Printf("  mcp: %s\n", strings.Join(mcps, ", "))
-		}
+	}
+	state, stateErr := readAuditState(root)
+	if stateErr != nil {
+		fmt.Fprintln(os.Stderr, stateErr)
+		return 2
+	}
+	fmt.Printf("last audit: %s master=%s\n", state.LastResult, state.LastMaster)
+	for _, violation := range state.Violations {
+		fmt.Printf("audit violation: %s\n", violation)
+	}
+	records, err := ReadLedger(root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	fmt.Println("recent runs:")
+	start := len(records) - 10
+	if start < 0 {
+		start = 0
+	}
+	for _, record := range records[start:] {
+		fmt.Printf("  %s agent=%s exit=%d duration=%.3f\n", record.RunID, record.Agent, record.Exit, record.Duration)
 	}
 	return 0
 }
 
-func cmdShow(api core.API, sha string) int {
-	v, c, err := api.Notes(sha)
+func kernelLockHeld(root string) (bool, error) {
+	file, err := os.OpenFile(forestPath(root, "lock"), os.O_RDWR, 0)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
 	if err != nil {
-		// The core API tags which note subsystem failed so the operator keeps
-		// the per-subsystem prefix the command always printed.
-		prefix := "forest:"
-		var se *core.StageError
-		if errors.As(err, &se) {
-			switch se.Stage {
-			case core.StageFetch:
-				prefix = "forest: notes:"
-			case core.StageVerdict:
-				prefix = "forest: verdict:"
-			case core.StageChecks:
-				prefix = "forest: checks:"
-			}
+		return false, err
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return true, nil
 		}
-		fmt.Fprintln(os.Stderr, prefix, err)
+		return false, err
+	}
+	return false, syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+}
+
+func readTriggerHealth(root string) (map[string]TriggerHealth, error) {
+	data, err := os.ReadFile(forestPath(root, "triggers.json"))
+	if err != nil {
+		return nil, err
+	}
+	var decoded map[string]*TriggerHealth
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, fmt.Errorf("parse trigger state: %w", err)
+	}
+	if decoded == nil {
+		return nil, fmt.Errorf("parse trigger state: expected object")
+	}
+	values := make(map[string]TriggerHealth, len(decoded))
+	for agent, health := range decoded {
+		if health == nil {
+			return nil, fmt.Errorf("parse trigger state: entry %q is null", agent)
+		}
+		if health.Agent != agent {
+			return nil, fmt.Errorf("parse trigger state: entry %q has agent %q", agent, health.Agent)
+		}
+		values[agent] = *health
+	}
+	return values, nil
+}
+
+func selfcheck(root string) int {
+	cfg, err := loadConfig(configPath(root))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	verdict := verdictNote{
-		Verdict: v.Verdict, Notes: v.Notes, Reviewer: v.Reviewer,
-		Model: v.Model, DefSHA: v.DefSHA, RunID: v.RunID, Time: v.Time,
-	}
-	// Preserve the stored nil-versus-empty results shape so a null or absent
-	// results field renders `null` and an explicit empty array renders `[]`,
-	// exactly as the command always printed before reaching state through the
-	// core API.
-	var results []checkResult
-	if c.Results != nil {
-		results = make([]checkResult, len(c.Results))
-		for i, r := range c.Results {
-			results[i] = checkResult{
-				Name: r.Name, Code: r.Code, Seconds: r.Seconds, Output: r.Output,
-			}
+	for _, name := range agentNames(cfg) {
+		if _, err := loadDeclaration(root, name); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
 		}
 	}
-	checks := checksNote{
-		Status:  c.Status,
-		Results: results,
-		RunID:   c.RunID,
-		Time:    c.Time,
-	}
-	value := struct {
-		Verdict *verdictNote `json:"verdict,omitempty"`
-		Checks  *checksNote  `json:"checks,omitempty"`
+	runner := NewRunner(root)
+	tools := []struct {
+		name    string
+		resolve func() (string, error)
 	}{
-		Checks: &checks,
+		{name: "git", resolve: func() (string, error) { return trustedExecutable(root, "git") }},
+		{name: "gh", resolve: func() (string, error) { return trustedExecutable(root, "gh") }},
+		{name: "omp", resolve: runner.ompExecutable},
 	}
-	if v.Present {
-		value.Verdict = &verdict
+	for _, tool := range tools {
+		if _, err := tool.resolve(); err != nil {
+			fmt.Fprintf(os.Stderr, "%s unavailable: %v\n", tool.name, err)
+			return 1
+		}
 	}
-	if !c.Present {
-		value.Checks = nil
-	}
-	b, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "forest: show:", err)
-		return 1
-	}
-	fmt.Println(string(b))
+	fmt.Println("selfcheck: ok")
 	return 0
 }
