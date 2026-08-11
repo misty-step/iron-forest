@@ -41,17 +41,9 @@ esac
 # Retire the single-instance unit this template replaces, and prove it is gone.
 if [ -f "$HOME/.config/systemd/user/forest.service" ]; then
 	disable_status=0
-	if systemctl --user disable --now forest.service >/dev/null 2>&1; then
-		:
-	else
-		disable_status=$?
-	fi
+	systemctl --user disable --now forest.service >/dev/null 2>&1 || disable_status=$?
 	legacy_status=0
-	if legacy_state="$(systemctl --user is-active forest.service 2>/dev/null)"; then
-		:
-	else
-		legacy_status=$?
-	fi
+	legacy_state="$(systemctl --user is-active forest.service 2>/dev/null)" || legacy_status=$?
 	case "$legacy_state" in
 		inactive|unknown|not-found) ;;
 		*) die "legacy forest.service is not inactive or not-found (disable exit $disable_status, state $legacy_state, query exit $legacy_status)" ;;

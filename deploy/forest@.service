@@ -4,7 +4,7 @@
 # @FOREST_ROOT@ is replaced by deploy/install-service.sh.
 
 [Unit]
-Description=iron-forest factory daemon for %i
+Description=Iron Forest Kernel for %i
 After=network-online.target
 Wants=network-online.target
 
