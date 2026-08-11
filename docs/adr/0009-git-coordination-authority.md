@@ -61,7 +61,13 @@ append-only by Revision, and competing writers fail closed.
 After a completed dispatch, the Kernel Auditor takes a bounded stable snapshot.
 The first observed remote `master` tip becomes a trusted baseline and is not
 Gate-checked. Every snapshot, including the baseline snapshot, checks each note
-entry's payload and exact target-path actor. Ancestry and Gate checks target
+entry's payload and exact target-path actor within a 500-entry-per-ref
+capacity bound. A ref beyond that bound, an enumeration or note-show transport
+overflow, a payload above 64 KiB, or malformed or unresolvable canonical note
+state (malformed list or tree rows, a listed note without its tree entry, a
+mismatched, unexpected, or duplicate tree entry, a non-SHA path, a non-blob
+entry, or a missing note object) is a bounded policy violation. Ancestry and
+Gate checks target
 only the final observed remote `master` tip. The Auditor reads observable final
 Git state and cannot prove check execution, atomic push ordering, or force
 absence. It reports violations but does not enforce the profile contract. A

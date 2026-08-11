@@ -58,12 +58,17 @@ checks:
 ```
 
 `repo` is the forge identity. `agents` maps each declaration to a Poll command,
-interval, and preparation-plus-execution timeout. Every Poll has a separate
-fixed 60-second deadline. Runner cleanup has a separate 10-second bound. A
-completed dispatch starts an audit with a separate 60-second bound. The systemd
-service uses a separate 3900-second drain bound. This bound covers the shipped
-declarations' concurrent Runs, bounded Runner cleanup, and serialized
-post-dispatch audits. The model is
+interval, and preparation-plus-execution timeout. Direct `forest poll`
+execution has a fixed 60-second deadline. The Scheduler gives its configured
+Poll command a separate 65-second bound. The supervisor preserves this full
+5-second difference as Poll shutdown grace. It lets the direct Poll stop
+Git/GitHub transport groups and remove private note snapshot refs before the
+supervisor force-stops its command group. Runner cleanup has a separate
+10-second bound. A completed dispatch starts an audit with a separate 60-second
+bound.
+The systemd service uses a separate 3900-second drain bound. This bound covers
+the shipped declarations' concurrent Runs, bounded Runner cleanup, and
+serialized post-dispatch audits. The model is
 in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.
@@ -117,8 +122,9 @@ Kernel into the sibling, validate there, and install that sibling instance:
 
 ```sh
 mise exec -- go build -o ../<sibling-directory-name>/forest .
-../<sibling-directory-name>/forest selfcheck
+(cd ../<sibling-directory-name> && ./forest selfcheck)
 deploy/install-service.sh <sibling-directory-name>
+cd ../<sibling-directory-name>
 ```
 
 The one-argument installer always builds the Kernel from the factory source
@@ -128,6 +134,9 @@ runs the target's selfcheck with
 HOME-expanded form of the service rule above. The installer stops on any
 selfcheck error. The Auditor needs a completed agent dispatch before it can
 validate remote Git evidence.
+
+The final `cd` keeps all later Kernel and observation commands in the managed
+repository.
 
 ## 5. Start the Kernel
 
@@ -140,12 +149,20 @@ checkout:
 ./forest serve
 ```
 
-The Kernel invokes each Poll at its interval and gives it a fixed 60-second
-deadline. Exit 0 dispatches work. Exit 1 is a healthy skip. Exit greater than
-1, deadline expiry, or malformed behavior skips the tick and logs an error.
-`forest status` reports the trigger's consecutive error count, last exit code,
-and any recorded error. The Auditor runs after a completed dispatch, not at
-startup or after an idle Poll skip.
+Exit 0 dispatches work.
+Exit 1 is a healthy skip. Exit greater than 1, deadline expiry, or malformed
+behavior skips the tick and logs an error. `forest status` reports the trigger's
+consecutive Poll error count, last Poll exit code, and separate persisted Poll,
+Run, and Audit errors. A healthy Poll clears only its Poll error. A successful
+Run clears only its Run error. A successful Audit clears only its Audit error.
+The Auditor runs after a completed dispatch, not at startup or after an idle
+Poll skip.
+
+Verifier and Fixer Poll enumeration is bounded at 500 entries per canonical
+notes tree. A larger tree or a note-enumeration transport-output overflow is a
+healthy exit-1 skip with an explicit log line. It does not mark the trigger
+unhealthy; the Auditor reports durable note growth as a bounded policy
+violation.
 
 Poll once and conditionally dispatch one declaration:
 
@@ -177,11 +194,15 @@ not republish it. No standalone master push is valid. If the Verdict is
 fresh review request atomically. That note is the reject handoff back to the
 Verifier.
 
-Use status and Git notes as the evidence surface:
+From the managed checkout, use status and Git notes as the evidence surface:
 
 ```sh
 ./forest status
 git log --oneline --decorate --all
+git fetch origin \
+  refs/notes/forest/review-request:refs/notes/forest/review-request \
+  refs/notes/forest/checks:refs/notes/forest/checks \
+  refs/notes/forest/verdict:refs/notes/forest/verdict
 git notes --ref=refs/notes/forest/review-request show <revision>
 git notes --ref=refs/notes/forest/checks show <revision>
 git notes --ref=refs/notes/forest/verdict show <revision>
@@ -191,8 +212,8 @@ Pull requests and other forge artifacts are Projections. Git branches, commits,
 and notes remain authoritative. The first observed remote `master` tip becomes
 a trusted baseline and is not Gate-checked. In each bounded stable snapshot,
 Auditor ancestry and Gate checks target only the final observed remote
-`master` tip. Schema and actor checks still cover every entry in every
-snapshotted `refs/notes/forest/*` ref, including the baseline snapshot. Remote
+`master` tip. Schema and actor checks cover each snapshotted
+`refs/notes/forest/*` entry within a 500-entry-per-ref capacity bound. Remote
 history cannot reveal a tip that advanced again between audits; such
 intermediate tips are not independently Gate-checked. The Auditor checks
 observable final Git state only. It cannot prove check execution, atomic push

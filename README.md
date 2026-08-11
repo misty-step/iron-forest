@@ -56,6 +56,15 @@ mise exec -- go build -o forest .
 The read-only Auditor runs after each completed agent dispatch. Starting the
 Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
 
+Before `serve` or `once` loads trigger health, the Scheduler performs reserved
+garbage collection under the Kernel lock. One 30-second deadline bounds the
+total operation. It removes reserved `.forest/worktrees/<run-id>` paths through
+Runner cleanup and prunes their registry entries. One `update-ref` transaction
+removes private Runner, Poll, and Audit refs. It removes only known stale
+`audit.json`, `audit.log`, and `triggers.json` temps. The Ledger owns Ledger
+temps. Run log retention owns Run logs. Any cleanup error blocks startup.
+Reserved garbage collection never resumes a Run.
+
 Start the Kernel:
 
 ```sh
@@ -64,15 +73,28 @@ Start the Kernel:
 
 Use exactly one Kernel checkout and process per repository. Its OS lock rejects
 a second process in that checkout. It does not coordinate another checkout or
-clone. Every Poll has a fixed 60-second deadline. The configured declaration timeout
-separately bounds worktree preparation and agent execution. Runner cleanup has
-a separate 10-second bound. A completed dispatch starts an audit with a
-separate 60-second bound. The systemd unit has a separate 3900-second service
-drain bound. This bound covers the shipped declarations' concurrent Runs,
-bounded Runner cleanup, and serialized post-dispatch audits.
+clone. Direct `forest poll` execution has a fixed 60-second deadline. The
+Scheduler gives its configured Poll command a separate 65-second bound. The
+supervisor preserves this full 5-second difference as Poll shutdown grace. It
+lets the direct Poll stop Git/GitHub transport groups and remove private note
+snapshot refs before the supervisor force-stops its command group. The
+configured declaration timeout separately bounds worktree preparation and agent
+execution.
+Runner cleanup has a separate 10-second bound. A completed dispatch starts an
+audit with a separate 60-second bound. The systemd unit has a separate
+3900-second service drain bound. This bound covers the shipped declarations'
+concurrent Runs, bounded Runner cleanup, and serialized post-dispatch audits.
 The user service receives
 `PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin`. Before restart, the
 installer runs selfcheck with the equivalent `$HOME`-expanded path.
+
+Trusted transport captures keep at most 1 MiB while draining the complete
+output. Output beyond the cap returns an explicit error after the process group
+stops. Each Run log retains at most 2 MiB of output. When truncated, it contains
+the exact first 1 MiB, an explicit marker, and the exact last 1 MiB. The marker
+is the only file content outside the 2 MiB output cap. The Runner retains the 32
+newest completed reserved `.log` files. It does not remove active logs or
+foreign entries.
 
 A trusted declaration runs with the operating-system user's configured
 credentials and filesystem access. Worktree separation and time bounds are
@@ -115,6 +137,12 @@ than 1, timeout, or malformed behavior records an unhealthy trigger. See
 [ADR 0012](docs/adr/0012-poll-trigger-protocol.md) and the
 [onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
 
+Verifier and Fixer Poll note enumeration is bounded at 500 entries per
+canonical notes tree. A larger tree, or a note-enumeration transport-output
+overflow, is a healthy exit-1 skip with an explicit log line. It never marks
+the trigger unhealthy; the Auditor reports durable note growth as a bounded
+policy violation.
+
 ## Merge Gate
 
 The Gate requires exactly one valid Builder-or-Fixer review-request, passing
@@ -132,19 +160,27 @@ accepted client-side risks.
 The Kernel Auditor is read-only. The first observed remote `master` tip becomes
 a trusted baseline and is not Gate-checked. In each bounded stable snapshot,
 ancestry and Gate checks target only the final observed remote `master` tip.
-Schema and actor checks still cover every entry in every snapshotted
-`refs/notes/forest/*` ref, including the baseline snapshot. Remote history
+Schema and actor checks cover each snapshotted `refs/notes/forest/*` entry
+within a 500-entry-per-ref capacity bound. A ref that exceeds that bound, a
+note enumeration or note-show transport-output overflow, a note payload
+above 64 KiB, or malformed or unresolvable canonical note state (malformed
+list or tree rows, a listed note without its tree entry, a mismatched,
+unexpected, or duplicate tree entry, a non-SHA path, a non-blob entry, or a
+note object missing from the object database) becomes a bounded persisted
+policy violation and a non-pass Audit
+result, never an AuditError. Current Audit results retain at most 999 concrete
+violation entries, each at most 1 KiB, plus one exact omission summary. Remote
+history
 cannot reveal a tip that advanced again between audits; such intermediate tips
 are not independently Gate-checked. The audit covers only observable final Git
 state. It cannot prove check execution, atomic push ordering, or force absence.
 
-The Auditor runs after a completed dispatch. It logs violations and marks the
-last audit as `violations` in `forest status`; it never blocks a merge. Startup
-and idle Poll skips do not start an audit.
-
-Day-one worktree separation and time bounds do not hide operating-system
-credentials, filesystem access, or network access from a trusted declaration.
-Deployment supplies any stronger process or credential containment.
+The Auditor runs after a completed dispatch. It stores current violations in
+`audit.json` and marks the last Audit as `violations` in `forest status`. It
+appends violations to `audit.log` only when the current set differs from the
+prior persisted set. A passing Audit clears current violations and adds no
+history. Audit history retains exactly the latest 1,000 violation entries. The
+Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 
 ## Commands
 
@@ -153,7 +189,7 @@ Deployment supplies any stronger process or credential containment.
 | `forest serve` | Poll and dispatch enabled declarations. |
 | `forest once <agent>` | Poll once, then dispatch that declaration only when the Poll exits 0. |
 | `forest poll <agent>` | Evaluate one declaration's trigger. |
-| `forest status` | Show trigger health, live runs, the last audit result, and recent runs. |
+| `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, and recent Runs. |
 | `forest selfcheck` | Validate `forest.yaml` and declarations locally. |
 
 ## Development

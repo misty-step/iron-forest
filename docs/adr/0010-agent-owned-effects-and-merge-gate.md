@@ -43,7 +43,8 @@ The profile Gate contract is fixed:
 The Kernel does not enforce this profile contract. The first observed remote
 `master` tip becomes a trusted baseline and is not Gate-checked. After a
 completed dispatch, its read-only Auditor checks each snapshotted note entry's
-schema and actor, including entries in the baseline snapshot. Ancestry and Gate
+schema and actor within a 500-entry-per-ref capacity bound, including entries
+in the baseline snapshot. Ancestry and Gate
 checks target only the final observed remote `master` tip. These checks cover
 observable final Git state only. The Auditor does not prove check execution,
 atomic push ordering, or force absence. It reports violations and does not
