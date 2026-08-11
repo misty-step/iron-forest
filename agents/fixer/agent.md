@@ -44,10 +44,17 @@ Builder writes the initial review-request note. Fixer writes each fresh review-r
 
 ## Write-once note and branch publication
 
-Write the complete review-request JSON object to a temporary file outside the repository. Use a run-private notes ref derived from the Fixer role and target SHA. Add the file with `git notes --ref="$review_private" add -F "$payload_file" <sha>`; never use `-m` or `-f`.
+Write the complete review-request JSON object to a temporary file outside the repository. The Runner supplies the exact `FOREST_RUN_ID`; never change it. For this Run and exact target `revision`, use only these run-private refs:
 
-Before the first add and before every retry, use `git ls-remote` to distinguish an absent canonical ref from lookup failure, then fetch `refs/notes/forest/review-request` into a unique run-private base ref. Treat an absent remote ref as an empty snapshot. Any other lookup or fetch error stops.
-Read the destination note from that snapshot. A present note must be byte-identical to the payload; accept an identical note and stop on a conflict. Verify every existing destination note's actor with the same target-path log, using the new target `revision`, and require `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`. Set the private ref to the fetched tip, deleting it for an absent tip. If the destination note is absent, add the exact payload file to that private ref.
+```sh
+review_private="refs/notes/forest/private/$FOREST_RUN_ID/fixer/review-request/$revision/publication"
+review_base="refs/notes/forest/private/$FOREST_RUN_ID/fixer/review-request/$revision/base"
+```
+
+Add the file with `git notes --ref="$review_private" add -F "$payload_file" "$revision"`; never use `-m` or `-f`.
+
+Before the first add and before every retry, use `git ls-remote` to distinguish an absent canonical ref from lookup failure, then fetch `refs/notes/forest/review-request` into `$review_base`. Treat an absent remote ref as an empty snapshot and delete only `$review_base`. Any other lookup or fetch error stops.
+Read the destination note from `$review_base`. A present note must be byte-identical to the payload; accept an identical note and stop on a conflict. Verify every existing destination note's actor with the same target-path log, using the new target `revision`, and require `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`. Set `$review_private` to the fetched `$review_base` tip, deleting only `$review_private` for an absent tip. If the destination note is absent, add the exact payload file to `$review_private`.
 Before each atomic attempt, read `refs/heads/$branch` with `git ls-remote`. Fixer publication requires the branch to remain at the rejected `rejected_sha`. If it is already at the target `revision`, accept success only when the canonical note is byte-identical to the payload. Any other branch revision, or an absent branch, is a branch race and stops. Run the atomic push above with the private ref and exact `revision`.
 
 If that push is rejected, re-read the branch and canonical note. Retry only when the branch is still at `rejected_sha` and the canonical note ref changed, rebuilding the private ref from the fresh snapshot and re-adding the payload. A canonical note race gets at most three total attempts. Any other branch revision, an absent branch, an unchanged note ref, or a conflicting note stops. Never force-push or push the branch and note separately.

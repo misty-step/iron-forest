@@ -47,8 +47,18 @@ Builder and Fixer write review-request notes. Verifier writes Checks and Verdict
 
 ## Write-once notes and atomic Gate
 
-Write each complete Checks or Verdict JSON object to its own temporary file outside the repository. Use run-private notes refs derived from the Verifier role, note kind, and target SHA. Add each file with `git notes --ref="$private_ref" add -F "$payload_file" <sha>`; never use `-m` or `-f`.
-Before the first add and before every retry, use `git ls-remote` to distinguish an absent canonical ref from lookup failure, then fetch both canonical notes refs into unique run-private base refs. Treat absent remote refs as empty snapshots. Any other lookup or fetch error stops. Read each destination note from its snapshot. A present note must be byte-identical to its payload; accept an identical note and stop on a conflict. For each exact target SHA, set `note_path="${sha:0:2}/${sha:2}"` and verify every existing destination note's actor with `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`; never search by blob. Require `Iron Forest Verifier <verifier@forest.invalid>`. Set each private ref to its fetched tip, deleting it for an absent tip. If a destination note is absent, add its exact payload file to that private ref.
+Write each complete Checks or Verdict JSON object to its own temporary file outside the repository. Call their paths `checks_payload_file` and `verdict_payload_file`. The Runner supplies the exact `FOREST_RUN_ID`; never change it. For this Run and exact target `revision`, use only these run-private refs:
+
+```sh
+checks_private="refs/notes/forest/private/$FOREST_RUN_ID/verifier/checks/$revision/publication"
+checks_base="refs/notes/forest/private/$FOREST_RUN_ID/verifier/checks/$revision/base"
+verdict_private="refs/notes/forest/private/$FOREST_RUN_ID/verifier/verdict/$revision/publication"
+verdict_base="refs/notes/forest/private/$FOREST_RUN_ID/verifier/verdict/$revision/base"
+```
+
+Add the Checks file with `git notes --ref="$checks_private" add -F "$checks_payload_file" "$revision"`. Add the Verdict file with `git notes --ref="$verdict_private" add -F "$verdict_payload_file" "$revision"`. Never use `-m` or `-f`.
+Before the first add and before every retry, use `git ls-remote` to distinguish an absent canonical ref from lookup failure. Fetch the canonical Checks and Verdict refs into `$checks_base` and `$verdict_base`. Treat an absent remote ref as an empty snapshot and delete only its base ref. Any other lookup or fetch error stops.
+Read each destination note from its corresponding base ref. A present note must be byte-identical to its payload; accept an identical note and stop on a conflict. For the exact target `revision`, set `note_path="${revision:0:2}/${revision:2}"` and verify every existing destination note's actor with `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`; never search by blob. Require `Iron Forest Verifier <verifier@forest.invalid>`. Set `$checks_private` to the `$checks_base` tip and `$verdict_private` to the `$verdict_base` tip. Delete only the corresponding publication ref for an absent base tip. If a destination note is absent, add its exact payload file to its publication ref.
 
 For a `changes` Verdict, publish Checks and Verdict together with one normal atomic push:
 
