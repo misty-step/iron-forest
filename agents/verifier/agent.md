@@ -1,5 +1,5 @@
 ---
-model: openai-codex/gpt-5.6-sol:high
+model: openrouter/deepseek/deepseek-v4-flash-0731
 tools: read,grep,glob,bash
 thinking: high
 ---
