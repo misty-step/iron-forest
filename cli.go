@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // Stable process exit codes. The usage text publishes these, so they are part of
@@ -45,11 +46,14 @@ type cliEnvelope struct {
 }
 
 // cliOutcome is the normalized result of one command. A command fills Data plus
-// Human, or Stream when it owns its own bytes, or ErrText when it fails.
+// Human, or Stream when it owns its own bytes, or ErrText when it fails. Warning
+// is a reason the answer is partial: it reaches stderr in human mode, and under
+// --json the payload already carries it, so it is not repeated.
 type cliOutcome struct {
 	Exit    int
 	Data    any
 	Human   string
+	Warning string
 	ErrText string
 	Stream  func(io.Writer) int
 }
@@ -119,15 +123,20 @@ func (c cliCommand) rejects(flags cliFlags) []string {
 	return rejected
 }
 
+// usage states the command's grammar. --follow is exclusive with --json, so the
+// two forms are written separately rather than as one line the binary rejects.
 func (c cliCommand) usage() string {
-	usage := "forest " + c.phrase
+	head := "forest " + c.phrase
 	if c.operands != "" {
-		usage += " " + c.operands
+		head += " " + c.operands
+	}
+	if slices.Contains(c.optional, flagFollow) {
+		return head + " [--json] [--root <dir>], or " + head + " --follow [--root <dir>]"
 	}
 	for _, name := range c.optional {
-		usage += " [" + name + "]"
+		head += " [" + name + "]"
 	}
-	return usage + " [--json] [--root <dir>]"
+	return head + " [--json] [--root <dir>]"
 }
 
 // runSurfaceCommand parses, dispatches, and renders one read-surface command.
@@ -145,20 +154,54 @@ func runSurfaceCommand(args []string) int {
 	command, rest, ok := lookupCommand(positional)
 	if !ok {
 		phrase := strings.Join(positional, " ")
-		code := render(phrase, nil, flags, failure(exitInvalidArg, "unknown command %q", phrase))
+		outcome := failure(exitInvalidArg, "unknown command %q", phrase)
+		// A group name is not unknown: it is incomplete. Naming its subcommands
+		// answers the operator instead of contradicting the usage block below.
+		if subcommands := subcommandsOf(positional); len(subcommands) > 0 {
+			outcome = failure(exitInvalidArg, "%s requires a subcommand: %s",
+				phrase, strings.Join(subcommands, ", "))
+		}
+		code := render(phrase, nil, flags, outcome)
 		if !flags.json {
 			printUsage()
 		}
 		return code
 	}
 	if len(rest) != command.args {
-		return render(command.phrase, rest, flags, failure(exitInvalidArg, "usage: %s", command.usage()))
+		complaint := "was given too many operands"
+		if len(rest) < command.args {
+			complaint = "needs an operand"
+		}
+		return render(command.phrase, rest, flags, failure(exitInvalidArg,
+			"%s %s; usage: %s", command.phrase, complaint, command.usage()))
 	}
 	if rejected := command.rejects(flags); len(rejected) > 0 {
 		return render(command.phrase, rest, flags, failure(exitInvalidArg,
-			"%s does not accept %s", command.phrase, strings.Join(rejected, " ")))
+			"%s does not accept %s; usage: %s",
+			command.phrase, strings.Join(rejected, " "), command.usage()))
+	}
+	// Every command reads one checkout. Answering from a directory that holds no
+	// configuration would report a clean factory where there is none.
+	if _, err := os.Stat(configPath(flags.root)); err != nil {
+		return render(command.phrase, rest, flags, failure(exitError,
+			"%s is not an Iron Forest checkout: no forest.yaml", flags.root))
 	}
 	return render(command.phrase, rest, flags, command.run(rest, flags))
+}
+
+// subcommandsOf names the rows under a group phrase, so an incomplete command
+// reports its options instead of being called unknown.
+func subcommandsOf(positional []string) []string {
+	if len(positional) != 1 {
+		return nil
+	}
+	var subcommands []string
+	for _, command := range cliCommands() {
+		if group, sub, found := strings.Cut(command.phrase, " "); found && group == positional[0] {
+			subcommands = append(subcommands, sub)
+		}
+	}
+	return subcommands
 }
 
 // lookupCommand resolves the longest matching phrase, so "run" and "run logs"
@@ -202,6 +245,11 @@ func render(command string, args []string, flags cliFlags, outcome cliOutcome) i
 		fmt.Fprintln(os.Stderr, outcome.ErrText)
 		return outcome.Exit
 	}
+	// A warning explains a partial answer, so it must not land in the stream the
+	// payload uses.
+	if outcome.Warning != "" {
+		fmt.Fprintln(os.Stderr, outcome.Warning)
+	}
 	if outcome.Stream != nil {
 		return outcome.Stream(os.Stdout)
 	}
@@ -212,9 +260,15 @@ func render(command string, args []string, flags cliFlags, outcome cliOutcome) i
 }
 
 // wantsJSON answers before parsing succeeds, so a rejected flag still reports
-// through the envelope rather than as loose stderr text. It is exhaustive
-// because parseCLIFlags refuses `--json=<value>`.
-func wantsJSON(args []string) bool { return slices.Contains(args, "--json") }
+// through the envelope rather than as loose stderr text. A malformed `--json=x`
+// counts: the caller asked for the machine surface, so its refusal belongs
+// there too.
+func wantsJSON(args []string) bool {
+	return slices.ContainsFunc(args, func(arg string) bool {
+		name, _, _ := strings.Cut(arg, "=")
+		return name == "--json"
+	})
+}
 
 // parseCLIFlags splits flags from positionals. It returns the positionals it had
 // collected even on failure, so the caller can still name the command.
@@ -347,14 +401,36 @@ func runDeclarationShow(rest []string, flags cliFlags) cliOutcome {
 	declaration, loadErr := loadDeclaration(flags.root, name)
 	if loadErr != nil {
 		if _, configured := cfg.Agents[name]; !configured {
-			return failure(exitNotFound, "declaration %q not found", name)
+			return failure(exitNotFound, "declaration %q not found; see forest declaration list", name)
 		}
 		return failure(exitError, "%s", loadErr)
 	}
-	human := fmt.Sprintf("declaration %s\nmodel: %s\ntools: %s\nthinking: %s\nsystem_prompt:\n%s\ntask_prompt:\n%s",
-		declaration.Name, declaration.Model, strings.Join(declaration.Tools, ","), declaration.Thinking,
-		declaration.SystemPrompt, declaration.TaskPrompt)
+	// Field labels sit at column zero and prompt bodies are indented, so audited
+	// prompt text cannot pose as a declaration field. An unset field carries no
+	// trailing space.
+	human := strings.Join([]string{
+		"declaration " + oneLine(declaration.Name),
+		field("model", oneLine(declaration.Model)),
+		field("tools", strings.Join(declaration.Tools, ",")),
+		field("thinking", oneLine(declaration.Thinking)),
+		field("system_prompt", "\n"+indentBlock(declaration.SystemPrompt)),
+		field("task_prompt", "\n"+indentBlock(declaration.TaskPrompt)),
+	}, "\n")
 	return cliOutcome{Exit: exitOK, Data: declaration, Human: human}
+}
+
+// field renders one label, omitting the separator when the value is empty so no
+// line ends in trailing whitespace.
+func field(label, value string) string {
+	switch {
+	case strings.TrimLeft(value, "\n") == "":
+		return label + ":"
+	case strings.HasPrefix(value, "\n"):
+		// A block value starts on the next line, so no separator belongs here.
+		return label + ":" + value
+	default:
+		return label + ": " + value
+	}
 }
 
 type triggerListPayload struct {
@@ -372,7 +448,7 @@ func runTriggerList(_ []string, flags cliFlags) cliOutcome {
 	if state.StateErr != nil {
 		payload.StateErr = state.StateErr.Error()
 	}
-	return cliOutcome{Exit: exitOK, Data: payload, Human: triggerViewsHuman(state.Views)}
+	return cliOutcome{Exit: exitOK, Data: payload, Human: triggerViewsHuman(state.Views), Warning: stateWarning(state)}
 }
 
 func runTriggerShow(rest []string, flags cliFlags) cliOutcome {
@@ -382,9 +458,34 @@ func runTriggerShow(rest []string, flags cliFlags) cliOutcome {
 	}
 	index := slices.IndexFunc(state.Views, func(view TriggerView) bool { return view.Name == rest[0] })
 	if index < 0 {
-		return failure(exitNotFound, "trigger %q not found", rest[0])
+		return failure(exitNotFound, "trigger %q is not configured; see forest trigger list", rest[0])
 	}
-	return cliOutcome{Exit: exitOK, Data: state.Views[index], Human: triggerViewsHuman(state.Views[index : index+1])}
+	payload := triggerShowPayload{TriggerView: state.Views[index]}
+	if state.StateErr != nil {
+		payload.StateErr = state.StateErr.Error()
+	}
+	return cliOutcome{
+		Exit:    exitOK,
+		Data:    payload,
+		Human:   triggerViewsHuman(state.Views[index : index+1]),
+		Warning: stateWarning(state),
+	}
+}
+
+// triggerShowPayload carries one trigger plus the reason its state may be
+// unknown, so one agent can be investigated without reading the whole list.
+type triggerShowPayload struct {
+	TriggerView
+	StateErr string `json:"state_error,omitempty"`
+}
+
+// stateWarning is the reason trigger state is unknown, reported once by every
+// command that renders a trigger.
+func stateWarning(state triggerState) string {
+	if state.StateErr == nil {
+		return ""
+	}
+	return "trigger state unknown: " + state.StateErr.Error()
 }
 
 // runTriggerReset clears one agent's accumulated errors. The Scheduler owns this
@@ -398,7 +499,10 @@ func runTriggerReset(rest []string, flags cliFlags) cliOutcome {
 	if _, configured := cfg.Agents[agent]; !configured {
 		return failure(exitNotFound, "trigger %q is not configured", agent)
 	}
-	return withKernelLock(flags.root, func() cliOutcome {
+	// The write happens under the Kernel lock; the view is resolved after it is
+	// released. Resolving inside would read this command's own lock as a running
+	// Kernel and report the agent as live.
+	if outcome := withKernelLock(flags.root, func() cliOutcome {
 		health, _, err := readTriggerHealth(flags.root)
 		if err != nil {
 			return failure(exitError, "%s", err)
@@ -415,13 +519,19 @@ func runTriggerReset(rest []string, flags cliFlags) cliOutcome {
 		if err := writeTriggerHealth(flags.root, health); err != nil {
 			return failure(exitError, "persist trigger state: %s", err)
 		}
-		state, err := resolveTriggerState(flags.root)
-		if err != nil {
-			return failure(exitError, "%s", err)
-		}
-		index := slices.IndexFunc(state.Views, func(view TriggerView) bool { return view.Name == agent })
-		return cliOutcome{Exit: exitOK, Data: state.Views[index], Human: triggerViewsHuman(state.Views[index : index+1])}
-	})
+		return cliOutcome{Exit: exitOK}
+	}); outcome.Exit != exitOK {
+		return outcome
+	}
+	state, err := resolveTriggerState(flags.root)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	index := slices.IndexFunc(state.Views, func(view TriggerView) bool { return view.Name == agent })
+	if index < 0 {
+		return failure(exitError, "trigger %q vanished during reset", agent)
+	}
+	return cliOutcome{Exit: exitOK, Data: state.Views[index], Human: triggerViewsHuman(state.Views[index : index+1])}
 }
 
 type runListPayload struct {
@@ -442,8 +552,16 @@ func runRunList(_ []string, flags cliFlags) cliOutcome {
 		return failure(exitError, "%s", err)
 	}
 	human := "no runs"
-	if len(records) > 0 {
+	switch {
+	case len(records) > 0:
 		human = runRecordsHuman(records, "")
+		if nextAfter != "" {
+			human += fmt.Sprintf("\nmore runs: forest run list --after %s", nextAfter)
+		}
+	case flags.after != "":
+		// "no runs" would claim the factory never ran anything; this is the end
+		// of a page walk.
+		human = "no more runs after " + oneLine(flags.after)
 	}
 	return cliOutcome{Exit: exitOK, Data: runListPayload{Runs: records, NextAfter: nextAfter}, Human: human}
 }
@@ -454,10 +572,18 @@ func runRunShow(rest []string, flags cliFlags) cliOutcome {
 		return failure(exitError, "%s", err)
 	}
 	if !found {
-		return failure(exitNotFound, "run %q not found", rest[0])
+		// A log without a ledger row is a real state, and `run logs` serves it.
+		// Saying only "not found" would make two commands disagree.
+		if _, statErr := os.Stat(runLogPath(flags.root, rest[0])); statErr == nil {
+			return failure(exitNotFound,
+				"run %q has no ledger row yet; its log exists, see forest run logs %s", rest[0], rest[0])
+		}
+		return failure(exitNotFound, "run %q not found; see forest run list", rest[0])
 	}
-	human := fmt.Sprintf("%s\tagent=%s\texit=%d\tduration=%.3f\tstarted=%s",
-		record.RunID, record.Agent, record.Exit, record.Duration, record.Started)
+	human := fmt.Sprintf("%s agent=%s exit=%d duration=%.3fs started=%s\n"+
+		"  tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
+		oneLine(record.RunID), oneLine(record.Agent), record.Exit, record.Duration, oneLine(record.Started),
+		record.TokensIn, record.TokensOut, record.CacheRead, record.CacheWrite, record.Reasoning)
 	return cliOutcome{Exit: exitOK, Data: record, Human: human}
 }
 
@@ -465,8 +591,9 @@ type runLogPayload struct {
 	RunID    string `json:"run_id"`
 	Retained bool   `json:"retained"`
 	Complete bool   `json:"complete"`
-	Exit     int    `json:"exit"`
-	Text     string `json:"text"`
+	// Exit is absent while a Run is in flight: reporting 0 would read as success.
+	Exit *int   `json:"exit"`
+	Text string `json:"text"`
 }
 
 func runRunLogs(rest []string, flags cliFlags) cliOutcome {
@@ -480,10 +607,14 @@ func runRunLogs(rest []string, flags cliFlags) cliOutcome {
 		return failure(exitError, "%s", err)
 	}
 	// A run identity is real when the ledger has it or its log exists. Following
-	// anything else would wait for a Run that will never appear.
-	_, statErr := os.Stat(logPath)
+	// anything else would wait for a Run that will never appear. A log that is
+	// not a regular file would block both reads forever, so it is refused here.
+	info, statErr := os.Stat(logPath)
 	if !found && statErr != nil {
 		return failure(exitNotFound, "run %q not found", runID)
+	}
+	if statErr == nil && !info.Mode().IsRegular() {
+		return failure(exitError, "run log for %q is not a regular file", runID)
 	}
 	if flags.follow && !found {
 		return cliOutcome{Exit: exitOK, Stream: func(w io.Writer) int { return followRunLog(w, flags.root, runID, logPath) }}
@@ -493,18 +624,26 @@ func runRunLogs(rest []string, flags cliFlags) cliOutcome {
 	if !retained && !os.IsNotExist(readErr) {
 		return failure(exitError, "%s", readErr)
 	}
-	payload := runLogPayload{RunID: runID, Retained: retained, Complete: found, Exit: record.Exit, Text: text}
-	human := text
+	payload := runLogPayload{RunID: runID, Retained: retained, Complete: found, Text: text}
+	if found {
+		payload.Exit = &record.Exit
+	}
+	human := strings.TrimSuffix(text, "\n")
+	warning := ""
 	if !retained {
-		human = "log not retained"
+		// A status sentence is not log content, so it must not land in the stream
+		// a caller redirects into a file.
+		human, warning = "", fmt.Sprintf("run %q has no retained log", runID)
 	}
 	exit := exitOK
 	if flags.follow {
 		// The Run already finished, so follow has nothing to wait for and
-		// reports the Run's own outcome, as the command contract requires.
+		// reports the Run's own outcome, as the command contract requires. The
+		// warning states whose code it is, because that code overlaps the CLI's.
 		exit = record.Exit
+		warning = fmt.Sprintf("run %q exited %d", runID, record.Exit)
 	}
-	return cliOutcome{Exit: exit, Data: payload, Human: strings.TrimSuffix(human, "\n")}
+	return cliOutcome{Exit: exit, Data: payload, Human: human, Warning: warning}
 }
 
 // followRunLog streams new log bytes until the Run's ledger row appears, then
@@ -592,7 +731,31 @@ func runAuditLog(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	return cliOutcome{Exit: exitOK, Data: auditLogPayload{Entries: entries}, Human: strings.Join(entries, "\n")}
+	human := "no audit history"
+	if len(entries) > 0 {
+		human = fmt.Sprintf("audit history: showing=%d\n%s", len(entries), strings.Join(entries, "\n"))
+	}
+	return cliOutcome{Exit: exitOK, Data: auditLogPayload{Entries: entries}, Human: human}
+}
+
+// oneLine keeps a stored value inside the line that reports it. Poll output, Run
+// errors, Auditor violations, and ledger identities are agent-authored, so an
+// embedded newline would otherwise forge additional lines in a human report.
+func oneLine(value string) string {
+	if strings.ContainsFunc(value, unicode.IsControl) {
+		return strconv.Quote(value)
+	}
+	return value
+}
+
+// indentBlock indents a multi-line body so its text cannot pose as a field label
+// at column zero.
+func indentBlock(body string) string {
+	trimmed := strings.TrimSuffix(body, "\n")
+	if trimmed == "" {
+		return ""
+	}
+	return "  " + strings.ReplaceAll(trimmed, "\n", "\n  ")
 }
 
 // auditStateHuman renders audit state, showing at most cap violations and
@@ -600,13 +763,21 @@ func runAuditLog(_ []string, flags cliFlags) cliOutcome {
 func auditStateHuman(state AuditState, cap int) string {
 	shown := min(len(state.Violations), cap)
 	var human strings.Builder
-	fmt.Fprintf(&human, "last audit: %s master=%s\n", state.LastResult, state.LastMaster)
+	if state.LastResult == "" && state.LastAt == "" {
+		human.WriteString("last audit: never\n")
+	} else {
+		fmt.Fprintf(&human, "last audit: %s", oneLine(state.LastResult))
+		if state.LastAt != "" {
+			fmt.Fprintf(&human, " at=%s", oneLine(state.LastAt))
+		}
+		fmt.Fprintf(&human, " master=%s\n", oneLine(state.LastMaster))
+	}
 	fmt.Fprintf(&human, "audit violations: total=%d", len(state.Violations))
 	if omitted := len(state.Violations) - shown; omitted > 0 {
 		fmt.Fprintf(&human, " omitted=%d", omitted)
 	}
 	for _, violation := range state.Violations[:shown] {
-		fmt.Fprintf(&human, "\naudit violation: %s", violation)
+		fmt.Fprintf(&human, "\naudit violation: %s", oneLine(violation))
 	}
 	return human.String()
 }
@@ -614,8 +785,8 @@ func auditStateHuman(state AuditState, cap int) string {
 func runRecordsHuman(records []RunRecord, indent string) string {
 	rows := make([]string, 0, len(records))
 	for _, record := range records {
-		rows = append(rows, fmt.Sprintf("%s%s agent=%s exit=%d duration=%.3f",
-			indent, record.RunID, record.Agent, record.Exit, record.Duration))
+		rows = append(rows, fmt.Sprintf("%s%s agent=%s exit=%d duration=%.3fs",
+			indent, oneLine(record.RunID), oneLine(record.Agent), record.Exit, record.Duration))
 	}
 	return strings.Join(rows, "\n")
 }

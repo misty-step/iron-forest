@@ -307,6 +307,12 @@ func ReadLedgerTail(root string, limit int) ([]RunRecord, error) {
 // caller paging with a stale cursor learns it instead of silently restarting.
 var errLedgerCursorUnknown = errors.New("run identity is not in the ledger")
 
+// errLedgerIdentityUnusable reports a ledger row whose identity cannot carry a
+// paging cursor: empty, or shared with an older row. Identities are minted
+// unique, so this is a corrupt ledger rather than a caller mistake. Failing here
+// is what stops a client from looping on a cursor that never advances.
+var errLedgerIdentityUnusable = errors.New("ledger row identity cannot carry a cursor")
+
 // ReadLedgerPage returns one newest-first page. after names the oldest identity
 // already delivered; the page continues from the next older row. The returned
 // cursor is empty on the last page.
@@ -331,12 +337,19 @@ func ReadLedgerPage(root string, limit int, after string) ([]RunRecord, string, 
 			return nil, "", fmt.Errorf("%w: %q", errLedgerCursorUnknown, after)
 		}
 		records = records[index+1:]
+		if slices.ContainsFunc(records, func(record RunRecord) bool { return record.RunID == after }) {
+			return nil, "", fmt.Errorf("%w: %q names more than one row", errLedgerIdentityUnusable, after)
+		}
 	}
 	if len(records) <= limit {
 		return records, "", nil
 	}
 	page := records[:limit]
-	return page, page[limit-1].RunID, nil
+	cursor := page[limit-1].RunID
+	if cursor == "" {
+		return nil, "", fmt.Errorf("%w: the page boundary has an empty identity", errLedgerIdentityUnusable)
+	}
+	return page, cursor, nil
 }
 
 // FindRun returns the ledger row for one run identity, stopping at the first

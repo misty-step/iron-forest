@@ -188,7 +188,7 @@ Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 | --- | --- |
 | `forest serve` | Poll and dispatch enabled declarations. |
 | `forest once <agent>` | Poll once, then dispatch that declaration only when the Poll exits 0. |
-| `forest poll <agent>` | Evaluate one declaration's trigger. |
+| `forest poll <agent>` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`. |
 | `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, and recent Runs. |
 | `forest selfcheck` | Validate `forest.yaml` and declarations locally. |
 | `forest config show` | Print the loaded configuration. |
@@ -203,10 +203,14 @@ Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 
 ### Reading the factory
 
-Every command above except `serve`, `once`, and `poll` is read-only, accepts
-`--root <dir>` to read another checkout, and accepts `--json`. `trigger reset`
-is the one exception: it writes, and it refuses while a Kernel holds the lock,
-because the Scheduler owns that file while it runs.
+`serve`, `once`, and `poll` are the engine: they hold the Kernel lock and write.
+Every other row is the read surface. Each read-surface command accepts
+`--root <dir>` to read another checkout and `--json` to emit one envelope, and
+each refuses a directory that holds no `forest.yaml` rather than reporting an
+empty factory. Two of them write: `trigger reset` and `audit show --rescan` hold
+the Kernel lock across the write and exit `5` while a Kernel holds it. Every
+other read-surface command only reads, under a shared lock that never blocks the
+Kernel.
 
 `--json` emits exactly one envelope on stdout, including on failure:
 
@@ -219,22 +223,37 @@ because the Scheduler owns that file while it runs.
 are snake_case throughout, and an empty collection is `[]`, never `null`.
 Adding a key is compatible; renaming or removing one requires `forest.cli.v2`.
 
-`run list` and `audit log` accept `--limit N`. `run list` also accepts
-`--after <run-id>` and returns `next_after`, which is empty on the last page.
-Paging with a cursor that no longer names a Run exits 4 rather than silently
-restarting.
+Each payload publishes what the command resolved. Three keys guard the rest and
+must be read first:
 
-`run list` returns Runs newest first. `status` reports its recent Runs in Ledger
-order, oldest first, because it is a snapshot of the tail rather than a pager.
+| Key | Meaning when false |
+| --- | --- |
+| `state_known` (per trigger) | No state is recorded for that agent, so its counters are zero because they are unknown, not because they are zero. |
+| `state_present` (`trigger list`) | No trigger state file exists yet. |
+| `complete` (`run logs`) | The Run has not finished, so `exit` is absent. |
+
+`trigger list` publishes `state_error` and `status` publishes
+`trigger_state_error`; both carry the same reason, scoped to their payload.
+`status` also publishes `kernel.running` with `kernel.running_known`, which is
+the only way to learn whether a Kernel holds the lock.
+
+`run list` and `audit log` accept `--limit N`; `run list` defaults to 50 rows.
+`run list` also accepts `--after <run-id>` and returns `next_after`, which is
+empty on the last page. Paging with a cursor that no longer names a Run exits 4
+rather than silently restarting, and a ledger whose identities are duplicated or
+empty cannot carry a cursor, so paging fails instead of looping.
+
+`run list` returns Runs newest first. `status` reports at most ten recent Runs in
+Ledger order, oldest first, because it is a snapshot of the tail rather than a
+pager; its human output labels the order.
 
 Exit codes are stable: `0` success, `1` no work, `2` error, `4` not found,
 `5` conflict, `6` invalid argument. One command leaves that space deliberately:
-`run logs --follow` exits with the Run's own exit code, so its exit does not
-carry the meanings above.
-
-`trigger reset` and `audit show --rescan` write, so they run while holding the
-Kernel lock and exit `5` when a Kernel holds it. Every other command in the
-table only reads, and reads take a shared lock that never blocks the Kernel.
+`run logs --follow` exits with the followed Run's own exit code, so its exit does
+not carry the meanings above. It therefore also refuses `--json`, since one
+envelope cannot describe a stream, and it names the Run's outcome on stderr so a
+relayed code is distinguishable from a CLI verdict. Ticket #257 specifies that
+relay; script against the stderr line or use `run show` for a structured answer.
 
 ## Development
 

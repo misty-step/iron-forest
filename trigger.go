@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -123,18 +124,26 @@ func resolveTriggerState(root string) (triggerState, error) {
 		health = map[string]TriggerHealth{}
 	}
 	state.LockHeld, state.LockErr = kernelLockHeld(root)
-	known := healthErr == nil && present && len(health) == len(names)
-	for _, name := range names {
-		if _, present := health[name]; !present {
-			known = false
+	// State for an agent the configuration no longer declares never updates
+	// again, so it is drift worth reporting. A configured agent with no row yet
+	// is the normal condition after one agent runs, not a fault.
+	if healthErr == nil {
+		orphans := make([]string, 0)
+		for agent := range health {
+			if !slices.Contains(names, agent) {
+				orphans = append(orphans, agent)
+			}
 		}
-	}
-	if present && healthErr == nil && !known {
-		state.StateErr = fmt.Errorf("trigger state does not match configured agents")
+		if len(orphans) > 0 {
+			slices.Sort(orphans)
+			state.StateErr = fmt.Errorf("trigger state names agents the configuration does not: %s", strings.Join(orphans, " "))
+		}
 	}
 	state.Views = make([]TriggerView, 0, len(names))
 	for _, name := range names {
-		value := health[name]
+		// Knowledge is per agent: one agent's missing row never hides another's
+		// recorded errors.
+		value, known := health[name]
 		view := TriggerView{Name: name, StateKnown: known, RunningKnown: state.LockErr == nil}
 		if known {
 			view.ConsecutiveErrors = value.ConsecutiveErrors
@@ -167,30 +176,35 @@ func triggerViewsHuman(views []TriggerView) string {
 		} else {
 			fmt.Fprintf(&human, "%t", view.Running)
 		}
-		if view.Stale {
-			human.WriteString(" stale=true")
-		}
+		// stale is always rendered so every row carries the same field set and an
+		// absent key cannot read as false.
+		fmt.Fprintf(&human, " stale=%t", view.Stale)
 		for _, field := range []struct {
 			label string
 			value string
 		}{{"poll_error", view.PollError}, {"run_error", view.RunError}, {"audit_error", view.AuditError}} {
 			if field.value != "" {
-				fmt.Fprintf(&human, " %s=%s", field.label, field.value)
+				fmt.Fprintf(&human, " %s=%s", field.label, oneLine(field.value))
 			}
 		}
 	}
 	return human.String()
 }
 
-// liveRunsHuman reports which agents hold a live Run right now.
-func liveRunsHuman(views []TriggerView) string {
-	for _, view := range views {
-		if !view.StateKnown || !view.RunningKnown {
+// liveRunsHuman reports which agents hold a live Run right now. Liveness is
+// unknown only when the lock or the state file cannot be read; an agent with no
+// recorded row simply holds no Run.
+func liveRunsHuman(state triggerState) string {
+	if state.StateErr != nil {
+		return "live runs: unknown"
+	}
+	for _, view := range state.Views {
+		if !view.RunningKnown {
 			return "live runs: unknown"
 		}
 	}
 	var live strings.Builder
-	for _, view := range views {
+	for _, view := range state.Views {
 		if view.Running {
 			fmt.Fprintf(&live, "\n  agent=%s running=true", view.Name)
 		}

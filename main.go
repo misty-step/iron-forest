@@ -23,6 +23,10 @@ func runCLI(args []string) int {
 	switch args[0] {
 	case "serve", "once", "poll":
 		return runEngineCommand(args[0], args[1:])
+	case "help", "--help", "-h":
+		// Asking for usage is not a usage error.
+		printUsage()
+		return exitOK
 	}
 	return runSurfaceCommand(args)
 }
@@ -58,7 +62,8 @@ func printUsage() {
 engine:
   forest serve                  run the scheduler until interrupted
   forest once <agent>           poll once, dispatch on exit 0
-  forest poll <agent>           evaluate one declaration's trigger
+  forest poll <agent>           evaluate the built-in trigger for builder,
+                                verifier, or fixer
 
 inspect:`)
 	for _, command := range cliCommands() {
@@ -71,27 +76,22 @@ flags:
   --root <dir>  read another checkout
   --limit N     bound a listing
   --after <id>  continue a listing after one identity
-  exit: 0 ok · 1 no work · 2 error · 4 not found · 5 conflict · 6 invalid arg`)
+  --rescan      re-run the Auditor before reporting (audit show)
+  --follow      stream a Run log until it completes; excludes --json (run logs)
+  exit: 0 ok, 1 no work, 2 error, 4 not found, 5 conflict, 6 invalid arg
+        run logs --follow instead exits with the followed Run's own code`)
 	fmt.Fprintln(os.Stderr, usage.String())
 }
 
+// withLock runs an engine command while holding the Kernel lock. It reports
+// through stderr and a process code; the read surface uses withKernelLock, which
+// is the same acquisition reported through the envelope.
 func withLock(root string, fn func() int) int {
-	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return exitError
+	outcome := withKernelLock(root, func() cliOutcome { return cliOutcome{Exit: fn()} })
+	if outcome.ErrText != "" {
+		fmt.Fprintln(os.Stderr, outcome.ErrText)
 	}
-	file, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return exitError
-	}
-	defer file.Close()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		fmt.Fprintln(os.Stderr, "another Kernel is already running")
-		return exitConflict
-	}
-	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-	return fn()
+	return outcome.Exit
 }
 
 // withKernelLock runs a mutation while holding the Kernel lock, so a Kernel that
@@ -175,19 +175,25 @@ func poll(root, agent string) int {
 
 func pollAgent(ctx context.Context, poller *Poller, agent string) int {
 	var code int
+	var err error
 	switch agent {
 	case "builder":
-		code = poller.builder(ctx)
+		code, err = poller.builder(ctx)
 	case "verifier":
-		code = poller.verifier(ctx)
+		code, err = poller.verifier(ctx)
 	case "fixer":
-		code = poller.fixer(ctx)
+		code, err = poller.fixer(ctx)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown poll agent %q\n", agent)
 		return exitError
 	}
 	if ctx.Err() != nil {
 		return exitError
+	}
+	// A Poll that fails must say why. Silence would leave the operator with an
+	// exit code and no cause, and a direct Poll records nothing to inspect.
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "poll %s: %v\n", agent, err)
 	}
 	return code
 }
@@ -207,6 +213,19 @@ type kernelView struct {
 	Running      bool   `json:"running"`
 	RunningKnown bool   `json:"running_known"`
 	LockError    string `json:"lock_error,omitempty"`
+}
+
+// kernelHuman states whether a Kernel holds the workspace lock. Without this the
+// human report of a running-but-idle Kernel is identical to a stopped one, while
+// the payload says otherwise.
+func kernelHuman(kernel kernelView) string {
+	if !kernel.RunningKnown {
+		return "unknown"
+	}
+	if kernel.Running {
+		return "running"
+	}
+	return "stopped"
 }
 
 // runStatus composes the read surface into one snapshot. It renders from the
@@ -232,19 +251,28 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	// Unreadable lock or state is a warning, not a failure: the snapshot still
-	// reports every other fact, and the payload marks what is unknown.
+	// An unreadable lock or state is a warning, not a failure: the snapshot still
+	// reports every other fact, and the payload marks what is unknown. Under
+	// --json the envelope carries both reasons, so warning again would publish
+	// the same fact twice.
+	warnings := make([]string, 0, 2)
 	if state.LockErr != nil {
-		fmt.Fprintf(os.Stderr, "kernel lock state unknown: %v\n", state.LockErr)
+		warnings = append(warnings, fmt.Sprintf("kernel lock state unknown: %v", state.LockErr))
 	}
-	if state.StateErr != nil {
-		fmt.Fprintf(os.Stderr, "trigger state unknown: %v\n", state.StateErr)
+	if reason := stateWarning(state); reason != "" {
+		warnings = append(warnings, reason)
 	}
+	// The repository and the ordering are stated, so a pasted status can be
+	// attributed to a factory and its newest Run cannot be mistaken for its
+	// oldest. `run list` pages the other way.
+	recent := fmt.Sprintf("recent runs (oldest first, at most %d):", statusRecentRuns)
 	sections := []string{
+		"repo: " + oneLine(cfg.Repo),
+		"kernel: " + kernelHuman(kernel),
 		triggerViewsHuman(state.Views),
-		liveRunsHuman(state.Views),
+		liveRunsHuman(state),
 		auditStateHuman(audit, statusViolations),
-		"recent runs:",
+		recent,
 	}
 	if rows := runRecordsHuman(records, "  "); rows != "" {
 		sections = append(sections, rows)
@@ -259,7 +287,12 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	if state.StateErr != nil {
 		payload.TriggerStateError = state.StateErr.Error()
 	}
-	return cliOutcome{Exit: exitOK, Data: payload, Human: strings.Join(sections, "\n")}
+	return cliOutcome{
+		Exit:    exitOK,
+		Data:    payload,
+		Human:   strings.Join(sections, "\n"),
+		Warning: strings.Join(warnings, "\n"),
+	}
 }
 
 // statusRecentRuns bounds both views of recent Runs. statusViolations bounds only
@@ -336,8 +369,19 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
 	return cliOutcome{
-		Exit:  exitOK,
-		Data:  selfcheckPayload{Repo: cfg.Repo, Declarations: names, Tools: resolved},
-		Human: "selfcheck: ok",
+		Exit: exitOK,
+		Data: selfcheckPayload{Repo: cfg.Repo, Declarations: names, Tools: resolved},
+		Human: fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
+			oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " ")),
 	}
+}
+
+// toolNames lists resolved tools as name=path, so the human surface reports the
+// same paths the payload publishes.
+func toolNames(tools []toolPath) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name+"="+tool.Path)
+	}
+	return names
 }
