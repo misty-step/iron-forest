@@ -28,6 +28,9 @@ const (
 	runLogHalfLimit             = 1 << 20
 	completedRunLogRetention    = 32
 	runLogTruncationMarker      = "\n--- Iron Forest Run log truncated; retained first 1 MiB and last 1 MiB ---\n"
+	// harnessUnavailableExit is the shell convention for a command that could not
+	// be executed. A Run that never started has no usage to report.
+	harnessUnavailableExit = 127
 )
 
 var (
@@ -278,16 +281,21 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	usage, usageErr := parseAgentUsage(logPath)
-	if usageErr != nil {
-		usageErr = fmt.Errorf("parse harness usage: %w", usageErr)
-		if record.Exit == 0 {
-			record.Exit = 1
+	// Usage exists only if the harness ran. Demanding it after a failure to start
+	// would report "no usage" as the cause and bury the real one.
+	var usageErr error
+	if invokeErr == nil || record.Exit != harnessUnavailableExit {
+		usage, parseErr := parseAgentUsage(logPath)
+		if parseErr != nil {
+			usageErr = fmt.Errorf("parse harness usage: %w", parseErr)
+			if record.Exit == 0 {
+				record.Exit = 1
+			}
+		} else {
+			record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
+			record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
+			record.Reasoning = usage.Reasoning
 		}
-	} else {
-		record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
-		record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
-		record.Reasoning = usage.Reasoning
 	}
 	retentionErr := completeRunLog(logPath)
 	if retentionErr != nil {
@@ -504,7 +512,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	}
 	path, err := r.piExecutable()
 	if err != nil {
-		record.Exit = 127
+		record.Exit = harnessUnavailableExit
 		return err
 	}
 	// ADR 0018 states this shape. The Runner owns the working directory and the
@@ -529,18 +537,18 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	email := declaration.Name + "@forest.invalid"
 	command.Env, err = runnerEnvironment(r.Root, name, email, record.RunID)
 	if err != nil {
-		record.Exit = 127
+		record.Exit = harnessUnavailableExit
 		return err
 	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		record.Exit = 127
+		record.Exit = harnessUnavailableExit
 		return fmt.Errorf("open harness output pipe: %w", err)
 	}
 	command.Stdout = writer
 	command.Stderr = writer
 	if err := command.Start(); err != nil {
-		record.Exit = 127
+		record.Exit = harnessUnavailableExit
 		return errors.Join(fmt.Errorf("start omp: %w", err), writer.Close(), reader.Close())
 	}
 	writerCloseErr := writer.Close()
@@ -688,23 +696,12 @@ func runContextExit(parent, run context.Context, fallback int) int {
 	return fallback
 }
 
-// piExecutable resolves the agent harness. The service PATH does not reach a
-// version-managed install, so the shim directory is checked before PATH.
+// piExecutable resolves the agent harness through the trusted PATH, exactly as
+// git and gh are resolved. The service unit and the installer put the version
+// manager's shim directory on that PATH, so no probing of the operator's home is
+// needed and a stubbed PATH is honoured.
 func (r *Runner) piExecutable() (string, error) {
-	if r.PiPath != "pi" {
-		return trustedExecutable(r.Root, r.PiPath)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, candidate := range []string{
-			filepath.Join(home, ".local", "bin", "pi"),
-			filepath.Join(home, ".local", "share", "mise", "shims", "pi"),
-		} {
-			if _, err := os.Stat(candidate); err == nil {
-				return trustedExecutable(r.Root, candidate)
-			}
-		}
-	}
-	return trustedExecutable(r.Root, "pi")
+	return trustedExecutable(r.Root, r.PiPath)
 }
 
 // trustedExecutable resolves a tool to a path outside the repository. Symlinks

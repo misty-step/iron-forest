@@ -243,7 +243,7 @@ func TestCLISelfcheckEmitsEnvelope(t *testing.T) {
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")
 	bin := t.TempDir()
-	for _, name := range []string{"git", "gh", "omp"} {
+	for _, name := range []string{"git", "gh", "pi"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -335,7 +335,7 @@ func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")
 	bin := t.TempDir()
-	for _, name := range []string{"git", "gh", "omp"} {
+	for _, name := range []string{"git", "gh", "pi"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}

@@ -582,7 +582,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"git", "gh", "omp"} {
+	for _, name := range []string{"git", "gh", "pi"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
