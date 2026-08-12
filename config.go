@@ -21,20 +21,20 @@ const workspaceName = ".forest"
 var repoNamePattern = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
 type Config struct {
-	Repo   string                 `yaml:"repo"`
-	Agents map[string]AgentConfig `yaml:"agents"`
-	Checks []Check                `yaml:"checks"`
+	Repo   string                 `yaml:"repo" json:"repo"`
+	Agents map[string]AgentConfig `yaml:"agents" json:"agents"`
+	Checks []Check                `yaml:"checks" json:"checks"`
 }
 
 type AgentConfig struct {
-	Poll     string `yaml:"poll"`
-	Interval int    `yaml:"interval"`
-	Timeout  int    `yaml:"timeout"`
+	Poll     string `yaml:"poll" json:"poll"`
+	Interval int    `yaml:"interval" json:"interval"`
+	Timeout  int    `yaml:"timeout" json:"timeout"`
 }
 
 type Check struct {
-	Name string `yaml:"name"`
-	Run  string `yaml:"run"`
+	Name string `yaml:"name" json:"name"`
+	Run  string `yaml:"run" json:"run"`
 }
 
 type yamlInt int

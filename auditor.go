@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -422,6 +423,32 @@ func scanAuditLog(ctx context.Context, path string, visit func(string)) error {
 		visit(entry)
 	}
 	return errors.Join(scanner.Err(), file.Close())
+}
+
+// ReadAuditLog returns the newest audit history entries, oldest first, bounded
+// by limit. A limit of zero or less means the whole retained history.
+func ReadAuditLog(ctx context.Context, root string, limit int) ([]string, error) {
+	if limit <= 0 || limit > auditHistoryEntries {
+		limit = auditHistoryEntries
+	}
+	entries := make([]string, 0, limit)
+	next := 0
+	if err := scanAuditLog(ctx, auditLogPath(root), func(entry string) {
+		if len(entries) < limit {
+			entries = append(entries, entry)
+			return
+		}
+		entries[next] = entry
+		next = (next + 1) % limit
+	}); err != nil {
+		return nil, err
+	}
+	if next != 0 {
+		slices.Reverse(entries[:next])
+		slices.Reverse(entries[next:])
+		slices.Reverse(entries)
+	}
+	return entries, nil
 }
 
 func cleanupAuditLogTemps(path string, deps auditDependencies) error {

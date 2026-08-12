@@ -314,7 +314,7 @@ func TestSchedulerRestartDropsRemovedDeclarationHealth(t *testing.T) {
 	if _, present := restarted.health["fixer"]; present {
 		t.Fatalf("removed declaration remains in Scheduler health: %#v", restarted.health)
 	}
-	persisted, err := readTriggerHealth(root)
+	persisted, _, err := readTriggerHealth(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 	if health.PollError != "" || health.RunError != runFailure.Error() || health.AuditError != auditFailure {
 		t.Fatalf("healthy Poll cleared another cause=%#v", health)
 	}
-	persisted, err := readTriggerHealth(root)
+	persisted, _, err := readTriggerHealth(root)
 	if err != nil || persisted["builder"] != health {
 		t.Fatalf("persisted trigger state=%#v err=%v, want %#v", persisted["builder"], err, health)
 	}

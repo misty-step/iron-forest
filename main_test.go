@@ -34,8 +34,8 @@ func TestRunCLIRequiresExactArityBeforeSideEffects(t *testing.T) {
 			root := t.TempDir()
 			t.Chdir(root)
 			code, _, stderr := captureCLIOutput(t, func() int { return runCLI(tc.args) })
-			if code != 2 {
-				t.Fatalf("runCLI(%q) code=%d, want 2", tc.args, code)
+			if code != exitInvalidArg {
+				t.Fatalf("runCLI(%q) code=%d, want %d", tc.args, code, exitInvalidArg)
 			}
 			if !strings.Contains(stderr, "usage: forest") {
 				t.Fatalf("runCLI(%q) stderr=%q, want usage", tc.args, stderr)
@@ -59,7 +59,7 @@ func TestRunCLIBoundedExitSemantics(t *testing.T) {
 		{name: "once operational failure", args: []string{"once", "builder"}, poll: "exit 2", want: 2},
 		{name: "poll operational failure", args: []string{"poll", "unknown"}, poll: "exit 1", want: 2},
 		{name: "status operational failure", args: []string{"status"}, want: 2},
-		{name: "selfcheck operational failure", args: []string{"selfcheck"}, want: 1},
+		{name: "selfcheck operational failure", args: []string{"selfcheck"}, want: exitError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -351,7 +351,7 @@ func TestStatusTreatsInvalidTriggerStateAsUnknown(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
+			code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 			if code != 0 {
 				t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout, stderr)
 			}
@@ -397,7 +397,7 @@ func TestStatusBoundsAuditViolationsWithoutDuplicatingErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
+	code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
@@ -443,7 +443,7 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 		}
 	}
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
+	code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
@@ -525,7 +525,7 @@ func TestStatusReportsKernelLockTruth(t *testing.T) {
 				}
 			}
 
-			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
+			code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 			if code != 0 {
 				t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout, stderr)
 			}
@@ -560,7 +560,7 @@ func TestRunCLISelfcheckRejectsWhitespaceSystemPrompt(t *testing.T) {
 	}
 	t.Chdir(root)
 	code, _, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"selfcheck"}) })
-	if code != 1 || !strings.Contains(stderr, "agent builder system prompt is empty") {
+	if code != exitError || !strings.Contains(stderr, "agent builder system prompt is empty") {
 		t.Fatalf("selfcheck code=%d stderr=%q, want declaration failure", code, stderr)
 	}
 }
@@ -583,7 +583,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
-	if code := selfcheck(root, cliFlags{}); code == 0 {
+	if code := runCLI([]string{"selfcheck", "--root", root}); code == 0 {
 		t.Fatal("selfcheck accepted repository tool path")
 	}
 }

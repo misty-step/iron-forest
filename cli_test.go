@@ -5,309 +5,107 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-func TestCLIConfigShowHumanAndJSON(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-
-	code, stdout, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"config", "show", "--root", root}) })
-	if code != exitOK || stderr != "" {
-		t.Fatalf("config show code=%d stderr=%q stdout=%s", code, stderr, stdout)
-	}
-	for _, want := range []string{"repo: owner/name", "agent builder: poll="} {
-		if !strings.Contains(stdout, want) {
-			t.Fatalf("config show missing %q in %s", want, stdout)
-		}
-	}
-
-	code, stdout, stderr = captureCLIOutput(t, func() int { return runObjectCommand([]string{"config", "show", "--json", "--root", root}) })
-	if code != exitOK || stderr != "" {
-		t.Fatalf("config show --json code=%d stderr=%q stdout=%s", code, stderr, stdout)
-	}
-	var envelope map[string]any
+// decodeEnvelope runs one read-surface command with --json and returns the single
+// envelope it must emit.
+func decodeEnvelope(t *testing.T, args ...string) (int, cliEnvelope, string) {
+	t.Helper()
+	code, stdout, stderr := captureCLIOutput(t, func() int { return runSurfaceCommand(args) })
+	var envelope cliEnvelope
 	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
-		t.Fatalf("config show --json not an envelope: %v", err)
+		t.Fatalf("%v did not emit one envelope: %v (stdout=%q stderr=%q)", args, err, stdout, stderr)
 	}
-	if envelope["schema"] != "forest.cli.v1" || envelope["exit"] != float64(exitOK) || envelope["error"] != nil {
-		t.Fatalf("bad envelope: %#v", envelope)
+	if envelope.Schema != "forest.cli.v1" {
+		t.Fatalf("schema=%q, want forest.cli.v1", envelope.Schema)
 	}
-	data, ok := envelope["data"].(map[string]any)
-	if !ok || data["repo"] != "owner/name" {
-		t.Fatalf("bad data: %#v", data)
+	if envelope.Exit != code {
+		t.Fatalf("envelope exit=%d, process exit=%d", envelope.Exit, code)
 	}
+	return code, envelope, stderr
 }
 
-func TestCLIDeclarationListAndShowNotFound(t *testing.T) {
+// payloadKeys decodes the envelope data as a generic object so a test can assert
+// the published key spelling.
+func payloadKeys(t *testing.T, envelope cliEnvelope) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal(encoded, &keys); err != nil {
+		t.Fatalf("data is not an object: %v (%s)", err, encoded)
+	}
+	return keys
+}
+
+func TestCLIEnvelopeSeparatesCommandFromOperands(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"declaration", "list", "--json", "--root", root}) })
-	if code != exitOK || stderr != "" {
-		t.Fatalf("declaration list code=%d stderr=%q stdout=%s", code, stderr, stdout)
+	_, envelope, _ := decodeEnvelope(t, "declaration", "show", "builder", "--json", "--root", root)
+	if envelope.Command != "declaration show" {
+		t.Fatalf("command=%q, want %q: a consumer selects its parser by this field", envelope.Command, "declaration show")
 	}
-	var envelope map[string]any
-	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
-		t.Fatalf("declaration list --json: %v", err)
+	if len(envelope.Args) != 1 || envelope.Args[0] != "builder" {
+		t.Fatalf("args=%v, want [builder]", envelope.Args)
 	}
-	decls := envelope["data"].(map[string]any)["declarations"].([]any)
-	if len(decls) != 1 {
-		t.Fatalf("declaration list length=%d, want 1", len(decls))
-	}
-
-	code, stdout, stderr = captureCLIOutput(t, func() int {
-		return runObjectCommand([]string{"declaration", "show", "builder", "--json", "--root", root})
-	})
-	if code != exitOK || !strings.Contains(stdout, "forest.cli.v1") {
-		t.Fatalf("declaration show code=%d stdout=%s stderr=%s", code, stdout, stderr)
-	}
-
-	code, _, stderr = captureCLIOutput(t, func() int { return runObjectCommand([]string{"declaration", "show", "missing", "--root", root}) })
-	if code != exitNotFound {
-		t.Fatalf("declaration show missing code=%d, want %d (stderr=%s)", code, exitNotFound, stderr)
+	if envelope.Error != nil {
+		t.Fatalf("error=%v, want null", *envelope.Error)
 	}
 }
 
-func TestCLITriggerResetClearsErrorsAndIsAtomic(t *testing.T) {
+// The schema publishes snake_case everywhere. Go field names reaching a payload
+// would force a consumer to special-case that one command.
+func TestCLIPayloadsUseSnakeCaseKeys(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
-	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	triggers := []byte(`{"builder":{"agent":"builder","consecutive_errors":4,"last_code":2,"poll_error":"poll down","run_error":"run down","audit_error":"audit down","last_run":"2026-01-01T00:00:00Z"}}`)
-	if err := os.WriteFile(forestPath(root, "triggers.json"), triggers, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTestDeclaration(t, root, "builder")
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"trigger", "reset", "builder", "--json", "--root", root}) })
-	if code != exitOK || stderr != "" {
-		t.Fatalf("trigger reset code=%d stderr=%q stdout=%s", code, stderr, stdout)
-	}
-	var envelope map[string]any
-	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
-		t.Fatalf("trigger reset --json: %v", err)
-	}
-	trigger := envelope["data"].(map[string]any)["trigger"].(map[string]any)
-	if trigger["consecutive_errors"] != float64(0) || trigger["poll_error"] != nil || trigger["run_error"] != nil {
-		t.Fatalf("reset did not clear errors: %#v", trigger)
-	}
-	// last_run and identity survive the reset.
-	if trigger["last_run"] != "2026-01-01T00:00:00Z" {
-		t.Fatalf("reset dropped last_run: %#v", trigger)
-	}
-
-	code, _, stderr = captureCLIOutput(t, func() int { return runObjectCommand([]string{"trigger", "reset", "missing", "--root", root}) })
-	if code != exitNotFound {
-		t.Fatalf("trigger reset missing code=%d, want %d (stderr=%s)", code, exitNotFound, stderr)
-	}
-}
-
-func TestCLIRunListPagingNewestFirst(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	for index := range 5 {
-		record := RunRecord{RunID: "run-" + string(rune('a'+index)), Agent: "builder", Exit: index, Duration: float64(index)}
-		if err := AppendRun(root, record); err != nil {
-			t.Fatal(err)
+	_, config, _ := decodeEnvelope(t, "config", "show", "--json", "--root", root)
+	configKeys := payloadKeys(t, config)
+	for _, key := range []string{"repo", "agents", "checks"} {
+		if _, ok := configKeys[key]; !ok {
+			t.Fatalf("config show payload missing %q: %v", key, configKeys)
 		}
 	}
-
-	page1 := runListForTest(t, root, 2, "")
-	if len(page1.runs) != 2 {
-		t.Fatalf("page1 len=%d, want 2", len(page1.runs))
+	agents, ok := configKeys["agents"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents is not an object: %v", configKeys["agents"])
 	}
-	if page1.runs[0].RunID != "run-e" || page1.runs[1].RunID != "run-d" {
-		t.Fatalf("page1 newest-first order wrong: %v", runIDs(page1.runs))
+	builder, ok := agents["builder"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents.builder is not an object: %v", agents)
 	}
-	if page1.nextAfter != "run-d" {
-		t.Fatalf("page1 next_after=%q, want run-d", page1.nextAfter)
-	}
-
-	page2 := runListForTest(t, root, 2, page1.nextAfter)
-	if len(page2.runs) != 2 || page2.runs[0].RunID != "run-c" || page2.runs[1].RunID != "run-b" {
-		t.Fatalf("page2 wrong: %v", runIDs(page2.runs))
-	}
-	if page2.nextAfter != "run-b" {
-		t.Fatalf("page2 next_after=%q, want run-b", page2.nextAfter)
-	}
-}
-
-type listPage struct {
-	runs      []RunRecord
-	nextAfter string
-}
-
-func runListForTest(t *testing.T, root string, limit int, after string) listPage {
-	t.Helper()
-	args := []string{"run", "list", "--json", "--root", root}
-	if limit > 0 {
-		args = append(args, "--limit", string(rune('0'+limit)))
-	}
-	if after != "" {
-		args = append(args, "--after", after)
-	}
-	code, stdout, stderr := captureCLIOutput(t, func() int { return runObjectCommand(args) })
-	if code != exitOK || stderr != "" {
-		t.Fatalf("run list code=%d stderr=%q stdout=%s", code, stderr, stdout)
-	}
-	var envelope struct {
-		Data runListPage `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
-		t.Fatalf("run list envelope decode: %v (%s)", err, stdout)
-	}
-	return listPage{runs: envelope.Data.Runs, nextAfter: envelope.Data.NextAfter}
-}
-
-type runListPage struct {
-	Runs      []RunRecord `json:"runs"`
-	NextAfter string      `json:"next_after"`
-}
-
-func runIDs(records []RunRecord) []string {
-	ids := make([]string, 0, len(records))
-	for _, record := range records {
-		ids = append(ids, record.RunID)
-	}
-	return ids
-}
-
-func TestCLIRunShowNotFoundAndFound(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	if err := AppendRun(root, RunRecord{RunID: "run-1", Agent: "builder", Exit: 0, Duration: 1.0}); err != nil {
-		t.Fatal(err)
-	}
-
-	code, _, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"run", "show", "run-missing", "--root", root}) })
-	if code != exitNotFound {
-		t.Fatalf("run show missing code=%d, want %d (stderr=%s)", code, exitNotFound, stderr)
-	}
-
-	code, stdout, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"run", "show", "run-1", "--json", "--root", root}) })
-	if code != exitOK || stderr != "" || !strings.Contains(stdout, "run-1") {
-		t.Fatalf("run show code=%d stdout=%s stderr=%s", code, stdout, stderr)
-	}
-}
-
-func TestCLIRunLogsFinishedAndExitsWithRunCode(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	if err := AppendRun(root, RunRecord{RunID: "run-7-builder", Agent: "builder", Exit: 3, Duration: 2.0}); err != nil {
-		t.Fatal(err)
-	}
-	logDir := filepath.Join(root, workspaceName, "runs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(logDir, "run-7-builder.log"), []byte("step one\nstep two\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	code, stdout, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"run", "logs", "run-7-builder", "--root", root}) })
-	if code != exitOK || stderr != "" || stdout != "step one\nstep two\n" {
-		t.Fatalf("run logs code=%d stdout=%q stderr=%q", code, stdout, stderr)
-	}
-
-	code, stdout, _ = captureCLIOutput(t, func() int {
-		return runObjectCommand([]string{"run", "logs", "--follow", "run-7-builder", "--root", root})
-	})
-	if code != 3 {
-		t.Fatalf("run logs --follow code=%d, want run exit 3 (stdout=%q)", code, stdout)
-	}
-	if !strings.Contains(stdout, "step two") {
-		t.Fatalf("run logs --follow stdout missing content: %q", stdout)
-	}
-}
-
-func TestCLIRunLogsMissingRunIsNotFound(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	code, _, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"run", "logs", "ghost", "--root", root}) })
-	if code != exitNotFound {
-		t.Fatalf("run logs ghost code=%d, want %d (stderr=%s)", code, exitNotFound, stderr)
-	}
-}
-
-func TestCLIRunLogsFollowWaitsForCompletion(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	logDir := filepath.Join(root, workspaceName, "runs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(logDir, "run-live-builder.log")
-	if err := os.WriteFile(logPath, []byte("started\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		time.Sleep(400 * time.Millisecond)
-		appendFile := func(path, text string) {
-			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-			if err == nil {
-				_, _ = file.WriteString(text)
-				_ = file.Close()
-			}
+	for _, key := range []string{"poll", "interval", "timeout"} {
+		if _, ok := builder[key]; !ok {
+			t.Fatalf("agent payload missing %q: %v", key, builder)
 		}
-		appendFile(logPath, "finished\n")
-		if err := AppendRun(root, RunRecord{RunID: "run-live-builder", Agent: "builder", Exit: 0, Duration: 1.0}); err != nil {
-			t.Error(err)
+	}
+	if _, leaked := builder["Poll"]; leaked {
+		t.Fatalf("agent payload leaks Go field names: %v", builder)
+	}
+
+	_, declaration, _ := decodeEnvelope(t, "declaration", "show", "builder", "--json", "--root", root)
+	declarationKeys := payloadKeys(t, declaration)
+	for _, key := range []string{"name", "model", "tools", "thinking", "system_prompt", "task_prompt"} {
+		if _, ok := declarationKeys[key]; !ok {
+			t.Fatalf("declaration payload missing %q: %v", key, declarationKeys)
 		}
-	}()
-
-	code, stdout, stderr := captureCLIOutput(t, func() int {
-		return runObjectCommand([]string{"run", "logs", "--follow", "run-live-builder", "--root", root})
-	})
-	if code != exitOK {
-		t.Fatalf("run logs --follow live code=%d stderr=%q stdout=%q", code, stderr, stdout)
 	}
-	if !strings.Contains(stdout, "finished") {
-		t.Fatalf("run logs --follow stdout=%q missing finished", stdout)
+	if _, leaked := declarationKeys["SystemPrompt"]; leaked {
+		t.Fatalf("declaration payload leaks Go field names: %v", declarationKeys)
 	}
 }
 
-func TestCLIAuditShowAndLog(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	state := AuditState{Baseline: "a", LastMaster: "abc123", LastAt: "2026-01-01T00:00:00Z", LastResult: "violations", Violations: []string{"v1", "v2"}}
-	if err := writeAuditState(root, state, defaultAuditDependencies()); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(auditLogPath(root), []byte("h1\nh2\nh3\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	code, stdout, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"audit", "show", "--json", "--root", root}) })
-	if code != exitOK || stderr != "" || !strings.Contains(stdout, "violations") {
-		t.Fatalf("audit show code=%d stdout=%s stderr=%s", code, stdout, stderr)
-	}
-
-	code, stdout, stderr = captureCLIOutput(t, func() int {
-		return runObjectCommand([]string{"audit", "log", "--limit", "2", "--json", "--root", root})
-	})
-	if code != exitOK || stderr != "" {
-		t.Fatalf("audit log limit code=%d stdout=%s stderr=%s", code, stdout, stderr)
-	}
-	var page struct {
-		Data struct {
-			Entries []string `json:"entries"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &page); err != nil {
-		t.Fatalf("audit log envelope decode: %v (%s)", err, stdout)
-	}
-	if len(page.Data.Entries) != 2 || page.Data.Entries[0] != "h2" || page.Data.Entries[1] != "h3" {
-		t.Fatalf("audit log latest-2 entries=%v", page.Data.Entries)
-	}
-}
-
-func TestCLIInvalidArgumentExitCodes(t *testing.T) {
+// A failure under --json must still be one envelope; a consumer never has to
+// sniff stderr to learn why a command failed.
+func TestCLIFailuresEmitOneEnvelopeUnderJSON(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 
@@ -316,31 +114,496 @@ func TestCLIInvalidArgumentExitCodes(t *testing.T) {
 		args []string
 		want int
 	}{
-		{name: "unknown flag", args: []string{"config", "show", "--bogus", "--root", root}, want: exitInvalidArg},
-		{name: "bad limit", args: []string{"run", "list", "--limit", "0", "--root", root}, want: exitInvalidArg},
-		{name: "missing subcommand", args: []string{"trigger", "--root", root}, want: exitInvalidArg},
-		{name: "unknown run verb", args: []string{"run", "frobnicate", "--root", root}, want: exitInvalidArg},
-		{name: "status unknown flag", args: []string{"status", "--bogus", "--root", root}, want: exitInvalidArg},
+		{name: "rejected limit", args: []string{"run", "list", "--limit", "0", "--json", "--root", root}, want: exitInvalidArg},
+		{name: "rejected limit before json", args: []string{"run", "list", "--limit", "0", "--root", root, "--json"}, want: exitInvalidArg},
+		{name: "unknown flag", args: []string{"config", "show", "--bogus", "--json", "--root", root}, want: exitInvalidArg},
+		{name: "unknown command", args: []string{"widget", "show", "--json", "--root", root}, want: exitInvalidArg},
+		{name: "missing operand", args: []string{"run", "show", "--json", "--root", root}, want: exitInvalidArg},
+		{name: "not found", args: []string{"run", "show", "ghost", "--json", "--root", root}, want: exitNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			code, _, _ := captureCLIOutput(t, func() int {
-				if tc.args[0] == "status" {
-					return runCLI(tc.args)
-				}
-				return runObjectCommand(tc.args)
-			})
+			code, envelope, _ := decodeEnvelope(t, tc.args...)
 			if code != tc.want {
 				t.Fatalf("code=%d, want %d", code, tc.want)
+			}
+			if envelope.Error == nil || *envelope.Error == "" {
+				t.Fatalf("envelope carries no error text: %+v", envelope)
 			}
 		})
 	}
 }
 
-func TestCLIObjectCommandsRequireConfig(t *testing.T) {
+func TestCLIRejectsMalformedLimit(t *testing.T) {
 	root := t.TempDir()
-	code, _, stderr := captureCLIOutput(t, func() int { return runObjectCommand([]string{"config", "show", "--root", root}) })
-	if code != exitError || stderr == "" {
-		t.Fatalf("config show without config code=%d stderr=%q", code, stderr)
+	writeCLIConfig(t, root, "exit 1")
+	for _, raw := range []string{"12abc", "", "-3", "0", "1.5", "12 34"} {
+		code, _, _ := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"run", "list", "--limit", raw, "--root", root})
+		})
+		if code != exitInvalidArg {
+			t.Fatalf("--limit %q code=%d, want %d", raw, code, exitInvalidArg)
+		}
+	}
+}
+
+// Each command declares the flags it implements, so an unsupported flag is an
+// error rather than a silent no-op.
+func TestCLIRejectsFlagsTheCommandDoesNotImplement(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	cases := [][]string{
+		{"config", "show", "--limit", "5"},
+		{"audit", "log", "--after", "x"},
+		{"run", "show", "id", "--follow"},
+		{"status", "--rescan"},
+		{"trigger", "list", "--follow"},
+	}
+	for _, args := range cases {
+		full := append(append([]string{}, args...), "--root", root)
+		code, _, stderr := captureCLIOutput(t, func() int { return runSurfaceCommand(full) })
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d (stderr=%q)", args, code, exitInvalidArg, stderr)
+		}
+	}
+}
+
+func TestCLIRunListPagesNewestFirstAndTerminates(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	ids := []string{"run-a", "run-b", "run-c", "run-d", "run-e"}
+	for index, id := range ids {
+		if err := AppendRun(root, RunRecord{RunID: id, Agent: "builder", Exit: index}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var seen []string
+	cursor := ""
+	for page := 0; page < len(ids); page++ {
+		args := []string{"run", "list", "--limit", "2", "--json", "--root", root}
+		if cursor != "" {
+			args = append(args, "--after", cursor)
+		}
+		_, envelope, _ := decodeEnvelope(t, args...)
+		encoded, err := json.Marshal(envelope.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload runListPayload
+		if err := json.Unmarshal(encoded, &payload); err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range payload.Runs {
+			seen = append(seen, record.RunID)
+		}
+		if payload.NextAfter == "" {
+			break
+		}
+		cursor = payload.NextAfter
+	}
+	want := []string{"run-e", "run-d", "run-c", "run-b", "run-a"}
+	if strings.Join(seen, ",") != strings.Join(want, ",") {
+		t.Fatalf("paged order=%v, want %v", seen, want)
+	}
+}
+
+// A cursor that names no run must be reported. Silently restarting at page one
+// makes a paging consumer loop forever.
+func TestCLIRunListUnknownCursorIsNotFound(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := AppendRun(root, RunRecord{RunID: "run-a", Agent: "builder"}); err != nil {
+		t.Fatal(err)
+	}
+	code, envelope, _ := decodeEnvelope(t, "run", "list", "--after", "evicted", "--json", "--root", root)
+	if code != exitNotFound {
+		t.Fatalf("code=%d, want %d (envelope=%+v)", code, exitNotFound, envelope)
+	}
+}
+
+func TestCLIRunLogsJSONCarriesTheLog(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := AppendRun(root, RunRecord{RunID: "run-7-builder", Agent: "builder", Exit: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(runLogPath(root, "run-7-builder")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runLogPath(root, "run-7-builder"), []byte("step one\nstep two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, _ := decodeEnvelope(t, "run", "logs", "run-7-builder", "--json", "--root", root)
+	keys := payloadKeys(t, envelope)
+	if keys["text"] != "step one\nstep two\n" {
+		t.Fatalf("payload text=%v, want the log content", keys["text"])
+	}
+	if keys["retained"] != true || keys["complete"] != true {
+		t.Fatalf("payload=%v, want retained and complete", keys)
+	}
+
+	code, stdout, _ := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "logs", "run-7-builder", "--root", root})
+	})
+	if code != exitOK || stdout != "step one\nstep two\n" {
+		t.Fatalf("human logs code=%d stdout=%q", code, stdout)
+	}
+}
+
+// A retained-but-evicted log is distinguishable from an unknown run.
+func TestCLIRunLogsSeparatesEvictedFromUnknown(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := AppendRun(root, RunRecord{RunID: "run-old", Agent: "builder", Exit: 0}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, envelope, _ := decodeEnvelope(t, "run", "logs", "run-old", "--json", "--root", root)
+	if code != exitOK {
+		t.Fatalf("evicted log code=%d, want %d", code, exitOK)
+	}
+	if keys := payloadKeys(t, envelope); keys["retained"] != false {
+		t.Fatalf("payload=%v, want retained=false", keys)
+	}
+
+	code, _, _ = captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "logs", "ghost", "--root", root})
+	})
+	if code != exitNotFound {
+		t.Fatalf("unknown run code=%d, want %d", code, exitNotFound)
+	}
+}
+
+// --follow on a run that does not exist must fail, not wait for a Run that will
+// never appear.
+func TestCLIRunLogsFollowRejectsUnknownRun(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	done := make(chan int, 1)
+	go func() {
+		code, _, _ := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"run", "logs", "--follow", "ghost", "--root", root})
+		})
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		if code != exitNotFound {
+			t.Fatalf("code=%d, want %d", code, exitNotFound)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run logs --follow on an unknown run did not return")
+	}
+}
+
+func TestCLIRunLogsFollowStreamsUntilTheRunCompletes(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	logPath := runLogPath(root, "run-live-builder")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("started\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(followPollInterval)
+		file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, _ = file.WriteString("finished\n")
+			_ = file.Close()
+		}
+		_ = AppendRun(root, RunRecord{RunID: "run-live-builder", Agent: "builder", Exit: 7})
+	}()
+
+	code, stdout, _ := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "logs", "--follow", "run-live-builder", "--root", root})
+	})
+	if code != 7 {
+		t.Fatalf("follow code=%d, want the Run's exit 7 (stdout=%q)", code, stdout)
+	}
+	for _, want := range []string{"started", "finished"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout=%q missing %q", stdout, want)
+		}
+	}
+}
+
+func TestCLIRunLogsFollowRejectsJSON(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	code, _, _ := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "logs", "--follow", "id", "--json", "--root", root})
+	})
+	if code != exitInvalidArg {
+		t.Fatalf("code=%d, want %d", code, exitInvalidArg)
+	}
+}
+
+// A checkout where the Kernel has never run has no trigger state. That is a
+// readable answer, not a failure.
+func TestCLITriggerListToleratesUnwrittenState(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+
+	code, envelope, stderr := decodeEnvelope(t, "trigger", "list", "--json", "--root", root)
+	if code != exitOK {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	keys := payloadKeys(t, envelope)
+	if keys["state_written"] != false {
+		t.Fatalf("payload=%v, want state_written=false", keys)
+	}
+	triggers, ok := keys["triggers"].([]any)
+	if !ok || len(triggers) != 1 {
+		t.Fatalf("triggers=%v, want one configured agent", keys["triggers"])
+	}
+	view, ok := triggers[0].(map[string]any)
+	if !ok || view["state_known"] != false {
+		t.Fatalf("view=%v, want state_known=false", triggers[0])
+	}
+}
+
+func TestCLITriggerResetClearsErrorsAndKeepsIdentity(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	triggers := []byte(`{"builder":{"agent":"builder","consecutive_errors":4,"last_code":2,` +
+		`"poll_error":"poll down","run_error":"run down","audit_error":"audit down","last_run":"2026-01-01T00:00:00Z"}}`)
+	if err := os.WriteFile(forestPath(root, "triggers.json"), triggers, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, _ := decodeEnvelope(t, "trigger", "reset", "builder", "--json", "--root", root)
+	keys := payloadKeys(t, envelope)
+	if keys["consecutive_errors"] != float64(0) {
+		t.Fatalf("reset left errors: %v", keys)
+	}
+	for _, cleared := range []string{"poll_error", "run_error", "audit_error"} {
+		if _, present := keys[cleared]; present {
+			t.Fatalf("reset left %s: %v", cleared, keys)
+		}
+	}
+	if keys["last_run"] != "2026-01-01T00:00:00Z" {
+		t.Fatalf("reset dropped last_run: %v", keys)
+	}
+
+	persisted, exists, err := readTriggerHealth(root)
+	if err != nil || !exists {
+		t.Fatalf("read persisted state: %v exists=%t", err, exists)
+	}
+	if persisted["builder"].ConsecutiveErrors != 0 || persisted["builder"].PollError != "" {
+		t.Fatalf("reset did not persist: %+v", persisted["builder"])
+	}
+	if persisted["builder"].Agent != "builder" {
+		t.Fatalf("reset broke identity: %+v", persisted["builder"])
+	}
+}
+
+// The Scheduler owns trigger state while it runs, so a reset refuses instead of
+// writing a snapshot the Kernel would overwrite.
+func TestCLITriggerResetRefusesWhileKernelHoldsLock(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(forestPath(root, "triggers.json"),
+		[]byte(`{"builder":{"agent":"builder","consecutive_errors":3}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"trigger", "reset", "builder", "--root", root})
+	})
+	if code != exitConflict {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitConflict, stderr)
+	}
+	persisted, _, err := readTriggerHealth(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted["builder"].ConsecutiveErrors != 3 {
+		t.Fatalf("refused reset still wrote state: %+v", persisted["builder"])
+	}
+}
+
+func TestCLITriggerNotFoundIsNotFound(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	for _, verb := range []string{"show", "reset"} {
+		code, _, _ := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"trigger", verb, "missing", "--root", root})
+		})
+		if code != exitNotFound {
+			t.Fatalf("trigger %s missing code=%d, want %d", verb, code, exitNotFound)
+		}
+	}
+}
+
+// Empty collections marshal as [] so a consumer can iterate without a null check.
+func TestCLIEmptyCollectionsAreArrays(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+
+	_, envelope, _ := decodeEnvelope(t, "audit", "log", "--json", "--root", root)
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"entries":[]`) {
+		t.Fatalf("audit log payload=%s, want entries as an empty array", encoded)
+	}
+
+	_, runs, _ := decodeEnvelope(t, "run", "list", "--json", "--root", root)
+	encoded, err = json.Marshal(runs.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"runs":[]`) {
+		t.Fatalf("run list payload=%s, want runs as an empty array", encoded)
+	}
+}
+
+func TestCLIAuditLogReturnsNewestEntriesWithinLimit(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(auditLogPath(root), []byte("h1\nh2\nh3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, _ := decodeEnvelope(t, "audit", "log", "--limit", "2", "--json", "--root", root)
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload auditLogPayload
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(payload.Entries, ",") != "h2,h3" {
+		t.Fatalf("entries=%v, want the newest two in order", payload.Entries)
+	}
+}
+
+// `audit show` and `status` publish the same audit shape, so one consumer parses
+// both.
+func TestCLIAuditShapeMatchesStatus(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := AuditState{Baseline: "base", LastMaster: "abc123", LastAt: "2026-01-01T00:00:00Z", LastResult: "violations", Violations: []string{"v1"}}
+	if err := writeAuditState(root, state, defaultAuditDependencies()); err != nil {
+		t.Fatal(err)
+	}
+
+	_, direct, _ := decodeEnvelope(t, "audit", "show", "--json", "--root", root)
+	directKeys := payloadKeys(t, direct)
+	_, snapshot, _ := decodeEnvelope(t, "status", "--json", "--root", root)
+	snapshotKeys := payloadKeys(t, snapshot)
+	nested, ok := snapshotKeys["audit"].(map[string]any)
+	if !ok {
+		t.Fatalf("status payload has no audit object: %v", snapshotKeys)
+	}
+	for key := range directKeys {
+		if _, ok := nested[key]; !ok {
+			t.Fatalf("status audit object is missing %q that audit show publishes: %v", key, nested)
+		}
+	}
+	if directKeys["last_result"] != "violations" || directKeys["last_master"] != "abc123" {
+		t.Fatalf("audit show reports the wrong fields: %v", directKeys)
+	}
+}
+
+func TestCLISelfcheckEmitsEnvelope(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	writeTestDeclaration(t, root, "builder")
+	bin := t.TempDir()
+	for _, name := range []string{"git", "gh", "omp"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	code, envelope, stderr := decodeEnvelope(t, "selfcheck", "--json", "--root", root)
+	if code != exitOK {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	keys := payloadKeys(t, envelope)
+	tools, ok := keys["tools"].([]any)
+	if !ok || len(tools) != 3 {
+		t.Fatalf("selfcheck payload tools=%v, want three resolved tools", keys["tools"])
+	}
+}
+
+// status must not claim a trigger is idle when it cannot read the Kernel lock;
+// the human view says unknown, so the payload must say so too.
+func TestCLIStatusMarksLivenessUnknownInBothViews(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(forestPath(root, "triggers.json"),
+		[]byte(`{"builder":{"agent":"builder","running":true}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the lock file belongs makes the lock state unreadable.
+	if err := os.Mkdir(forestPath(root, "lock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, stderr := decodeEnvelope(t, "status", "--json", "--root", root)
+	if !strings.Contains(stderr, "kernel lock state unknown:") {
+		t.Fatalf("stderr=%q, want the lock diagnostic", stderr)
+	}
+	keys := payloadKeys(t, envelope)
+	kernel, ok := keys["kernel"].(map[string]any)
+	if !ok || kernel["running_known"] != false {
+		t.Fatalf("kernel=%v, want running_known=false", keys["kernel"])
+	}
+	triggers, ok := keys["triggers"].([]any)
+	if !ok || len(triggers) == 0 {
+		t.Fatalf("triggers=%v", keys["triggers"])
+	}
+	view := triggers[0].(map[string]any)
+	if view["running_known"] != false {
+		t.Fatalf("trigger view=%v, want running_known=false", view)
+	}
+
+	_, stdout, _ := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
+	if !strings.Contains(stdout, "running=unknown") {
+		t.Fatalf("human status=%q, want running=unknown", stdout)
+	}
+}
+
+// The usage text is generated from the command table, so the grammar cannot
+// drift from the dispatcher.
+func TestCLIUsageListsEveryCommand(t *testing.T) {
+	_, _, stderr := captureCLIOutput(t, func() int { return runCLI(nil) })
+	for _, command := range cliCommands() {
+		if !strings.Contains(stderr, "forest "+command.phrase) {
+			t.Fatalf("usage omits %q: %s", command.phrase, stderr)
+		}
 	}
 }

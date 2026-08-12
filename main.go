@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -16,91 +16,63 @@ func main() { os.Exit(runCLI(os.Args[1:])) }
 func runCLI(args []string) int {
 	if len(args) == 0 {
 		printUsage()
-		return 2
-	}
-	command := args[0]
-	rest := args[1:]
-	switch command {
-	case "config", "declaration", "trigger", "run", "audit":
-		return runObjectCommand(args)
-	case "serve":
-		if len(rest) != 0 {
-			printUsage()
-			return 2
-		}
-		root, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 2
-		}
-		return serve(root)
-	case "once", "poll":
-		if len(rest) != 1 {
-			printUsage()
-			return 2
-		}
-		root, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 2
-		}
-		if command == "once" {
-			return once(root, rest[0])
-		}
-		return poll(root, rest[0])
-	case "status", "selfcheck":
-		// flag-parsed below
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n", command)
-		printUsage()
-		return 2
-	}
-	positional, flags, err := parseCLIFlags(rest)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
 		return exitInvalidArg
 	}
-	if len(positional) != 0 {
+	// Engine commands act on the current checkout and hold the Kernel lock, so
+	// they take no flags. Everything else is the read surface.
+	switch args[0] {
+	case "serve", "once", "poll":
+		return runEngineCommand(args[0], args[1:])
+	}
+	return runSurfaceCommand(args)
+}
+
+func runEngineCommand(command string, rest []string) int {
+	wantArgs := 0
+	if command != "serve" {
+		wantArgs = 1
+	}
+	if len(rest) != wantArgs {
 		printUsage()
-		return 2
+		return exitInvalidArg
 	}
-	root := flags.root
-	if root == "" {
-		var getErr error
-		root, getErr = os.Getwd()
-		if getErr != nil {
-			fmt.Fprintln(os.Stderr, getErr)
-			return 2
-		}
+	root, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return exitError
 	}
-	if command == "status" {
-		return status(root, flags)
+	switch command {
+	case "serve":
+		return serve(root)
+	case "once":
+		return once(root, rest[0])
+	default:
+		return poll(root, rest[0])
 	}
-	return selfcheck(root, flags)
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `usage: forest <command> [flags]
+	var usage strings.Builder
+	usage.WriteString(`usage: forest <command> [flags]
 
 engine:
-  serve                 run the scheduler until interrupted
-  once <agent>          poll once, dispatch on exit 0
-  poll <agent>          evaluate one declaration's trigger
+  forest serve                  run the scheduler until interrupted
+  forest once <agent>           poll once, dispatch on exit 0
+  forest poll <agent>           evaluate one declaration's trigger
 
-inspect:
-  status [--json] [--root <dir>]          composition snapshot
-  config show [--json] [--root <dir>]
-  declaration list|show <name> [--json] [--root <dir>]
-  trigger list|show <agent>|reset <agent> [--json] [--root <dir>]
-  run list|show <run-id> [--json] [--root <dir>] [--limit N] [--after <id>]
-  run logs [--follow] <run-id> [--root <dir>]
-  audit show [--rescan]|log [--json] [--root <dir>] [--limit N]
-  selfcheck [--root <dir>]
+inspect:`)
+	for _, command := range cliCommands() {
+		fmt.Fprintf(&usage, "\n  %s", command.usage())
+	}
+	usage.WriteString(`
 
 flags:
   --json        emit one forest.cli.v1 envelope on stdout
-  --root <dir>  inspect another checkout
+  --root <dir>  read another checkout
+  --limit N     bound a listing
+  --after <id>  continue a listing after one identity
   exit: 0 ok · 1 no work · 2 error · 4 not found · 5 conflict · 6 invalid arg`)
+	fmt.Fprintln(os.Stderr, usage.String())
 }
 
 func withLock(root string, fn func() int) int {
@@ -201,142 +173,79 @@ func pollAgent(ctx context.Context, poller *Poller, agent string) int {
 	return code
 }
 
-func status(root string, flags cliFlags) int {
-	cfg, err := loadConfig(configPath(root))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
-	}
-	lockHeld, lockErr := kernelLockHeld(root)
-	if lockErr != nil {
-		fmt.Fprintf(os.Stderr, "kernel lock state unknown: %v\n", lockErr)
-	}
-	names := agentNames(cfg)
-	health, healthErr := readTriggerHealth(root)
-	known := healthErr == nil && len(health) == len(names)
-	for _, name := range names {
-		_, present := health[name]
-		known = known && present
-	}
-	if healthErr == nil && !known {
-		healthErr = errors.New("trigger state does not match configured agents")
-	}
-	if healthErr != nil && !os.IsNotExist(healthErr) && !flags.json {
-		fmt.Fprintf(os.Stderr, "trigger state unknown: %v\n", healthErr)
-	}
-
-	// Build the JSON view of every fact the human view prints, so --json never
-	// diverges from the human scope.
-	type triggerView struct {
-		Name              string `json:"name"`
-		StateKnown        bool   `json:"state_known"`
-		ConsecutiveErrors int    `json:"consecutive_errors"`
-		LastCode          int    `json:"last_code"`
-		Running           bool   `json:"running"`
-		Stale             bool   `json:"stale"`
-		PollError         string `json:"poll_error,omitempty"`
-		RunError          string `json:"run_error,omitempty"`
-		AuditError        string `json:"audit_error,omitempty"`
-	}
-	triggers := make([]triggerView, 0, len(names))
-	for _, name := range names {
-		value, present := health[name]
-		view := triggerView{Name: name, StateKnown: known && present}
-		if known && present {
-			view.ConsecutiveErrors = value.ConsecutiveErrors
-			view.LastCode = value.LastCode
-			view.Running = lockHeld && value.Running
-			view.Stale = value.Running && lockErr == nil && !lockHeld
-			view.PollError = value.PollError
-			view.RunError = value.RunError
-			view.AuditError = value.AuditError
-		}
-		triggers = append(triggers, view)
-	}
-
-	state, stateErr := readAuditState(root)
-	if stateErr != nil {
-		fmt.Fprintln(os.Stderr, stateErr)
-		return 2
-	}
-	records, recordsErr := ReadLedgerTail(root, 10)
-	if recordsErr != nil {
-		fmt.Fprintln(os.Stderr, recordsErr)
-		return 2
-	}
-
-	if flags.json {
-		emitEnvelope(os.Stdout, "status", 0, map[string]any{
-			"repo":     cfg.Repo,
-			"kernels":  map[string]any{"running": lockHeld, "stale_unknown": lockErr != nil},
-			"triggers": triggers,
-			"audit":    map[string]any{"last_result": state.LastResult, "last_master": state.LastMaster, "last_at": state.LastAt, "violations": state.Violations},
-			"recent":   records,
-		}, "")
-		return 0
-	}
-
-	fmt.Println("triggers:")
-	for _, name := range names {
-		value, present := health[name]
-		if !known || !present {
-			fmt.Printf("  %s state=unknown\n", name)
-			continue
-		}
-		fmt.Printf("  %s errors=%d code=%d running=", name, value.ConsecutiveErrors, value.LastCode)
-		if lockErr != nil {
-			fmt.Print("unknown")
-		} else {
-			fmt.Printf("%t", lockHeld && value.Running)
-		}
-		if value.Running && lockErr == nil && !lockHeld {
-			fmt.Print(" stale=true")
-		}
-		if value.PollError != "" {
-			fmt.Printf(" poll_error=%s", value.PollError)
-		}
-		if value.RunError != "" {
-			fmt.Printf(" run_error=%s", value.RunError)
-		}
-		if value.AuditError != "" {
-			fmt.Printf(" audit_error=%s", value.AuditError)
-		}
-		fmt.Println()
-	}
-	if !known || lockErr != nil {
-		fmt.Println("live runs: unknown")
-	} else {
-		anyLive := false
-		for _, value := range health {
-			anyLive = anyLive || lockHeld && value.Running
-		}
-		if !anyLive {
-			fmt.Println("live runs: none")
-		} else {
-			fmt.Println("live runs:")
-			for agent, value := range health {
-				if lockHeld && value.Running {
-					fmt.Printf("  agent=%s running=true\n", agent)
-				}
-			}
-		}
-	}
-	fmt.Printf("last audit: %s master=%s\n", state.LastResult, state.LastMaster)
-	shown := min(len(state.Violations), 10)
-	fmt.Printf("audit violations: total=%d", len(state.Violations))
-	if omitted := len(state.Violations) - shown; omitted > 0 {
-		fmt.Printf(" omitted=%d", omitted)
-	}
-	fmt.Println()
-	for _, violation := range state.Violations[:shown] {
-		fmt.Printf("audit violation: %s\n", violation)
-	}
-	fmt.Println("recent runs:")
-	for _, record := range records {
-		fmt.Printf("  %s agent=%s exit=%d duration=%.3f\n", record.RunID, record.Agent, record.Exit, record.Duration)
-	}
-	return 0
+type statusPayload struct {
+	Repo     string        `json:"repo"`
+	Kernel   kernelView    `json:"kernel"`
+	Triggers []TriggerView `json:"triggers"`
+	Audit    AuditState    `json:"audit"`
+	Recent   []RunRecord   `json:"recent"`
 }
+
+type kernelView struct {
+	Running      bool   `json:"running"`
+	RunningKnown bool   `json:"running_known"`
+	LockError    string `json:"lock_error,omitempty"`
+}
+
+// runStatus composes the read surface into one snapshot. It renders from the
+// same resolved values it publishes, so the two views cannot diverge.
+func runStatus(_ []string, flags cliFlags) cliOutcome {
+	cfg, err := loadConfig(configPath(flags.root))
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	state, err := resolveTriggerState(flags.root)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	kernel := kernelView{Running: state.LockHeld, RunningKnown: state.LockErr == nil}
+	if state.LockErr != nil {
+		kernel.LockError = state.LockErr.Error()
+	}
+	audit, err := readAuditState(flags.root)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	records, err := ReadLedgerTail(flags.root, statusRecentRuns)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	// Unreadable lock or state is a warning, not a failure: the snapshot still
+	// reports every other fact, and the payload marks what is unknown.
+	if state.LockErr != nil {
+		fmt.Fprintf(os.Stderr, "kernel lock state unknown: %v\n", state.LockErr)
+	}
+	if state.StateErr != nil {
+		fmt.Fprintf(os.Stderr, "trigger state unknown: %v\n", state.StateErr)
+	}
+	sections := []string{
+		triggerViewsHuman(state.Views),
+		liveRunsHuman(state.Views),
+		auditStateHuman(audit, statusViolations),
+		"recent runs:",
+	}
+	if rows := runRecordsHuman(records, "  "); rows != "" {
+		sections = append(sections, rows)
+	}
+	return cliOutcome{
+		Exit: exitOK,
+		Data: statusPayload{
+			Repo:     cfg.Repo,
+			Kernel:   kernel,
+			Triggers: state.Views,
+			Audit:    audit,
+			Recent:   records,
+		},
+		Human: strings.Join(sections, "\n"),
+	}
+}
+
+// statusRecentRuns and statusViolations bound what one snapshot prints; the full
+// sets are reachable through `run list` and `audit show`.
+const (
+	statusRecentRuns = 10
+	statusViolations = 10
+)
 
 func kernelLockHeld(root string) (bool, error) {
 	file, err := os.OpenFile(forestPath(root, "lock"), os.O_RDWR, 0)
@@ -356,58 +265,44 @@ func kernelLockHeld(root string) (bool, error) {
 	return false, syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
 
-func readTriggerHealth(root string) (map[string]TriggerHealth, error) {
-	data, err := os.ReadFile(forestPath(root, "triggers.json"))
-	if err != nil {
-		return nil, err
-	}
-	var decoded map[string]*TriggerHealth
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return nil, fmt.Errorf("parse trigger state: %w", err)
-	}
-	if decoded == nil {
-		return nil, fmt.Errorf("parse trigger state: expected object")
-	}
-	values := make(map[string]TriggerHealth, len(decoded))
-	for agent, health := range decoded {
-		if health == nil {
-			return nil, fmt.Errorf("parse trigger state: entry %q is null", agent)
-		}
-		if health.Agent != agent {
-			return nil, fmt.Errorf("parse trigger state: entry %q has agent %q", agent, health.Agent)
-		}
-		values[agent] = *health
-	}
-	return values, nil
+type selfcheckPayload struct {
+	Repo         string   `json:"repo"`
+	Declarations []string `json:"declarations"`
+	Tools        []string `json:"tools"`
 }
 
-func selfcheck(root string, _ cliFlags) int {
-	cfg, err := loadConfig(configPath(root))
+// runSelfcheck validates the configuration, the declarations, and the trusted
+// tool paths this checkout would run with.
+func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
+	cfg, err := loadConfig(configPath(flags.root))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
+		return failure(exitError, "%s", err)
 	}
-	for _, name := range agentNames(cfg) {
-		if _, err := loadDeclaration(root, name); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
+	names := agentNames(cfg)
+	for _, name := range names {
+		if _, err := loadDeclaration(flags.root, name); err != nil {
+			return failure(exitError, "%s", err)
 		}
 	}
-	runner := NewRunner(root)
+	runner := NewRunner(flags.root)
 	tools := []struct {
 		name    string
 		resolve func() (string, error)
 	}{
-		{name: "git", resolve: func() (string, error) { return trustedExecutable(root, "git") }},
-		{name: "gh", resolve: func() (string, error) { return trustedExecutable(root, "gh") }},
+		{name: "git", resolve: func() (string, error) { return trustedExecutable(flags.root, "git") }},
+		{name: "gh", resolve: func() (string, error) { return trustedExecutable(flags.root, "gh") }},
 		{name: "omp", resolve: runner.ompExecutable},
 	}
+	resolved := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		if _, err := tool.resolve(); err != nil {
-			fmt.Fprintf(os.Stderr, "%s unavailable: %v\n", tool.name, err)
-			return 1
+			return failure(exitError, "%s unavailable: %s", tool.name, err)
 		}
+		resolved = append(resolved, tool.name)
 	}
-	fmt.Println("selfcheck: ok")
-	return 0
+	return cliOutcome{
+		Exit:  exitOK,
+		Data:  selfcheckPayload{Repo: cfg.Repo, Declarations: names, Tools: resolved},
+		Human: "selfcheck: ok",
+	}
 }

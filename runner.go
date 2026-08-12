@@ -207,6 +207,12 @@ func isReservedRunLogName(name string) bool {
 	return isReservedRunID(strings.TrimSuffix(name, ".log"))
 }
 
+// runLogPath names the per-Run log. The Runner owns this layout; readers use
+// this helper so the name is stated once.
+func runLogPath(root, runID string) string {
+	return forestPath(root, "runs", runID+".log")
+}
+
 func NewRunner(root string) *Runner {
 	return &Runner{Root: root, GitPath: "git", OMPPath: "omp"}
 }
@@ -219,7 +225,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	started := time.Now().UTC()
 	runID := newRunID(declaration.Name, started)
 	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano)}
-	logPath := forestPath(r.Root, "runs", runID+".log")
+	logPath := runLogPath(r.Root, runID)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return record, err
 	}

@@ -60,12 +60,12 @@ func (s *StringList) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Declaration struct {
-	Name         string
-	Model        string
-	Tools        []string
-	Thinking     string
-	SystemPrompt string
-	TaskPrompt   string
+	Name         string   `json:"name"`
+	Model        string   `json:"model"`
+	Tools        []string `json:"tools"`
+	Thinking     string   `json:"thinking"`
+	SystemPrompt string   `json:"system_prompt"`
+	TaskPrompt   string   `json:"task_prompt"`
 }
 
 type declarationFrontmatter struct {

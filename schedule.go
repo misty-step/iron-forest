@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -107,8 +105,8 @@ func NewScheduler(root string, cfg Config, runner *Runner) *Scheduler {
 			return s
 		}
 	}
-	values, err := readTriggerHealth(root)
-	if err != nil && !os.IsNotExist(err) {
+	values, _, err := readTriggerHealth(root)
+	if err != nil {
 		s.startupErr = err
 		return s
 	}
@@ -311,36 +309,7 @@ func (s *Scheduler) saveHealthLocked() error {
 	if s.Root == "" {
 		return nil
 	}
-	data, err := json.MarshalIndent(s.health, "", "  ")
-	if err != nil {
-		return err
-	}
-	dir := filepath.Join(s.Root, workspaceName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "triggers.json.*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, filepath.Join(dir, "triggers.json"))
+	return writeTriggerHealth(s.Root, s.health)
 }
 
 func auditSummary(ctx context.Context, root string) string {
