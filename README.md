@@ -224,9 +224,17 @@ Adding a key is compatible; renaming or removing one requires `forest.cli.v2`.
 Paging with a cursor that no longer names a Run exits 4 rather than silently
 restarting.
 
+`run list` returns Runs newest first. `status` reports its recent Runs in Ledger
+order, oldest first, because it is a snapshot of the tail rather than a pager.
+
 Exit codes are stable: `0` success, `1` no work, `2` error, `4` not found,
-`5` conflict, `6` invalid argument. `run logs --follow` exits with the Run's own
-exit code.
+`5` conflict, `6` invalid argument. One command leaves that space deliberately:
+`run logs --follow` exits with the Run's own exit code, so its exit does not
+carry the meanings above.
+
+`trigger reset` and `audit show --rescan` write, so they run while holding the
+Kernel lock and exit `5` when a Kernel holds it. Every other command in the
+table only reads, and reads take a shared lock that never blocks the Kernel.
 
 ## Development
 
