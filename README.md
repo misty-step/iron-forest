@@ -191,6 +191,42 @@ Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 | `forest poll <agent>` | Evaluate one declaration's trigger. |
 | `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, and recent Runs. |
 | `forest selfcheck` | Validate `forest.yaml` and declarations locally. |
+| `forest config show` | Print the loaded configuration. |
+| `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
+| `forest trigger list\|show <agent>` | Print resolved trigger state. |
+| `forest trigger reset <agent>` | Clear one agent's accumulated errors. Refuses while a Kernel runs. |
+| `forest run list` | Page the Ledger, newest first. |
+| `forest run show <run-id>` | Print one Ledger row. |
+| `forest run logs [--follow] <run-id>` | Print a Run log, or stream it until the Run completes. |
+| `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
+| `forest audit log` | Print audit history. |
+
+### Reading the factory
+
+Every command above except `serve`, `once`, and `poll` is read-only, accepts
+`--root <dir>` to read another checkout, and accepts `--json`. `trigger reset`
+is the one exception: it writes, and it refuses while a Kernel holds the lock,
+because the Scheduler owns that file while it runs.
+
+`--json` emits exactly one envelope on stdout, including on failure:
+
+```json
+{"schema":"forest.cli.v1","command":"run show","args":["<run-id>"],"exit":0,"data":{},"error":null}
+```
+
+`command` names the verb only and selects the `data` shape; operands live in
+`args`. `data` is `null` when a command fails, and `error` is the reason. Keys
+are snake_case throughout, and an empty collection is `[]`, never `null`.
+Adding a key is compatible; renaming or removing one requires `forest.cli.v2`.
+
+`run list` and `audit log` accept `--limit N`. `run list` also accepts
+`--after <run-id>` and returns `next_after`, which is empty on the last page.
+Paging with a cursor that no longer names a Run exits 4 rather than silently
+restarting.
+
+Exit codes are stable: `0` success, `1` no work, `2` error, `4` not found,
+`5` conflict, `6` invalid argument. `run logs --follow` exits with the Run's own
+exit code.
 
 ## Development
 
