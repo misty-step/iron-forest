@@ -58,14 +58,13 @@ func failure(exit int, format string, args ...any) cliOutcome {
 	return cliOutcome{Exit: exit, ErrText: fmt.Sprintf(format, args...)}
 }
 
-// optionalFlag names a per-command flag beyond the universal --json and --root.
-type optionalFlag uint8
-
+// Optional flag names. --json and --root are universal; every other flag is
+// declared per command so an unsupported flag is an error, not a no-op.
 const (
-	flagLimit optionalFlag = 1 << iota
-	flagAfter
-	flagFollow
-	flagRescan
+	flagLimit  = "--limit"
+	flagAfter  = "--after"
+	flagFollow = "--follow"
+	flagRescan = "--rescan"
 )
 
 type cliFlags struct {
@@ -75,38 +74,10 @@ type cliFlags struct {
 	after  string
 	follow bool
 	rescan bool
-}
-
-// set reports which optional flags the caller actually passed, so a command can
-// reject the ones it does not implement instead of ignoring them.
-func (f cliFlags) set() optionalFlag {
-	var bits optionalFlag
-	if f.limit != 0 {
-		bits |= flagLimit
-	}
-	if f.after != "" {
-		bits |= flagAfter
-	}
-	if f.follow {
-		bits |= flagFollow
-	}
-	if f.rescan {
-		bits |= flagRescan
-	}
-	return bits
-}
-
-func (bits optionalFlag) names() []string {
-	var names []string
-	for _, candidate := range []struct {
-		bit  optionalFlag
-		name string
-	}{{flagLimit, "--limit"}, {flagAfter, "--after"}, {flagFollow, "--follow"}, {flagRescan, "--rescan"}} {
-		if bits&candidate.bit != 0 {
-			names = append(names, candidate.name)
-		}
-	}
-	return names
+	// seen records the optional flags the caller actually passed. Presence is
+	// recorded here rather than inferred from values, so an empty value cannot
+	// slip past a command's allowlist.
+	seen []string
 }
 
 // cliCommand is one row of the read surface. The table is the only statement of
@@ -115,7 +86,7 @@ type cliCommand struct {
 	phrase   string
 	args     int
 	operands string
-	optional optionalFlag
+	optional []string
 	run      func(rest []string, flags cliFlags) cliOutcome
 }
 
@@ -129,12 +100,23 @@ func cliCommands() []cliCommand {
 		{phrase: "trigger list", run: runTriggerList},
 		{phrase: "trigger show", args: 1, operands: "<agent>", run: runTriggerShow},
 		{phrase: "trigger reset", args: 1, operands: "<agent>", run: runTriggerReset},
-		{phrase: "run list", optional: flagLimit | flagAfter, run: runRunList},
+		{phrase: "run list", optional: []string{flagLimit, flagAfter}, run: runRunList},
 		{phrase: "run show", args: 1, operands: "<run-id>", run: runRunShow},
-		{phrase: "run logs", args: 1, operands: "<run-id>", optional: flagFollow, run: runRunLogs},
-		{phrase: "audit show", optional: flagRescan, run: runAuditShow},
-		{phrase: "audit log", optional: flagLimit, run: runAuditLog},
+		{phrase: "run logs", args: 1, operands: "<run-id>", optional: []string{flagFollow}, run: runRunLogs},
+		{phrase: "audit show", optional: []string{flagRescan}, run: runAuditShow},
+		{phrase: "audit log", optional: []string{flagLimit}, run: runAuditLog},
 	}
+}
+
+// rejects lists the passed flags this command does not implement.
+func (c cliCommand) rejects(flags cliFlags) []string {
+	var rejected []string
+	for _, name := range flags.seen {
+		if !slices.Contains(c.optional, name) {
+			rejected = append(rejected, name)
+		}
+	}
+	return rejected
 }
 
 func (c cliCommand) usage() string {
@@ -142,7 +124,7 @@ func (c cliCommand) usage() string {
 	if c.operands != "" {
 		usage += " " + c.operands
 	}
-	for _, name := range c.optional.names() {
+	for _, name := range c.optional {
 		usage += " [" + name + "]"
 	}
 	return usage + " [--json] [--root <dir>]"
@@ -152,7 +134,13 @@ func (c cliCommand) usage() string {
 func runSurfaceCommand(args []string) int {
 	positional, flags, err := parseCLIFlags(args)
 	if err != nil {
-		return render(args[0], nil, flags, failure(exitInvalidArg, "%s", err))
+		// Name the command as far as it parsed, so the envelope still says which
+		// command was refused.
+		phrase := ""
+		if command, _, ok := lookupCommand(positional); ok {
+			phrase = command.phrase
+		}
+		return render(phrase, nil, flags, failure(exitInvalidArg, "%s", err))
 	}
 	command, rest, ok := lookupCommand(positional)
 	if !ok {
@@ -166,9 +154,9 @@ func runSurfaceCommand(args []string) int {
 	if len(rest) != command.args {
 		return render(command.phrase, rest, flags, failure(exitInvalidArg, "usage: %s", command.usage()))
 	}
-	if rejected := flags.set() & ^command.optional; rejected != 0 {
+	if rejected := command.rejects(flags); len(rejected) > 0 {
 		return render(command.phrase, rest, flags, failure(exitInvalidArg,
-			"%s does not accept %s", command.phrase, strings.Join(rejected.names(), " ")))
+			"%s does not accept %s", command.phrase, strings.Join(rejected, " ")))
 	}
 	return render(command.phrase, rest, flags, command.run(rest, flags))
 }
@@ -224,56 +212,77 @@ func render(command string, args []string, flags cliFlags, outcome cliOutcome) i
 }
 
 // wantsJSON answers before parsing succeeds, so a rejected flag still reports
-// through the envelope rather than as loose stderr text.
+// through the envelope rather than as loose stderr text. It is exhaustive
+// because parseCLIFlags refuses `--json=<value>`.
 func wantsJSON(args []string) bool { return slices.Contains(args, "--json") }
 
+// parseCLIFlags splits flags from positionals. It returns the positionals it had
+// collected even on failure, so the caller can still name the command.
 func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 	flags := cliFlags{json: wantsJSON(args)}
 	var positional []string
+	// value reads a flag's argument from either `--name=value` or `--name value`.
+	// A named identity may not be empty: an empty cursor or root would otherwise
+	// read as "no flag at all" and bypass the command's allowlist.
 	value := func(index int, name string) (string, int, error) {
-		if arg := args[index]; strings.HasPrefix(arg, name+"=") {
-			return strings.TrimPrefix(arg, name+"="), index, nil
+		arg := args[index]
+		if raw, ok := strings.CutPrefix(arg, name+"="); ok {
+			if raw == "" {
+				return "", index, fmt.Errorf("%s requires a value", name)
+			}
+			return raw, index, nil
 		}
-		if index+1 >= len(args) {
+		if index+1 >= len(args) || args[index+1] == "" {
 			return "", index, fmt.Errorf("%s requires a value", name)
 		}
 		return args[index+1], index + 1, nil
 	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
-		name, _, _ := strings.Cut(arg, "=")
+		name, _, hasValue := strings.Cut(arg, "=")
 		switch name {
-		case "--json":
-			flags.json = true
-		case "--follow":
-			flags.follow = true
-		case "--rescan":
-			flags.rescan = true
+		case "--json", flagFollow, flagRescan:
+			if hasValue {
+				return positional, flags, fmt.Errorf("%s does not take a value", name)
+			}
+			switch name {
+			case "--json":
+				flags.json = true
+			case flagFollow:
+				flags.follow = true
+			default:
+				flags.rescan = true
+			}
+			if name != "--json" {
+				flags.seen = append(flags.seen, name)
+			}
 		case "--root", "-C":
 			root, next, err := value(index, name)
 			if err != nil {
-				return nil, flags, err
+				return positional, flags, err
 			}
 			flags.root, index = root, next
-		case "--after":
+		case flagAfter:
 			after, next, err := value(index, name)
 			if err != nil {
-				return nil, flags, err
+				return positional, flags, err
 			}
 			flags.after, index = after, next
-		case "--limit":
+			flags.seen = append(flags.seen, flagAfter)
+		case flagLimit:
 			raw, next, err := value(index, name)
 			if err != nil {
-				return nil, flags, err
+				return positional, flags, err
 			}
 			limit, convErr := strconv.Atoi(raw)
 			if convErr != nil || limit <= 0 {
-				return nil, flags, fmt.Errorf("--limit must be a positive integer, got %q", raw)
+				return positional, flags, fmt.Errorf("--limit must be a positive integer, got %q", raw)
 			}
 			flags.limit, index = limit, next
+			flags.seen = append(flags.seen, flagLimit)
 		default:
 			if strings.HasPrefix(arg, "-") {
-				return nil, flags, fmt.Errorf("unknown flag %q", arg)
+				return positional, flags, fmt.Errorf("unknown flag %q", arg)
 			}
 			positional = append(positional, arg)
 		}
@@ -281,7 +290,7 @@ func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 	if flags.root == "" {
 		root, err := os.Getwd()
 		if err != nil {
-			return nil, flags, fmt.Errorf("resolve working directory: %w", err)
+			return positional, flags, fmt.Errorf("resolve working directory: %w", err)
 		}
 		flags.root = root
 	}
@@ -349,9 +358,9 @@ func runDeclarationShow(rest []string, flags cliFlags) cliOutcome {
 }
 
 type triggerListPayload struct {
-	Triggers  []TriggerView `json:"triggers"`
-	StateErr  string        `json:"state_error,omitempty"`
-	StateRead bool          `json:"state_written"`
+	Triggers     []TriggerView `json:"triggers"`
+	StateErr     string        `json:"state_error,omitempty"`
+	StatePresent bool          `json:"state_present"`
 }
 
 func runTriggerList(_ []string, flags cliFlags) cliOutcome {
@@ -359,7 +368,7 @@ func runTriggerList(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	payload := triggerListPayload{Triggers: state.Views, StateRead: state.StateRead}
+	payload := triggerListPayload{Triggers: state.Views, StatePresent: state.StatePresent}
 	if state.StateErr != nil {
 		payload.StateErr = state.StateErr.Error()
 	}
@@ -379,41 +388,40 @@ func runTriggerShow(rest []string, flags cliFlags) cliOutcome {
 }
 
 // runTriggerReset clears one agent's accumulated errors. The Scheduler owns this
-// file while it runs, so the command refuses rather than racing it.
+// file while it runs, so the write happens under the Kernel lock.
 func runTriggerReset(rest []string, flags cliFlags) cliOutcome {
 	agent := rest[0]
-	held, err := kernelLockHeld(flags.root)
-	if err != nil {
-		return failure(exitError, "kernel lock state unknown: %s", err)
-	}
-	if held {
-		return failure(exitConflict, "a Kernel is running; stop it before resetting %q", agent)
-	}
-	health, exists, err := readTriggerHealth(flags.root)
+	cfg, err := loadConfig(configPath(flags.root))
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	value, present := health[agent]
-	if !exists || !present {
-		return failure(exitNotFound, "trigger %q not found", agent)
+	if _, configured := cfg.Agents[agent]; !configured {
+		return failure(exitNotFound, "trigger %q is not configured", agent)
 	}
-	value.ConsecutiveErrors = 0
-	value.PollError = ""
-	value.RunError = ""
-	value.AuditError = ""
-	health[agent] = value
-	if err := writeTriggerHealth(flags.root, health); err != nil {
-		return failure(exitError, "persist trigger state: %s", err)
-	}
-	state, err := resolveTriggerState(flags.root)
-	if err != nil {
-		return failure(exitError, "%s", err)
-	}
-	index := slices.IndexFunc(state.Views, func(view TriggerView) bool { return view.Name == agent })
-	if index < 0 {
-		return failure(exitError, "trigger %q vanished during reset", agent)
-	}
-	return cliOutcome{Exit: exitOK, Data: state.Views[index], Human: triggerViewsHuman(state.Views[index : index+1])}
+	return withKernelLock(flags.root, func() cliOutcome {
+		health, _, err := readTriggerHealth(flags.root)
+		if err != nil {
+			return failure(exitError, "%s", err)
+		}
+		value, present := health[agent]
+		if !present {
+			return failure(exitNoWork, "trigger %q has no persisted state to clear", agent)
+		}
+		value.ConsecutiveErrors = 0
+		value.PollError = ""
+		value.RunError = ""
+		value.AuditError = ""
+		health[agent] = value
+		if err := writeTriggerHealth(flags.root, health); err != nil {
+			return failure(exitError, "persist trigger state: %s", err)
+		}
+		state, err := resolveTriggerState(flags.root)
+		if err != nil {
+			return failure(exitError, "%s", err)
+		}
+		index := slices.IndexFunc(state.Views, func(view TriggerView) bool { return view.Name == agent })
+		return cliOutcome{Exit: exitOK, Data: state.Views[index], Human: triggerViewsHuman(state.Views[index : index+1])}
+	})
 }
 
 type runListPayload struct {
@@ -471,15 +479,16 @@ func runRunLogs(rest []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	text, readErr := readRunLogFrom(logPath, 0)
-	// A run identity is real when the ledger has it or its log exists; --follow
-	// on anything else would wait for a Run that will never appear.
-	if !found && readErr != nil {
+	// A run identity is real when the ledger has it or its log exists. Following
+	// anything else would wait for a Run that will never appear.
+	_, statErr := os.Stat(logPath)
+	if !found && statErr != nil {
 		return failure(exitNotFound, "run %q not found", runID)
 	}
 	if flags.follow && !found {
 		return cliOutcome{Exit: exitOK, Stream: func(w io.Writer) int { return followRunLog(w, flags.root, runID, logPath) }}
 	}
+	text, readErr := readRunLogFrom(logPath, 0)
 	retained := readErr == nil
 	if !retained && !os.IsNotExist(readErr) {
 		return failure(exitError, "%s", readErr)
@@ -492,7 +501,7 @@ func runRunLogs(rest []string, flags cliFlags) cliOutcome {
 	exit := exitOK
 	if flags.follow {
 		// The Run already finished, so follow has nothing to wait for and
-		// reports the Run's own outcome.
+		// reports the Run's own outcome, as the command contract requires.
 		exit = record.Exit
 	}
 	return cliOutcome{Exit: exit, Data: payload, Human: strings.TrimSuffix(human, "\n")}
@@ -518,6 +527,15 @@ func followRunLog(w io.Writer, root, runID, logPath string) int {
 		}
 		if found {
 			return record.Exit
+		}
+		// Every Run is dispatched under the Kernel lock and its ledger row is
+		// written before that lock is released. A free lock plus a confirming
+		// miss therefore proves the Run died without recording an outcome.
+		if held, lockErr := kernelLockHeld(root); lockErr == nil && !held {
+			if _, confirmed, findErr := FindRun(root, runID); findErr == nil && !confirmed {
+				fmt.Fprintf(os.Stderr, "run %q did not complete and no Kernel is running\n", runID)
+				return exitError
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -546,17 +564,16 @@ func readRunLogFrom(path string, offset int64) (string, error) {
 
 func runAuditShow(_ []string, flags cliFlags) cliOutcome {
 	if flags.rescan {
-		// audit() persists the state it computes, so the read below reports the
-		// rescan. Refuse while a Kernel owns the audit files.
-		held, err := kernelLockHeld(flags.root)
-		if err != nil {
-			return failure(exitError, "kernel lock state unknown: %s", err)
-		}
-		if held {
-			return failure(exitConflict, "a Kernel is running; it audits on its own")
-		}
-		if _, err := audit(context.Background(), flags.root); err != nil {
-			return failure(exitError, "%s", err)
+		// audit() rewrites audit.json and audit.log, and its temp cleanup would
+		// remove a concurrent writer's in-flight file, so it runs under the
+		// Kernel lock. It persists the state the read below reports.
+		if outcome := withKernelLock(flags.root, func() cliOutcome {
+			if _, err := audit(context.Background(), flags.root); err != nil {
+				return failure(exitError, "%s", err)
+			}
+			return cliOutcome{Exit: exitOK}
+		}); outcome.ErrText != "" {
+			return outcome
 		}
 	}
 	state, err := readAuditState(flags.root)

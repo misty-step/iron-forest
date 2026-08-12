@@ -78,17 +78,36 @@ flags:
 func withLock(root string, fn func() int) int {
 	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 2
+		return exitError
 	}
 	file, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 2
+		return exitError
 	}
 	defer file.Close()
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		fmt.Fprintln(os.Stderr, "another Kernel is already running")
-		return 2
+		return exitConflict
+	}
+	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+// withKernelLock runs a mutation while holding the Kernel lock, so a Kernel that
+// starts mid-command cannot overwrite the result from a stale snapshot. Probing
+// the lock and releasing it would prove nothing about the write that follows.
+func withKernelLock(root string, fn func() cliOutcome) cliOutcome {
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		return failure(exitError, "%s", err)
+	}
+	file, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return failure(exitConflict, "a Kernel is running; stop it first")
 	}
 	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 	return fn()
@@ -99,12 +118,12 @@ func serve(root string) int {
 		cfg, err := loadConfig(configPath(root))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 2
+			return exitError
 		}
 		for _, name := range agentNames(cfg) {
 			if _, err := loadDeclaration(root, name); err != nil {
 				fmt.Fprintln(os.Stderr, err)
-				return 2
+				return exitError
 			}
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -112,9 +131,9 @@ func serve(root string) int {
 		scheduler := NewScheduler(root, cfg, NewRunner(root))
 		if err := scheduler.Serve(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 2
+			return exitError
 		}
-		return 0
+		return exitOK
 	})
 }
 
@@ -123,7 +142,7 @@ func once(root, agent string) int {
 		cfg, err := loadConfig(configPath(root))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 2
+			return exitError
 		}
 		scheduler := NewScheduler(root, cfg, NewRunner(root))
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -131,12 +150,12 @@ func once(root, agent string) int {
 		dispatched, err := scheduler.Once(ctx, agent)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 2
+			return exitError
 		}
 		if dispatched {
-			return 0
+			return exitOK
 		}
-		return 1
+		return exitNoWork
 	})
 }
 
@@ -144,7 +163,7 @@ func poll(root, agent string) int {
 	cfg, err := loadConfig(configPath(root))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return 2
+		return exitError
 	}
 	poller := NewPoller(root, cfg.Repo)
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -165,10 +184,10 @@ func pollAgent(ctx context.Context, poller *Poller, agent string) int {
 		code = poller.fixer(ctx)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown poll agent %q\n", agent)
-		return 2
+		return exitError
 	}
 	if ctx.Err() != nil {
-		return 2
+		return exitError
 	}
 	return code
 }
@@ -177,8 +196,11 @@ type statusPayload struct {
 	Repo     string        `json:"repo"`
 	Kernel   kernelView    `json:"kernel"`
 	Triggers []TriggerView `json:"triggers"`
-	Audit    AuditState    `json:"audit"`
-	Recent   []RunRecord   `json:"recent"`
+	// TriggerStateError reports why trigger state is unknown, so a machine
+	// reader learns the reason its sibling lock_error already publishes.
+	TriggerStateError string      `json:"trigger_state_error,omitempty"`
+	Audit             AuditState  `json:"audit"`
+	Recent            []RunRecord `json:"recent"`
 }
 
 type kernelView struct {
@@ -227,26 +249,32 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	if rows := runRecordsHuman(records, "  "); rows != "" {
 		sections = append(sections, rows)
 	}
-	return cliOutcome{
-		Exit: exitOK,
-		Data: statusPayload{
-			Repo:     cfg.Repo,
-			Kernel:   kernel,
-			Triggers: state.Views,
-			Audit:    audit,
-			Recent:   records,
-		},
-		Human: strings.Join(sections, "\n"),
+	payload := statusPayload{
+		Repo:     cfg.Repo,
+		Kernel:   kernel,
+		Triggers: state.Views,
+		Audit:    audit,
+		Recent:   records,
 	}
+	if state.StateErr != nil {
+		payload.TriggerStateError = state.StateErr.Error()
+	}
+	return cliOutcome{Exit: exitOK, Data: payload, Human: strings.Join(sections, "\n")}
 }
 
-// statusRecentRuns and statusViolations bound what one snapshot prints; the full
-// sets are reachable through `run list` and `audit show`.
+// statusRecentRuns bounds both views of recent Runs. statusViolations bounds only
+// the human view, which reports the remainder as omitted; the payload carries the
+// full violation set the Auditor recorded.
 const (
 	statusRecentRuns = 10
 	statusViolations = 10
 )
 
+// kernelLockHeld reports whether a Kernel holds the workspace lock. The probe
+// takes a shared lock, so concurrent read-only commands never mistake each other
+// for a Kernel; a shared lock still conflicts with the Kernel's exclusive one.
+// This answers a reporting question only. A mutation must hold the lock through
+// withKernelLock rather than act on a released probe.
 func kernelLockHeld(root string) (bool, error) {
 	file, err := os.OpenFile(forestPath(root, "lock"), os.O_RDWR, 0)
 	if os.IsNotExist(err) {
@@ -256,7 +284,7 @@ func kernelLockHeld(root string) (bool, error) {
 		return false, err
 	}
 	defer file.Close()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 			return true, nil
 		}
@@ -265,14 +293,20 @@ func kernelLockHeld(root string) (bool, error) {
 	return false, syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
 
+type toolPath struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
 type selfcheckPayload struct {
-	Repo         string   `json:"repo"`
-	Declarations []string `json:"declarations"`
-	Tools        []string `json:"tools"`
+	Repo         string     `json:"repo"`
+	Declarations []string   `json:"declarations"`
+	Tools        []toolPath `json:"tools"`
 }
 
 // runSelfcheck validates the configuration, the declarations, and the trusted
-// tool paths this checkout would run with.
+// tool paths this checkout would run with. The payload reports the paths it
+// resolved, which is the fact the check establishes.
 func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	cfg, err := loadConfig(configPath(flags.root))
 	if err != nil {
@@ -293,12 +327,13 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		{name: "gh", resolve: func() (string, error) { return trustedExecutable(flags.root, "gh") }},
 		{name: "omp", resolve: runner.ompExecutable},
 	}
-	resolved := make([]string, 0, len(tools))
+	resolved := make([]toolPath, 0, len(tools))
 	for _, tool := range tools {
-		if _, err := tool.resolve(); err != nil {
+		path, err := tool.resolve()
+		if err != nil {
 			return failure(exitError, "%s unavailable: %s", tool.name, err)
 		}
-		resolved = append(resolved, tool.name)
+		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
 	return cliOutcome{
 		Exit:  exitOK,

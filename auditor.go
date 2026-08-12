@@ -190,20 +190,26 @@ func ensureAuditWorkspace(root string, deps auditDependencies) error {
 	return syncAndCloseAuditFile(directory, "repository root", deps)
 }
 
+// readAuditState reads persisted audit state. Violations is always a slice so
+// the published payload never carries null in place of an empty list.
 func readAuditState(root string) (AuditState, error) {
+	empty := AuditState{Violations: []string{}}
 	data, err := os.ReadFile(auditStatePath(root))
 	if os.IsNotExist(err) {
-		return AuditState{}, nil
+		return empty, nil
 	}
 	if err != nil {
-		return AuditState{}, err
+		return empty, err
 	}
 	var state AuditState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return AuditState{}, fmt.Errorf("parse audit state: %w", err)
+		return empty, fmt.Errorf("parse audit state: %w", err)
 	}
 	if state.Baseline == "" && state.LastMaster != "" {
 		state.Baseline = state.LastMaster
+	}
+	if state.Violations == nil {
+		state.Violations = []string{}
 	}
 	return state, nil
 }

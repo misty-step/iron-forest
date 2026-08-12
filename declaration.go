@@ -106,11 +106,16 @@ func loadDeclaration(root, name string) (Declaration, error) {
 		}
 		return Declaration{}, fmt.Errorf("agent %s frontmatter: multiple YAML documents", name)
 	}
-	var tools StringList
+	// Tools is always a slice: the published declaration payload never carries
+	// null in place of an empty list.
+	tools := StringList{}
 	if metadata.Tools.Kind != 0 {
 		if err := tools.UnmarshalYAML(&metadata.Tools); err != nil {
 			return Declaration{}, fmt.Errorf("agent %s frontmatter tools: %w", name, err)
 		}
+	}
+	if tools == nil {
+		tools = StringList{}
 	}
 	thinking := ""
 	if metadata.Thinking.Kind != 0 {

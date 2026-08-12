@@ -99,11 +99,11 @@ type TriggerView struct {
 // mismatched state is reported in StateErr and rendered as unknown, never as a
 // missing answer: a reader always learns the state of every configured agent.
 type triggerState struct {
-	Views     []TriggerView
-	StateErr  error
-	LockErr   error
-	LockHeld  bool
-	StateRead bool
+	Views        []TriggerView
+	StateErr     error
+	LockErr      error
+	LockHeld     bool
+	StatePresent bool
 }
 
 // resolveTriggerState is the only place that decides whether a trigger is
@@ -116,20 +116,20 @@ func resolveTriggerState(root string) (triggerState, error) {
 	}
 	names := agentNames(cfg)
 	state := triggerState{}
-	health, exists, healthErr := readTriggerHealth(root)
-	state.StateRead = exists
+	health, present, healthErr := readTriggerHealth(root)
+	state.StatePresent = present
 	if healthErr != nil {
 		state.StateErr = healthErr
 		health = map[string]TriggerHealth{}
 	}
 	state.LockHeld, state.LockErr = kernelLockHeld(root)
-	known := healthErr == nil && exists && len(health) == len(names)
+	known := healthErr == nil && present && len(health) == len(names)
 	for _, name := range names {
 		if _, present := health[name]; !present {
 			known = false
 		}
 	}
-	if exists && healthErr == nil && !known {
+	if present && healthErr == nil && !known {
 		state.StateErr = fmt.Errorf("trigger state does not match configured agents")
 	}
 	state.Views = make([]TriggerView, 0, len(names))

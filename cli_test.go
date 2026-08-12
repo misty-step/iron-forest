@@ -308,14 +308,32 @@ func TestCLIRunLogsFollowStreamsUntilTheRunCompletes(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte("started\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A live Run implies a Kernel holding the workspace lock, which is what tells
+	// follow the Run is still alive.
+	lock, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	// The Kernel goroutine owns the lock and the handle for the rest of the test,
+	// so the test body never touches either concurrently.
+	finished := make(chan struct{})
+	defer func() {
+		<-finished
+		_ = lock.Close()
+	}()
 	go func() {
+		defer close(finished)
 		time.Sleep(followPollInterval)
-		file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err == nil {
+		file, openErr := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+		if openErr == nil {
 			_, _ = file.WriteString("finished\n")
 			_ = file.Close()
 		}
 		_ = AppendRun(root, RunRecord{RunID: "run-live-builder", Agent: "builder", Exit: 7})
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	}()
 
 	code, stdout, _ := captureCLIOutput(t, func() int {
@@ -328,6 +346,35 @@ func TestCLIRunLogsFollowStreamsUntilTheRunCompletes(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout=%q missing %q", stdout, want)
 		}
+	}
+}
+
+// A Run whose Kernel died without recording an outcome must be reported, not
+// followed forever.
+func TestCLIRunLogsFollowReportsARunWhoseKernelDied(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	logPath := runLogPath(root, "run-orphan-builder")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("partial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		code, _, _ := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"run", "logs", "--follow", "run-orphan-builder", "--root", root})
+		})
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		if code != exitError {
+			t.Fatalf("orphaned run code=%d, want %d", code, exitError)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("follow did not report a Run whose Kernel died")
 	}
 }
 
@@ -353,8 +400,8 @@ func TestCLITriggerListToleratesUnwrittenState(t *testing.T) {
 		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
 	}
 	keys := payloadKeys(t, envelope)
-	if keys["state_written"] != false {
-		t.Fatalf("payload=%v, want state_written=false", keys)
+	if keys["state_present"] != false {
+		t.Fatalf("payload=%v, want state_present=false", keys)
 	}
 	triggers, ok := keys["triggers"].([]any)
 	if !ok || len(triggers) != 1 {
@@ -604,6 +651,252 @@ func TestCLIUsageListsEveryCommand(t *testing.T) {
 	for _, command := range cliCommands() {
 		if !strings.Contains(stderr, "forest "+command.phrase) {
 			t.Fatalf("usage omits %q: %s", command.phrase, stderr)
+		}
+	}
+}
+
+// A boolean flag with a value is rejected, so the pre-parse --json detection and
+// the parser can never disagree about the output contract.
+func TestCLIBooleanFlagsRejectValues(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	for _, arg := range []string{"--json=false", "--json=true", "--follow=false", "--rescan=1"} {
+		code, stdout, stderr := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"run", "list", arg, "--root", root})
+		})
+		if code != exitInvalidArg {
+			t.Fatalf("%s code=%d, want %d (stdout=%q stderr=%q)", arg, code, exitInvalidArg, stdout, stderr)
+		}
+	}
+}
+
+// One failure must produce one output contract regardless of argument order.
+func TestCLIFailureContractIsOrderIndependent(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	orders := [][]string{
+		{"run", "list", "--limit", "abc", "--json", "--root", root},
+		{"run", "list", "--json", "--limit", "abc", "--root", root},
+		{"--json", "run", "list", "--limit", "abc", "--root", root},
+	}
+	for _, args := range orders {
+		code, stdout, _ := captureCLIOutput(t, func() int { return runSurfaceCommand(args) })
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d", args, code, exitInvalidArg)
+		}
+		var envelope cliEnvelope
+		if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+			t.Fatalf("%v emitted no envelope: %v (stdout=%q)", args, err, stdout)
+		}
+		if envelope.Error == nil {
+			t.Fatalf("%v envelope has no error", args)
+		}
+	}
+}
+
+// An empty flag value must not read as "flag absent" and slip past the allowlist.
+func TestCLIRejectsEmptyFlagValues(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	cases := [][]string{
+		{"run", "list", "--after=", "--root", root},
+		{"run", "list", "--after", "", "--root", root},
+		{"status", "--after=", "--root", root},
+		{"config", "show", "--root", ""},
+	}
+	for _, args := range cases {
+		code, _, stderr := captureCLIOutput(t, func() int { return runSurfaceCommand(args) })
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d (stderr=%q)", args, code, exitInvalidArg, stderr)
+		}
+	}
+}
+
+// A passing audit is the most common state; it must not publish null violations.
+func TestCLIPassingAuditPublishesEmptyViolations(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A pass writes violations as nil, which is exactly the case that used to
+	// serialize as null.
+	if err := writeAuditState(root, AuditState{LastMaster: "abc", LastResult: "pass", Violations: nil}, defaultAuditDependencies()); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"audit", "show", "--json", "--root", root}, {"status", "--json", "--root", root}} {
+		_, envelope, _ := decodeEnvelope(t, args...)
+		encoded, err := json.Marshal(envelope.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(encoded), `"violations":[]`) {
+			t.Fatalf("%v payload=%s, want violations as an empty array", args, encoded)
+		}
+	}
+}
+
+// A declaration without a tools key must publish an empty list, not null.
+func TestCLIDeclarationWithoutToolsPublishesEmptyList(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	dir := filepath.Join(root, "agents", "builder")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent.md"), []byte("---\nmodel: local\n---\nsystem\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.md"), []byte("task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, _ := decodeEnvelope(t, "declaration", "show", "builder", "--json", "--root", root)
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"tools":[]`) {
+		t.Fatalf("payload=%s, want tools as an empty array", encoded)
+	}
+}
+
+// Resetting an agent that is no longer configured must not write state and then
+// report an error about the write.
+func TestCLITriggerResetSeparatesUnconfiguredFromUnwritten(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// State left behind by an agent that has since been removed from forest.yaml.
+	if err := os.WriteFile(forestPath(root, "triggers.json"),
+		[]byte(`{"retired":{"agent":"retired","consecutive_errors":3}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"trigger", "reset", "retired", "--root", root})
+	})
+	if code != exitNotFound {
+		t.Fatalf("unconfigured agent code=%d, want %d (stderr=%q)", code, exitNotFound, stderr)
+	}
+	persisted, _, err := readTriggerHealth(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted["retired"].ConsecutiveErrors != 3 {
+		t.Fatalf("refused reset still wrote state: %+v", persisted["retired"])
+	}
+
+	// A configured agent with no persisted state is a no-op, not a failure.
+	code, _, stderr = captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"trigger", "reset", "builder", "--root", root})
+	})
+	if code != exitNoWork {
+		t.Fatalf("unwritten state code=%d, want %d (stderr=%q)", code, exitNoWork, stderr)
+	}
+}
+
+// Two concurrent read-only probes must not report each other as a Kernel.
+func TestCLIConcurrentStatusProbesDoNotSeeEachOther(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(forestPath(root, "lock"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A concurrent reader holds the same shared probe the CLI uses.
+	other, err := os.OpenFile(forestPath(root, "lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	if err := syscall.Flock(int(other.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(other.Fd()), syscall.LOCK_UN)
+
+	held, err := kernelLockHeld(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held {
+		t.Fatal("a concurrent read-only probe was reported as a running Kernel")
+	}
+}
+
+// The lock a mutation takes must be the Kernel's own, so a Kernel cannot start
+// mid-write.
+func TestCLIResetHoldsTheKernelLockDuringTheWrite(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(forestPath(root, "triggers.json"),
+		[]byte(`{"builder":{"agent":"builder","consecutive_errors":9}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	observed := make(chan bool, 1)
+	outcome := withKernelLock(root, func() cliOutcome {
+		// While the mutation holds the lock, a Kernel start must fail.
+		file, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			t.Error(err)
+			return cliOutcome{Exit: exitError}
+		}
+		defer file.Close()
+		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		observed <- err != nil
+		if err == nil {
+			_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		}
+		return cliOutcome{Exit: exitOK}
+	})
+	if outcome.Exit != exitOK {
+		t.Fatalf("withKernelLock outcome=%+v", outcome)
+	}
+	if blocked := <-observed; !blocked {
+		t.Fatal("a Kernel could take the lock while a mutation held it")
+	}
+}
+
+// selfcheck publishes the paths it resolved, not a constant list of names.
+func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	writeTestDeclaration(t, root, "builder")
+	bin := t.TempDir()
+	for _, name := range []string{"git", "gh", "omp"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	_, envelope, _ := decodeEnvelope(t, "selfcheck", "--json", "--root", root)
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload selfcheckPayload
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Tools) != 3 {
+		t.Fatalf("tools=%+v, want three", payload.Tools)
+	}
+	for _, tool := range payload.Tools {
+		if !filepath.IsAbs(tool.Path) {
+			t.Fatalf("tool %s path=%q, want an absolute resolved path", tool.Name, tool.Path)
+		}
+	}
+	// git and gh resolve through PATH, so they must land in the trusted bin.
+	for _, tool := range payload.Tools[:2] {
+		if tool.Path != filepath.Join(bin, tool.Name) {
+			t.Fatalf("tool %s path=%q, want %s", tool.Name, tool.Path, filepath.Join(bin, tool.Name))
 		}
 	}
 }
