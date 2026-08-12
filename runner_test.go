@@ -57,7 +57,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 				t.Fatal(err)
 			}
 			runner := NewRunner(root)
-			runner.OMPPath = omp
+			runner.PiPath = omp
 			record, err := runner.Run(context.Background(), Declaration{Name: test.role, Model: "local", Tools: StringList{"read", "bash"}, SystemPrompt: "system", TaskPrompt: "Reply"}, 10)
 			if err != nil {
 				t.Fatal(err)
@@ -83,7 +83,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 			}
 			for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply"} {
 				if !strings.Contains(string(args), value) {
-					t.Fatalf("OMP args missing %q:\n%s", value, args)
+					t.Fatalf("harness args missing %q:\n%s", value, args)
 				}
 			}
 			assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, test.noteKind)
@@ -136,7 +136,7 @@ func TestRunnerCleansPrivateRefsAfterAgentFailureAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := NewRunner(root)
-			runner.OMPPath = omp
+			runner.PiPath = omp
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if cancelRun {
@@ -162,9 +162,9 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
-	if err == nil || !strings.Contains(err.Error(), "parse OMP usage") || !strings.Contains(err.Error(), "nonnegative") {
+	if err == nil || !strings.Contains(err.Error(), "parse harness usage") || !strings.Contains(err.Error(), "nonnegative") {
 		t.Fatalf("invalid usage record=%#v err=%v", record, err)
 	}
 	if record.Exit != 1 {
@@ -198,9 +198,9 @@ func TestRunnerRejectsUsageWithoutRecognizedAlias(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := NewRunner(root)
-			runner.OMPPath = omp
+			runner.PiPath = omp
 			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
-			if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "parse OMP usage") {
+			if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "parse harness usage") {
 				t.Fatalf("drifted usage record=%#v err=%v", record, err)
 			}
 			rows, ledgerErr := ReadLedger(root)
@@ -219,7 +219,7 @@ func TestOMPUsageParser(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := parseOMPUsage(path)
+	usage, err := parseAgentUsage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestParseOMPUsageAggregatesTurnsAfterLargeRecord(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := parseOMPUsage(path)
+	usage, err := parseAgentUsage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestParseOMPUsagePreservesExactIntegers(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := parseOMPUsage(path)
+	usage, err := parseAgentUsage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestParseOMPUsageRejectsInvalidNumbers(t *testing.T) {
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if usage, err := parseOMPUsage(path); err == nil {
+			if usage, err := parseAgentUsage(path); err == nil {
 				t.Fatalf("accepted usage %#v", usage)
 			}
 		})
@@ -293,7 +293,7 @@ func TestParseOMPUsageRejectsEveryAggregateOverflow(t *testing.T) {
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if usage, err := parseOMPUsage(path); err == nil {
+			if usage, err := parseAgentUsage(path); err == nil {
 				t.Fatalf("accepted overflowing %s usage %#v", key, usage)
 			}
 		})
@@ -310,7 +310,7 @@ func TestParseOMPUsageAllowsEveryAggregateMaxPlusZero(t *testing.T) {
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			usage, err := parseOMPUsage(path)
+			usage, err := parseAgentUsage(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -355,7 +355,7 @@ func TestRunnerDirectTimeoutBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		runner := NewRunner(root)
-		runner.OMPPath = omp
+		runner.PiPath = omp
 		record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
 		if err != nil || record.Exit != 0 {
 			t.Fatalf("timeout 1 record=%#v err=%v", record, err)
@@ -409,7 +409,7 @@ exit 0
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("leader-success record=%#v err=%v", record, err)
@@ -431,7 +431,7 @@ func TestRunnerTerminatesTimedOutProcessTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	started := time.Now()
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
 	if err == nil || record.Exit != 124 || time.Since(started) > 4*time.Second {
@@ -465,7 +465,7 @@ while :; do sleep 1; done
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
 	if err == nil || record.Exit != 124 {
 		t.Fatalf("leader-stop record=%#v err=%v", record, err)
@@ -681,7 +681,7 @@ exec "$REAL_GIT" "$@"
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.GitPath, runner.OMPPath = gitWrapper, omp
+	runner.GitPath, runner.PiPath = gitWrapper, omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 10)
 	if err == nil || record.Exit != 1 {
 		t.Fatalf("cleanup record=%#v err=%v", record, err)
@@ -847,13 +847,62 @@ func TestTrustedPathExcludesManagedCheckout(t *testing.T) {
 	}
 }
 
+// A version manager dispatches on the name it was invoked as, so the caller's own
+// path must be executed even when it is a symlink. Executing the resolved target
+// would run the manager instead of the tool. The trust decision still follows the
+// symlink, so a link into the repository is still refused.
+func TestTrustedExecutableRunsTheCallersPathSoShimsDispatch(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+
+	// A shim that reports the name it was invoked as, like a version manager.
+	real := filepath.Join(outside, "manager")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$(basename \"$0\")\"\n"
+	if err := os.WriteFile(real, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	shim := filepath.Join(outside, "pi")
+	if err := os.Symlink(real, shim); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := trustedExecutable(root, shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != shim {
+		t.Fatalf("resolved=%q, want the caller's path %q so the shim dispatches", resolved, shim)
+	}
+	output, err := exec.Command(resolved).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(output)) != "pi" {
+		t.Fatalf("shim was invoked as %q, want pi", strings.TrimSpace(string(output)))
+	}
+
+	// Trust still follows the link: a shim whose target is in the repository is
+	// refused even though the link itself sits outside.
+	inside := filepath.Join(root, "planted")
+	if err := os.WriteFile(inside, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(outside, "planted-link")
+	if err := os.Symlink(inside, planted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := trustedExecutable(root, planted); err == nil {
+		t.Fatal("accepted a shim whose target is inside the repository")
+	}
+}
+
 func TestToolEntrypointsRejectRepositoryExecutablesThroughSymlinkedPath(t *testing.T) {
 	root := t.TempDir()
 	repositoryBin := filepath.Join(root, "bin")
 	if err := os.Mkdir(repositoryBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"git", "gh", "omp", "rm"} {
+	for _, name := range []string{"git", "gh", "pi", "rm"} {
 		if err := os.WriteFile(filepath.Join(repositoryBin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -883,8 +932,8 @@ func TestToolEntrypointsRejectRepositoryExecutablesThroughSymlinkedPath(t *testi
 			_, err := poller.gh(context.Background(), "--version")
 			return err
 		}},
-		{name: "omp", run: func() error {
-			_, err := runner.ompExecutable()
+		{name: "pi", run: func() error {
+			_, err := runner.piExecutable()
 			return err
 		}},
 		{name: "rm", run: func() error {

@@ -19,7 +19,11 @@ KillMode=mixed
 # 3900 seconds covers concurrent declared Runs, Runner cleanup, and serialized audits.
 TimeoutStopSec=3900
 # Match install-service.sh's selfcheck PATH; ExecStart names the managed binary absolutely.
-Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+# The mise shim directory is included because the agent harness (pi) is version
+# managed and absent from the base directories. `forest selfcheck` fails when the
+# harness cannot be resolved, so a host that cannot dispatch says so before a
+# Kernel starts.
+Environment=PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target

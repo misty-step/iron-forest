@@ -12,12 +12,12 @@ Install these tools on the host:
 - Git with push access to the managed repository;
 - `gh` for the day-one GitHub adapter;
 - `mise` and the managed repository's declared check tools;
-- OMP with host-managed provider routing.
+- `pi` with host-managed provider routing. It is the agent harness; see [ADR 0018](adr/0018-pi-harness.md). A `model` of `ollama/<name>` runs locally and costs nothing.
 
 The user service resolves these tools only through
 `%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin`.
 
-Configure forge access and OMP provider routing on the host. Do not put
+Configure forge access and pi provider routing on the host. Do not put
 adapter configuration or credentials in `forest.yaml`, declarations, prompts,
 or commits. A trusted declaration has the host user's configured credentials,
 filesystem access, and

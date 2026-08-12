@@ -358,7 +358,7 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	}{
 		{name: "git", resolve: func() (string, error) { return trustedExecutable(flags.root, "git") }},
 		{name: "gh", resolve: func() (string, error) { return trustedExecutable(flags.root, "gh") }},
-		{name: "omp", resolve: runner.ompExecutable},
+		{name: "pi", resolve: runner.piExecutable},
 	}
 	resolved := make([]toolPath, 0, len(tools))
 	for _, tool := range tools {

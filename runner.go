@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,7 +20,7 @@ import (
 type Runner struct {
 	Root    string
 	GitPath string
-	OMPPath string
+	PiPath  string
 }
 
 const (
@@ -214,7 +213,7 @@ func runLogPath(root, runID string) string {
 }
 
 func NewRunner(root string) *Runner {
-	return &Runner{Root: root, GitPath: "git", OMPPath: "omp"}
+	return &Runner{Root: root, GitPath: "git", PiPath: "pi"}
 }
 
 func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSeconds int) (RunRecord, error) {
@@ -279,9 +278,9 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	usage, usageErr := parseOMPUsage(logPath)
+	usage, usageErr := parseAgentUsage(logPath)
 	if usageErr != nil {
-		usageErr = fmt.Errorf("parse OMP usage: %w", usageErr)
+		usageErr = fmt.Errorf("parse harness usage: %w", usageErr)
 		if record.Exit == 0 {
 			record.Exit = 1
 		}
@@ -503,12 +502,19 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		record.Exit = contextExit(err)
 		return err
 	}
-	path, err := r.ompExecutable()
+	path, err := r.piExecutable()
 	if err != nil {
 		record.Exit = 127
 		return err
 	}
-	args := []string{"-p", "--mode", "json", "--no-session", "--auto-approve", "--cwd", worktree, "--max-time", strconv.Itoa(timeoutSeconds), "--model", declaration.Model, "--system-prompt", declaration.SystemPrompt}
+	// ADR 0018 states this shape. The Runner owns the working directory and the
+	// deadline, so it does not restate either to the harness, and it ignores
+	// project-local harness configuration in a repository it did not author.
+	args := []string{
+		"-p", "--mode", "json", "--no-session", "--no-approve",
+		"--model", declaration.Model,
+		"--system-prompt", declaration.SystemPrompt,
+	}
 	if len(declaration.Tools) > 0 {
 		args = append(args, "--tools", strings.Join(declaration.Tools, ","))
 	}
@@ -529,7 +535,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		record.Exit = 127
-		return fmt.Errorf("open OMP output pipe: %w", err)
+		return fmt.Errorf("open harness output pipe: %w", err)
 	}
 	command.Stdout = writer
 	command.Stderr = writer
@@ -682,19 +688,30 @@ func runContextExit(parent, run context.Context, fallback int) int {
 	return fallback
 }
 
-func (r *Runner) ompExecutable() (string, error) {
-	if r.OMPPath != "omp" {
-		return trustedExecutable(r.Root, r.OMPPath)
+// piExecutable resolves the agent harness. The service PATH does not reach a
+// version-managed install, so the shim directory is checked before PATH.
+func (r *Runner) piExecutable() (string, error) {
+	if r.PiPath != "pi" {
+		return trustedExecutable(r.Root, r.PiPath)
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		candidate := filepath.Join(home, ".local", "bin", "omp")
-		if _, err := os.Stat(candidate); err == nil {
-			return trustedExecutable(r.Root, candidate)
+		for _, candidate := range []string{
+			filepath.Join(home, ".local", "bin", "pi"),
+			filepath.Join(home, ".local", "share", "mise", "shims", "pi"),
+		} {
+			if _, err := os.Stat(candidate); err == nil {
+				return trustedExecutable(r.Root, candidate)
+			}
 		}
 	}
-	return trustedExecutable(r.Root, "omp")
+	return trustedExecutable(r.Root, "pi")
 }
 
+// trustedExecutable resolves a tool to a path outside the repository. Symlinks
+// are followed to decide trust, because the target is what actually runs, but the
+// caller's own path is returned to execute. A version-manager shim dispatches on
+// its own name, so running the resolved target would run the manager instead of
+// the tool.
 func trustedExecutable(root, name string) (string, error) {
 	path := name
 	if !strings.ContainsRune(path, os.PathSeparator) {
@@ -726,7 +743,7 @@ func trustedExecutable(root, name string) (string, error) {
 	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
 		return "", fmt.Errorf("%s is not executable", resolved)
 	}
-	return resolved, nil
+	return absolute, nil
 }
 
 func runnerEnvironment(root, name, email, runID string) ([]string, error) {
@@ -812,7 +829,7 @@ func processExit(err error) int {
 	return 1
 }
 
-func parseOMPUsage(path string) (Usage, error) {
+func parseAgentUsage(path string) (Usage, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Usage{}, err
@@ -838,7 +855,7 @@ func parseOMPUsage(path string) (Usage, error) {
 			if decoded {
 				usage, ok, usageErr := findUsage(value)
 				if usageErr != nil {
-					return Usage{}, fmt.Errorf("OMP usage line %d: %w", lineNumber, usageErr)
+					return Usage{}, fmt.Errorf("harness usage line %d: %w", lineNumber, usageErr)
 				}
 				if ok {
 					latest = usage
@@ -847,12 +864,12 @@ func parseOMPUsage(path string) (Usage, error) {
 				if object, ok := value.(map[string]any); ok && object["type"] == "turn_end" {
 					usage, ok, usageErr = findUsage(object["message"])
 					if usageErr != nil {
-						return Usage{}, fmt.Errorf("OMP usage line %d: %w", lineNumber, usageErr)
+						return Usage{}, fmt.Errorf("harness usage line %d: %w", lineNumber, usageErr)
 					}
 					if ok {
 						total, usageErr = addUsage(total, usage)
 						if usageErr != nil {
-							return Usage{}, fmt.Errorf("OMP usage line %d: %w", lineNumber, usageErr)
+							return Usage{}, fmt.Errorf("harness usage line %d: %w", lineNumber, usageErr)
 						}
 						turns = true
 					}
@@ -870,7 +887,7 @@ func parseOMPUsage(path string) (Usage, error) {
 		return total, nil
 	}
 	if !found {
-		return Usage{}, fmt.Errorf("OMP output has no usage")
+		return Usage{}, fmt.Errorf("harness output has no usage")
 	}
 	return latest, nil
 }

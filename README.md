@@ -28,7 +28,7 @@ checks:
     run: mise exec -- go test ./...
 ```
 
-Declare each agent with OMP-compatible files:
+Declare each agent with two files:
 
 ```text
 agents/<name>/agent.md
@@ -37,7 +37,7 @@ agents/<name>/task.md
 
 `agent.md` uses YAML frontmatter with required `model` and optional `tools` and
 `thinking`, followed by the system prompt. `task.md` is the standing user
-prompt. `model`, `tools`, and `thinking` belong to the declaration. OMP provider
+prompt. `model`, `tools`, and `thinking` belong to the declaration. Provider
 routing is host-managed, not repository configuration.
 
 This quick start uses self-host mode: the factory source checkout is also the
