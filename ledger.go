@@ -303,36 +303,83 @@ func ReadLedgerTail(root string, limit int) ([]RunRecord, error) {
 	return readLedger(root, limit)
 }
 
-func readLedger(root string, limit int) (records []RunRecord, err error) {
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
-	path := ledgerPath(root)
-	directory, err := os.Open(filepath.Dir(path))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := lockLedger(directory, syscall.LOCK_SH); err != nil {
-		return nil, errors.Join(err, directory.Close())
-	}
-	defer func() {
-		err = errors.Join(err, directory.Close())
-	}()
+// errLedgerCursorUnknown reports a paging cursor that names no ledger row, so a
+// caller paging with a stale cursor learns it instead of silently restarting.
+var errLedgerCursorUnknown = errors.New("run identity is not in the ledger")
 
-	file, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return nil, nil
+// errLedgerIdentityUnusable reports a ledger row whose identity cannot carry a
+// paging cursor: empty, or shared with an older row. Identities are minted
+// unique, so this is a corrupt ledger rather than a caller mistake. Failing here
+// is what stops a client from looping on a cursor that never advances.
+var errLedgerIdentityUnusable = errors.New("ledger row identity cannot carry a cursor")
+
+// ReadLedgerPage returns one newest-first page. after names the oldest identity
+// already delivered; the page continues from the next older row. The returned
+// cursor is empty on the last page.
+func ReadLedgerPage(root string, limit int, after string) ([]RunRecord, string, error) {
+	if limit <= 0 {
+		return nil, "", errors.New("ledger page limit must be positive")
+	}
+	// Without a cursor the newest rows are the page, so a bounded tail read
+	// suffices; one extra row reveals whether an older page exists.
+	window := limit + 1
+	if after != "" {
+		window = -1
+	}
+	records, err := readLedger(root, window)
+	if err != nil {
+		return nil, "", err
+	}
+	slices.Reverse(records)
+	if after != "" {
+		index := slices.IndexFunc(records, func(record RunRecord) bool { return record.RunID == after })
+		if index < 0 {
+			return nil, "", fmt.Errorf("%w: %q", errLedgerCursorUnknown, after)
+		}
+		records = records[index+1:]
+		if slices.ContainsFunc(records, func(record RunRecord) bool { return record.RunID == after }) {
+			return nil, "", fmt.Errorf("%w: %q names more than one row", errLedgerIdentityUnusable, after)
+		}
+	}
+	if len(records) <= limit {
+		return records, "", nil
+	}
+	page := records[:limit]
+	cursor := page[limit-1].RunID
+	if cursor == "" {
+		return nil, "", fmt.Errorf("%w: the page boundary has an empty identity", errLedgerIdentityUnusable)
+	}
+	return page, cursor, nil
+}
+
+// FindRun returns the ledger row for one run identity, stopping at the first
+// match.
+func FindRun(root, runID string) (RunRecord, bool, error) {
+	var found RunRecord
+	stop := errors.New("stop")
+	err := visitLedger(root, func(record RunRecord) error {
+		if record.RunID != runID {
+			return nil
+		}
+		found = record
+		return stop
+	})
+	if errors.Is(err, stop) {
+		return found, true, nil
 	}
 	if err != nil {
-		return nil, err
+		return RunRecord{}, false, err
 	}
+	return RunRecord{}, false, nil
+}
+
+func readLedger(root string, limit int) ([]RunRecord, error) {
+	var records []RunRecord
 	if limit > 0 {
 		records = make([]RunRecord, 0, limit)
 	}
 	next := 0
-	scanErr := scanLedger(file, func(_ []byte, record RunRecord) error {
+	if err := visitLedger(root, func(record RunRecord) error {
 		switch {
 		case limit < 0:
 			records = append(records, record)
@@ -344,9 +391,7 @@ func readLedger(root string, limit int) (records []RunRecord, err error) {
 			next = (next + 1) % limit
 		}
 		return nil
-	})
-	closeErr := file.Close()
-	if err := errors.Join(scanErr, closeErr); err != nil {
+	}); err != nil {
 		return nil, err
 	}
 	if next != 0 {
@@ -355,4 +400,35 @@ func readLedger(root string, limit int) (records []RunRecord, err error) {
 		slices.Reverse(records)
 	}
 	return records, nil
+}
+
+// visitLedger reads every row under the shared ledger lock. A visitor error
+// stops the scan and reaches the caller, which is how bounded lookups exit
+// early.
+func visitLedger(root string, visit func(RunRecord) error) (err error) {
+	ledgerMu.Lock()
+	defer ledgerMu.Unlock()
+	path := ledgerPath(root)
+	directory, err := os.Open(filepath.Dir(path))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := lockLedger(directory, syscall.LOCK_SH); err != nil {
+		return errors.Join(err, directory.Close())
+	}
+	defer func() {
+		err = errors.Join(err, directory.Close())
+	}()
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	scanErr := scanLedger(file, func(_ []byte, record RunRecord) error { return visit(record) })
+	return errors.Join(scanErr, file.Close())
 }

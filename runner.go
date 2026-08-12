@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,7 +20,7 @@ import (
 type Runner struct {
 	Root    string
 	GitPath string
-	OMPPath string
+	PiPath  string
 }
 
 const (
@@ -29,6 +28,9 @@ const (
 	runLogHalfLimit             = 1 << 20
 	completedRunLogRetention    = 32
 	runLogTruncationMarker      = "\n--- Iron Forest Run log truncated; retained first 1 MiB and last 1 MiB ---\n"
+	// harnessUnavailableExit is the shell convention for a command that could not
+	// be executed. A Run that never started has no usage to report.
+	harnessUnavailableExit = 127
 )
 
 var (
@@ -207,8 +209,14 @@ func isReservedRunLogName(name string) bool {
 	return isReservedRunID(strings.TrimSuffix(name, ".log"))
 }
 
+// runLogPath names the per-Run log. The Runner owns this layout; readers use
+// this helper so the name is stated once.
+func runLogPath(root, runID string) string {
+	return forestPath(root, "runs", runID+".log")
+}
+
 func NewRunner(root string) *Runner {
-	return &Runner{Root: root, GitPath: "git", OMPPath: "omp"}
+	return &Runner{Root: root, GitPath: "git", PiPath: "pi"}
 }
 
 func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSeconds int) (RunRecord, error) {
@@ -219,7 +227,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	started := time.Now().UTC()
 	runID := newRunID(declaration.Name, started)
 	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano)}
-	logPath := forestPath(r.Root, "runs", runID+".log")
+	logPath := runLogPath(r.Root, runID)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return record, err
 	}
@@ -273,16 +281,21 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	usage, usageErr := parseOMPUsage(logPath)
-	if usageErr != nil {
-		usageErr = fmt.Errorf("parse OMP usage: %w", usageErr)
-		if record.Exit == 0 {
-			record.Exit = 1
+	// Usage exists only if the harness ran. Demanding it after a failure to start
+	// would report "no usage" as the cause and bury the real one.
+	var usageErr error
+	if invokeErr == nil || record.Exit != harnessUnavailableExit {
+		usage, parseErr := parseAgentUsage(logPath)
+		if parseErr != nil {
+			usageErr = fmt.Errorf("parse harness usage: %w", parseErr)
+			if record.Exit == 0 {
+				record.Exit = 1
+			}
+		} else {
+			record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
+			record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
+			record.Reasoning = usage.Reasoning
 		}
-	} else {
-		record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
-		record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
-		record.Reasoning = usage.Reasoning
 	}
 	retentionErr := completeRunLog(logPath)
 	if retentionErr != nil {
@@ -497,12 +510,21 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		record.Exit = contextExit(err)
 		return err
 	}
-	path, err := r.ompExecutable()
+	path, err := r.piExecutable()
 	if err != nil {
-		record.Exit = 127
+		record.Exit = harnessUnavailableExit
 		return err
 	}
-	args := []string{"-p", "--mode", "json", "--no-session", "--auto-approve", "--cwd", worktree, "--max-time", strconv.Itoa(timeoutSeconds), "--model", declaration.Model, "--system-prompt", declaration.SystemPrompt}
+	// ADR 0018 states this shape. The Runner owns the working directory and the
+	// deadline, so it does not restate either to the harness. Project-local
+	// harness configuration is trusted: the repository's own skills and
+	// extensions are the tools an agent is meant to use, exactly like the
+	// AGENTS.md the harness already loads.
+	args := []string{
+		"-p", "--mode", "json", "--no-session", "--approve",
+		"--model", declaration.Model,
+		"--system-prompt", declaration.SystemPrompt,
+	}
 	if len(declaration.Tools) > 0 {
 		args = append(args, "--tools", strings.Join(declaration.Tools, ","))
 	}
@@ -517,18 +539,18 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	email := declaration.Name + "@forest.invalid"
 	command.Env, err = runnerEnvironment(r.Root, name, email, record.RunID)
 	if err != nil {
-		record.Exit = 127
+		record.Exit = harnessUnavailableExit
 		return err
 	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		record.Exit = 127
-		return fmt.Errorf("open OMP output pipe: %w", err)
+		record.Exit = harnessUnavailableExit
+		return fmt.Errorf("open harness output pipe: %w", err)
 	}
 	command.Stdout = writer
 	command.Stderr = writer
 	if err := command.Start(); err != nil {
-		record.Exit = 127
+		record.Exit = harnessUnavailableExit
 		return errors.Join(fmt.Errorf("start omp: %w", err), writer.Close(), reader.Close())
 	}
 	writerCloseErr := writer.Close()
@@ -676,19 +698,19 @@ func runContextExit(parent, run context.Context, fallback int) int {
 	return fallback
 }
 
-func (r *Runner) ompExecutable() (string, error) {
-	if r.OMPPath != "omp" {
-		return trustedExecutable(r.Root, r.OMPPath)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		candidate := filepath.Join(home, ".local", "bin", "omp")
-		if _, err := os.Stat(candidate); err == nil {
-			return trustedExecutable(r.Root, candidate)
-		}
-	}
-	return trustedExecutable(r.Root, "omp")
+// piExecutable resolves the agent harness through the trusted PATH, exactly as
+// git and gh are resolved. The service unit and the installer put the version
+// manager's shim directory on that PATH, so no probing of the operator's home is
+// needed and a stubbed PATH is honoured.
+func (r *Runner) piExecutable() (string, error) {
+	return trustedExecutable(r.Root, r.PiPath)
 }
 
+// trustedExecutable resolves a tool to a path outside the repository. Symlinks
+// are followed to decide trust, because the target is what actually runs, but the
+// caller's own path is returned to execute. A version-manager shim dispatches on
+// its own name, so running the resolved target would run the manager instead of
+// the tool.
 func trustedExecutable(root, name string) (string, error) {
 	path := name
 	if !strings.ContainsRune(path, os.PathSeparator) {
@@ -720,7 +742,7 @@ func trustedExecutable(root, name string) (string, error) {
 	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
 		return "", fmt.Errorf("%s is not executable", resolved)
 	}
-	return resolved, nil
+	return absolute, nil
 }
 
 func runnerEnvironment(root, name, email, runID string) ([]string, error) {
@@ -762,6 +784,9 @@ func trustedPath(root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// Resolve to decide trust, keep the caller's entry to hand to the child.
+		// A shim directory reached through a symlink must stay a shim directory,
+		// or the agent's own tools break the way the harness did.
 		resolved := absolute
 		if value, err := filepath.EvalSymlinks(absolute); err == nil {
 			resolved = value
@@ -771,7 +796,7 @@ func trustedPath(root string) (string, error) {
 			return "", err
 		}
 		if !inside {
-			entries = append(entries, resolved)
+			entries = append(entries, absolute)
 		}
 	}
 	if len(entries) == 0 {
@@ -806,7 +831,7 @@ func processExit(err error) int {
 	return 1
 }
 
-func parseOMPUsage(path string) (Usage, error) {
+func parseAgentUsage(path string) (Usage, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Usage{}, err
@@ -832,7 +857,7 @@ func parseOMPUsage(path string) (Usage, error) {
 			if decoded {
 				usage, ok, usageErr := findUsage(value)
 				if usageErr != nil {
-					return Usage{}, fmt.Errorf("OMP usage line %d: %w", lineNumber, usageErr)
+					return Usage{}, fmt.Errorf("harness usage line %d: %w", lineNumber, usageErr)
 				}
 				if ok {
 					latest = usage
@@ -841,12 +866,12 @@ func parseOMPUsage(path string) (Usage, error) {
 				if object, ok := value.(map[string]any); ok && object["type"] == "turn_end" {
 					usage, ok, usageErr = findUsage(object["message"])
 					if usageErr != nil {
-						return Usage{}, fmt.Errorf("OMP usage line %d: %w", lineNumber, usageErr)
+						return Usage{}, fmt.Errorf("harness usage line %d: %w", lineNumber, usageErr)
 					}
 					if ok {
 						total, usageErr = addUsage(total, usage)
 						if usageErr != nil {
-							return Usage{}, fmt.Errorf("OMP usage line %d: %w", lineNumber, usageErr)
+							return Usage{}, fmt.Errorf("harness usage line %d: %w", lineNumber, usageErr)
 						}
 						turns = true
 					}
@@ -864,7 +889,7 @@ func parseOMPUsage(path string) (Usage, error) {
 		return total, nil
 	}
 	if !found {
-		return Usage{}, fmt.Errorf("OMP output has no usage")
+		return Usage{}, fmt.Errorf("harness output has no usage")
 	}
 	return latest, nil
 }

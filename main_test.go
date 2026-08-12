@@ -34,8 +34,8 @@ func TestRunCLIRequiresExactArityBeforeSideEffects(t *testing.T) {
 			root := t.TempDir()
 			t.Chdir(root)
 			code, _, stderr := captureCLIOutput(t, func() int { return runCLI(tc.args) })
-			if code != 2 {
-				t.Fatalf("runCLI(%q) code=%d, want 2", tc.args, code)
+			if code != exitInvalidArg {
+				t.Fatalf("runCLI(%q) code=%d, want %d", tc.args, code, exitInvalidArg)
 			}
 			if !strings.Contains(stderr, "usage: forest") {
 				t.Fatalf("runCLI(%q) stderr=%q, want usage", tc.args, stderr)
@@ -59,7 +59,7 @@ func TestRunCLIBoundedExitSemantics(t *testing.T) {
 		{name: "once operational failure", args: []string{"once", "builder"}, poll: "exit 2", want: 2},
 		{name: "poll operational failure", args: []string{"poll", "unknown"}, poll: "exit 1", want: 2},
 		{name: "status operational failure", args: []string{"status"}, want: 2},
-		{name: "selfcheck operational failure", args: []string{"selfcheck"}, want: 1},
+		{name: "selfcheck operational failure", args: []string{"selfcheck"}, want: exitError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -323,6 +323,9 @@ exec "$REAL_GIT" "$@"
 	}
 }
 
+// Corrupt trigger state is a warning and renders as unknown. A configured agent
+// with no row yet is NOT corrupt: an empty object means the Kernel has recorded
+// nothing, which is what a missing file also means, so both stay silent.
 func TestStatusTreatsInvalidTriggerStateAsUnknown(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -330,14 +333,14 @@ func TestStatusTreatsInvalidTriggerStateAsUnknown(t *testing.T) {
 		wantStderr bool
 	}{
 		{name: "missing"},
-		{name: "missing entry", state: `{}`, wantStderr: true},
+		{name: "no rows recorded yet", state: `{}`},
 		{name: "malformed", state: "{", wantStderr: true},
 		{name: "null document", state: "null", wantStderr: true},
 		{name: "null entry", state: `{"builder":null}`, wantStderr: true},
 		{name: "missing identity", state: `{"builder":{}}`, wantStderr: true},
 		{name: "empty identity", state: `{"builder":{"agent":""}}`, wantStderr: true},
 		{name: "mismatched identity", state: `{"builder":{"agent":"fixer"}}`, wantStderr: true},
-		{name: "mismatched agents", state: `{"fixer":{"agent":"fixer"}}`, wantStderr: true},
+		{name: "state for an agent the config dropped", state: `{"fixer":{"agent":"fixer"}}`, wantStderr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -351,19 +354,23 @@ func TestStatusTreatsInvalidTriggerStateAsUnknown(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+			code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 			if code != 0 {
 				t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout, stderr)
 			}
-			for _, want := range []string{"builder state=unknown", "live runs: unknown"} {
+			// Liveness is unknown only when the state file cannot be read. A file
+			// that simply records nothing proves no Run is live.
+			wantLive := "live runs: none"
+			if tc.wantStderr {
+				wantLive = "live runs: unknown"
+			}
+			for _, want := range []string{"builder state=unknown", wantLive} {
 				if !strings.Contains(stdout, want) {
 					t.Fatalf("status stdout missing %q: %s", want, stdout)
 				}
 			}
-			for _, forbidden := range []string{"builder errors=", "live runs: none"} {
-				if strings.Contains(stdout, forbidden) {
-					t.Fatalf("status stdout contains %q: %s", forbidden, stdout)
-				}
+			if strings.Contains(stdout, "builder errors=") {
+				t.Fatalf("status stdout reported state it does not have: %s", stdout)
 			}
 			if tc.wantStderr != strings.Contains(stderr, "trigger state unknown:") {
 				t.Fatalf("status stderr=%q, trigger-state error wanted=%t", stderr, tc.wantStderr)
@@ -397,12 +404,14 @@ func TestStatusBoundsAuditViolationsWithoutDuplicatingErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+	code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
-	want := `triggers:
-  builder errors=0 code=0 running=false poll_error=poll failed run_error=run failed audit_error=audit transport failed
+	want := `repo: owner/name
+kernel: stopped
+triggers:
+  builder errors=0 code=0 running=false stale=false poll_error=poll failed run_error=run failed audit_error=audit transport failed
 live runs: none
 last audit: violations master=abc123
 audit violations: total=12 omitted=2
@@ -416,8 +425,8 @@ audit violation: policy-6
 audit violation: policy-7
 audit violation: policy-8
 audit violation: policy-9
-recent runs:
-  status-run agent=builder exit=0 duration=1.250
+recent runs (oldest first, at most 10):
+  status-run agent=builder exit=0 duration=1.250s
 `
 	if stdout != want {
 		t.Fatalf("status stdout:\n%s\nwant:\n%s", stdout, want)
@@ -443,7 +452,7 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 		}
 	}
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+	code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
@@ -460,7 +469,7 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 		index := i + 2
 		want := "  status-run-" + strconv.Itoa(index) +
 			" agent=builder exit=" + strconv.Itoa(index) +
-			" duration=" + strconv.Itoa(index) + ".000"
+			" duration=" + strconv.Itoa(index) + ".000s"
 		if line != want {
 			t.Fatalf("recent run line %d=%q, want %q", i, line, want)
 		}
@@ -525,7 +534,7 @@ func TestStatusReportsKernelLockTruth(t *testing.T) {
 				}
 			}
 
-			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+			code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"status", "--root", root}) })
 			if code != 0 {
 				t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout, stderr)
 			}
@@ -560,7 +569,7 @@ func TestRunCLISelfcheckRejectsWhitespaceSystemPrompt(t *testing.T) {
 	}
 	t.Chdir(root)
 	code, _, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"selfcheck"}) })
-	if code != 1 || !strings.Contains(stderr, "agent builder system prompt is empty") {
+	if code != exitError || !strings.Contains(stderr, "agent builder system prompt is empty") {
 		t.Fatalf("selfcheck code=%d stderr=%q, want declaration failure", code, stderr)
 	}
 }
@@ -573,7 +582,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"git", "gh", "omp"} {
+	for _, name := range []string{"git", "gh", "pi"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -583,7 +592,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
-	if code := selfcheck(root); code == 0 {
+	if code := runCLI([]string{"selfcheck", "--root", root}); code == 0 {
 		t.Fatal("selfcheck accepted repository tool path")
 	}
 }
@@ -643,4 +652,23 @@ func captureCLIOutput(t *testing.T, run func() int) (int, string, string) {
 		t.Fatal(stderrErr)
 	}
 	return code, string(stdout), string(stderr)
+}
+
+// A Poll that fails must name its cause. A direct Poll records no state, so
+// silence would leave the operator with an exit code and nothing to inspect.
+func TestPollCommandReportsWhyItFailed(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	writeTestDeclaration(t, root, "builder")
+	t.Chdir(root)
+
+	for _, agent := range []string{"builder", "verifier", "fixer"} {
+		code, stdout, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"poll", agent}) })
+		if code != exitError {
+			t.Fatalf("poll %s code=%d, want %d (stdout=%q stderr=%q)", agent, code, exitError, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "poll "+agent+": ") {
+			t.Fatalf("poll %s failed silently: stderr=%q", agent, stderr)
+		}
+	}
 }

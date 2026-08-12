@@ -60,12 +60,12 @@ func (s *StringList) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Declaration struct {
-	Name         string
-	Model        string
-	Tools        []string
-	Thinking     string
-	SystemPrompt string
-	TaskPrompt   string
+	Name         string   `json:"name"`
+	Model        string   `json:"model"`
+	Tools        []string `json:"tools"`
+	Thinking     string   `json:"thinking"`
+	SystemPrompt string   `json:"system_prompt"`
+	TaskPrompt   string   `json:"task_prompt"`
 }
 
 type declarationFrontmatter struct {
@@ -106,11 +106,16 @@ func loadDeclaration(root, name string) (Declaration, error) {
 		}
 		return Declaration{}, fmt.Errorf("agent %s frontmatter: multiple YAML documents", name)
 	}
-	var tools StringList
+	// Tools is always a slice: the published declaration payload never carries
+	// null in place of an empty list.
+	tools := StringList{}
 	if metadata.Tools.Kind != 0 {
 		if err := tools.UnmarshalYAML(&metadata.Tools); err != nil {
 			return Declaration{}, fmt.Errorf("agent %s frontmatter tools: %w", name, err)
 		}
+	}
+	if tools == nil {
+		tools = StringList{}
 	}
 	thinking := ""
 	if metadata.Thinking.Kind != 0 {

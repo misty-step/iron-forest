@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -189,20 +190,26 @@ func ensureAuditWorkspace(root string, deps auditDependencies) error {
 	return syncAndCloseAuditFile(directory, "repository root", deps)
 }
 
+// readAuditState reads persisted audit state. Violations is always a slice so
+// the published payload never carries null in place of an empty list.
 func readAuditState(root string) (AuditState, error) {
+	empty := AuditState{Violations: []string{}}
 	data, err := os.ReadFile(auditStatePath(root))
 	if os.IsNotExist(err) {
-		return AuditState{}, nil
+		return empty, nil
 	}
 	if err != nil {
-		return AuditState{}, err
+		return empty, err
 	}
 	var state AuditState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return AuditState{}, fmt.Errorf("parse audit state: %w", err)
+		return empty, fmt.Errorf("parse audit state: %w", err)
 	}
 	if state.Baseline == "" && state.LastMaster != "" {
 		state.Baseline = state.LastMaster
+	}
+	if state.Violations == nil {
+		state.Violations = []string{}
 	}
 	return state, nil
 }
@@ -422,6 +429,32 @@ func scanAuditLog(ctx context.Context, path string, visit func(string)) error {
 		visit(entry)
 	}
 	return errors.Join(scanner.Err(), file.Close())
+}
+
+// ReadAuditLog returns the newest audit history entries, oldest first, bounded
+// by limit. A limit of zero or less means the whole retained history.
+func ReadAuditLog(ctx context.Context, root string, limit int) ([]string, error) {
+	if limit <= 0 || limit > auditHistoryEntries {
+		limit = auditHistoryEntries
+	}
+	entries := make([]string, 0, limit)
+	next := 0
+	if err := scanAuditLog(ctx, auditLogPath(root), func(entry string) {
+		if len(entries) < limit {
+			entries = append(entries, entry)
+			return
+		}
+		entries[next] = entry
+		next = (next + 1) % limit
+	}); err != nil {
+		return nil, err
+	}
+	if next != 0 {
+		slices.Reverse(entries[:next])
+		slices.Reverse(entries[next:])
+		slices.Reverse(entries)
+	}
+	return entries, nil
 }
 
 func cleanupAuditLogTemps(path string, deps auditDependencies) error {

@@ -12,12 +12,16 @@ import (
 	"time"
 )
 
+// The Runner's dispatch: invocation, identity, usage accounting, and cleanup.
+
+// runnerPrivateRefSetup is the per-Run private note publication a stub harness
+// performs, so a test exercises the same ref layout a real Run creates.
 const runnerPrivateRefSetup = `revision=$(git rev-parse HEAD)
 git update-ref "refs/notes/forest/private/$FOREST_RUN_ID/$ROLE/$NOTE_KIND/$revision/publication" "$revision"
 git update-ref "refs/notes/forest/private/$FOREST_RUN_ID/$ROLE/$NOTE_KIND/$revision/base" "$revision"
 `
 
-func TestRunnerWorktreeOMPAndLedger(t *testing.T) {
+func TestRunnerWorktreeHarnessAndLedger(t *testing.T) {
 	for _, test := range []struct {
 		role, name, email, noteKind string
 	}{
@@ -57,7 +61,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 				t.Fatal(err)
 			}
 			runner := NewRunner(root)
-			runner.OMPPath = omp
+			runner.PiPath = omp
 			record, err := runner.Run(context.Background(), Declaration{Name: test.role, Model: "local", Tools: StringList{"read", "bash"}, SystemPrompt: "system", TaskPrompt: "Reply"}, 10)
 			if err != nil {
 				t.Fatal(err)
@@ -81,9 +85,9 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply"} {
+			for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply", "--approve"} {
 				if !strings.Contains(string(args), value) {
-					t.Fatalf("OMP args missing %q:\n%s", value, args)
+					t.Fatalf("harness args missing %q:\n%s", value, args)
 				}
 			}
 			assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, test.noteKind)
@@ -136,7 +140,7 @@ func TestRunnerCleansPrivateRefsAfterAgentFailureAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := NewRunner(root)
-			runner.OMPPath = omp
+			runner.PiPath = omp
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if cancelRun {
@@ -162,9 +166,9 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
-	if err == nil || !strings.Contains(err.Error(), "parse OMP usage") || !strings.Contains(err.Error(), "nonnegative") {
+	if err == nil || !strings.Contains(err.Error(), "parse harness usage") || !strings.Contains(err.Error(), "nonnegative") {
 		t.Fatalf("invalid usage record=%#v err=%v", record, err)
 	}
 	if record.Exit != 1 {
@@ -198,9 +202,9 @@ func TestRunnerRejectsUsageWithoutRecognizedAlias(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := NewRunner(root)
-			runner.OMPPath = omp
+			runner.PiPath = omp
 			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
-			if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "parse OMP usage") {
+			if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "parse harness usage") {
 				t.Fatalf("drifted usage record=%#v err=%v", record, err)
 			}
 			rows, ledgerErr := ReadLedger(root)
@@ -219,7 +223,7 @@ func TestOMPUsageParser(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := parseOMPUsage(path)
+	usage, err := parseAgentUsage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +241,7 @@ func TestParseOMPUsageAggregatesTurnsAfterLargeRecord(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := parseOMPUsage(path)
+	usage, err := parseAgentUsage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +256,7 @@ func TestParseOMPUsagePreservesExactIntegers(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	usage, err := parseOMPUsage(path)
+	usage, err := parseAgentUsage(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +281,7 @@ func TestParseOMPUsageRejectsInvalidNumbers(t *testing.T) {
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if usage, err := parseOMPUsage(path); err == nil {
+			if usage, err := parseAgentUsage(path); err == nil {
 				t.Fatalf("accepted usage %#v", usage)
 			}
 		})
@@ -293,7 +297,7 @@ func TestParseOMPUsageRejectsEveryAggregateOverflow(t *testing.T) {
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if usage, err := parseOMPUsage(path); err == nil {
+			if usage, err := parseAgentUsage(path); err == nil {
 				t.Fatalf("accepted overflowing %s usage %#v", key, usage)
 			}
 		})
@@ -310,7 +314,7 @@ func TestParseOMPUsageAllowsEveryAggregateMaxPlusZero(t *testing.T) {
 			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			usage, err := parseOMPUsage(path)
+			usage, err := parseAgentUsage(path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -355,7 +359,7 @@ func TestRunnerDirectTimeoutBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		runner := NewRunner(root)
-		runner.OMPPath = omp
+		runner.PiPath = omp
 		record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
 		if err != nil || record.Exit != 0 {
 			t.Fatalf("timeout 1 record=%#v err=%v", record, err)
@@ -409,7 +413,7 @@ exit 0
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("leader-success record=%#v err=%v", record, err)
@@ -431,7 +435,7 @@ func TestRunnerTerminatesTimedOutProcessTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	started := time.Now()
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
 	if err == nil || record.Exit != 124 || time.Since(started) > 4*time.Second {
@@ -465,7 +469,7 @@ while :; do sleep 1; done
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
 	if err == nil || record.Exit != 124 {
 		t.Fatalf("leader-stop record=%#v err=%v", record, err)
@@ -681,7 +685,7 @@ exec "$REAL_GIT" "$@"
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.GitPath, runner.OMPPath = gitWrapper, omp
+	runner.GitPath, runner.PiPath = gitWrapper, omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 10)
 	if err == nil || record.Exit != 1 {
 		t.Fatalf("cleanup record=%#v err=%v", record, err)
@@ -824,79 +828,6 @@ exec "$REAL_GIT" "$@"
 	}
 	if _, statErr := os.Stat(worktree); statErr != nil {
 		t.Fatalf("blocked filesystem residue was not preserved for retry: %v", statErr)
-	}
-}
-
-func TestTrustedPathExcludesManagedCheckout(t *testing.T) {
-	root := t.TempDir()
-	safe := t.TempDir()
-	t.Setenv("PATH", root+string(os.PathListSeparator)+safe)
-	got, err := trustedPath(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != safe {
-		t.Fatalf("trusted PATH=%q, want %q", got, safe)
-	}
-	shadow := filepath.Join(root, "omp")
-	if err := os.WriteFile(shadow, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := trustedExecutable(root, shadow); err == nil {
-		t.Fatal("repository executable accepted")
-	}
-}
-
-func TestToolEntrypointsRejectRepositoryExecutablesThroughSymlinkedPath(t *testing.T) {
-	root := t.TempDir()
-	repositoryBin := filepath.Join(root, "bin")
-	if err := os.Mkdir(repositoryBin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"git", "gh", "omp", "rm"} {
-		if err := os.WriteFile(filepath.Join(repositoryBin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	outside := t.TempDir()
-	pathEntry := filepath.Join(outside, "bin")
-	if err := os.Symlink(repositoryBin, pathEntry); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PATH", pathEntry)
-	runner := NewRunner(root)
-	poller := NewPoller(root, "owner/name")
-	tests := []struct {
-		name string
-		run  func() error
-	}{
-		{name: "git", run: func() error {
-			_, err := runner.git(context.Background(), root, "--version")
-			return err
-		}},
-		{name: "poller git", run: func() error {
-			_, err := poller.run(context.Background(), "git", "--version")
-			return err
-		}},
-		{name: "gh", run: func() error {
-			_, err := poller.gh(context.Background(), "--version")
-			return err
-		}},
-		{name: "omp", run: func() error {
-			_, err := runner.ompExecutable()
-			return err
-		}},
-		{name: "rm", run: func() error {
-			return runner.removeFilesystem(context.Background(), filepath.Join(root, "worktrees", "missing"))
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if err := test.run(); err == nil {
-				t.Fatalf("accepted repository %s executable", test.name)
-			}
-		})
 	}
 }
 

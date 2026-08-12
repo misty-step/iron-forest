@@ -94,7 +94,7 @@ cat "$FIRST_OUTPUT" "$MIDDLE_OUTPUT" "$TAIL_OUTPUT"
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.OMPPath = omp
+	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("noisy Run record=%#v err=%v", record, err)
@@ -112,7 +112,7 @@ cat "$FIRST_OUTPUT" "$MIDDLE_OUTPUT" "$TAIL_OUTPUT"
 	if !bytes.Equal(log[:half], first) || string(log[half:half+len(marker)]) != marker || !bytes.Equal(log[half+len(marker):], tail) {
 		t.Fatal("bounded Run log did not retain the exact first half, marker, and last half")
 	}
-	assertProcessQuiescent(t, heartbeat, "noisy OMP descendant", "leader completion")
+	assertProcessQuiescent(t, heartbeat, "noisy harness descendant", "leader completion")
 }
 
 func TestRunnerRetainsNewestCompletedLogsAndPreservesActiveAndForeignFiles(t *testing.T) {
@@ -153,18 +153,18 @@ func TestRunnerRetainsNewestCompletedLogsAndPreservesActiveAndForeignFiles(t *te
 	releasePath := filepath.Join(state, "release")
 	t.Setenv("ACTIVE_ID", activeIDPath)
 	t.Setenv("RELEASE_ACTIVE", releasePath)
-	activeOMP := filepath.Join(state, "active-omp")
+	activeHarness := filepath.Join(state, "active-harness")
 	activeScript := `#!/bin/sh
 set -eu
 printf '%s' "$FOREST_RUN_ID" > "$ACTIVE_ID"
 while [ ! -e "$RELEASE_ACTIVE" ]; do sleep 0.02; done
 printf '%s\n' '{"usage":{"input":1}}'
 `
-	if err := os.WriteFile(activeOMP, []byte(activeScript), 0o755); err != nil {
+	if err := os.WriteFile(activeHarness, []byte(activeScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	quickOMP := filepath.Join(state, "quick-omp")
-	if err := os.WriteFile(quickOMP, []byte("#!/bin/sh\nprintf '%s\\n' '{\"usage\":{\"input\":2}}'\n"), 0o755); err != nil {
+	quickHarness := filepath.Join(state, "quick-harness")
+	if err := os.WriteFile(quickHarness, []byte("#!/bin/sh\nprintf '%s\\n' '{\"usage\":{\"input\":2}}'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -175,7 +175,7 @@ printf '%s\n' '{"usage":{"input":1}}'
 	activeResult := make(chan runResult, 1)
 	activeDone := make(chan struct{})
 	activeRunner := NewRunner(root)
-	activeRunner.OMPPath = activeOMP
+	activeRunner.PiPath = activeHarness
 	go func() {
 		defer close(activeDone)
 		record, err := activeRunner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
@@ -193,7 +193,7 @@ printf '%s\n' '{"usage":{"input":1}}'
 	activeLog := filepath.Join(runsDir, activeID+".log")
 
 	quickRunner := NewRunner(root)
-	quickRunner.OMPPath = quickOMP
+	quickRunner.PiPath = quickHarness
 	quickRecord, err := quickRunner.Run(context.Background(), Declaration{Name: "fixer", Model: "local", TaskPrompt: "x"}, 10)
 	if err != nil || quickRecord.Exit != 0 {
 		t.Fatalf("quick Run record=%#v err=%v", quickRecord, err)

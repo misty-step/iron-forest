@@ -53,7 +53,7 @@ func TestBuilderPollMatrix(t *testing.T) {
 				}
 				return []byte(tc.branch), tc.gitErr
 			}
-			if got := p.builder(ctx); got != tc.want {
+			if got, _ := p.builder(ctx); got != tc.want {
 				t.Fatalf("poll exit=%d want %d", got, tc.want)
 			}
 		})
@@ -133,7 +133,8 @@ func TestConcurrentPollsPreserveCanonicalNotesAcrossLinkedWorktrees(t *testing.T
 			return output, nil
 		}
 		go func() {
-			results <- poller.verifier(context.Background())
+			code, _ := poller.verifier(context.Background())
+			results <- code
 		}()
 	}
 
@@ -215,8 +216,14 @@ func TestPollRejectsDuplicateNoteBlobFromWrongTargetWriter(t *testing.T) {
 	addNote(t, root, reviewRequestNoteRef, master, payload, "Iron Forest Builder", "builder@forest.invalid")
 	runGitDir(t, root, "push", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
 
-	if got := NewPoller(root, "owner/name").verifier(context.Background()); got != 2 {
-		t.Fatalf("poll exit=%d want 2", got)
+	got, pollErr := NewPoller(root, "owner/name").verifier(context.Background())
+	if got != exitError {
+		t.Fatalf("poll exit=%d want %d", got, exitError)
+	}
+	// A failing Poll must carry its reason: the direct command has nothing else
+	// to report and records no state to inspect.
+	if pollErr == nil {
+		t.Fatal("poll failed without a reason")
 	}
 }
 
@@ -551,8 +558,14 @@ func TestVerifierPollMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			deleted := []string{}
 			tc.deletedRefs = &deleted
-			if got := notePoller(t, tc).verifier(context.Background()); got != tc.want {
+			got, pollErr := notePoller(t, tc).verifier(context.Background())
+			if got != tc.want {
 				t.Fatalf("poll exit=%d want %d", got, tc.want)
+			}
+			// Every failing Poll carries its reason; a skip or a dispatch carries
+			// none, so the two cannot be confused by a caller.
+			if (pollErr != nil) != (tc.want == exitError) {
+				t.Fatalf("poll exit=%d reason=%v", got, pollErr)
 			}
 			assertPollPrivateCleanup(t, tc, deleted)
 		})
@@ -594,8 +607,12 @@ func TestFixerPollMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			deleted := []string{}
 			tc.deletedRefs = &deleted
-			if got := notePoller(t, tc).fixer(context.Background()); got != tc.want {
+			got, pollErr := notePoller(t, tc).fixer(context.Background())
+			if got != tc.want {
 				t.Fatalf("poll exit=%d want %d", got, tc.want)
+			}
+			if (pollErr != nil) != (tc.want == exitError) {
+				t.Fatalf("poll exit=%d reason=%v", got, pollErr)
 			}
 			assertPollPrivateCleanup(t, tc, deleted)
 		})
@@ -653,7 +670,7 @@ func TestPollPrivateCleanupUsesFreshContext(t *testing.T) {
 				}
 				return output, err
 			}
-			if got := poller.verifier(parent); got != want {
+			if got, _ := poller.verifier(parent); got != want {
 				t.Fatalf("poll exit=%d want %d", got, want)
 			}
 			if reads != 2 {
@@ -874,7 +891,8 @@ func TestPollEnumerationCapacityRealNotes(t *testing.T) {
 
 	runPoll := func(want int, label string) {
 		t.Helper()
-		if got := NewPoller(root, "owner/name").verifier(context.Background()); got != want {
+		got, _ := NewPoller(root, "owner/name").verifier(context.Background())
+		if got != want {
 			t.Fatalf("%s poll exit=%d want %d", label, got, want)
 		}
 		if refs := strings.TrimSpace(string(runGitDir(t, root, "for-each-ref", "--format=%(refname)", pollNotesNamespace+"/"))); refs != "" {

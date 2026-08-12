@@ -92,25 +92,28 @@ func (p *Poller) readyIssues(ctx context.Context) ([]int, error) {
 	return issues, nil
 }
 
-func (p *Poller) builder(ctx context.Context) int {
+// builder reports whether an Issue is ready for a Builder Run. A non-nil error
+// accompanies exitError so the caller can say why the Poll failed instead of
+// exiting silently.
+func (p *Poller) builder(ctx context.Context) (int, error) {
 	issues, err := p.readyIssues(ctx)
 	if err != nil {
-		return 2
+		return exitError, err
 	}
 	for _, issue := range issues {
 		branches, err := p.git(ctx, "ls-remote", "--heads", "origin", fmt.Sprintf("refs/heads/forest/%d-*", issue))
 		if err != nil {
-			return 2
+			return exitError, err
 		}
 		matches, err := parseBranchOutput(branches, issue)
 		if err != nil {
-			return 2
+			return exitError, err
 		}
 		if len(matches) == 0 {
-			return 0
+			return exitOK, nil
 		}
 	}
-	return 1
+	return exitNoWork, nil
 }
 
 func parseBranchOutput(output []byte, issue int) ([]branchTip, error) {
@@ -149,108 +152,108 @@ func parseBranchOutput(output []byte, issue int) ([]branchTip, error) {
 	return branches, nil
 }
 
-func (p *Poller) verifier(ctx context.Context) (code int) {
+func (p *Poller) verifier(ctx context.Context) (code int, pollErr error) {
 	branches, err := p.branchTips(ctx)
 	if err != nil {
-		return 2
+		return exitError, err
 	}
 	if len(branches) == 0 {
-		return 1
+		return exitNoWork, nil
 	}
 	notes, err := p.fetchNotes(ctx)
 	if err != nil {
-		return 2
+		return exitError, err
 	}
 	defer func() {
 		if err := p.deleteNotes(notes); err != nil {
-			code = 2
+			code, pollErr = exitError, err
 		}
 	}()
 	for _, tip := range branches {
 		review, reviewErr := p.coordinationNote(ctx, notes.ReviewRequest.Ref, tip.SHA, "builder", "fixer")
 		if reviewErr != nil {
 			if errors.Is(reviewErr, pollEnumerationSkip) {
-				return 1
+				return exitNoWork, nil
 			}
 			if !isMissingNote(reviewErr) {
-				return 2
+				return exitError, reviewErr
 			}
 			continue
 		}
 		if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
-			return 2
+			return exitError, err
 		}
 		verdict, verdictErr := p.coordinationNote(ctx, notes.Verdict.Ref, tip.SHA, "verifier")
 		if verdictErr == nil {
 			if _, err := decodeVerdict(verdict, tip.SHA); err != nil {
-				return 2
+				return exitError, err
 			}
 			continue
 		}
 		if errors.Is(verdictErr, pollEnumerationSkip) {
-			return 1
+			return exitNoWork, nil
 		}
 		if !isMissingNote(verdictErr) {
-			return 2
+			return exitError, verdictErr
 		}
 		if err := p.confirmSnapshot(ctx, tip, notes); err != nil {
-			return 2
+			return exitError, err
 		}
-		return 0
+		return exitOK, nil
 	}
-	return 1
+	return exitNoWork, nil
 }
 
-func (p *Poller) fixer(ctx context.Context) (code int) {
+func (p *Poller) fixer(ctx context.Context) (code int, pollErr error) {
 	branches, err := p.branchTips(ctx)
 	if err != nil {
-		return 2
+		return exitError, err
 	}
 	if len(branches) == 0 {
-		return 1
+		return exitNoWork, nil
 	}
 	notes, err := p.fetchNotes(ctx)
 	if err != nil {
-		return 2
+		return exitError, err
 	}
 	defer func() {
 		if err := p.deleteNotes(notes); err != nil {
-			code = 2
+			code, pollErr = exitError, err
 		}
 	}()
 	for _, tip := range branches {
 		verdict, verdictErr := p.coordinationNote(ctx, notes.Verdict.Ref, tip.SHA, "verifier")
 		if verdictErr != nil {
 			if errors.Is(verdictErr, pollEnumerationSkip) {
-				return 1
+				return exitNoWork, nil
 			}
 			if !isMissingNote(verdictErr) {
-				return 2
+				return exitError, verdictErr
 			}
 			continue
 		}
 		parsed, err := decodeVerdict(verdict, tip.SHA)
 		if err != nil {
-			return 2
+			return exitError, err
 		}
 		if parsed.Verdict == "changes" {
 			review, reviewErr := p.coordinationNote(ctx, notes.ReviewRequest.Ref, tip.SHA, "builder", "fixer")
 			if reviewErr != nil {
 				if errors.Is(reviewErr, pollEnumerationSkip) {
-					return 1
+					return exitNoWork, nil
 				}
-				return 2
+				return exitError, reviewErr
 			}
 			if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
-				return 2
+				return exitError, err
 			}
 			if err := p.confirmSnapshot(ctx, tip, notes); err != nil {
-				return 2
+				return exitError, err
 			}
-			return 0
+			return exitOK, nil
 		}
 	}
-	return 1
+	return exitNoWork, nil
 }
 
 type branchTip struct {

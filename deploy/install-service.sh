@@ -14,7 +14,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 factory="$(cd "$here/.." && pwd)"
 root="$(dirname "$factory")"
 unit="$HOME/.config/systemd/user/forest@.service"
-service_path="$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin"
+service_path="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin"
 
 die() { echo "$(basename "$0"): $*" >&2; exit 1; }
 
