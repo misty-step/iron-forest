@@ -351,7 +351,7 @@ func TestStatusTreatsInvalidTriggerStateAsUnknown(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
 			if code != 0 {
 				t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout, stderr)
 			}
@@ -397,7 +397,7 @@ func TestStatusBoundsAuditViolationsWithoutDuplicatingErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
@@ -443,7 +443,7 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 		}
 	}
 
-	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+	code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
@@ -525,7 +525,7 @@ func TestStatusReportsKernelLockTruth(t *testing.T) {
 				}
 			}
 
-			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root) })
+			code, stdout, stderr := captureCLIOutput(t, func() int { return status(root, cliFlags{}) })
 			if code != 0 {
 				t.Fatalf("status code=%d stdout=%s stderr=%s", code, stdout, stderr)
 			}
@@ -583,7 +583,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
-	if code := selfcheck(root); code == 0 {
+	if code := selfcheck(root, cliFlags{}); code == 0 {
 		t.Fatal("selfcheck accepted repository tool path")
 	}
 }

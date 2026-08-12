@@ -19,43 +19,88 @@ func runCLI(args []string) int {
 		return 2
 	}
 	command := args[0]
+	rest := args[1:]
 	switch command {
-	case "serve", "status", "selfcheck":
-		if len(args) != 1 {
+	case "config", "declaration", "trigger", "run", "audit":
+		return runObjectCommand(args)
+	case "serve":
+		if len(rest) != 0 {
 			printUsage()
 			return 2
 		}
+		root, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		return serve(root)
 	case "once", "poll":
-		if len(args) != 2 {
+		if len(rest) != 1 {
 			printUsage()
 			return 2
 		}
+		root, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if command == "once" {
+			return once(root, rest[0])
+		}
+		return poll(root, rest[0])
+	case "status", "selfcheck":
+		// flag-parsed below
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", command)
 		printUsage()
 		return 2
 	}
-	root, err := os.Getwd()
+	positional, flags, err := parseCLIFlags(rest)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		return exitInvalidArg
+	}
+	if len(positional) != 0 {
+		printUsage()
 		return 2
 	}
-	switch command {
-	case "serve":
-		return serve(root)
-	case "once":
-		return once(root, args[1])
-	case "poll":
-		return poll(root, args[1])
-	case "status":
-		return status(root)
-	default:
-		return selfcheck(root)
+	root := flags.root
+	if root == "" {
+		var getErr error
+		root, getErr = os.Getwd()
+		if getErr != nil {
+			fmt.Fprintln(os.Stderr, getErr)
+			return 2
+		}
 	}
+	if command == "status" {
+		return status(root, flags)
+	}
+	return selfcheck(root, flags)
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: forest serve | once <agent> | poll <agent> | status | selfcheck")
+	fmt.Fprintln(os.Stderr, `usage: forest <command> [flags]
+
+engine:
+  serve                 run the scheduler until interrupted
+  once <agent>          poll once, dispatch on exit 0
+  poll <agent>          evaluate one declaration's trigger
+
+inspect:
+  status [--json] [--root <dir>]          composition snapshot
+  config show [--json] [--root <dir>]
+  declaration list|show <name> [--json] [--root <dir>]
+  trigger list|show <agent>|reset <agent> [--json] [--root <dir>]
+  run list|show <run-id> [--json] [--root <dir>] [--limit N] [--after <id>]
+  run logs [--follow] <run-id> [--root <dir>]
+  audit show [--rescan]|log [--json] [--root <dir>] [--limit N]
+  selfcheck [--root <dir>]
+
+flags:
+  --json        emit one forest.cli.v1 envelope on stdout
+  --root <dir>  inspect another checkout
+  exit: 0 ok · 1 no work · 2 error · 4 not found · 5 conflict · 6 invalid arg`)
 }
 
 func withLock(root string, fn func() int) int {
@@ -156,13 +201,12 @@ func pollAgent(ctx context.Context, poller *Poller, agent string) int {
 	return code
 }
 
-func status(root string) int {
+func status(root string, flags cliFlags) int {
 	cfg, err := loadConfig(configPath(root))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	fmt.Println("triggers:")
 	lockHeld, lockErr := kernelLockHeld(root)
 	if lockErr != nil {
 		fmt.Fprintf(os.Stderr, "kernel lock state unknown: %v\n", lockErr)
@@ -177,9 +221,62 @@ func status(root string) int {
 	if healthErr == nil && !known {
 		healthErr = errors.New("trigger state does not match configured agents")
 	}
-	if healthErr != nil && !os.IsNotExist(healthErr) {
+	if healthErr != nil && !os.IsNotExist(healthErr) && !flags.json {
 		fmt.Fprintf(os.Stderr, "trigger state unknown: %v\n", healthErr)
 	}
+
+	// Build the JSON view of every fact the human view prints, so --json never
+	// diverges from the human scope.
+	type triggerView struct {
+		Name              string `json:"name"`
+		StateKnown        bool   `json:"state_known"`
+		ConsecutiveErrors int    `json:"consecutive_errors"`
+		LastCode          int    `json:"last_code"`
+		Running           bool   `json:"running"`
+		Stale             bool   `json:"stale"`
+		PollError         string `json:"poll_error,omitempty"`
+		RunError          string `json:"run_error,omitempty"`
+		AuditError        string `json:"audit_error,omitempty"`
+	}
+	triggers := make([]triggerView, 0, len(names))
+	for _, name := range names {
+		value, present := health[name]
+		view := triggerView{Name: name, StateKnown: known && present}
+		if known && present {
+			view.ConsecutiveErrors = value.ConsecutiveErrors
+			view.LastCode = value.LastCode
+			view.Running = lockHeld && value.Running
+			view.Stale = value.Running && lockErr == nil && !lockHeld
+			view.PollError = value.PollError
+			view.RunError = value.RunError
+			view.AuditError = value.AuditError
+		}
+		triggers = append(triggers, view)
+	}
+
+	state, stateErr := readAuditState(root)
+	if stateErr != nil {
+		fmt.Fprintln(os.Stderr, stateErr)
+		return 2
+	}
+	records, recordsErr := ReadLedgerTail(root, 10)
+	if recordsErr != nil {
+		fmt.Fprintln(os.Stderr, recordsErr)
+		return 2
+	}
+
+	if flags.json {
+		emitEnvelope(os.Stdout, "status", 0, map[string]any{
+			"repo":     cfg.Repo,
+			"kernels":  map[string]any{"running": lockHeld, "stale_unknown": lockErr != nil},
+			"triggers": triggers,
+			"audit":    map[string]any{"last_result": state.LastResult, "last_master": state.LastMaster, "last_at": state.LastAt, "violations": state.Violations},
+			"recent":   records,
+		}, "")
+		return 0
+	}
+
+	fmt.Println("triggers:")
 	for _, name := range names {
 		value, present := health[name]
 		if !known || !present {
@@ -224,11 +321,6 @@ func status(root string) int {
 			}
 		}
 	}
-	state, stateErr := readAuditState(root)
-	if stateErr != nil {
-		fmt.Fprintln(os.Stderr, stateErr)
-		return 2
-	}
 	fmt.Printf("last audit: %s master=%s\n", state.LastResult, state.LastMaster)
 	shown := min(len(state.Violations), 10)
 	fmt.Printf("audit violations: total=%d", len(state.Violations))
@@ -238,11 +330,6 @@ func status(root string) int {
 	fmt.Println()
 	for _, violation := range state.Violations[:shown] {
 		fmt.Printf("audit violation: %s\n", violation)
-	}
-	records, err := ReadLedgerTail(root, 10)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
 	}
 	fmt.Println("recent runs:")
 	for _, record := range records {
@@ -294,7 +381,7 @@ func readTriggerHealth(root string) (map[string]TriggerHealth, error) {
 	return values, nil
 }
 
-func selfcheck(root string) int {
+func selfcheck(root string, _ cliFlags) int {
 	cfg, err := loadConfig(configPath(root))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
