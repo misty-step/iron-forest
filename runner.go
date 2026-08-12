@@ -516,10 +516,12 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		return err
 	}
 	// ADR 0018 states this shape. The Runner owns the working directory and the
-	// deadline, so it does not restate either to the harness, and it ignores
-	// project-local harness configuration in a repository it did not author.
+	// deadline, so it does not restate either to the harness. Project-local
+	// harness configuration is trusted: the repository's own skills and
+	// extensions are the tools an agent is meant to use, exactly like the
+	// AGENTS.md the harness already loads.
 	args := []string{
-		"-p", "--mode", "json", "--no-session", "--no-approve",
+		"-p", "--mode", "json", "--no-session", "--approve",
 		"--model", declaration.Model,
 		"--system-prompt", declaration.SystemPrompt,
 	}
@@ -782,6 +784,9 @@ func trustedPath(root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// Resolve to decide trust, keep the caller's entry to hand to the child.
+		// A shim directory reached through a symlink must stay a shim directory,
+		// or the agent's own tools break the way the harness did.
 		resolved := absolute
 		if value, err := filepath.EvalSymlinks(absolute); err == nil {
 			resolved = value
@@ -791,7 +796,7 @@ func trustedPath(root string) (string, error) {
 			return "", err
 		}
 		if !inside {
-			entries = append(entries, resolved)
+			entries = append(entries, absolute)
 		}
 	}
 	if len(entries) == 0 {

@@ -85,7 +85,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply"} {
+			for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply", "--approve"} {
 				if !strings.Contains(string(args), value) {
 					t.Fatalf("harness args missing %q:\n%s", value, args)
 				}

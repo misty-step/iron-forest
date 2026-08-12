@@ -33,12 +33,12 @@ run with no money at all.
 The Runner invokes `pi` with this command shape:
 
 ```text
-pi -p --mode json --no-session --no-approve --model <model> \
+pi -p --mode json --no-session --approve --model <model> \
   --system-prompt <instructions> [--tools <comma-separated-tools>] \
   [--thinking <level>] "<task>"
 ```
 
-Three differences from the OMP shape, each deliberate:
+Two omissions from the OMP shape, each deliberate:
 
 - No `--cwd`. The Runner already sets the child's working directory to the Run's
   private worktree, so a second statement of the same fact could disagree with
@@ -46,14 +46,24 @@ Three differences from the OMP shape, each deliberate:
 - No `--max-time`. The Runner owns the timeout: it cancels the context and stops
   the process group with TERM, a grace period, KILL, and a quiescence probe.
   Delegating the deadline would leave the Runner unable to prove the child died.
-- `--no-approve` instead of `--auto-approve`. A Run executes against repository
-  content the factory did not author, so project-local harness configuration is
-  ignored rather than trusted. This is a deliberate reduction in what the audited
-  repository can influence, and it is not a sandbox: worktree separation and the
-  timeout remain the only isolation, as [0016](0016-isolation-posture.md) states.
 
-`AGENTS.md` discovery stays enabled. Repository instructions are the task
-context an agent is supposed to read, and they are visible in the Run log.
+Project-local harness configuration is trusted, so the repository's own skills,
+extensions, and prompt templates reach the agent. The first draft of this ADR
+chose `--no-approve` on the reasoning that a Run executes against content the
+factory did not author. That reasoning was wrong twice over, and measuring it
+showed how: a repository-shipped skill became invisible, and the agent reported
+`UNKNOWN` rather than saying a skill existed that it was not allowed to load.
+
+It was also incoherent. `AGENTS.md` discovery was already enabled, so
+repository-authored *instructions* were trusted while repository-authored *tools*
+were not, and nothing distinguishes those two. And it bought no safety:
+[0016](0016-isolation-posture.md) states that worktree separation and the timeout
+are the only isolation and that this is not a sandbox. Refusing the repository's
+tooling removed a capability class without closing any boundary.
+
+The factory runs agents on a repository at its operator's instruction. That
+repository is the workspace, not hostile input. A declaration already states which
+tools an agent gets; the repository states what those tools know.
 
 The trusted tool set becomes `git`, `gh`, and `pi`. `forest selfcheck` resolves
 and publishes all three, so a host that cannot dispatch says so before a Run.
