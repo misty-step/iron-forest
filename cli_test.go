@@ -331,6 +331,7 @@ func TestCLIRejectsEmptyFlagValues(t *testing.T) {
 
 // selfcheck publishes the paths it resolved, not a constant list of names.
 func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
+	t.Setenv("FOREST_DEFAULTS", "")
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")
@@ -382,6 +383,18 @@ func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 	}
 	if payload.DefaultsSource != defaultsPath || payload.Defaults.Model != "host/model" {
 		t.Fatalf("selfcheck defaults=%#v source=%q", payload.Defaults, payload.DefaultsSource)
+	}
+	if err := os.MkdirAll(forestPath(root, "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(defaultsPath, []byte("profile: .forest/profiles\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"selfcheck", "--root", root})
+	})
+	if code != exitError || !strings.Contains(stderr, "contains the Run profile") {
+		t.Fatalf("nested profile selfcheck code=%d stderr=%q", code, stderr)
 	}
 }
 

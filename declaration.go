@@ -79,7 +79,9 @@ type Declaration struct {
 	EnvKeys []string `json:"env,omitempty"`
 	// ProfileFiles lists the files in this declaration's profile layer, so the
 	// read surface can show what the layer contributes without opening it.
-	ProfileFiles []string `json:"profile_files,omitempty"`
+	ProfileFiles        []string `json:"profile_files,omitempty"`
+	BaseProfile         string   `json:"-"`
+	BaseProfileRequired bool     `json:"-"`
 }
 
 type declarationFrontmatter struct {
@@ -92,6 +94,14 @@ type declarationFrontmatter struct {
 func declarationDir(root, name string) string { return filepath.Join(root, "agents", name) }
 
 func loadDeclaration(root, name string) (Declaration, error) {
+	defaults, _, err := loadDefaults(root)
+	if err != nil {
+		return Declaration{}, fmt.Errorf("agent %s: %w", name, err)
+	}
+	return loadDeclarationWithDefaults(root, name, defaults)
+}
+
+func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declaration, error) {
 	if name == "" || filepath.Base(name) != name || name == "." || name == ".." {
 		return Declaration{}, fmt.Errorf("invalid agent name %q", name)
 	}
@@ -151,10 +161,6 @@ func loadDeclaration(root, name string) (Declaration, error) {
 	}
 	// The model resolves through three layers, declaration first, so an operator
 	// can set one fleet default and a repository can still override it.
-	defaults, _, err := loadDefaults(root)
-	if err != nil {
-		return Declaration{}, fmt.Errorf("agent %s: %w", name, err)
-	}
 	model := strings.TrimSpace(string(metadata.Model))
 	modelSource := "declaration"
 	if model == "" {
@@ -171,16 +177,18 @@ func loadDeclaration(root, name string) (Declaration, error) {
 		return Declaration{}, err
 	}
 	return Declaration{
-		Name:         name,
-		Model:        model,
-		Tools:        tools,
-		Thinking:     strings.TrimSpace(thinking),
-		SystemPrompt: body,
-		TaskPrompt:   string(taskData),
-		ModelSource:  modelSource,
-		Env:          env,
-		EnvKeys:      envKeys(env),
-		ProfileFiles: profileFiles,
+		Name:                name,
+		Model:               model,
+		Tools:               tools,
+		Thinking:            strings.TrimSpace(thinking),
+		SystemPrompt:        body,
+		TaskPrompt:          string(taskData),
+		ModelSource:         modelSource,
+		Env:                 env,
+		EnvKeys:             envKeys(env),
+		ProfileFiles:        profileFiles,
+		BaseProfile:         operatorProfile(defaults),
+		BaseProfileRequired: defaults.Profile != "",
 	}, nil
 }
 
@@ -203,6 +211,9 @@ func decodeDeclarationEnv(name string, node *yaml.Node) (map[string]string, erro
 	if node.Kind == 0 {
 		return nil, nil
 	}
+	if node.Kind == yaml.ScalarNode && node.ShortTag() == "!!null" {
+		return nil, nil
+	}
 	if node.Kind != yaml.MappingNode || node.ShortTag() != "!!map" {
 		return nil, fmt.Errorf("agent %s frontmatter env: must be a YAML mapping of string scalars, got %s", name, node.ShortTag())
 	}
@@ -222,6 +233,9 @@ func decodeDeclarationEnv(name string, node *yaml.Node) (map[string]string, erro
 		}
 		if slices.Contains(blockedEnvNames, key) {
 			return nil, fmt.Errorf("agent %s frontmatter env %q names a variable the Kernel owns", name, key)
+		}
+		if _, exists := env[key]; exists {
+			return nil, fmt.Errorf("agent %s frontmatter env %q is declared twice", name, key)
 		}
 		env[key] = value
 	}

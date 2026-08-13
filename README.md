@@ -49,11 +49,14 @@ including in JSON.
 Each Run gets a private harness profile under `.forest/profiles/<run-id>`.
 The operator's base profile copies first and may hold credentials. When
 `forest.defaults.yaml` does not name one, the host Pi profile
-(`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) is that base. The shared
-repository layer copies next. The declaration's own layer copies last and
-wins on a name collision. A repository layer may not contain `auth.json` or
-a symlink. The child sees the result through `PI_CODING_AGENT_DIR`.
-Reserved startup GC removes leftover profiles.
+(`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) is that base. The Kernel refreshes
+OAuth for the selected model before it copies the base. It omits host session
+history. The shared repository layer copies next. The declaration's own layer
+copies last and wins even when a path changes between a file and directory.
+A repository layer may not contain `auth.json` or a symlink. One file is limited
+to 16 MiB. One composition is limited to 4,096 copied files, 64 MiB, and a
+512 KiB evidence manifest. The child sees the result through
+`PI_CODING_AGENT_DIR`. Bounded cleanup removes active and leftover profiles.
 
 This quick start uses self-host mode: the factory source checkout is also the
 managed repository. For a separate sibling managed checkout, use the
@@ -101,8 +104,10 @@ audit with a separate 60-second bound. The systemd unit has a separate
 3900-second service drain bound. This bound covers the shipped declarations'
 concurrent Runs, bounded Runner cleanup, and serialized post-dispatch audits.
 The user service receives
-`PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin`. Before restart, the
-installer runs selfcheck with the equivalent `$HOME`-expanded path.
+`PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`
+and `PI_CODING_AGENT_DIR=%h/.pi/agent`. It unsets `FOREST_DEFAULTS`. Before
+restart, the installer runs selfcheck with the equivalent `$HOME`-expanded
+environment.
 
 Trusted transport captures keep at most 1 MiB while draining the complete
 output. Output beyond the cap returns an explicit error after the process group

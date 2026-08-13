@@ -376,10 +376,14 @@ func runDeclarationList(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
+	defaults, _, err := loadDefaults(flags.root)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
 	names := agentNames(cfg)
 	declarations := make([]Declaration, 0, len(names))
 	for _, name := range names {
-		declaration, loadErr := loadDeclaration(flags.root, name)
+		declaration, loadErr := loadDeclarationWithDefaults(flags.root, name, defaults)
 		if loadErr != nil {
 			return failure(exitError, "%s", loadErr)
 		}

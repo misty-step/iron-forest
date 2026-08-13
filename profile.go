@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -156,18 +157,12 @@ func scanProfileLayer(dir string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if filepath.Base(relative) == "auth.json" {
-			return fmt.Errorf("%w: %s", errProfileAuth, filepath.Join(dir, relative))
+		if err := validateRepositoryProfileEntry(dir, relative, entry); err != nil {
+			return err
 		}
-		switch {
-		case entry.IsDir():
-			return nil
-		case entry.Type()&os.ModeSymlink != 0:
-			return fmt.Errorf("profile layer %s contains symlink %s", dir, relative)
-		case !entry.Type().IsRegular():
-			return fmt.Errorf("profile layer %s contains a non-regular file %s", dir, relative)
+		if !entry.IsDir() {
+			files = append(files, relative)
 		}
-		files = append(files, relative)
 		return nil
 	})
 	if walkErr != nil {
@@ -175,6 +170,21 @@ func scanProfileLayer(dir string) ([]string, error) {
 	}
 	slices.Sort(files)
 	return files, nil
+}
+
+func validateRepositoryProfileEntry(dir, relative string, entry fs.DirEntry) error {
+	switch {
+	case filepath.Base(relative) == "auth.json":
+		return fmt.Errorf("%w: %s", errProfileAuth, filepath.Join(dir, relative))
+	case entry.IsDir():
+		return nil
+	case entry.Type()&os.ModeSymlink != 0:
+		return fmt.Errorf("profile layer %s contains a symlink %s", dir, relative)
+	case !entry.Type().IsRegular():
+		return fmt.Errorf("profile layer %s contains a non-regular file %s", dir, relative)
+	default:
+		return nil
+	}
 }
 
 // declarationProfileFiles validates this declaration's own layer and the shared
@@ -190,111 +200,119 @@ func declarationProfileFiles(root, name string) ([]string, error) {
 	return files, nil
 }
 
-// materializeRunProfile builds the per-Run harness profile. The operator's base
-// profile (which may carry credentials) is copied first, then the shared
-// repository layer, then the declaration's own layer; each later file replaces
-// an earlier one. The returned manifest lists every file the profile holds, in
-// sorted order, so the Run's evidence states exactly what the agent saw.
-func materializeRunProfile(ctx context.Context, root, runID string, declaration Declaration, defaults Defaults) (string, []string, error) {
-	target := runProfileDir(root, runID)
-	type layer struct {
-		dir      string
-		trusted  bool
-		required bool
+const (
+	maxProfileFiles         = 4096
+	maxProfileFileBytes     = 16 << 20
+	maxProfileBytes         = 64 << 20
+	maxProfileManifestBytes = 512 << 10
+)
+
+type profileLayerKind uint8
+
+const (
+	operatorProfileLayer profileLayerKind = iota
+	repositoryProfileLayer
+)
+
+type profileLayer struct {
+	dir      string
+	kind     profileLayerKind
+	required bool
+}
+
+type profileBudget struct {
+	files         int
+	bytes         int64
+	manifestBytes int
+}
+
+func (b *profileBudget) add(relative string, size int64) error {
+	if size < 0 || size > maxProfileFileBytes {
+		return fmt.Errorf("profile file %s exceeds %d bytes", relative, maxProfileFileBytes)
 	}
-	layers := []layer{}
-	if base := operatorProfile(defaults); base != "" {
-		layers = append(layers, layer{
-			dir:      base,
-			trusted:  true,
-			required: defaults.Profile != "",
+	b.files++
+	b.bytes += size
+	b.manifestBytes += len(relative)*6 + 3
+	if b.files > maxProfileFiles || b.bytes > maxProfileBytes || b.manifestBytes > maxProfileManifestBytes {
+		return fmt.Errorf("profile exceeds limits: files=%d bytes=%d manifest=%d", b.files, b.bytes, b.manifestBytes)
+	}
+	return nil
+}
+
+func pruneProfileManifest(manifest map[string]struct{}, relative string) {
+	prefix := relative + string(os.PathSeparator)
+	for path := range manifest {
+		if path == relative || strings.HasPrefix(path, prefix) {
+			delete(manifest, path)
+		}
+	}
+}
+
+func openProfileDirectory(parent *os.Root, name string, mode os.FileMode) (*os.Root, error) {
+	if err := parent.Mkdir(name, mode); err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, err
+	}
+	info, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("profile path %s is not a real directory", name)
+	}
+	return parent.OpenRoot(name)
+}
+
+func createRunProfileRoot(root, runID string) (*os.Root, string, error) {
+	repository, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, "", err
+	}
+	defer repository.Close()
+	forest, err := openProfileDirectory(repository, workspaceName, 0o755)
+	if err != nil {
+		return nil, "", err
+	}
+	defer forest.Close()
+	profiles, err := openProfileDirectory(forest, "profiles", 0o700)
+	if err != nil {
+		return nil, "", err
+	}
+	defer profiles.Close()
+	if err := profiles.Mkdir(runID, 0o700); err != nil {
+		return nil, "", fmt.Errorf("create Run profile: %w", err)
+	}
+	target, err := profiles.OpenRoot(runID)
+	if err != nil {
+		return nil, "", err
+	}
+	return target, runProfileDir(root, runID), nil
+}
+
+// materializeRunProfile builds the per-Run harness profile. The trusted base
+// is copied first, then the shared repository layer, then the declaration's
+// layer. Later files replace earlier paths.
+func materializeRunProfile(ctx context.Context, root, runID string, declaration Declaration) (string, []string, error) {
+	target, targetPath, err := createRunProfileRoot(root, runID)
+	if err != nil {
+		return "", nil, err
+	}
+	defer target.Close()
+	layers := []profileLayer{}
+	if declaration.BaseProfile != "" {
+		layers = append(layers, profileLayer{
+			dir:      declaration.BaseProfile,
+			kind:     operatorProfileLayer,
+			required: declaration.BaseProfileRequired,
 		})
 	}
 	layers = append(layers,
-		layer{dir: sharedProfileDir(root)},
-		layer{dir: declarationProfileDir(root, declaration.Name)},
+		profileLayer{dir: sharedProfileDir(root), kind: repositoryProfileLayer},
+		profileLayer{dir: declarationProfileDir(root, declaration.Name), kind: repositoryProfileLayer},
 	)
 	manifest := make(map[string]struct{})
-	for _, item := range layers {
-		if err := ctx.Err(); err != nil {
-			return "", nil, err
-		}
-		info, err := os.Stat(item.dir)
-		if errors.Is(err, os.ErrNotExist) {
-			if item.required {
-				return "", nil, fmt.Errorf("read operator profile %s: %w", item.dir, err)
-			}
-			continue
-		} else if err != nil {
-			return "", nil, err
-		}
-		if !info.IsDir() {
-			return "", nil, fmt.Errorf("profile layer %s is not a directory", item.dir)
-		}
-		source := item.dir
-		if resolved, err := filepath.EvalSymlinks(item.dir); err == nil {
-			source = resolved
-		}
-		if inside, err := pathInside(source, target); err != nil {
-			return "", nil, err
-		} else if inside {
-			return "", nil, fmt.Errorf("profile layer %s contains the Run profile", item.dir)
-		}
-		walkErr := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			relative, err := filepath.Rel(source, path)
-			if err != nil {
-				return err
-			}
-			if !item.trusted && filepath.Base(relative) == "auth.json" {
-				return fmt.Errorf("%w: %s", errProfileAuth, filepath.Join(item.dir, relative))
-			}
-			destination := filepath.Join(target, relative)
-			if entry.IsDir() {
-				return os.MkdirAll(destination, 0o700)
-			}
-			if !entry.Type().IsRegular() {
-				// The operator base may contain sockets or dangling links. Skip
-				// them. A repository layer already failed at load for these.
-				if item.trusted {
-					return nil
-				}
-				return fmt.Errorf("profile layer %s contains a non-regular file %s", item.dir, relative)
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-				return err
-			}
-			// Owner-only, and keep an execute bit the source already had.
-			mode := os.FileMode(0o600)
-			if info, err := entry.Info(); err == nil {
-				mode |= info.Mode().Perm() & 0o111
-			}
-			if err := os.WriteFile(destination, data, mode); err != nil {
-				return err
-			}
-			if err := os.Chmod(destination, mode); err != nil {
-				return err
-			}
-			manifest[relative] = struct{}{}
-			return nil
-		})
-		if walkErr != nil {
-			return "", nil, walkErr
-		}
-	}
-	if len(manifest) == 0 {
-		// An empty profile still exists so the harness has a directory to write
-		// its own defaults into.
-		if err := os.MkdirAll(target, 0o700); err != nil {
+	budget := profileBudget{}
+	for _, layer := range layers {
+		if err := copyProfileLayer(ctx, target, targetPath, layer, manifest, &budget); err != nil {
 			return "", nil, err
 		}
 	}
@@ -303,7 +321,139 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 		files = append(files, name)
 	}
 	slices.Sort(files)
-	return target, files, nil
+	return targetPath, files, nil
+}
+
+func copyProfileLayer(ctx context.Context, target *os.Root, targetPath string, layer profileLayer, manifest map[string]struct{}, budget *profileBudget) error {
+	source := layer.dir
+	var info os.FileInfo
+	var err error
+	if layer.kind == operatorProfileLayer {
+		info, err = os.Stat(source)
+		if err == nil {
+			source, err = filepath.EvalSymlinks(source)
+		}
+	} else {
+		info, err = os.Lstat(source)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("profile layer %s contains a symlink", layer.dir)
+		}
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		if layer.required {
+			return fmt.Errorf("read operator profile %s: %w", layer.dir, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("profile layer %s is not a directory", layer.dir)
+	}
+	if inside, err := pathInside(source, targetPath); err != nil {
+		return err
+	} else if inside {
+		return fmt.Errorf("profile layer %s contains the Run profile", layer.dir)
+	}
+	sourceRoot, err := os.OpenRoot(source)
+	if err != nil {
+		return err
+	}
+	defer sourceRoot.Close()
+	return fs.WalkDir(sourceRoot.FS(), ".", func(relative string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if layer.kind == operatorProfileLayer && (relative == "sessions" || strings.HasPrefix(relative, "sessions"+string(os.PathSeparator))) {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if relative == "." {
+			return nil
+		}
+		if layer.kind == repositoryProfileLayer {
+			if err := validateRepositoryProfileEntry(layer.dir, relative, entry); err != nil {
+				return err
+			}
+		}
+		if entry.IsDir() {
+			existing, err := target.Lstat(relative)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+			case err != nil:
+				return err
+			case existing.IsDir():
+				return nil
+			default:
+				if err := target.RemoveAll(relative); err != nil {
+					return err
+				}
+				pruneProfileManifest(manifest, relative)
+			}
+			return target.MkdirAll(relative, 0o700)
+		}
+		var file *os.File
+		if entry.Type()&os.ModeSymlink != 0 {
+			file, err = os.Open(filepath.Join(source, relative))
+		} else {
+			file, err = sourceRoot.Open(relative)
+		}
+		if err != nil {
+			return err
+		}
+		fileInfo, statErr := file.Stat()
+		if statErr != nil {
+			return errors.Join(statErr, file.Close())
+		}
+		if !fileInfo.Mode().IsRegular() {
+			closeErr := file.Close()
+			if layer.kind == operatorProfileLayer {
+				return closeErr
+			}
+			return errors.Join(fmt.Errorf("profile layer %s contains a non-regular file %s", layer.dir, relative), closeErr)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxProfileFileBytes+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
+			return errors.Join(readErr, closeErr)
+		}
+		if err := budget.add(relative, int64(len(data))); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := target.RemoveAll(relative); err != nil {
+			return err
+		}
+		pruneProfileManifest(manifest, relative)
+		mode := os.FileMode(0o600) | fileInfo.Mode().Perm()&0o111
+		if err := target.WriteFile(relative, data, mode); err != nil {
+			return err
+		}
+		if err := target.Chmod(relative, mode); err != nil {
+			return err
+		}
+		manifest[relative] = struct{}{}
+		return nil
+	})
+}
+
+func childEnvironment() []string {
+	environment := make([]string, 0, len(os.Environ()))
+	for _, value := range os.Environ() {
+		key, _, _ := strings.Cut(value, "=")
+		if key == "HOME" || !slices.Contains(blockedEnvNames, key) {
+			environment = append(environment, value)
+		}
+	}
+	return environment
 }
 
 // runEnvironment composes the child's environment: the inherited environment
@@ -315,13 +465,7 @@ func runEnvironment(root, name, email, runID, profileDir string, declaration Dec
 	if err != nil {
 		return nil, err
 	}
-	environment := make([]string, 0, len(os.Environ())+8)
-	for _, value := range os.Environ() {
-		key, _, _ := strings.Cut(value, "=")
-		if key == "HOME" || !slices.Contains(blockedEnvNames, key) {
-			environment = append(environment, value)
-		}
-	}
+	environment := childEnvironment()
 	environment = append(environment,
 		"PATH="+path,
 		"GIT_AUTHOR_NAME="+name,

@@ -29,17 +29,18 @@ The Kernel materializes one harness profile per Run, then points the child at
 it with `PI_CODING_AGENT_DIR`. Layers copy in this order; a later file of the
 same relative path replaces an earlier one:
 
-1. The operator's base profile. `forest.defaults.yaml` `profile` (or
-   `$FOREST_DEFAULTS`) names it when set. Otherwise the host Pi profile
-   (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) is used, so an upgraded factory
-   keeps the credentials pi already stored. This is the only layer that may
-   hold credentials.
+1. The operator's base profile. The `profile` key in `forest.defaults.yaml`
+   names it. `$FOREST_DEFAULTS` may name a different defaults file; it never
+   names a profile directory. Otherwise the host Pi profile
+   (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) is used. This is the only layer
+   that may hold credentials.
 2. `agents/_shared/profile/`, the repository layer every declaration shares.
 3. `agents/<name>/profile/`, the declaration's own layer.
 
 Repository layers are checked, not trusted: no `auth.json`, no symlink, and
 nothing but regular files and directories. A declaration that ships a bad
-layer fails at load, before any Run starts.
+layer fails at load, before any Run starts. The Kernel refreshes selected-model
+OAuth in the shared base before copying it, and omits host session history.
 
 The model resolves through three layers: the declaration, then instance
 defaults, then the built-in `openrouter/deepseek/deepseek-v4-flash-0731`.
@@ -55,9 +56,10 @@ Declared `env` is a map of opaque string scalars. Names the Kernel owns
 variables) are rejected. The read surface and the Run evidence publish keys,
 never values.
 
-The profile directory is collected with the worktree. Reserved startup GC
-sweeps leftover `.forest/profiles/<run-id>` paths through the trusted
-remover, because a leftover profile can hold copied credentials.
+The profile directory is collected with the worktree through the bounded
+trusted remover. Reserved startup GC sweeps leftovers by the same path.
+Composition rejects any file over 16 MiB or any total above 4,096 files,
+64 MiB, or a 512 KiB evidence manifest.
 
 ## Consequences
 

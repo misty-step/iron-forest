@@ -27,6 +27,7 @@ func writeAgentFiles(t *testing.T, root, name, frontmatter, body, task string) {
 }
 
 func TestModelChainResolvesDeclarationThenDefaultsThenBuiltIn(t *testing.T) {
+	t.Setenv("FOREST_DEFAULTS", "")
 	root := t.TempDir()
 	writeAgentFiles(t, root, "builder", "thinking: low\n", "System rules\n", "Select one item.")
 	declaration, err := loadDeclaration(root, "builder")
@@ -59,6 +60,7 @@ func TestModelChainResolvesDeclarationThenDefaultsThenBuiltIn(t *testing.T) {
 }
 
 func TestDefaultsFileIsOptionalAndFOREST_DEFAULTSWins(t *testing.T) {
+	t.Setenv("FOREST_DEFAULTS", "")
 	root := t.TempDir()
 	defaults, source, err := loadDefaults(root)
 	if err != nil || source != "" || defaults != (Defaults{}) {
@@ -98,6 +100,7 @@ func TestDefaultsFileIsOptionalAndFOREST_DEFAULTSWins(t *testing.T) {
 }
 
 func TestEmptyOrCommentOnlyDefaultsAreZero(t *testing.T) {
+	t.Setenv("FOREST_DEFAULTS", "")
 	root := t.TempDir()
 	path := filepath.Join(root, "forest.defaults.yaml")
 	for _, body := range []string{"", "# comment only\n"} {
@@ -137,6 +140,16 @@ func TestDeclarationEnvPreservesOpaqueValuesAndRejectsOwnedNames(t *testing.T) {
 	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "Kernel owns") {
 		t.Fatalf("owned env err=%v, want Kernel owns", err)
 	}
+
+	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  NOTE: one\n  NOTE: two\n", "System rules\n", "Select one item.")
+	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "declared twice") {
+		t.Fatalf("duplicate env err=%v, want declared twice", err)
+	}
+	writeAgentFiles(t, root, "builder", "model: local\nenv:\n", "System rules\n", "Select one item.")
+	declaration, err = loadDeclaration(root, "builder")
+	if err != nil || declaration.Env != nil {
+		t.Fatalf("empty env=%v err=%v", declaration.Env, err)
+	}
 }
 
 func TestRepositoryProfileRejectsAuthAndSymlinks(t *testing.T) {
@@ -174,6 +187,19 @@ func TestRepositoryProfileRejectsAuthAndSymlinks(t *testing.T) {
 	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("symlink err=%v, want symlink", err)
 	}
+	if err := os.RemoveAll(layer); err != nil {
+		t.Fatal(err)
+	}
+	external := t.TempDir()
+	if err := os.WriteFile(filepath.Join(external, "leak"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, layer); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("materialized a symlinked repository root: %v", err)
+	}
 }
 
 func TestMaterializeRunProfileOverlaysLayers(t *testing.T) {
@@ -184,6 +210,10 @@ func TestMaterializeRunProfileOverlaysLayers(t *testing.T) {
 		{base, "skills/shared.md", "base skill\n"},
 		{filepath.Join(root, "agents", "_shared", "profile"), "skills/shared.md", "shared skill\n"},
 		{filepath.Join(root, "agents", "builder", "profile"), "skills/builder.md", "builder skill\n"},
+		{base, "file-to-dir", "base file\n"},
+		{base, "dir-to-file/old", "base child\n"},
+		{filepath.Join(root, "agents", "builder", "profile"), "file-to-dir/new", "new child\n"},
+		{filepath.Join(root, "agents", "builder", "profile"), "dir-to-file", "new file\n"},
 	} {
 		if err := os.MkdirAll(filepath.Join(item.dir, filepath.Dir(item.name)), 0o755); err != nil {
 			t.Fatal(err)
@@ -192,12 +222,12 @@ func TestMaterializeRunProfileOverlaysLayers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	declaration := Declaration{Name: "builder"}
-	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", declaration, Defaults{Profile: base})
+	declaration := Declaration{Name: "builder", BaseProfile: base, BaseProfileRequired: true}
+	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", declaration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(files, []string{"auth.json", "skills/builder.md", "skills/shared.md"}) {
+	if !reflect.DeepEqual(files, []string{"auth.json", "dir-to-file", "file-to-dir/new", "skills/builder.md", "skills/shared.md"}) {
 		t.Fatalf("manifest=%v", files)
 	}
 	shared, err := os.ReadFile(filepath.Join(target, "skills/shared.md"))
@@ -208,6 +238,22 @@ func TestMaterializeRunProfileOverlaysLayers(t *testing.T) {
 	if err != nil || string(auth) != `{"token":"base"}` {
 		t.Fatalf("base auth=%q err=%v", auth, err)
 	}
+	for name, want := range map[string]string{"dir-to-file": "new file\n", "file-to-dir/new": "new child\n"} {
+		got, err := os.ReadFile(filepath.Join(target, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("collision %s=%q err=%v", name, got, err)
+		}
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, runProfileDir(root, "2-builder")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := materializeRunProfile(context.Background(), root, "2-builder", declaration); err == nil || !strings.Contains(err.Error(), "create Run profile") {
+		t.Fatalf("reused a pre-existing Run profile target: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "auth.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("profile escaped through target symlink: %v", err)
+	}
 }
 
 func TestMaterializeRejectsAFileValuedBaseProfile(t *testing.T) {
@@ -216,7 +262,7 @@ func TestMaterializeRejectsAFileValuedBaseProfile(t *testing.T) {
 	if err := os.WriteFile(base, []byte("nope"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{Profile: base})
+	_, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder", BaseProfile: base, BaseProfileRequired: true})
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("file base err=%v, want not a directory", err)
 	}
@@ -225,9 +271,27 @@ func TestMaterializeRejectsAFileValuedBaseProfile(t *testing.T) {
 func TestMaterializeRejectsAMissingExplicitOperatorProfile(t *testing.T) {
 	root := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "gone")
-	_, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{Profile: missing})
+	_, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder", BaseProfile: missing, BaseProfileRequired: true})
 	if err == nil || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing explicit profile err=%v, want not exist", err)
+	}
+}
+
+func TestMaterializeRejectsAnOversizedProfileFile(t *testing.T) {
+	root, base := t.TempDir(), t.TempDir()
+	file, err := os.Create(filepath.Join(base, "oversized"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxProfileFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder", BaseProfile: base, BaseProfileRequired: true})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized profile err=%v", err)
 	}
 }
 
@@ -240,47 +304,45 @@ func TestMaterializeFollowsASymlinkedOperatorProfile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(real, "auth.json"), []byte(`{"ok":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	externalFile := filepath.Join(t.TempDir(), "tool")
+	if err := os.WriteFile(externalFile, []byte("tool body"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalFile, filepath.Join(real, "tool")); err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(t.TempDir(), "link")
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{Profile: link})
+	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder", BaseProfile: link, BaseProfileRequired: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(files, []string{"auth.json"}) {
+	if !reflect.DeepEqual(files, []string{"auth.json", "tool"}) {
 		t.Fatalf("symlink profile files=%v", files)
 	}
-	got, err := os.ReadFile(filepath.Join(target, "auth.json"))
-	if err != nil || string(got) != `{"ok":true}` {
-		t.Fatalf("symlink profile=%q err=%v", got, err)
+	for name, want := range map[string]string{"auth.json": `{"ok":true}`, "tool": "tool body"} {
+		got, err := os.ReadFile(filepath.Join(target, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("symlink profile %s=%q err=%v", name, got, err)
+		}
+	}
+	info, err := os.Lstat(filepath.Join(target, "tool"))
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("materialized tool mode=%v err=%v", info, err)
+	}
+	if err := os.WriteFile(externalFile, []byte("changed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "tool")); err != nil || string(got) != "tool body" {
+		t.Fatalf("private tool changed with host target: %q err=%v", got, err)
 	}
 }
 
-func TestOperatorProfileSeedsHostPiAndRejectsNestedTarget(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("PI_CODING_AGENT_DIR", "")
-	host := filepath.Join(home, ".pi", "agent")
-	if err := os.MkdirAll(host, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(host, "auth.json"), []byte(`{"ok":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+func TestOperatorProfileRejectsNestedTarget(t *testing.T) {
 	root := t.TempDir()
-	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(files, []string{"auth.json"}) {
-		t.Fatalf("host seed files=%v", files)
-	}
-	got, err := os.ReadFile(filepath.Join(target, "auth.json"))
-	if err != nil || string(got) != `{"ok":true}` {
-		t.Fatalf("host seed=%q err=%v", got, err)
-	}
-	_, _, err = materializeRunProfile(context.Background(), root, "2-builder", Declaration{Name: "builder"}, Defaults{Profile: forestPath(root, "profiles")})
+	_, _, err := materializeRunProfile(context.Background(), root, "2-builder", Declaration{Name: "builder", BaseProfile: forestPath(root, "profiles"), BaseProfileRequired: true})
 	if err == nil || !strings.Contains(err.Error(), "contains the Run profile") {
 		t.Fatalf("nested target err=%v", err)
 	}
@@ -389,6 +451,50 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":1,"output":1}}}'
 	}
 }
 
+func TestRunnerRefreshesOAuthBeforeCopyingThePrivateProfile(t *testing.T) {
+	root, _ := testClone(t)
+	base, state := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "auth.json"), []byte(`{"openai-codex":{"type":"oauth"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(state, "refresh")
+	script := `#!/bin/sh
+set -eu
+if [ "${1-}" = auth ]; then
+	test "$2" = print-bearer-token
+	test -z "${FOREST_RUN_ID+x}${GIT_AUTHOR_NAME+x}"
+	test "$6" = 70s
+	printf refreshed > "$MARKER"
+	printf token
+	exit 0
+fi
+test -f "$PI_CODING_AGENT_DIR/auth.json"
+printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":1}}}'
+`
+	pi := filepath.Join(state, "pi")
+	if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MARKER", marker)
+	t.Setenv("FOREST_RUN_ID", "stale")
+	t.Setenv("GIT_AUTHOR_NAME", "stale")
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	declaration := Declaration{
+		Name:                "builder",
+		Model:               "openai-codex/gpt-5.6-sol",
+		TaskPrompt:          "x",
+		BaseProfile:         base,
+		BaseProfileRequired: true,
+	}
+	if record, err := runner.Run(context.Background(), declaration, 10); err != nil || record.Exit != 0 {
+		t.Fatalf("Run record=%#v err=%v", record, err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "refreshed" {
+		t.Fatalf("OAuth refresh marker=%q err=%v", got, err)
+	}
+}
+
 func TestShippedBuilderSkillIsInvisibleToVerifier(t *testing.T) {
 	source, err := os.Getwd()
 	if err != nil {
@@ -407,11 +513,11 @@ func TestShippedBuilderSkillIsInvisibleToVerifier(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	builder, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{})
+	builder, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, _, err := materializeRunProfile(context.Background(), root, "1-verifier", Declaration{Name: "verifier"}, Defaults{})
+	verifier, _, err := materializeRunProfile(context.Background(), root, "1-verifier", Declaration{Name: "verifier"})
 	if err != nil {
 		t.Fatal(err)
 	}

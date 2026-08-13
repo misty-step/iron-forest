@@ -120,21 +120,24 @@ func serve(root string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
 		}
-		// Residue can hold copied credentials. Sweep it before a bad
-		// declaration can keep serve from constructing the Scheduler.
-		if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
+		scheduler := NewScheduler(root, cfg, NewRunner(root))
+		if scheduler.startupErr != nil {
+			fmt.Fprintln(os.Stderr, scheduler.startupErr)
+			return exitError
+		}
+		defaults, _, err := loadDefaults(root)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
 		}
 		for _, name := range agentNames(cfg) {
-			if _, err := loadDeclaration(root, name); err != nil {
+			if _, err := loadDeclarationWithDefaults(root, name, defaults); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				return exitError
 			}
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		scheduler := NewScheduler(root, cfg, NewRunner(root))
 		if err := scheduler.Serve(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
@@ -362,18 +365,24 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	if defaults.Profile != "" {
-		info, statErr := os.Stat(defaults.Profile)
-		if statErr != nil {
-			return failure(exitError, "operator profile %s: %s", defaults.Profile, statErr)
+	profile := operatorProfile(defaults)
+	if profile != "" {
+		info, statErr := os.Stat(profile)
+		if statErr != nil && (defaults.Profile != "" || !errors.Is(statErr, os.ErrNotExist)) {
+			return failure(exitError, "operator profile %s: %s", profile, statErr)
 		}
-		if !info.IsDir() {
-			return failure(exitError, "operator profile %s is not a directory", defaults.Profile)
+		if statErr == nil && !info.IsDir() {
+			return failure(exitError, "operator profile %s is not a directory", profile)
+		}
+		if inside, pathErr := pathInside(profile, forestPath(flags.root, "profiles")); pathErr != nil {
+			return failure(exitError, "%s", pathErr)
+		} else if inside {
+			return failure(exitError, "operator profile %s contains the Run profile directory", profile)
 		}
 	}
 	names := agentNames(cfg)
 	for _, name := range names {
-		if _, err := loadDeclaration(flags.root, name); err != nil {
+		if _, err := loadDeclarationWithDefaults(flags.root, name, defaults); err != nil {
 			return failure(exitError, "%s", err)
 		}
 	}
@@ -394,7 +403,6 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		}
 		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
-	profile := operatorProfile(defaults)
 	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
 		oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
 	if defaultsSource != "" {

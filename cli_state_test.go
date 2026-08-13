@@ -567,10 +567,13 @@ func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
 	_, human, _ := captureCLIOutput(t, func() int {
 		return runSurfaceCommand([]string{"declaration", "show", "builder", "--root", root})
 	})
-	for _, want := range []string{"model_source: declaration", "env: NOTE", "skills/builder.md"} {
+	for _, want := range []string{"model_source: declaration", "skills/builder.md"} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human=%q, want %q", human, want)
 		}
+	}
+	if !strings.Contains("\n"+human+"\n", "\nenv: NOTE\n") {
+		t.Fatalf("human=%q, want exact env key line", human)
 	}
 	if strings.Contains(human, "secret-value") {
 		t.Fatalf("human leaked an env value: %q", human)

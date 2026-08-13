@@ -265,16 +265,13 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	}
 
 	// The profile is materialized after the worktree exists, because its evidence
-	// belongs to a Run that really started. A failure here means the harness never
-	// ran, which the usage parser must know.
-	defaults, _, err := loadDefaults(r.Root)
+	// belongs to a Run that really started. Refresh OAuth in the shared base first,
+	// so the private copy remains valid for the complete bounded Run.
+	profileErr := r.refreshProfileAuth(runCtx, declaration, timeoutSeconds)
 	var profileDir string
 	var profileFiles []string
-	var profileErr error
-	if err != nil {
-		profileErr = fmt.Errorf("load instance defaults: %w", err)
-	} else {
-		profileDir, profileFiles, profileErr = materializeRunProfile(runCtx, r.Root, runID, declaration, defaults)
+	if profileErr == nil {
+		profileDir, profileFiles, profileErr = materializeRunProfile(runCtx, r.Root, runID, declaration)
 	}
 	harnessRunnable := profileErr == nil
 	if profileErr != nil {
@@ -295,10 +292,10 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	if profileErr := os.RemoveAll(runProfileDir(r.Root, runID)); profileErr != nil {
-		profileErr = fmt.Errorf("collect Run profile: remove Run profile: %w", profileErr)
-		_, _ = fmt.Fprintln(logFile, profileErr)
-		cleanupErr = errors.Join(cleanupErr, profileErr)
+	if collectErr := r.cleanupProfile(runProfileDir(r.Root, runID)); collectErr != nil {
+		collectErr = fmt.Errorf("collect Run profile: %w", collectErr)
+		_, _ = fmt.Fprintln(logFile, collectErr)
+		cleanupErr = errors.Join(cleanupErr, collectErr)
 		if record.Exit == 0 {
 			record.Exit = 1
 		}
@@ -379,6 +376,12 @@ func (r *Runner) cleanupWorktree(path, runID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	return r.removeWorktree(ctx, path, runID)
+}
+
+func (r *Runner) cleanupProfile(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupFilesystemExecutionTimeout)
+	defer cancel()
+	return r.removeFilesystem(ctx, path)
 }
 
 func (r *Runner) removeWorktree(ctx context.Context, path, runID string) error {
@@ -736,13 +739,60 @@ func (r *Runner) piExecutable() (string, error) {
 	return trustedExecutable(r.Root, r.PiPath)
 }
 
+func (r *Runner) refreshProfileAuth(ctx context.Context, declaration Declaration, timeoutSeconds int) error {
+	provider, _, ok := strings.Cut(declaration.Model, "/")
+	if declaration.BaseProfile == "" || !ok {
+		return nil
+	}
+	authPath := filepath.Join(declaration.BaseProfile, "auth.json")
+	info, err := os.Stat(authPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect operator auth: %w", err)
+	}
+	if info.Size() > maxProfileFileBytes {
+		return fmt.Errorf("operator auth exceeds %d bytes", maxProfileFileBytes)
+	}
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		return fmt.Errorf("read operator auth: %w", err)
+	}
+	var credentials map[string]struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &credentials); err != nil {
+		return fmt.Errorf("decode operator auth: %w", err)
+	}
+	if credentials[provider].Type != "oauth" {
+		return nil
+	}
+	executable, err := r.piExecutable()
+	if err != nil {
+		return err
+	}
+	path, err := trustedPath(r.Root)
+	if err != nil {
+		return err
+	}
+	environment := childEnvironment()
+	environment = append(environment, "PATH="+path, "PI_CODING_AGENT_DIR="+declaration.BaseProfile)
+	refresh := exec.Command(executable, "auth", "print-bearer-token", "--model", declaration.Model, "--min-expiry", fmt.Sprintf("%ds", timeoutSeconds+60))
+	refresh.Dir, refresh.Env = r.Root, environment
+	if _, err := processGroupOutput(ctx, refresh); err != nil {
+		return fmt.Errorf("extend operator OAuth lifetime: %w", err)
+	}
+	return nil
+}
+
 // runEvidenceLine is the Run's manifest: the model and its source, the profile
 // files the agent saw, and the declared environment's keys. Values never appear
 // because they are not the reader's business. The line is JSON, so the harness
 // output parser reads past it, and typed, so a consumer can distinguish it from
 // harness events.
 func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []string) string {
-	line, err := json.Marshal(map[string]any{
+	line, _ := json.Marshal(map[string]any{
 		"type":         "forest.run",
 		"run_id":       record.RunID,
 		"agent":        declaration.Name,
@@ -751,9 +801,6 @@ func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []s
 		"profile":      profileFiles,
 		"env":          envKeys(declaration.Env),
 	})
-	if err != nil {
-		return fmt.Sprintf("{\"type\":\"forest.run\",\"run_id\":%q}", record.RunID)
-	}
 	return string(line)
 }
 
