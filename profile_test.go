@@ -83,6 +83,32 @@ func TestDefaultsFileIsOptionalAndFOREST_DEFAULTSWins(t *testing.T) {
 	if defaults.Profile != filepath.Join(root, "profiles/base") {
 		t.Fatalf("relative profile=%q, want resolved against checkout", defaults.Profile)
 	}
+	t.Setenv("FOREST_DEFAULTS", "missing.yaml")
+	if _, _, err := loadDefaults(root); err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing FOREST_DEFAULTS err=%v, want not exist", err)
+	}
+	t.Setenv("FOREST_DEFAULTS", "host.yaml")
+	if err := os.WriteFile(filepath.Join(root, "host.yaml"), []byte("model: relative/model\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defaults, source, err = loadDefaults(root)
+	if err != nil || defaults.Model != "relative/model" || source != filepath.Join(root, "host.yaml") {
+		t.Fatalf("relative FOREST_DEFAULTS: %#v source=%q err=%v", defaults, source, err)
+	}
+}
+
+func TestEmptyOrCommentOnlyDefaultsAreZero(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "forest.defaults.yaml")
+	for _, body := range []string{"", "# comment only\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		defaults, source, err := loadDefaults(root)
+		if err != nil || defaults != (Defaults{}) || source != path {
+			t.Fatalf("body=%q defaults=%#v source=%q err=%v", body, defaults, source, err)
+		}
+	}
 }
 
 func TestDeclarationEnvRewritesMintAndRejectsOwnedNames(t *testing.T) {
@@ -96,6 +122,16 @@ func TestDeclarationEnvRewritesMintAndRejectsOwnedNames(t *testing.T) {
 	if !reflect.DeepEqual(declaration.Env, want) {
 		t.Fatalf("env=%v, want %v", declaration.Env, want)
 	}
+	if !reflect.DeepEqual(declaration.EnvKeys, []string{"NOTE", "OPENROUTER_API_KEY"}) {
+		t.Fatalf("env keys=%v", declaration.EnvKeys)
+	}
+	encoded, err := json.Marshal(declaration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "hello") || strings.Contains(string(encoded), "__mint.") {
+		t.Fatalf("JSON leaked env values: %s", encoded)
+	}
 
 	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  PATH: /tmp\n", "System rules\n", "Select one item.")
 	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "Kernel owns") {
@@ -108,6 +144,18 @@ func TestRepositoryProfileRejectsAuthAndSymlinks(t *testing.T) {
 	writeAgentFiles(t, root, "builder", "model: local\n", "System rules\n", "Select one item.")
 	layer := filepath.Join(root, "agents", "builder", "profile")
 	if err := os.MkdirAll(layer, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(layer, "secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layer, "secrets", "auth.json"), []byte(`{"token":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadDeclaration(root, "builder"); err == nil || !errors.Is(err, errProfileAuth) {
+		t.Fatalf("nested auth.json err=%v, want errProfileAuth", err)
+	}
+	if err := os.Remove(filepath.Join(layer, "secrets", "auth.json")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(layer, "auth.json"), []byte(`{"token":"x"}`), 0o644); err != nil {
@@ -145,7 +193,7 @@ func TestMaterializeRunProfileOverlaysLayersAndCollects(t *testing.T) {
 		}
 	}
 	declaration := Declaration{Name: "builder"}
-	target, files, err := materializeRunProfile(root, "1-builder", declaration, Defaults{Profile: base})
+	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", declaration, Defaults{Profile: base})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +213,18 @@ func TestMaterializeRunProfileOverlaysLayersAndCollects(t *testing.T) {
 	}
 	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("collected profile survived: %v", err)
+	}
+}
+
+func TestMaterializeRejectsAFileValuedBaseProfile(t *testing.T) {
+	root := t.TempDir()
+	base := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(base, []byte("nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{Profile: base})
+	if err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("file base err=%v, want not a directory", err)
 	}
 }
 
@@ -285,11 +345,11 @@ func TestShippedBuilderSkillIsInvisibleToVerifier(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	builder, _, err := materializeRunProfile(root, "1-builder", Declaration{Name: "builder"}, Defaults{})
+	builder, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, _, err := materializeRunProfile(root, "1-verifier", Declaration{Name: "verifier"}, Defaults{})
+	verifier, _, err := materializeRunProfile(context.Background(), root, "1-verifier", Declaration{Name: "verifier"}, Defaults{})
 	if err != nil {
 		t.Fatal(err)
 	}

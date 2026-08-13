@@ -41,9 +41,12 @@ layer fails at load, before any Run starts.
 
 The model resolves through three layers: the declaration, then instance
 defaults, then the built-in `openrouter/deepseek/deepseek-v4-flash-0731`.
-Local models are available by declaring one; they are never the default.
-`forest declaration show` and the Run log's `forest.run` line publish the
-resolved model and the layer that supplied it.
+`thinking` resolves through the declaration, then instance defaults; there is
+no built-in thinking level. An empty or comment-only defaults file is the
+zero Defaults, not an error. Local models are available by declaring one;
+they are never the default. `forest declaration show` and the Run log's
+`forest.run` line publish the resolved model and the layer that supplied it.
+JSON publication of a declaration omits env values.
 
 Declared `env` is a map of string scalars. A value of `mint:<alias>` becomes
 `__mint.<alias>__`. Names the Kernel owns (`PATH`, `HOME`, `FOREST_RUN_ID`,

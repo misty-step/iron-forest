@@ -120,6 +120,12 @@ func serve(root string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
 		}
+		// Residue can hold copied credentials. Sweep it before a bad
+		// declaration can keep serve from constructing the Scheduler.
+		if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitError
+		}
 		for _, name := range agentNames(cfg) {
 			if _, err := loadDeclaration(root, name); err != nil {
 				fmt.Fprintln(os.Stderr, err)

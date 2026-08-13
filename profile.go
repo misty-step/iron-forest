@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -146,6 +147,9 @@ func scanProfileLayer(dir string) ([]string, error) {
 		if err != nil {
 			return err
 		}
+		if filepath.Base(relative) == "auth.json" {
+			return fmt.Errorf("%w: %s", errProfileAuth, filepath.Join(dir, relative))
+		}
 		switch {
 		case entry.IsDir():
 			return nil
@@ -153,9 +157,6 @@ func scanProfileLayer(dir string) ([]string, error) {
 			return fmt.Errorf("profile layer %s contains symlink %s", dir, relative)
 		case !entry.Type().IsRegular():
 			return fmt.Errorf("profile layer %s contains a non-regular file %s", dir, relative)
-		}
-		if relative == "auth.json" {
-			return fmt.Errorf("%w: %s", errProfileAuth, filepath.Join(dir, relative))
 		}
 		files = append(files, relative)
 		return nil
@@ -185,37 +186,59 @@ func declarationProfileFiles(root, name string) ([]string, error) {
 // repository layer, then the declaration's own layer; each later file replaces
 // an earlier one. The returned manifest lists every file the profile holds, in
 // sorted order, so the Run's evidence states exactly what the agent saw.
-func materializeRunProfile(root, runID string, declaration Declaration, defaults Defaults) (string, []string, error) {
+func materializeRunProfile(ctx context.Context, root, runID string, declaration Declaration, defaults Defaults) (string, []string, error) {
 	target := runProfileDir(root, runID)
-	layers := []string{}
-	if defaults.Profile != "" {
-		layers = append(layers, defaults.Profile)
+	type layer struct {
+		dir     string
+		trusted bool
 	}
-	layers = append(layers, sharedProfileDir(root), declarationProfileDir(root, declaration.Name))
+	layers := []layer{}
+	if defaults.Profile != "" {
+		layers = append(layers, layer{dir: defaults.Profile, trusted: true})
+	}
+	layers = append(layers,
+		layer{dir: sharedProfileDir(root)},
+		layer{dir: declarationProfileDir(root, declaration.Name)},
+	)
 	manifest := make(map[string]struct{})
-	for _, layer := range layers {
-		if _, err := os.Stat(layer); errors.Is(err, os.ErrNotExist) {
+	for _, item := range layers {
+		if err := ctx.Err(); err != nil {
+			return "", nil, err
+		}
+		info, err := os.Stat(item.dir)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
 			return "", nil, err
 		}
-		// The base profile is the operator's own directory and may hold
-		// credentials; repository layers were validated when the declaration
-		// loaded. Both copy the same way.
-		walkErr := filepath.WalkDir(layer, func(path string, entry fs.DirEntry, err error) error {
+		if !info.IsDir() {
+			return "", nil, fmt.Errorf("profile layer %s is not a directory", item.dir)
+		}
+		walkErr := filepath.WalkDir(item.dir, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			relative, err := filepath.Rel(layer, path)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(item.dir, path)
 			if err != nil {
 				return err
+			}
+			if !item.trusted && filepath.Base(relative) == "auth.json" {
+				return fmt.Errorf("%w: %s", errProfileAuth, filepath.Join(item.dir, relative))
 			}
 			destination := filepath.Join(target, relative)
 			if entry.IsDir() {
 				return os.MkdirAll(destination, 0o700)
 			}
 			if !entry.Type().IsRegular() {
-				return fmt.Errorf("profile layer %s contains a non-regular file %s", layer, relative)
+				// The operator base may contain sockets or dangling links. Skip
+				// them. A repository layer already failed at load for these.
+				if item.trusted {
+					return nil
+				}
+				return fmt.Errorf("profile layer %s contains a non-regular file %s", item.dir, relative)
 			}
 			data, err := os.ReadFile(path)
 			if err != nil {
@@ -224,8 +247,12 @@ func materializeRunProfile(root, runID string, declaration Declaration, defaults
 			if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 				return err
 			}
-			// 0600 because the base layer may carry credentials.
-			if err := os.WriteFile(destination, data, 0o600); err != nil {
+			// Owner-only, and keep an execute bit the source already had.
+			mode := os.FileMode(0o600)
+			if info, err := entry.Info(); err == nil {
+				mode |= info.Mode().Perm() & 0o111
+			}
+			if err := os.WriteFile(destination, data, mode); err != nil {
 				return err
 			}
 			manifest[relative] = struct{}{}

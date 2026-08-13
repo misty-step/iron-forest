@@ -92,9 +92,13 @@ type defaultsYAML struct {
 }
 
 // defaultsPath locates the instance defaults: FOREST_DEFAULTS names the file
-// when set, and the checkout's forest.defaults.yaml is the fallback.
+// when set, and the checkout's forest.defaults.yaml is the fallback. A relative
+// override resolves against the checkout, so --root and the engine agree.
 func defaultsPath(root string) string {
 	if path := strings.TrimSpace(os.Getenv("FOREST_DEFAULTS")); path != "" {
+		if !filepath.IsAbs(path) {
+			return filepath.Join(root, path)
+		}
 		return path
 	}
 	return filepath.Join(root, "forest.defaults.yaml")
@@ -102,11 +106,16 @@ func defaultsPath(root string) string {
 
 // loadDefaults reads the instance defaults. The source is returned so the read
 // surface can state where a value came from. A relative profile directory
-// resolves against the checkout.
+// resolves against the checkout. An explicit FOREST_DEFAULTS that is missing
+// is an error: the operator named a file, so silence would hide a typo.
 func loadDefaults(root string) (Defaults, string, error) {
 	path := defaultsPath(root)
+	explicit := strings.TrimSpace(os.Getenv("FOREST_DEFAULTS")) != ""
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		if explicit {
+			return Defaults{}, "", fmt.Errorf("read %s: %w", path, err)
+		}
 		return Defaults{}, "", nil
 	}
 	if err != nil {
@@ -116,6 +125,11 @@ func loadDefaults(root string) (Defaults, string, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&document); err != nil {
+		// An empty or comment-only file is the same as an absent one: the
+		// operator created the slot and has not filled it yet.
+		if errors.Is(err, io.EOF) {
+			return Defaults{}, path, nil
+		}
 		return Defaults{}, "", fmt.Errorf("parse %s: %w", path, err)
 	}
 	var extra yaml.Node

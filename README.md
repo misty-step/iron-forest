@@ -39,12 +39,13 @@ agents/_shared/profile/         # optional; every declaration
 
 `agent.md` uses YAML frontmatter with optional `model`, `tools`, `thinking`, and
 `env`, followed by the system prompt. `task.md` is the standing user prompt.
-`model` resolves through three layers: the declaration, then
-`forest.defaults.yaml` (or `$FOREST_DEFAULTS`), then the built-in
-`openrouter/deepseek/deepseek-v4-flash-0731`. `forest declaration show`
-publishes the resolved model and its source. `env` values are literals or
-`mint:<alias>` references rewritten to `__mint.<alias>__`. The Kernel never
-prints an env value.
+`model` and `thinking` resolve through the declaration, then
+`forest.defaults.yaml` (or `$FOREST_DEFAULTS`), then — for `model` only — the
+built-in `openrouter/deepseek/deepseek-v4-flash-0731`. An empty or
+comment-only defaults file is the zero Defaults, not an error.
+`forest declaration show` publishes the resolved model and its source. `env`
+values are literals or `mint:<alias>` references rewritten to
+`__mint.<alias>__`. The Kernel never prints an env value, including in JSON.
 
 Each Run gets a private harness profile under `.forest/profiles/<run-id>`.
 The operator's base profile (from defaults) copies first and may hold

@@ -575,4 +575,15 @@ func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
 	if strings.Contains(human, "secret-value") {
 		t.Fatalf("human leaked an env value: %q", human)
 	}
+	_, envelope, _ := decodeEnvelope(t, "declaration", "show", "builder", "--json", "--root", root)
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret-value") {
+		t.Fatalf("JSON leaked an env value: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), `"env":["NOTE"]`) {
+		t.Fatalf("JSON=%s, want env keys only", encoded)
+	}
 }

@@ -52,7 +52,7 @@ func cleanupReservedProfiles(ctx context.Context, root string, runner *Runner) e
 		return fmt.Errorf("enumerate reserved profiles: %w", readErr)
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || !isReservedRunID(entry.Name()) {
+		if !isReservedRunID(entry.Name()) {
 			continue
 		}
 		if err := ctx.Err(); err != nil {

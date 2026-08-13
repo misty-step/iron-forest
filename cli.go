@@ -409,18 +409,13 @@ func runDeclarationShow(rest []string, flags cliFlags) cliOutcome {
 	// prompt text cannot pose as a declaration field. An unset field carries no
 	// trailing space. Declared environment prints its keys only: a value is the
 	// Run's business, not the reader's.
-	envKeys := make([]string, 0, len(declaration.Env))
-	for key := range declaration.Env {
-		envKeys = append(envKeys, key)
-	}
-	slices.Sort(envKeys)
 	human := strings.Join([]string{
 		"declaration " + oneLine(declaration.Name),
 		field("model", oneLine(declaration.Model)),
 		field("model_source", oneLine(declaration.ModelSource)),
 		field("tools", strings.Join(declaration.Tools, ",")),
 		field("thinking", oneLine(declaration.Thinking)),
-		field("env", strings.Join(envKeys, ",")),
+		field("env", strings.Join(declaration.EnvKeys, ",")),
 		field("profile", "\n"+indentBlock(strings.Join(declaration.ProfileFiles, "\n"))),
 		field("system_prompt", "\n"+indentBlock(declaration.SystemPrompt)),
 		field("task_prompt", "\n"+indentBlock(declaration.TaskPrompt)),

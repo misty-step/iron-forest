@@ -74,8 +74,10 @@ type Declaration struct {
 	ModelSource string `json:"model_source,omitempty"`
 	// Env carries declared environment for the Run. Values are literals, or a
 	// `mint:` reference already rewritten to its `__mint.<alias>__` marker. A
-	// declaration never carries a secret value.
-	Env map[string]string `json:"env,omitempty"`
+	// declaration never carries a secret value, and JSON never prints one.
+	Env map[string]string `json:"-"`
+	// EnvKeys lists declared environment names for the read surface.
+	EnvKeys []string `json:"env,omitempty"`
 	// ProfileFiles lists the files in this declaration's profile layer, so the
 	// read surface can show what the layer contributes without opening it.
 	ProfileFiles []string `json:"profile_files,omitempty"`
@@ -178,6 +180,7 @@ func loadDeclaration(root, name string) (Declaration, error) {
 		TaskPrompt:   string(taskData),
 		ModelSource:  modelSource,
 		Env:          env,
+		EnvKeys:      envKeys(env),
 		ProfileFiles: profileFiles,
 	}, nil
 }
@@ -233,6 +236,15 @@ func decodeDeclarationEnv(name string, node *yaml.Node) (map[string]string, erro
 		env[key] = value
 	}
 	return env, nil
+}
+
+func envKeys(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func splitFrontmatter(data []byte) ([]byte, string, error) {

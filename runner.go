@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -275,7 +274,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	if err != nil {
 		profileErr = fmt.Errorf("load instance defaults: %w", err)
 	} else {
-		profileDir, profileFiles, profileErr = materializeRunProfile(r.Root, runID, declaration, defaults)
+		profileDir, profileFiles, profileErr = materializeRunProfile(runCtx, r.Root, runID, declaration, defaults)
 	}
 	harnessRunnable := profileErr == nil
 	if profileErr != nil {
@@ -747,11 +746,6 @@ var runnerControlledEnvPrefixes = []string{"PATH=", "FOREST_RUN_ID=", "GIT_AUTHO
 // The line is JSON, so the harness output parser reads past it, and typed, so a
 // consumer can distinguish it from harness events.
 func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []string) string {
-	envKeys := make([]string, 0, len(declaration.Env))
-	for key := range declaration.Env {
-		envKeys = append(envKeys, key)
-	}
-	slices.Sort(envKeys)
 	line, err := json.Marshal(map[string]any{
 		"type":         "forest.run",
 		"run_id":       record.RunID,
@@ -759,7 +753,7 @@ func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []s
 		"model":        declaration.Model,
 		"model_source": declaration.ModelSource,
 		"profile":      profileFiles,
-		"env":          envKeys,
+		"env":          envKeys(declaration.Env),
 	})
 	if err != nil {
 		return fmt.Sprintf("{\"type\":\"forest.run\",\"run_id\":%q}", record.RunID)
