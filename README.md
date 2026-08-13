@@ -1,10 +1,10 @@
 # Iron Forest
 
 Iron Forest is a self-hosted software factory. It is a small deterministic
-Kernel plus an agent-owned profile, shipped as an appliance. The Kernel handles
-mechanics. The profile declares what agents think and do.
+Kernel plus agent-owned declarations, shipped as an appliance. The Kernel
+handles mechanics. Declarations state what agents think and do.
 
-The default profile has Builder, Verifier, and Fixer declarations. A Builder
+The shipped roster has Builder, Verifier, and Fixer declarations. A Builder
 turns a ready Tracker Issue into a branch. A Verifier checks and reviews the
 exact Revision. A Fixer repairs a rejected Revision and sends it back for
 review.
@@ -28,40 +28,40 @@ checks:
     run: mise exec -- go test ./...
 ```
 
-Declare each agent with two files, and optionally a profile layer:
+Declare each agent with two prompt files. Skills live only in the shared
+directory and, when a role needs private skills, its own directory:
 
 ```text
 agents/<name>/agent.md
 agents/<name>/task.md
-agents/<name>/profile/          # optional; this declaration only
-agents/_shared/profile/         # optional; every declaration
+agents/_shared/skills/          # every declaration
+agents/<name>/skills/           # optional; this declaration only
 ```
 
-`agent.md` uses YAML frontmatter with optional `model`, `tools`, `thinking`, and
-`env`, followed by the system prompt. `task.md` is the standing user prompt.
-`model` and `thinking` resolve through the declaration, then
-`forest.defaults.yaml` (or `$FOREST_DEFAULTS`), then — for `model` only — the
-built-in `openrouter/deepseek/deepseek-v4-flash-0731`. An empty or
-comment-only defaults file is the zero Defaults, not an error.
-`forest declaration show` publishes the resolved model and its source. `env`
-values are opaque string scalars. The Kernel never prints an env value,
-including in JSON.
-Each Run gets a private harness profile under `.forest/profiles/<run-id>`.
-The operator's base profile copies first and may hold credentials. When
-`forest.defaults.yaml` does not name one, the host Pi profile
-(`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) is that base. The Kernel refreshes
-OAuth for the selected model before it copies the base. It omits host session
-history. The shared repository layer copies next. The declaration's own layer
-copies last and wins even when a path changes between a file and directory.
-A repository layer may not contain `auth.json` or a symlink. One file is limited
-to 16 MiB. One composition is limited to 4,096 copied files, 64 MiB, and a
-512 KiB evidence manifest. The child sees the result through
-`PI_CODING_AGENT_DIR`. Bounded cleanup removes active and leftover profiles.
-The shipped profile keeps short, always-on engineering rules in each
-declaration's `profile/AGENTS.md`. Shared skills verify claims and debug
-failures. The Verifier adds deep correctness and code-quality review skills.
-Builder and Fixer add no private skills. The exact Git-note protocol stays in
-`agent.md`; it does not depend on on-demand skill loading.
+`agent.md` uses YAML frontmatter with optional `model`, `tools`, and `thinking`,
+followed by the system prompt. `task.md` is the standing user prompt. `model`
+and `thinking` resolve through the declaration, then `forest.defaults.yaml` (or
+`$FOREST_DEFAULTS`), then — for `model` only — the built-in
+`openrouter/deepseek/deepseek-v4-flash-0731`. An empty or comment-only defaults
+file is the zero Defaults, not an error. `forest declaration show` publishes
+the resolved model and its source.
+
+Every Run gives Pi a new writable, initially empty agent directory through
+`PI_CODING_AGENT_DIR`; no operator Pi state is inherited. Pi extension, skill,
+prompt-template, and theme discovery are disabled with `--no-extensions`,
+`--no-skills`, `--no-prompt-templates`, and `--no-themes`. The Runner passes
+each existing skill source directory with an explicit `--skill`. Those paths
+are repository-relative and Pi resolves them from the Run worktree.
+Declaration and Run evidence publish the directories as `skills`.
+
+Credentials come only from the service environment inherited by the Run.
+Declaration frontmatter has no `env` field; unknown metadata fails validation.
+Credentials do not belong in prompts, skills, defaults, or commits. The shared
+skills verify claims and debug failures. Verifier also receives the deep
+correctness and code-quality review skills under `agents/verifier/skills/`;
+Builder and Fixer receive only the shared skills. Each role's always-on
+engineering rules live directly in `agent.md`, alongside the exact Git-note
+protocol.
 
 This quick start uses self-host mode: the factory source checkout is also the
 managed repository. For a separate sibling managed checkout, use the
@@ -82,9 +82,8 @@ Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
 Before `serve` or `once` loads trigger health, the Scheduler performs reserved
 garbage collection under the Kernel lock. One 30-second deadline bounds the
 total operation. It removes reserved `.forest/worktrees/<run-id>` paths through
-Runner cleanup and prunes their registry entries. It removes reserved
-`.forest/profiles/<run-id>` paths through the same trusted remover. One
-`update-ref` transaction removes private Runner, Poll, and Audit refs. It removes only known stale
+Runner cleanup and prunes their registry entries. One `update-ref` transaction
+removes private Runner, Poll, and Audit refs. It removes only known stale
 `audit.json`, `audit.log`, and `triggers.json` temps. The Ledger owns Ledger
 temps. Run log retention owns Run logs. Any cleanup error blocks startup.
 Reserved garbage collection never resumes a Run.
@@ -109,10 +108,13 @@ audit with a separate 60-second bound. The systemd unit has a separate
 3900-second service drain bound. This bound covers the shipped declarations'
 concurrent Runs, bounded Runner cleanup, and serialized post-dispatch audits.
 The user service receives
-`PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`
-and `PI_CODING_AGENT_DIR=%h/.pi/agent`. It unsets `FOREST_DEFAULTS`. Before
-restart, the installer runs selfcheck with the equivalent `$HOME`-expanded
-environment.
+`PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`,
+loads operator-supplied credentials from
+`%h/.config/iron-forest/%i.env`, and unsets `FOREST_DEFAULTS`. It does not set
+`PI_CODING_AGENT_DIR`; the Runner owns that variable for each Run. Before
+restart, the installer stops the instance, removes timestamped legacy
+`.forest/profiles` residue, and runs selfcheck with the equivalent
+`$HOME`-expanded environment.
 
 Trusted transport captures keep at most 1 MiB while draining the complete
 output. Output beyond the cap returns an explicit error after the process group
@@ -122,8 +124,8 @@ is the only file content outside the 2 MiB output cap. The Runner retains the 32
 newest completed reserved `.log` files. It does not remove active logs or
 foreign entries.
 
-A trusted declaration runs with the operating-system user's configured
-credentials and filesystem access. Worktree separation and time bounds are
+A trusted declaration runs with the inherited service credentials and filesystem
+access. Worktree separation and time bounds are
 operational boundaries, not a security sandbox. Stronger credential and process
 containment belongs to the deployment substrate.
 
@@ -176,7 +178,7 @@ Checks, and an approving Verdict for the same exact Revision, plus a
 fast-forward of `master` to that Revision. The approve publication is one atomic
 push containing Checks, Verdict, and the exact `master` advance. The existing
 review-request is not republished. The merge never uses force. The Gate is a
-profile contract. Except for the trusted first `master` baseline, the Auditor
+role contract. Except for the trusted first `master` baseline, the Auditor
 checks its observable final state after the Effect; it does not enforce it. See [ADR
 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md) for the Gate and its
 accepted client-side risks.
@@ -241,13 +243,15 @@ Kernel.
 `--json` emits exactly one envelope on stdout, including on failure:
 
 ```json
-{"schema":"forest.cli.v1","command":"run show","args":["<run-id>"],"exit":0,"data":{},"error":null}
+{"schema":"forest.cli.v2","command":"run show","args":["<run-id>"],"exit":0,"data":{},"error":null}
 ```
 
 `command` names the verb only and selects the `data` shape; operands live in
 `args`. `data` is `null` when a command fails, and `error` is the reason. Keys
 are snake_case throughout, and an empty collection is `[]`, never `null`.
-Adding a key is compatible; renaming or removing one requires `forest.cli.v2`.
+Adding a key is compatible; renaming or removing one requires the next schema
+version. Version 2 replaces declaration `profile_files` with `skills` and
+removes declaration `env`.
 
 Each payload publishes what the command resolved. Three keys guard the rest and
 must be read first:

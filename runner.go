@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,6 +41,127 @@ var (
 		active map[string]struct{}
 	}{active: make(map[string]struct{})}
 )
+
+// trustedExecutable resolves a tool to a path outside the repository. Symlinks
+// are followed to decide trust, because the target is what actually runs, but the
+// caller's own path is returned to execute. A version-manager shim dispatches on
+// its own name, so running the resolved target would run the manager instead of
+// the tool.
+func trustedExecutable(root, name string) (string, error) {
+	path := name
+	if !strings.ContainsRune(path, os.PathSeparator) {
+		found, err := exec.LookPath(path)
+		if err != nil {
+			return "", err
+		}
+		path = found
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved := absolute
+	if value, err := filepath.EvalSymlinks(absolute); err == nil {
+		resolved = value
+	}
+	inside, err := pathInside(root, resolved)
+	if err != nil {
+		return "", err
+	}
+	if inside {
+		return "", fmt.Errorf("refuse repository executable %s", resolved)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("%s is not executable", resolved)
+	}
+	return absolute, nil
+}
+
+func trustedPath(root string) (string, error) {
+	entries := make([]string, 0)
+	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
+		if entry == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(entry)
+		if err != nil {
+			return "", err
+		}
+		// Resolve to decide trust, keep the caller's entry to hand to the child.
+		// A shim directory reached through a symlink must stay a shim directory,
+		// or the agent's own tools break the way the harness did.
+		resolved := absolute
+		if value, err := filepath.EvalSymlinks(absolute); err == nil {
+			resolved = value
+		}
+		inside, err := pathInside(root, resolved)
+		if err != nil {
+			return "", err
+		}
+		if !inside {
+			entries = append(entries, absolute)
+		}
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("PATH has no trusted directories")
+	}
+	return strings.Join(entries, string(os.PathListSeparator)), nil
+}
+
+func pathInside(root, path string) (bool, error) {
+	rootPath, err := filepath.Abs(root)
+	if err != nil {
+		return false, err
+	}
+	if value, err := filepath.EvalSymlinks(rootPath); err == nil {
+		rootPath = value
+	}
+	relative, err := filepath.Rel(rootPath, path)
+	if err != nil {
+		return false, err
+	}
+	return relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)), nil
+}
+
+var overriddenChildEnvNames = []string{
+	"PATH", "FOREST_RUN_ID", "PI_CODING_AGENT_DIR",
+	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+}
+
+func childEnvironment() []string {
+	environment := make([]string, 0, len(os.Environ()))
+	for _, value := range os.Environ() {
+		key, _, _ := strings.Cut(value, "=")
+		if !slices.Contains(overriddenChildEnvNames, key) {
+			environment = append(environment, value)
+		}
+	}
+	return environment
+}
+
+// runEnvironment composes the child's inherited service values, trusted PATH,
+// Run Git identity and marker, and fresh writable Pi directory.
+func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
+	path, err := trustedPath(root)
+	if err != nil {
+		return nil, err
+	}
+	environment := childEnvironment()
+	environment = append(environment,
+		"PATH="+path,
+		"GIT_AUTHOR_NAME="+name,
+		"GIT_AUTHOR_EMAIL="+email,
+		"GIT_COMMITTER_NAME="+name,
+		"GIT_COMMITTER_EMAIL="+email,
+		"FOREST_RUN_ID="+runID,
+		"PI_CODING_AGENT_DIR="+piDir,
+	)
+	return environment, nil
+}
 
 type boundedTransportOutput struct {
 	data     []byte
@@ -264,38 +386,47 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		return record, errors.Join(prepareErr, cleanupErr, finalizeErr, retentionErr, appendErr)
 	}
 
-	// The profile is materialized after the worktree exists, because its evidence
-	// belongs to a Run that really started. Refresh OAuth in the shared base first,
-	// so the private copy remains valid for the complete bounded Run.
-	profileErr := r.refreshProfileAuth(runCtx, declaration, timeoutSeconds)
-	var profileDir string
-	var profileFiles []string
-	if profileErr == nil {
-		profileDir, profileFiles, profileErr = materializeRunProfile(runCtx, r.Root, runID, declaration)
-	}
-	harnessRunnable := profileErr == nil
-	if profileErr != nil {
+	skillErr := validateDeclarationSkillPaths(worktree, declaration.Name, declaration.SkillPaths)
+	if skillErr != nil {
+		skillErr = fmt.Errorf("validate Run skills: %w", skillErr)
 		record.Exit = runContextExit(ctx, runCtx, 1)
-		_, _ = fmt.Fprintf(logFile, "materialize Run profile: %v\n", profileErr)
-	} else {
-		_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration, profileFiles))
+		_, _ = fmt.Fprintln(logFile, skillErr)
 	}
+
+	var piDir string
+	var piErr error
+	if skillErr == nil {
+		// Pi state is isolated in a fresh OS temporary directory. Credentials
+		// remain in the inherited service environment; no operator Pi files
+		// enter the Run.
+		piDir, piErr = os.MkdirTemp("", "iron-forest-pi-")
+		if piErr != nil {
+			piErr = fmt.Errorf("create Run Pi directory: %w", piErr)
+			record.Exit = runContextExit(ctx, runCtx, 1)
+			_, _ = fmt.Fprintln(logFile, piErr)
+		} else {
+			_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration))
+		}
+	}
+	harnessRunnable := skillErr == nil && piErr == nil
 	var invokeErr error
 	if harnessRunnable {
-		invokeErr = r.invoke(runCtx, worktree, declaration, profileDir, timeoutSeconds, logFile, &record)
+		invokeErr = r.invoke(runCtx, worktree, declaration, piDir, timeoutSeconds, logFile, &record)
+	}
+	var piCleanupErr error
+	if piDir != "" {
+		if removeErr := r.cleanupFilesystem(piDir); removeErr != nil {
+			piCleanupErr = fmt.Errorf("cleanup Run Pi directory: %w", removeErr)
+			_, _ = fmt.Fprintln(logFile, piCleanupErr)
+			if record.Exit == 0 {
+				record.Exit = 1
+			}
+		}
 	}
 	cleanupErr := r.cleanupWorktree(worktree, runID)
 	if cleanupErr != nil {
 		cleanupErr = fmt.Errorf("cleanup worktree: %w", cleanupErr)
 		_, _ = fmt.Fprintln(logFile, cleanupErr)
-		if record.Exit == 0 {
-			record.Exit = 1
-		}
-	}
-	if collectErr := r.cleanupProfile(runProfileDir(r.Root, runID)); collectErr != nil {
-		collectErr = fmt.Errorf("collect Run profile: %w", collectErr)
-		_, _ = fmt.Fprintln(logFile, collectErr)
-		cleanupErr = errors.Join(cleanupErr, collectErr)
 		if record.Exit == 0 {
 			record.Exit = 1
 		}
@@ -332,7 +463,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		}
 	}
 	appendErr := AppendRun(r.Root, record)
-	if err := errors.Join(profileErr, invokeErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
+	if err := errors.Join(skillErr, piErr, invokeErr, piCleanupErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
 		return record, err
 	}
 	if record.Exit != 0 {
@@ -378,7 +509,7 @@ func (r *Runner) cleanupWorktree(path, runID string) error {
 	return r.removeWorktree(ctx, path, runID)
 }
 
-func (r *Runner) cleanupProfile(path string) error {
+func (r *Runner) cleanupFilesystem(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupFilesystemExecutionTimeout)
 	defer cancel()
 	return r.removeFilesystem(ctx, path)
@@ -538,7 +669,7 @@ func soleExitCode(err error, code int) bool {
 	return leaves == 1 && matching == 1
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, profileDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
 		return err
@@ -548,15 +679,17 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		record.Exit = harnessUnavailableExit
 		return err
 	}
-	// ADR 0018 states this shape. The Runner owns the working directory and the
-	// deadline, so it does not restate either to the harness. Project-local
-	// harness configuration is trusted: the repository's own skills and
-	// extensions are the tools an agent is meant to use, exactly like the
-	// AGENTS.md the harness already loads.
+	// Pi receives a complete explicit resource contract. Global extensions,
+	// skills, prompt templates, and themes are disabled; each declared skill is
+	// resolved from the Run worktree.
 	args := []string{
 		"-p", "--mode", "json", "--no-session", "--approve",
+		"--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
 		"--model", declaration.Model,
 		"--system-prompt", declaration.SystemPrompt,
+	}
+	for _, skill := range declaration.SkillPaths {
+		args = append(args, "--skill", skill)
 	}
 	if len(declaration.Tools) > 0 {
 		args = append(args, "--tools", strings.Join(declaration.Tools, ","))
@@ -570,7 +703,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, profileDir, declaration)
+	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
 		return err
@@ -584,7 +717,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.Stderr = writer
 	if err := command.Start(); err != nil {
 		record.Exit = harnessUnavailableExit
-		return errors.Join(fmt.Errorf("start omp: %w", err), writer.Close(), reader.Close())
+		return errors.Join(fmt.Errorf("start pi: %w", err), writer.Close(), reader.Close())
 	}
 	writerCloseErr := writer.Close()
 	read := make(chan error, 1)
@@ -608,7 +741,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		record.Exit = contextExit(ctx.Err())
 		if record.Exit == 124 {
 			timedOut = true
-			runErr = fmt.Errorf("omp timed out after %ds", timeoutSeconds)
+			runErr = fmt.Errorf("pi timed out after %ds", timeoutSeconds)
 		} else {
 			runErr = ctx.Err()
 		}
@@ -622,7 +755,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		readerCloseErr = reader.Close()
 	}
 	if timedOut {
-		_, _ = fmt.Fprintln(logFile, "omp wall-clock timeout")
+		_, _ = fmt.Fprintln(logFile, "pi wall-clock timeout")
 	}
 	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr)
 	if err != nil && record.Exit == 0 {
@@ -739,67 +872,20 @@ func (r *Runner) piExecutable() (string, error) {
 	return trustedExecutable(r.Root, r.PiPath)
 }
 
-func (r *Runner) refreshProfileAuth(ctx context.Context, declaration Declaration, timeoutSeconds int) error {
-	provider, _, ok := strings.Cut(declaration.Model, "/")
-	if declaration.BaseProfile == "" || !ok {
-		return nil
+// runEvidenceLine describes the explicit resources and non-secret settings Pi
+// received. The line is typed JSON so consumers distinguish it from Pi events.
+func runEvidenceLine(record RunRecord, declaration Declaration) string {
+	skills := declaration.SkillPaths
+	if skills == nil {
+		skills = []string{}
 	}
-	authPath := filepath.Join(declaration.BaseProfile, "auth.json")
-	info, err := os.Stat(authPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect operator auth: %w", err)
-	}
-	if info.Size() > maxProfileFileBytes {
-		return fmt.Errorf("operator auth exceeds %d bytes", maxProfileFileBytes)
-	}
-	data, err := os.ReadFile(authPath)
-	if err != nil {
-		return fmt.Errorf("read operator auth: %w", err)
-	}
-	var credentials map[string]struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(data, &credentials); err != nil {
-		return fmt.Errorf("decode operator auth: %w", err)
-	}
-	if credentials[provider].Type != "oauth" {
-		return nil
-	}
-	executable, err := r.piExecutable()
-	if err != nil {
-		return err
-	}
-	path, err := trustedPath(r.Root)
-	if err != nil {
-		return err
-	}
-	environment := childEnvironment()
-	environment = append(environment, "PATH="+path, "PI_CODING_AGENT_DIR="+declaration.BaseProfile)
-	refresh := exec.Command(executable, "auth", "print-bearer-token", "--model", declaration.Model, "--min-expiry", fmt.Sprintf("%ds", timeoutSeconds+60))
-	refresh.Dir, refresh.Env = r.Root, environment
-	if _, err := processGroupOutput(ctx, refresh); err != nil {
-		return fmt.Errorf("extend operator OAuth lifetime: %w", err)
-	}
-	return nil
-}
-
-// runEvidenceLine is the Run's manifest: the model and its source, the profile
-// files the agent saw, and the declared environment's keys. Values never appear
-// because they are not the reader's business. The line is JSON, so the harness
-// output parser reads past it, and typed, so a consumer can distinguish it from
-// harness events.
-func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []string) string {
 	line, _ := json.Marshal(map[string]any{
 		"type":         "forest.run",
 		"run_id":       record.RunID,
 		"agent":        declaration.Name,
 		"model":        declaration.Model,
 		"model_source": declaration.ModelSource,
-		"profile":      profileFiles,
-		"env":          envKeys(declaration.Env),
+		"skills":       skills,
 	})
 	return string(line)
 }

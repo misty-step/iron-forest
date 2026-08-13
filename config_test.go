@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -147,6 +149,7 @@ func TestDeclarationYAMLValidation(t *testing.T) {
 		want  string
 	}{
 		{name: "unknown key", agent: "---\nmodel: local/model\nmodle: other/model\n---\nSystem rules\n", task: "Select one item.", want: "field modle not found"},
+		{name: "declaration environment", agent: "---\nmodel: local/model\nenv:\n  OPENROUTER_API_KEY: committed-secret\n---\nSystem rules\n", task: "Select one item.", want: "field env not found"},
 		{name: "empty task", agent: validAgent, task: " \n\t", want: "task.md is empty"},
 		{name: "missing system prompt", agent: "---\nmodel: local/model\n---", task: "Select one item.", want: "system prompt is empty"},
 		{name: "empty system prompt", agent: "---\nmodel: local/model\n---\n", task: "Select one item.", want: "system prompt is empty"},
@@ -229,5 +232,147 @@ func TestConfigRejectsDurationOverflow(t *testing.T) {
 	cfg.Agents["builder"] = AgentConfig{Poll: "poll", Interval: 1, Timeout: overflow}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
 		t.Fatalf("timeout overflow error=%v", err)
+	}
+}
+func writeAgentFiles(t *testing.T, root, name, frontmatter, body, task string) {
+	t.Helper()
+	dir := filepath.Join(root, "agents", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent.md"), []byte("---\n"+frontmatter+"---\n"+body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.md"), []byte(task), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelChainResolvesDeclarationThenDefaultsThenBuiltIn(t *testing.T) {
+	root := t.TempDir()
+	writeAgentFiles(t, root, "builder", "thinking: low\n", "System rules\n", "Select one item.")
+	declaration, err := loadDeclarationWithDefaults(root, "builder", Defaults{Model: "default/model", Thinking: "high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if declaration.Model != "default/model" || declaration.ModelSource != "defaults" || declaration.Thinking != "low" {
+		t.Fatalf("declaration=%#v", declaration)
+	}
+
+	writeAgentFiles(t, root, "builder", "model: declared/model\n", "System rules\n", "Select one item.")
+	declaration, err = loadDeclarationWithDefaults(root, "builder", Defaults{Model: "default/model", Thinking: "high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if declaration.Model != "declared/model" || declaration.ModelSource != "declaration" || declaration.Thinking != "high" {
+		t.Fatalf("declaration=%#v", declaration)
+	}
+
+	writeAgentFiles(t, root, "builder", "", "System rules\n", "Select one item.")
+	declaration, err = loadDeclarationWithDefaults(root, "builder", Defaults{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if declaration.Model != defaultModel || declaration.ModelSource != "built-in" {
+		t.Fatalf("declaration=%#v", declaration)
+	}
+}
+
+func TestDefaultsFileIsOptionalAndFOREST_DEFAULTSWins(t *testing.T) {
+	root := t.TempDir()
+	defaults, source, err := loadDefaults(root)
+	if err != nil || defaults != (Defaults{}) || source != "" {
+		t.Fatalf("optional defaults=%#v source=%q err=%v", defaults, source, err)
+	}
+	override := filepath.Join(t.TempDir(), "host.yaml")
+	if err := os.WriteFile(override, []byte("model: host/model\nthinking: high\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREST_DEFAULTS", override)
+	defaults, source, err = loadDefaults(root)
+	if err != nil || defaults.Model != "host/model" || defaults.Thinking != "high" || source != override {
+		t.Fatalf("override defaults=%#v source=%q err=%v", defaults, source, err)
+	}
+	t.Setenv("FOREST_DEFAULTS", "missing.yaml")
+	if _, _, err := loadDefaults(root); err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing explicit defaults err=%v, want not exist", err)
+	}
+}
+
+func TestDeclarationDiscoversConventionalSkillDirectoriesAndRejectsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	writeAgentFiles(t, root, "builder", "model: local\n", "System rules\n", "Select one item.")
+	declaration, err := loadDeclaration(root, "builder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(declaration.SkillPaths) != 0 {
+		t.Fatalf("skills without directories=%v", declaration.SkillPaths)
+	}
+
+	shared := filepath.Join(root, "agents", "_shared", "skills")
+	role := filepath.Join(root, "agents", "builder", "skills")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, role); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "agents", "other", "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "must be a real directory") {
+		t.Fatalf("symlinked skill path err=%v, want real-directory rejection", err)
+	}
+
+	if err := os.Remove(role); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(role, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nestedLink := filepath.Join(shared, "outside")
+	if err := os.Symlink(outside, nestedLink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "contains symlink agents/_shared/skills/outside") {
+		t.Fatalf("nested skill symlink err=%v, want rejection", err)
+	}
+	if err := os.Remove(nestedLink); err != nil {
+		t.Fatal(err)
+	}
+	declaration, err = loadDeclaration(root, "builder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"agents/_shared/skills", "agents/builder/skills"}
+	if !reflect.DeepEqual(declaration.SkillPaths, want) {
+		t.Fatalf("skills=%v, want %v", declaration.SkillPaths, want)
+	}
+}
+
+func TestRunEvidencePublishesSkillsWithoutProfiles(t *testing.T) {
+	line := runEvidenceLine(
+		RunRecord{RunID: "1-builder"},
+		Declaration{
+			Name:        "builder",
+			Model:       "local",
+			ModelSource: "declaration",
+			SkillPaths:  []string{"agents/_shared/skills", "agents/builder/skills"},
+		},
+	)
+	var evidence map[string]any
+	if err := json.Unmarshal([]byte(line), &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(line, "profile") {
+		t.Fatalf("evidence leaked obsolete profile data: %s", line)
+	}
+	if got := evidence["skills"]; !reflect.DeepEqual(got, []any{"agents/_shared/skills", "agents/builder/skills"}) {
+		t.Fatalf("skills=%v", got)
+	}
+	if _, exists := evidence["env"]; exists {
+		t.Fatalf("evidence retained declaration env: %v", evidence)
 	}
 }

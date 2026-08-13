@@ -228,7 +228,7 @@ func render(command string, args []string, flags cliFlags, outcome cliOutcome) i
 			errText = &outcome.ErrText
 		}
 		envelope := cliEnvelope{
-			Schema:  "forest.cli.v1",
+			Schema:  "forest.cli.v2",
 			Command: command,
 			Args:    args,
 			Exit:    outcome.Exit,
@@ -411,16 +411,14 @@ func runDeclarationShow(rest []string, flags cliFlags) cliOutcome {
 	}
 	// Field labels sit at column zero and prompt bodies are indented, so audited
 	// prompt text cannot pose as a declaration field. An unset field carries no
-	// trailing space. Declared environment prints its keys only: a value is the
-	// Run's business, not the reader's.
+	// trailing space.
 	human := strings.Join([]string{
 		"declaration " + oneLine(declaration.Name),
 		field("model", oneLine(declaration.Model)),
 		field("model_source", oneLine(declaration.ModelSource)),
 		field("tools", strings.Join(declaration.Tools, ",")),
 		field("thinking", oneLine(declaration.Thinking)),
-		field("env", strings.Join(declaration.EnvKeys, ",")),
-		field("profile", "\n"+indentBlock(strings.Join(declaration.ProfileFiles, "\n"))),
+		field("skills", "\n"+indentBlock(strings.Join(declaration.SkillPaths, "\n"))),
 		field("system_prompt", "\n"+indentBlock(declaration.SystemPrompt)),
 		field("task_prompt", "\n"+indentBlock(declaration.TaskPrompt)),
 	}, "\n")

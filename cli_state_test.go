@@ -545,48 +545,39 @@ func TestCLIDeclarationShowIndentsPromptBodies(t *testing.T) {
 	}
 }
 
-// declaration show publishes the resolved model source, env keys, and profile
-// files. Env values stay out of the human surface.
+// Declaration show publishes the resolved model source and explicit skill
+// directories.
 func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	dir := filepath.Join(root, "agents", "builder")
-	if err := os.MkdirAll(filepath.Join(dir, "profile", "skills"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "agent.md"), []byte("---\nmodel: local\nenv:\n  NOTE: secret-value\n---\nsystem\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "agent.md"), []byte("---\nmodel: local\n---\nsystem\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "task.md"), []byte("task\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "profile", "skills", "builder.md"), []byte("skill\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "skills", "builder.md"), []byte("skill\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	_, human, _ := captureCLIOutput(t, func() int {
 		return runSurfaceCommand([]string{"declaration", "show", "builder", "--root", root})
 	})
-	for _, want := range []string{"model_source: declaration", "skills/builder.md"} {
+	for _, want := range []string{"model_source: declaration", "skills:\n  agents/builder/skills"} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human=%q, want %q", human, want)
 		}
-	}
-	if !strings.Contains("\n"+human+"\n", "\nenv: NOTE\n") {
-		t.Fatalf("human=%q, want exact env key line", human)
-	}
-	if strings.Contains(human, "secret-value") {
-		t.Fatalf("human leaked an env value: %q", human)
 	}
 	_, envelope, _ := decodeEnvelope(t, "declaration", "show", "builder", "--json", "--root", root)
 	encoded, err := json.Marshal(envelope.Data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "secret-value") {
-		t.Fatalf("JSON leaked an env value: %s", encoded)
-	}
-	if !strings.Contains(string(encoded), `"env":["NOTE"]`) {
-		t.Fatalf("JSON=%s, want env keys only", encoded)
+	if !strings.Contains(string(encoded), `"skills":["agents/builder/skills"]`) {
+		t.Fatalf("JSON=%s, want explicit skill directory", encoded)
 	}
 }
