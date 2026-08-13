@@ -669,6 +669,131 @@ func soleExitCode(err error, code int) bool {
 	return leaves == 1 && matching == 1
 }
 
+const agentOutcomePatternLimit = 32
+
+var (
+	agentEndPattern          = []byte(`"type":"agent_end"`)
+	agentAssistantPattern    = []byte(`"role":"assistant"`)
+	agentErrorPattern        = []byte(`"stopReason":"error"`)
+	agentErrorMessagePattern = []byte(`"errorMessage":"`)
+)
+
+type streamPattern struct {
+	pattern []byte
+	prefix  [agentOutcomePatternLimit]int
+	matched int
+}
+
+func (m *streamPattern) init(pattern []byte) {
+	m.pattern = pattern
+	for index := 1; index < len(pattern); index++ {
+		fallback := m.prefix[index-1]
+		for fallback > 0 && pattern[index] != pattern[fallback] {
+			fallback = m.prefix[fallback-1]
+		}
+		if pattern[index] == pattern[fallback] {
+			fallback++
+		}
+		m.prefix[index] = fallback
+	}
+}
+
+func (m *streamPattern) advance(value byte) bool {
+	for m.matched > 0 && value != m.pattern[m.matched] {
+		m.matched = m.prefix[m.matched-1]
+	}
+	if value == m.pattern[m.matched] {
+		m.matched++
+	}
+	if m.matched != len(m.pattern) {
+		return false
+	}
+	m.matched = m.prefix[m.matched-1]
+	return true
+}
+
+// agentOutcomeTracker observes the unbounded Pi stream while the Run log keeps
+// only its bounded head and tail. Structural JSON strings remain unescaped in
+// events and escaped inside message content, so the tracker can identify the
+// latest assistant outcome without retaining an arbitrarily large agent_end.
+type agentOutcomeTracker struct {
+	agentEnd             streamPattern
+	agentAssistant       streamPattern
+	agentError           streamPattern
+	agentErrorMessage    streamPattern
+	lineActive           bool
+	sawAgentEnd          bool
+	sawAssistant         bool
+	awaitingErrorMessage bool
+	assistantError       bool
+	failed               bool
+}
+
+func newAgentOutcomeTracker() *agentOutcomeTracker {
+	tracker := &agentOutcomeTracker{}
+	tracker.agentEnd.init(agentEndPattern)
+	tracker.agentAssistant.init(agentAssistantPattern)
+	tracker.agentError.init(agentErrorPattern)
+	tracker.agentErrorMessage.init(agentErrorMessagePattern)
+	return tracker
+}
+
+func (t *agentOutcomeTracker) Write(data []byte) (int, error) {
+	for _, value := range data {
+		if value == '\n' {
+			t.finishLine()
+			continue
+		}
+		if t.awaitingErrorMessage {
+			if value != '"' {
+				t.assistantError = true
+			}
+			t.awaitingErrorMessage = false
+		}
+		t.lineActive = true
+		if t.agentEnd.advance(value) {
+			t.sawAgentEnd = true
+		}
+		if t.agentAssistant.advance(value) {
+			t.sawAssistant = true
+			t.awaitingErrorMessage = false
+			t.assistantError = false
+		}
+		if t.agentError.advance(value) && t.sawAssistant {
+			t.assistantError = true
+		}
+		if t.agentErrorMessage.advance(value) && t.sawAssistant {
+			t.awaitingErrorMessage = true
+		}
+	}
+	return len(data), nil
+}
+
+func (t *agentOutcomeTracker) finishLine() {
+	if t.sawAgentEnd && t.sawAssistant {
+		t.failed = t.assistantError
+	}
+	t.agentEnd.matched = 0
+	t.agentAssistant.matched = 0
+	t.agentError.matched = 0
+	t.agentErrorMessage.matched = 0
+	t.lineActive = false
+	t.sawAgentEnd = false
+	t.sawAssistant = false
+	t.awaitingErrorMessage = false
+	t.assistantError = false
+}
+
+func (t *agentOutcomeTracker) Err() error {
+	if t.lineActive {
+		t.finishLine()
+	}
+	if t.failed {
+		return errors.New("pi agent ended with error")
+	}
+	return nil
+}
+
 func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
@@ -720,9 +845,10 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		return errors.Join(fmt.Errorf("start pi: %w", err), writer.Close(), reader.Close())
 	}
 	writerCloseErr := writer.Close()
+	outcome := newAgentOutcomeTracker()
 	read := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(logFile, reader)
+		_, err := io.Copy(io.MultiWriter(logFile, outcome), reader)
 		read <- err
 	}()
 	wait := make(chan error, 1)
@@ -757,7 +883,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	if timedOut {
 		_, _ = fmt.Fprintln(logFile, "pi wall-clock timeout")
 	}
-	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr)
+	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, outcome.Err())
 	if err != nil && record.Exit == 0 {
 		record.Exit = 1
 	}
