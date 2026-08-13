@@ -465,11 +465,12 @@ if [ "${1-}" = auth ]; then
 	test "$2" = print-bearer-token
 	test -z "${FOREST_RUN_ID+x}${GIT_AUTHOR_NAME+x}"
 	test "$6" = 70s
+	printf '%s' '{"openai-codex":{"type":"oauth","access":"refreshed"}}' > "$PI_CODING_AGENT_DIR/auth.json"
 	printf refreshed > "$MARKER"
 	printf token
 	exit 0
 fi
-test -f "$PI_CODING_AGENT_DIR/auth.json"
+test "$(cat "$PI_CODING_AGENT_DIR/auth.json")" = '{"openai-codex":{"type":"oauth","access":"refreshed"}}'
 printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":1}}}'
 `
 	pi := filepath.Join(state, "pi")
