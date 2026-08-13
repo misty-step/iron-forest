@@ -28,17 +28,30 @@ checks:
     run: mise exec -- go test ./...
 ```
 
-Declare each agent with two files:
+Declare each agent with two files, and optionally a profile layer:
 
 ```text
 agents/<name>/agent.md
 agents/<name>/task.md
+agents/<name>/profile/          # optional; this declaration only
+agents/_shared/profile/         # optional; every declaration
 ```
 
-`agent.md` uses YAML frontmatter with required `model` and optional `tools` and
-`thinking`, followed by the system prompt. `task.md` is the standing user
-prompt. `model`, `tools`, and `thinking` belong to the declaration. Provider
-routing is host-managed, not repository configuration.
+`agent.md` uses YAML frontmatter with optional `model`, `tools`, `thinking`, and
+`env`, followed by the system prompt. `task.md` is the standing user prompt.
+`model` resolves through three layers: the declaration, then
+`forest.defaults.yaml` (or `$FOREST_DEFAULTS`), then the built-in
+`openrouter/deepseek/deepseek-v4-flash-0731`. `forest declaration show`
+publishes the resolved model and its source. `env` values are literals or
+`mint:<alias>` references rewritten to `__mint.<alias>__`. The Kernel never
+prints an env value.
+
+Each Run gets a private harness profile under `.forest/profiles/<run-id>`.
+The operator's base profile (from defaults) copies first and may hold
+credentials. The shared repository layer copies next. The declaration's own
+layer copies last and wins on a name collision. A repository layer may not
+contain `auth.json` or a symlink. The child sees the result through
+`PI_CODING_AGENT_DIR`. Reserved startup GC removes leftover profiles.
 
 This quick start uses self-host mode: the factory source checkout is also the
 managed repository. For a separate sibling managed checkout, use the
@@ -59,8 +72,9 @@ Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
 Before `serve` or `once` loads trigger health, the Scheduler performs reserved
 garbage collection under the Kernel lock. One 30-second deadline bounds the
 total operation. It removes reserved `.forest/worktrees/<run-id>` paths through
-Runner cleanup and prunes their registry entries. One `update-ref` transaction
-removes private Runner, Poll, and Audit refs. It removes only known stale
+Runner cleanup and prunes their registry entries. It removes reserved
+`.forest/profiles/<run-id>` paths through the same trusted remover. One
+`update-ref` transaction removes private Runner, Poll, and Audit refs. It removes only known stale
 `audit.json`, `audit.log`, and `triggers.json` temps. The Ledger owns Ledger
 temps. Run log retention owns Run logs. Any cleanup error blocks startup.
 Reserved garbage collection never resumes a Run.

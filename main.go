@@ -335,6 +335,11 @@ type selfcheckPayload struct {
 	Repo         string     `json:"repo"`
 	Declarations []string   `json:"declarations"`
 	Tools        []toolPath `json:"tools"`
+	// Defaults reports the instance layer the declarations resolve against, and
+	// DefaultsSource names its file, so a host that supplies no defaults is
+	// visibly different from one that supplies empty ones.
+	Defaults       Defaults `json:"defaults"`
+	DefaultsSource string   `json:"defaults_source,omitempty"`
 }
 
 // runSelfcheck validates the configuration, the declarations, and the trusted
@@ -342,6 +347,10 @@ type selfcheckPayload struct {
 // resolved, which is the fact the check establishes.
 func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	cfg, err := loadConfig(configPath(flags.root))
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	defaults, defaultsSource, err := loadDefaults(flags.root)
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
@@ -368,11 +377,21 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		}
 		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
+	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
+		oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
+	if defaultsSource != "" {
+		human += fmt.Sprintf("\ndefaults: %s (model=%s)", oneLine(defaultsSource), oneLine(defaults.Model))
+	}
 	return cliOutcome{
 		Exit: exitOK,
-		Data: selfcheckPayload{Repo: cfg.Repo, Declarations: names, Tools: resolved},
-		Human: fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
-			oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " ")),
+		Data: selfcheckPayload{
+			Repo:           cfg.Repo,
+			Declarations:   names,
+			Tools:          resolved,
+			Defaults:       defaults,
+			DefaultsSource: defaultsSource,
+		},
+		Human: human,
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -264,11 +265,41 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		return record, errors.Join(prepareErr, cleanupErr, finalizeErr, retentionErr, appendErr)
 	}
 
-	invokeErr := r.invoke(runCtx, worktree, declaration, timeoutSeconds, logFile, &record)
+	// The profile is materialized after the worktree exists, because its evidence
+	// belongs to a Run that really started. A failure here means the harness never
+	// ran, which the usage parser must know.
+	defaults, _, err := loadDefaults(r.Root)
+	var profileDir string
+	var profileFiles []string
+	var profileErr error
+	if err != nil {
+		profileErr = fmt.Errorf("load instance defaults: %w", err)
+	} else {
+		profileDir, profileFiles, profileErr = materializeRunProfile(r.Root, runID, declaration, defaults)
+	}
+	harnessRunnable := profileErr == nil
+	if profileErr != nil {
+		record.Exit = 1
+		_, _ = fmt.Fprintf(logFile, "materialize Run profile: %v\n", profileErr)
+	} else {
+		_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration, profileFiles))
+	}
+	var invokeErr error
+	if harnessRunnable {
+		invokeErr = r.invoke(runCtx, worktree, declaration, profileDir, timeoutSeconds, logFile, &record)
+	}
 	cleanupErr := r.cleanupWorktree(worktree, runID)
 	if cleanupErr != nil {
 		cleanupErr = fmt.Errorf("cleanup worktree: %w", cleanupErr)
 		_, _ = fmt.Fprintln(logFile, cleanupErr)
+		if record.Exit == 0 {
+			record.Exit = 1
+		}
+	}
+	if profileErr := collectRunProfile(r.Root, runID); profileErr != nil {
+		profileErr = fmt.Errorf("collect Run profile: %w", profileErr)
+		_, _ = fmt.Fprintln(logFile, profileErr)
+		cleanupErr = errors.Join(cleanupErr, profileErr)
 		if record.Exit == 0 {
 			record.Exit = 1
 		}
@@ -284,7 +315,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	// Usage exists only if the harness ran. Demanding it after a failure to start
 	// would report "no usage" as the cause and bury the real one.
 	var usageErr error
-	if invokeErr == nil || record.Exit != harnessUnavailableExit {
+	if harnessRunnable && (invokeErr == nil || record.Exit != harnessUnavailableExit) {
 		usage, parseErr := parseAgentUsage(logPath)
 		if parseErr != nil {
 			usageErr = fmt.Errorf("parse harness usage: %w", parseErr)
@@ -305,7 +336,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		}
 	}
 	appendErr := AppendRun(r.Root, record)
-	if err := errors.Join(invokeErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
+	if err := errors.Join(profileErr, invokeErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
 		return record, err
 	}
 	if record.Exit != 0 {
@@ -505,7 +536,7 @@ func soleExitCode(err error, code int) bool {
 	return leaves == 1 && matching == 1
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, profileDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
 		return err
@@ -537,7 +568,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runnerEnvironment(r.Root, name, email, record.RunID)
+	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, profileDir, declaration)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
 		return err
@@ -706,118 +737,34 @@ func (r *Runner) piExecutable() (string, error) {
 	return trustedExecutable(r.Root, r.PiPath)
 }
 
-// trustedExecutable resolves a tool to a path outside the repository. Symlinks
-// are followed to decide trust, because the target is what actually runs, but the
-// caller's own path is returned to execute. A version-manager shim dispatches on
-// its own name, so running the resolved target would run the manager instead of
-// the tool.
-func trustedExecutable(root, name string) (string, error) {
-	path := name
-	if !strings.ContainsRune(path, os.PathSeparator) {
-		found, err := exec.LookPath(path)
-		if err != nil {
-			return "", err
-		}
-		path = found
-	}
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	resolved := absolute
-	if value, err := filepath.EvalSymlinks(absolute); err == nil {
-		resolved = value
-	}
-	inside, err := pathInside(root, resolved)
-	if err != nil {
-		return "", err
-	}
-	if inside {
-		return "", fmt.Errorf("refuse repository executable %s", resolved)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("%s is not executable", resolved)
-	}
-	return absolute, nil
-}
+// runnerControlledEnvPrefixes are the environment variables the Kernel owns.
+// Anything inherited with one of these prefixes is replaced, never merged.
+var runnerControlledEnvPrefixes = []string{"PATH=", "FOREST_RUN_ID=", "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL="}
 
-func runnerEnvironment(root, name, email, runID string) ([]string, error) {
-	path, err := trustedPath(root)
+// runEvidenceLine is the Run's manifest: the model and its source, the profile
+// files the agent saw, and the declared environment's keys. Values never appear,
+// because a mint marker or a literal is not the reader's business; the shape is.
+// The line is JSON, so the harness output parser reads past it, and typed, so a
+// consumer can distinguish it from harness events.
+func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []string) string {
+	envKeys := make([]string, 0, len(declaration.Env))
+	for key := range declaration.Env {
+		envKeys = append(envKeys, key)
+	}
+	slices.Sort(envKeys)
+	line, err := json.Marshal(map[string]any{
+		"type":         "forest.run",
+		"run_id":       record.RunID,
+		"agent":        declaration.Name,
+		"model":        declaration.Model,
+		"model_source": declaration.ModelSource,
+		"profile":      profileFiles,
+		"env":          envKeys,
+	})
 	if err != nil {
-		return nil, err
+		return fmt.Sprintf("{\"type\":\"forest.run\",\"run_id\":%q}", record.RunID)
 	}
-	blocked := []string{"PATH=", "FOREST_RUN_ID=", "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL="}
-	environment := make([]string, 0, len(os.Environ())+6)
-	for _, value := range os.Environ() {
-		keep := true
-		for _, prefix := range blocked {
-			if strings.HasPrefix(value, prefix) {
-				keep = false
-				break
-			}
-		}
-		if keep {
-			environment = append(environment, value)
-		}
-	}
-	return append(environment,
-		"PATH="+path,
-		"GIT_AUTHOR_NAME="+name,
-		"GIT_AUTHOR_EMAIL="+email,
-		"GIT_COMMITTER_NAME="+name,
-		"GIT_COMMITTER_EMAIL="+email,
-		"FOREST_RUN_ID="+runID,
-	), nil
-}
-
-func trustedPath(root string) (string, error) {
-	entries := make([]string, 0)
-	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
-		if entry == "" {
-			continue
-		}
-		absolute, err := filepath.Abs(entry)
-		if err != nil {
-			return "", err
-		}
-		// Resolve to decide trust, keep the caller's entry to hand to the child.
-		// A shim directory reached through a symlink must stay a shim directory,
-		// or the agent's own tools break the way the harness did.
-		resolved := absolute
-		if value, err := filepath.EvalSymlinks(absolute); err == nil {
-			resolved = value
-		}
-		inside, err := pathInside(root, resolved)
-		if err != nil {
-			return "", err
-		}
-		if !inside {
-			entries = append(entries, absolute)
-		}
-	}
-	if len(entries) == 0 {
-		return "", fmt.Errorf("PATH has no trusted directories")
-	}
-	return strings.Join(entries, string(os.PathListSeparator)), nil
-}
-
-func pathInside(root, path string) (bool, error) {
-	rootPath, err := filepath.Abs(root)
-	if err != nil {
-		return false, err
-	}
-	if value, err := filepath.EvalSymlinks(rootPath); err == nil {
-		rootPath = value
-	}
-	relative, err := filepath.Rel(rootPath, path)
-	if err != nil {
-		return false, err
-	}
-	return relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)), nil
+	return string(line)
 }
 
 func processExit(err error) int {

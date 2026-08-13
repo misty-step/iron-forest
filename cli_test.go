@@ -365,6 +365,24 @@ func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 			t.Fatalf("tool %s path=%q, want %s", tool.Name, tool.Path, filepath.Join(bin, tool.Name))
 		}
 	}
+	if payload.DefaultsSource != "" || payload.Defaults.Model != "" {
+		t.Fatalf("absent defaults leaked into selfcheck: %#v", payload)
+	}
+	defaultsPath := filepath.Join(root, "forest.defaults.yaml")
+	if err := os.WriteFile(defaultsPath, []byte("model: host/model\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, envelope, _ = decodeEnvelope(t, "selfcheck", "--json", "--root", root)
+	encoded, err = json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.DefaultsSource != defaultsPath || payload.Defaults.Model != "host/model" {
+		t.Fatalf("selfcheck defaults=%#v source=%q", payload.Defaults, payload.DefaultsSource)
+	}
 }
 
 // Reading a directory that holds no configuration must be an error. Reporting

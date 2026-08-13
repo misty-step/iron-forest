@@ -90,10 +90,12 @@ agents/
     task.md
 ```
 
-`agent.md` starts with YAML frontmatter containing `model` and optional `tools`
-and `thinking`, then the system prompt. `task.md` is the standing user prompt.
-`model`, `tools`, and `thinking` belong to each declaration. The Kernel parses
-this format directly. Keep Git note and merge instructions in the prompts.
+`agent.md` starts with YAML frontmatter containing optional `model`, `tools`,
+`thinking`, and `env`, then the system prompt. `task.md` is the standing user
+prompt. `model` falls through instance defaults and then a built-in last layer.
+Each declaration may ship `agents/<name>/profile/`; every declaration shares
+`agents/_shared/profile/`. A repository layer must not contain credentials.
+The Kernel parses this format directly. Keep Git note and merge instructions in the prompts.
 Agents use native `git`; no coordination wrapper is required.
 
 ## 4. Build and validate

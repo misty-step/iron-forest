@@ -544,3 +544,35 @@ func TestCLIDeclarationShowIndentsPromptBodies(t *testing.T) {
 		}
 	}
 }
+
+// declaration show publishes the resolved model source, env keys, and profile
+// files. Env values stay out of the human surface.
+func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	dir := filepath.Join(root, "agents", "builder")
+	if err := os.MkdirAll(filepath.Join(dir, "profile", "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agent.md"), []byte("---\nmodel: local\nenv:\n  NOTE: secret-value\n---\nsystem\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.md"), []byte("task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "profile", "skills", "builder.md"), []byte("skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, human, _ := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"declaration", "show", "builder", "--root", root})
+	})
+	for _, want := range []string{"model_source: declaration", "env: NOTE", "skills/builder.md"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human=%q, want %q", human, want)
+		}
+	}
+	if strings.Contains(human, "secret-value") {
+		t.Fatalf("human leaked an env value: %q", human)
+	}
+}

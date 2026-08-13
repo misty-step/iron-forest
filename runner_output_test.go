@@ -95,7 +95,8 @@ cat "$FIRST_OUTPUT" "$MIDDLE_OUTPUT" "$TAIL_OUTPUT"
 	}
 	runner := NewRunner(root)
 	runner.PiPath = omp
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	declaration := Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}
+	record, err := runner.Run(context.Background(), declaration, 10)
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("noisy Run record=%#v err=%v", record, err)
 	}
@@ -109,7 +110,15 @@ cat "$FIRST_OUTPUT" "$MIDDLE_OUTPUT" "$TAIL_OUTPUT"
 	if len(log) != 2*half+len(marker) {
 		t.Fatalf("bounded Run log=%d bytes, want %d", len(log), 2*half+len(marker))
 	}
-	if !bytes.Equal(log[:half], first) || string(log[half:half+len(marker)]) != marker || !bytes.Equal(log[half+len(marker):], tail) {
+	// The evidence line is the first bytes of the log, so the first retained
+	// half starts with that line and the start of the harness output. The last
+	// half is still the exact last 1 MiB of harness output, which is where
+	// usage lives.
+	prefix, rest, ok := bytes.Cut(log[:half], []byte("\n"))
+	if !ok || !bytes.Contains(prefix, []byte(`"type":"forest.run"`)) {
+		t.Fatalf("first half missing forest.run evidence: %q", prefix)
+	}
+	if !bytes.Equal(rest, first[:len(rest)]) || string(log[half:half+len(marker)]) != marker || !bytes.Equal(log[half+len(marker):], tail) {
 		t.Fatal("bounded Run log did not retain the exact first half, marker, and last half")
 	}
 	assertProcessQuiescent(t, heartbeat, "noisy harness descendant", "leader completion")

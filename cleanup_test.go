@@ -43,6 +43,17 @@ func TestReservedGarbageCollectionRemovesRealResidue(t *testing.T) {
 	if err := os.WriteFile(runLog, []byte("preserve run evidence\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	profileDir := forestPath(root, "profiles", runID)
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profileDir, "auth.json"), []byte(`{"token":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	foreignProfile := forestPath(root, "profiles", "manual-keep")
+	if err := os.MkdirAll(foreignProfile, 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -80,6 +91,12 @@ exec "$CLEANUP_REAL_GIT" "$@"
 	registry := string(runGitDir(t, root, "worktree", "list", "--porcelain"))
 	if strings.Contains(registry, worktree) {
 		t.Fatalf("reserved worktree registry survived:\n%s", registry)
+	}
+	if _, err := os.Stat(profileDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reserved profile survived: %v", err)
+	}
+	if _, err := os.Stat(foreignProfile); err != nil {
+		t.Fatalf("foreign profile removed: %v", err)
 	}
 	namespaces := reservedRefNamespaces()
 	refs := strings.Fields(string(runGitDir(t, root, append([]string{"for-each-ref", "--format=%(refname)"}, namespaces[:]...)...)))
