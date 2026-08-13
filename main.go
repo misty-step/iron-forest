@@ -362,6 +362,15 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
+	if defaults.Profile != "" {
+		info, statErr := os.Stat(defaults.Profile)
+		if statErr != nil {
+			return failure(exitError, "operator profile %s: %s", defaults.Profile, statErr)
+		}
+		if !info.IsDir() {
+			return failure(exitError, "operator profile %s is not a directory", defaults.Profile)
+		}
+	}
 	names := agentNames(cfg)
 	for _, name := range names {
 		if _, err := loadDeclaration(flags.root, name); err != nil {

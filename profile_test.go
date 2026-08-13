@@ -237,6 +237,15 @@ func TestMaterializeRejectsAFileValuedBaseProfile(t *testing.T) {
 	}
 }
 
+func TestMaterializeRejectsAMissingExplicitOperatorProfile(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "gone")
+	_, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{Profile: missing})
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing explicit profile err=%v, want not exist", err)
+	}
+}
+
 func TestOperatorProfileSeedsHostPiAndRejectsNestedTarget(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

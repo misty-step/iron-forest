@@ -205,11 +205,14 @@ func declarationProfileFiles(root, name string) ([]string, error) {
 func materializeRunProfile(ctx context.Context, root, runID string, declaration Declaration, defaults Defaults) (string, []string, error) {
 	target := runProfileDir(root, runID)
 	type layer struct {
-		dir     string
-		trusted bool
+		dir      string
+		trusted  bool
+		required bool
 	}
 	layers := []layer{}
-	if base := operatorProfile(defaults); base != "" {
+	if defaults.Profile != "" {
+		layers = append(layers, layer{dir: defaults.Profile, trusted: true, required: true})
+	} else if base := operatorProfile(defaults); base != "" {
 		layers = append(layers, layer{dir: base, trusted: true})
 	}
 	layers = append(layers,
@@ -223,6 +226,9 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 		}
 		info, err := os.Stat(item.dir)
 		if errors.Is(err, os.ErrNotExist) {
+			if item.required {
+				return "", nil, fmt.Errorf("read operator profile %s: %w", item.dir, err)
+			}
 			continue
 		} else if err != nil {
 			return "", nil, err
