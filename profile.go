@@ -236,19 +236,23 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 		if !info.IsDir() {
 			return "", nil, fmt.Errorf("profile layer %s is not a directory", item.dir)
 		}
-		if inside, err := pathInside(item.dir, target); err != nil {
+		source := item.dir
+		if resolved, err := filepath.EvalSymlinks(item.dir); err == nil {
+			source = resolved
+		}
+		if inside, err := pathInside(source, target); err != nil {
 			return "", nil, err
 		} else if inside {
 			return "", nil, fmt.Errorf("profile layer %s contains the Run profile", item.dir)
 		}
-		walkErr := filepath.WalkDir(item.dir, func(path string, entry fs.DirEntry, err error) error {
+		walkErr := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			relative, err := filepath.Rel(item.dir, path)
+			relative, err := filepath.Rel(source, path)
 			if err != nil {
 				return err
 			}

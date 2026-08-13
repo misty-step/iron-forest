@@ -246,6 +246,32 @@ func TestMaterializeRejectsAMissingExplicitOperatorProfile(t *testing.T) {
 	}
 }
 
+func TestMaterializeFollowsASymlinkedOperatorProfile(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(t.TempDir(), "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "auth.json"), []byte(`{"ok":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{Profile: link})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, []string{"auth.json"}) {
+		t.Fatalf("symlink profile files=%v", files)
+	}
+	got, err := os.ReadFile(filepath.Join(target, "auth.json"))
+	if err != nil || string(got) != `{"ok":true}` {
+		t.Fatalf("symlink profile=%q err=%v", got, err)
+	}
+}
+
 func TestOperatorProfileSeedsHostPiAndRejectsNestedTarget(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
