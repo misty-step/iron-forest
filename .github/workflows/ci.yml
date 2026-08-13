@@ -15,3 +15,14 @@ jobs:
         run: mise exec -- go vet ./...
       - name: test
         run: mise exec -- go test ./...
+      # Mirrors the `secrets` check in forest.yaml. A merged branch must never
+      # carry credential material; CI provisions the same generic scanner the
+      # local check uses and scans the whole worktree (untracked files
+      # included), so the merged gate is green only when the scan passes.
+      - name: Install the generic secret scanner
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+            | sh -s -- -b /usr/local/bin
+          trufflehog --version
+      - name: Scan for leaked credentials
+        run: mise exec -- go run . scan-secrets .

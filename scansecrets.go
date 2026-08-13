@@ -1,0 +1,184 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// secretScanner names the external binary the checks require for generic
+// high-entropy credential detection. It reads the local working tree only and is
+// never run against a network service; --no-verification skips the check that
+// would confirm a candidate with a remote service, and --no-update suppresses
+// the self-update call.
+const secretScanner = "trufflehog"
+
+// defaultScanExcludes are paths the scanner always skips because they are the
+// engine's own bookkeeping, not repository content: version-control internals
+// and the factory workspace (per-Run worktrees, Ledger, lock). This is
+// infrastructure, not a protected-path list, so it stays tiny and never extends
+// to content.
+var defaultScanExcludes = []string{".git", ".forest"}
+
+// secretFinding is one place in a working tree that carries leaked credential
+// material: the file, which detector matched, and the matched value.
+type secretFinding struct {
+	Path  string
+	Rule  string
+	Match string
+}
+
+// secretsConfig is forest.secrets.yaml: the explicit exclusion path for
+// legitimate fixtures. It must stay narrow and name content only; it is not a
+// return of the protected-path list that docs/adr/0003 removed.
+type secretsConfig struct {
+	Exclude []string `yaml:"exclude"`
+}
+
+// scanEnv holds the two seams a scan needs and a test can substitute: where to
+// find the external scanner binary, and how to run the generic scan once found.
+var scanEnv = struct {
+	lookPath   func(string) (string, error)
+	runGeneric func(bin, dir string, excludes []string) ([]secretFinding, error)
+}{
+	lookPath:   exec.LookPath,
+	runGeneric: runTrufflehog,
+}
+
+// scanSecretsTree runs the generic secret scan over a working tree dir and
+// returns every finding. It fails closed: a required generic scanner that is
+// absent returns an error naming the tool rather than silently narrowing to
+// nothing. Exclusions are loaded from forest.secrets.yaml at the scanned root.
+func scanSecretsTree(dir string) ([]secretFinding, error) {
+	excludes := append([]string(nil), defaultScanExcludes...)
+	if cfg, err := loadSecretsConfig(dir); err == nil {
+		excludes = append(excludes, cfg.Exclude...)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	return scanGeneric(dir, excludes)
+}
+
+// loadSecretsConfig reads forest.secrets.yaml from the scanned root, or returns
+// an os.IsNotExist error when the file is absent.
+func loadSecretsConfig(dir string) (secretsConfig, error) {
+	var cfg secretsConfig
+	b, err := os.ReadFile(filepath.Join(dir, "forest.secrets.yaml"))
+	if err != nil {
+		return cfg, err
+	}
+	if err := yaml.Unmarshal(b, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse forest.secrets.yaml: %w", err)
+	}
+	return cfg, nil
+}
+
+// scanGeneric runs the external generic scanner over the working tree. If the
+// scanner binary is absent the check fails closed, naming the tool, rather than
+// silently skipping the scan. The exclusions are handed to the scanner too, so a
+// legitimate fixture on the list cannot fail.
+func scanGeneric(dir string, excludes []string) ([]secretFinding, error) {
+	bin, err := scanEnv.lookPath(secretScanner)
+	if err != nil {
+		return nil, fmt.Errorf("%s not found on PATH; failing closed instead of skipping the generic high-entropy scan: %w", secretScanner, err)
+	}
+	return scanEnv.runGeneric(bin, dir, excludes)
+}
+
+// runTrufflehog runs the trufflehog filesystem detector against the local
+// working tree dir and parses its JSON findings. It never contacts a network
+// service: the scan reads only local files, --no-verification disables the
+// confirmation call that is the tool's only network request, and --no-update
+// suppresses the self-update check.
+//
+// The exclusion path is a file trufflehog reads with gitignore-style patterns,
+// so the same forest.secrets.yaml list that the command honours is written to a
+// temporary file and passed with --exclude-paths.
+func runTrufflehog(bin, dir string, excludes []string) ([]secretFinding, error) {
+	excludeFile, err := writeExcludePaths(excludes)
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(excludeFile)
+	args := []string{"filesystem", "--no-update", "--no-verification", "--json", "--directory", dir}
+	if excludeFile != "" {
+		args = append(args, "--exclude-paths", excludeFile)
+	}
+	cmd := exec.Command(bin, args...)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s failed: %w: %s", secretScanner, err, strings.TrimSpace(stderr.String()))
+	}
+	// Findings are the only JSON on stdout; the tool's own progress logs go to
+	// stderr and are never parsed as detections.
+	var findings []secretFinding
+	sc := bufio.NewScanner(&stdout)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var f struct {
+			DetectorName   string `json:"DetectorName"`
+			Raw            string `json:"Raw"`
+			SourceMetadata struct {
+				Data struct {
+					Filesystem struct {
+						File string `json:"file"`
+					} `json:"Filesystem"`
+				} `json:"Data"`
+			} `json:"SourceMetadata"`
+		}
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			continue
+		}
+		path := f.SourceMetadata.Data.Filesystem.File
+		if path == "" {
+			path = "<unknown>"
+		}
+		rule := f.DetectorName
+		if rule == "" {
+			rule = "generic-secret"
+		}
+		findings = append(findings, secretFinding{Path: path, Rule: rule, Match: f.Raw})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("parse %s output: %w", secretScanner, err)
+	}
+	return findings, nil
+}
+
+// writeExcludePaths writes the exclusion list to a temporary file trufflehog
+// reads as its --exclude-paths (gitignore-style patterns, one per line) and
+// returns the file's path. The caller removes it. An empty list writes no file
+// and returns an empty path.
+func writeExcludePaths(excludes []string) (string, error) {
+	if len(excludes) == 0 {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", "forest-excludes-*.txt")
+	if err != nil {
+		return "", fmt.Errorf("write scanner exclusion file: %w", err)
+	}
+	path := f.Name()
+	if _, err := f.WriteString(strings.Join(excludes, "\n") + "\n"); err != nil {
+		f.Close()
+		os.Remove(path)
+		return "", fmt.Errorf("write scanner exclusion file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("close scanner exclusion file: %w", err)
+	}
+	return path, nil
+}
