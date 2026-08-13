@@ -63,8 +63,8 @@ Composition rejects any file over 16 MiB or any total above 4,096 files,
 
 ## Consequences
 
-- A Builder skill lives in `agents/builder/profile/` and is invisible to
-  Verifier. A shared skill lives in `agents/_shared/profile/`.
+- A Builder resource in `agents/builder/profile/` is invisible to Verifier. A
+  shared skill lives in `agents/_shared/profile/`.
 - An operator sets one fleet model in `forest.defaults.yaml` or
   `$FOREST_DEFAULTS`. A repository still overrides it.
 - `forest selfcheck` publishes the defaults file it loaded.

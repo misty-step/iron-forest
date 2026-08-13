@@ -57,6 +57,11 @@ A repository layer may not contain `auth.json` or a symlink. One file is limited
 to 16 MiB. One composition is limited to 4,096 copied files, 64 MiB, and a
 512 KiB evidence manifest. The child sees the result through
 `PI_CODING_AGENT_DIR`. Bounded cleanup removes active and leftover profiles.
+The shipped profile keeps short, always-on engineering rules in each
+declaration's `profile/AGENTS.md`. Shared skills verify claims and debug
+failures. The Verifier adds deep correctness and code-quality review skills.
+Builder and Fixer add no private skills. The exact Git-note protocol stays in
+`agent.md`; it does not depend on on-demand skill loading.
 
 This quick start uses self-host mode: the factory source checkout is also the
 managed repository. For a separate sibling managed checkout, use the

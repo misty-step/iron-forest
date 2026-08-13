@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -495,13 +496,13 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":1}}}'
 	}
 }
 
-func TestShippedBuilderSkillIsInvisibleToVerifier(t *testing.T) {
+func TestShippedProfilesComposeSharedAndRoleResources(t *testing.T) {
 	source, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	for _, name := range []string{"builder", "verifier"} {
+	for _, name := range []string{"_shared", "builder", "verifier", "fixer"} {
 		src := filepath.Join(source, "agents", name, "profile")
 		if _, err := os.Stat(src); errors.Is(err, os.ErrNotExist) {
 			continue
@@ -513,18 +514,33 @@ func TestShippedBuilderSkillIsInvisibleToVerifier(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	builder, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"})
-	if err != nil {
-		t.Fatal(err)
+
+	profiles := make(map[string]string)
+	for index, name := range []string{"builder", "verifier", "fixer"} {
+		profile, _, err := materializeRunProfile(context.Background(), root, fmt.Sprintf("%d-%s", index+1, name), Declaration{Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		profiles[name] = profile
+		for _, skill := range []string{"systematic-debugging", "verify-claim"} {
+			if _, err := os.Stat(filepath.Join(profile, "skills", skill, "SKILL.md")); err != nil {
+				t.Fatalf("%s profile missing shared skill %s: %v", name, skill, err)
+			}
+		}
+		agents, err := os.ReadFile(filepath.Join(profile, "AGENTS.md"))
+		if err != nil || !bytes.Contains(agents, []byte("# "+strings.ToUpper(name[:1])+name[1:]+" engineering")) {
+			t.Fatalf("%s AGENTS.md=%q err=%v", name, agents, err)
+		}
 	}
-	verifier, _, err := materializeRunProfile(context.Background(), root, "1-verifier", Declaration{Name: "verifier"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(builder, "skills", "iron-forest-builder.md")); err != nil {
-		t.Fatalf("Builder profile missing shipped skill: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(verifier, "skills", "iron-forest-builder.md")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Verifier profile received the Builder skill: %v", err)
+
+	for _, skill := range []string{"thermo-nuclear-review", "thermo-nuclear-code-quality-review"} {
+		if _, err := os.Stat(filepath.Join(profiles["verifier"], "skills", skill, "SKILL.md")); err != nil {
+			t.Fatalf("Verifier profile missing %s: %v", skill, err)
+		}
+		for _, name := range []string{"builder", "fixer"} {
+			if _, err := os.Stat(filepath.Join(profiles[name], "skills", skill, "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s profile received Verifier skill %s: %v", name, skill, err)
+			}
+		}
 	}
 }
