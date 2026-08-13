@@ -19,8 +19,8 @@ func decodeEnvelope(t *testing.T, args ...string) (int, cliEnvelope, string) {
 	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
 		t.Fatalf("%v did not emit one envelope: %v (stdout=%q stderr=%q)", args, err, stdout, stderr)
 	}
-	if envelope.Schema != "forest.cli.v1" {
-		t.Fatalf("schema=%q, want forest.cli.v1", envelope.Schema)
+	if envelope.Schema != "forest.cli.v2" {
+		t.Fatalf("schema=%q, want forest.cli.v2", envelope.Schema)
 	}
 	if envelope.Exit != code {
 		t.Fatalf("envelope exit=%d, process exit=%d", envelope.Exit, code)
@@ -139,10 +139,13 @@ func TestCLIPayloadsUseSnakeCaseKeys(t *testing.T) {
 
 	_, declaration, _ := decodeEnvelope(t, "declaration", "show", "builder", "--json", "--root", root)
 	declarationKeys := payloadKeys(t, declaration)
-	for _, key := range []string{"name", "model", "tools", "thinking", "system_prompt", "task_prompt"} {
+	for _, key := range []string{"name", "model", "tools", "thinking", "system_prompt", "task_prompt", "skills"} {
 		if _, ok := declarationKeys[key]; !ok {
 			t.Fatalf("declaration payload missing %q: %v", key, declarationKeys)
 		}
+	}
+	if skills, ok := declarationKeys["skills"].([]any); !ok || len(skills) != 0 {
+		t.Fatalf("declaration skills=%v, want []", declarationKeys["skills"])
 	}
 	if _, leaked := declarationKeys["SystemPrompt"]; leaked {
 		t.Fatalf("declaration payload leaks Go field names: %v", declarationKeys)
@@ -383,18 +386,6 @@ func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 	}
 	if payload.DefaultsSource != defaultsPath || payload.Defaults.Model != "host/model" {
 		t.Fatalf("selfcheck defaults=%#v source=%q", payload.Defaults, payload.DefaultsSource)
-	}
-	if err := os.MkdirAll(forestPath(root, "profiles"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(defaultsPath, []byte("profile: .forest/profiles\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	code, _, stderr := captureCLIOutput(t, func() int {
-		return runSurfaceCommand([]string{"selfcheck", "--root", root})
-	})
-	if code != exitError || !strings.Contains(stderr, "contains the Run profile") {
-		t.Fatalf("nested profile selfcheck code=%d stderr=%q", code, stderr)
 	}
 }
 

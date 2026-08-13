@@ -52,7 +52,7 @@ exit 7
 	assertProcessQuiescent(t, heartbeat, "noisy transport descendant", "overflow completion")
 }
 
-func TestRunnerBoundsNoisyOMPLogPreservesTailUsageAndStopsDescendant(t *testing.T) {
+func TestRunnerBoundsNoisyPiLogPreservesTailUsageAndStopsDescendant(t *testing.T) {
 	const half = 1 << 20
 	const marker = "\n--- Iron Forest Run log truncated; retained first 1 MiB and last 1 MiB ---\n"
 	if runLogHalfLimit != half || runLogTruncationMarker != marker {

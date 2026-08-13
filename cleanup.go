@@ -34,35 +34,7 @@ func cleanupReservedResidueWith(ctx context.Context, root string, runner *Runner
 	if refErr == nil {
 		worktreeErr = cleanupReservedWorktrees(ctx, root, runner)
 	}
-	return errors.Join(refErr, worktreeErr, cleanupReservedProfiles(ctx, root, runner), cleanupReservedTemps(ctx, root, remove))
-}
-
-// cleanupReservedProfiles sweeps per-Run harness profiles whose Runs died before
-// collection. A profile can hold credentials copied from the base layer, so
-// residue here is removed with the same urgency as residue worktrees, through
-// the same trusted remover.
-func cleanupReservedProfiles(ctx context.Context, root string, runner *Runner) error {
-	dir := forestPath(root, "profiles")
-	entries, readErr := os.ReadDir(dir)
-	if errors.Is(readErr, os.ErrNotExist) {
-		return nil
-	}
-	var cleanupErr error
-	if readErr != nil {
-		return fmt.Errorf("enumerate reserved profiles: %w", readErr)
-	}
-	for _, entry := range entries {
-		if !isReservedRunID(entry.Name()) {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return errors.Join(cleanupErr, err)
-		}
-		if err := runner.removeFilesystem(ctx, filepath.Join(dir, entry.Name())); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove reserved profile %s: %w", entry.Name(), err))
-		}
-	}
-	return cleanupErr
+	return errors.Join(refErr, worktreeErr, cleanupReservedTemps(ctx, root, remove))
 }
 
 func cleanupReservedWorktrees(ctx context.Context, root string, runner *Runner) error {

@@ -72,7 +72,7 @@ inspect:`)
 	usage.WriteString(`
 
 flags:
-  --json        emit one forest.cli.v1 envelope on stdout
+  --json        emit one forest.cli.v2 envelope on stdout
   --root <dir>  read another checkout
   --limit N     bound a listing
   --after <id>  continue a listing after one identity
@@ -349,8 +349,6 @@ type selfcheckPayload struct {
 	// visibly different from one that supplies empty ones.
 	Defaults       Defaults `json:"defaults"`
 	DefaultsSource string   `json:"defaults_source,omitempty"`
-	// Profile is the trusted base directory a Run will seed from.
-	Profile string `json:"profile,omitempty"`
 }
 
 // runSelfcheck validates the configuration, the declarations, and the trusted
@@ -364,21 +362,6 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	defaults, defaultsSource, err := loadDefaults(flags.root)
 	if err != nil {
 		return failure(exitError, "%s", err)
-	}
-	profile := operatorProfile(defaults)
-	if profile != "" {
-		info, statErr := os.Stat(profile)
-		if statErr != nil && (defaults.Profile != "" || !errors.Is(statErr, os.ErrNotExist)) {
-			return failure(exitError, "operator profile %s: %s", profile, statErr)
-		}
-		if statErr == nil && !info.IsDir() {
-			return failure(exitError, "operator profile %s is not a directory", profile)
-		}
-		if inside, pathErr := pathInside(profile, forestPath(flags.root, "profiles")); pathErr != nil {
-			return failure(exitError, "%s", pathErr)
-		} else if inside {
-			return failure(exitError, "operator profile %s contains the Run profile directory", profile)
-		}
 	}
 	names := agentNames(cfg)
 	for _, name := range names {
@@ -408,9 +391,6 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	if defaultsSource != "" {
 		human += fmt.Sprintf("\ndefaults: %s (model=%s)", oneLine(defaultsSource), oneLine(defaults.Model))
 	}
-	if profile != "" {
-		human += fmt.Sprintf("\nprofile: %s", oneLine(profile))
-	}
 	return cliOutcome{
 		Exit: exitOK,
 		Data: selfcheckPayload{
@@ -419,7 +399,6 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 			Tools:          resolved,
 			Defaults:       defaults,
 			DefaultsSource: defaultsSource,
-			Profile:        profile,
 		},
 		Human: human,
 	}

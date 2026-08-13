@@ -62,7 +62,14 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 			}
 			runner := NewRunner(root)
 			runner.PiPath = omp
-			record, err := runner.Run(context.Background(), Declaration{Name: test.role, Model: "local", Tools: StringList{"read", "bash"}, SystemPrompt: "system", TaskPrompt: "Reply"}, 10)
+			record, err := runner.Run(context.Background(), Declaration{
+				Name:         test.role,
+				Model:        "local",
+				Tools:        StringList{"read", "bash"},
+				SystemPrompt: "system",
+				TaskPrompt:   "Reply",
+				SkillPaths:   []string{"agents/_shared/skills", "agents/" + test.role + "/skills"},
+			}, 10)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -85,7 +92,12 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, value := range []string{"--mode\njson", "--model\nlocal", "--tools\nread,bash", "--system-prompt\nsystem", "Reply", "--approve"} {
+			for _, value := range []string{
+				"--mode\njson", "--model\nlocal", "--tools\nread,bash",
+				"--system-prompt\nsystem", "Reply", "--approve",
+				"--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
+				"--skill\nagents/_shared/skills", "--skill\nagents/" + test.role + "/skills",
+			} {
 				if !strings.Contains(string(args), value) {
 					t.Fatalf("harness args missing %q:\n%s", value, args)
 				}
@@ -215,8 +227,8 @@ func TestRunnerRejectsUsageWithoutRecognizedAlias(t *testing.T) {
 	}
 }
 
-func TestOMPUsageParser(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "omp.jsonl")
+func TestPiUsageParser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pi.jsonl")
 	data := `{"message":{"usage":{"input":3,"output":5,"cacheRead":7,"cacheWrite":11,"reasoning":13}}}
 {"message":{"usage":{"input":17,"output":19,"cacheRead":23,"cacheWrite":29,"reasoning":31}}}
 `
@@ -922,6 +934,133 @@ while :; do /bin/sleep 1; done
 		}
 		if processGroupExists(pid) {
 			t.Fatalf("%s process group %d survived cleanup", name, pid)
+		}
+	}
+}
+
+func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", "/operator/pi")
+	t.Setenv("SERVICE_API_TOKEN", "inherited-only")
+	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]string)
+	for _, entry := range environment {
+		key, value, _ := strings.Cut(entry, "=")
+		values[key] = value
+	}
+	for key, want := range map[string]string{
+		"PI_CODING_AGENT_DIR": "/tmp/run-pi",
+		"SERVICE_API_TOKEN":   "inherited-only",
+		"FOREST_RUN_ID":       "1-builder",
+	} {
+		if values[key] != want {
+			t.Fatalf("%s=%q, want %q", key, values[key], want)
+		}
+	}
+}
+
+func TestRunnerRejectsSkillSymlinkIntroducedInRunRevision(t *testing.T) {
+	root, origin := testClone(t)
+	outside := t.TempDir()
+	author := t.TempDir()
+	runGit(t, "clone", "--branch", "master", origin, author)
+	configGit(t, author, "Builder", "builder@forest.invalid")
+	if err := os.RemoveAll(filepath.Join(author, "agents", "_shared", "skills")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(author, "agents", "_shared", "skills")); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, author, "add", "agents/_shared/skills")
+	runGitDir(t, author, "commit", "-m", "introduce skill symlink")
+	runGitDir(t, author, "push", "origin", "HEAD:master")
+	runGitDir(t, root, "fetch", "origin", "master")
+
+	pi := filepath.Join(t.TempDir(), "pi")
+	marker := filepath.Join(t.TempDir(), "invoked")
+	t.Setenv("PI_INVOKED", marker)
+	if err := os.WriteFile(pi, []byte("#!/bin/sh\ntouch \"$PI_INVOKED\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	record, err := runner.Run(context.Background(), Declaration{
+		Name:         "builder",
+		Model:        "local",
+		SystemPrompt: "system",
+		TaskPrompt:   "task",
+		SkillPaths:   []string{"agents/_shared/skills"},
+	}, 10)
+	if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "validate Run skills") {
+		t.Fatalf("record=%#v err=%v, want Run-skill validation failure", record, err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Pi ran despite invalid worktree skills: %v", statErr)
+	}
+	logData, readErr := os.ReadFile(runLogPath(root, record.RunID))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(logData), `"type":"forest.run"`) {
+		t.Fatalf("failed validation published invocation evidence: %s", logData)
+	}
+}
+
+func TestRunnerUsesAnEmptyTemporaryPiDirectoryAndRemovesIt(t *testing.T) {
+	root, _ := testClone(t)
+	state := t.TempDir()
+	pi := filepath.Join(state, "pi")
+	piDirFile := filepath.Join(state, "pi-dir")
+	hostPiDir := filepath.Join(state, "operator-pi")
+	if err := os.MkdirAll(filepath.Join(hostPiDir, "extensions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostPiDir, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostPiDir, "extensions", "host-mcp.js"), []byte("host extension fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PI_DIR_FILE", piDirFile)
+	t.Setenv("HOST_PI_DIR", hostPiDir)
+	t.Setenv("PI_CODING_AGENT_DIR", hostPiDir)
+	t.Setenv("SERVICE_API_TOKEN", "service-credential")
+	script := `#!/bin/sh
+set -eu
+test "$PI_CODING_AGENT_DIR" != "$HOST_PI_DIR"
+test -d "$PI_CODING_AGENT_DIR"
+test -w "$PI_CODING_AGENT_DIR"
+test -z "$(ls -A "$PI_CODING_AGENT_DIR")"
+test "$SERVICE_API_TOKEN" = service-credential
+printf '%s' "$PI_CODING_AGENT_DIR" > "$PI_DIR_FILE"
+printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}'
+`
+	if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", SystemPrompt: "system", TaskPrompt: "task"}, 10)
+	if err != nil || record.Exit != 0 {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+	piDirBytes, err := os.ReadFile(piDirFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	piDir := string(piDirBytes)
+	if !filepath.IsAbs(piDir) || piDir == hostPiDir {
+		t.Fatalf("Run Pi directory=%q", piDir)
+	}
+	if _, err := os.Stat(piDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Run Pi directory survived invocation: %v", err)
+	}
+	for _, relative := range []string{"auth.json", filepath.Join("extensions", "host-mcp.js")} {
+		if _, err := os.Stat(filepath.Join(hostPiDir, relative)); err != nil {
+			t.Fatalf("operator Pi fixture %s changed: %v", relative, err)
 		}
 	}
 }

@@ -80,15 +80,11 @@ func forestPath(root string, parts ...string) string {
 type Defaults struct {
 	Model    string `yaml:"model" json:"model,omitempty"`
 	Thinking string `yaml:"thinking" json:"thinking,omitempty"`
-	// Profile is the operator's base profile directory. It seeds every Run's
-	// harness profile and is the only layer that may carry credentials.
-	Profile string `yaml:"profile" json:"profile,omitempty"`
 }
 
 type defaultsYAML struct {
 	Model    yamlString `yaml:"model"`
 	Thinking yamlString `yaml:"thinking"`
-	Profile  yamlString `yaml:"profile"`
 }
 
 // defaultsPath locates the instance defaults: FOREST_DEFAULTS names the file
@@ -105,9 +101,9 @@ func defaultsPath(root string) string {
 }
 
 // loadDefaults reads the instance defaults. The source is returned so the read
-// surface can state where a value came from. A relative profile directory
-// resolves against the checkout. An explicit FOREST_DEFAULTS that is missing
-// is an error: the operator named a file, so silence would hide a typo.
+// surface can state where a value came from. An explicit FOREST_DEFAULTS that
+// is missing is an error: the operator named a file, so silence would hide a
+// typo.
 func loadDefaults(root string) (Defaults, string, error) {
 	path := defaultsPath(root)
 	explicit := strings.TrimSpace(os.Getenv("FOREST_DEFAULTS")) != ""
@@ -142,10 +138,6 @@ func loadDefaults(root string) (Defaults, string, error) {
 	defaults := Defaults{
 		Model:    strings.TrimSpace(string(document.Model)),
 		Thinking: strings.TrimSpace(string(document.Thinking)),
-		Profile:  strings.TrimSpace(string(document.Profile)),
-	}
-	if defaults.Profile != "" && !filepath.IsAbs(defaults.Profile) {
-		defaults.Profile = filepath.Join(root, defaults.Profile)
 	}
 	return defaults, path, nil
 }

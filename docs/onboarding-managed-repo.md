@@ -12,15 +12,16 @@ Install these tools on the host:
 - Git with push access to the managed repository;
 - `gh` for the day-one GitHub adapter;
 - `mise` and the managed repository's declared check tools;
-- `pi` with host-managed provider routing. It is the agent harness; see [ADR 0018](adr/0018-pi-harness.md). A `model` of `ollama/<name>` runs locally and costs nothing.
+- `pi`; the shipped contract uses its built-in providers. It is the agent harness; see [ADR 0018](adr/0018-pi-harness.md).
 
-The user service resolves these tools only through
-`%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin`.
+The user service resolves these tools through
+`%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`.
 
-Configure forge access and pi provider routing on the host. Do not put
-adapter configuration or credentials in `forest.yaml`, declarations, prompts,
-or commits. A trusted declaration has the host user's configured credentials,
-filesystem access, and
+Configure forge access and Pi provider credentials for the service. Put its
+credential variables in `%h/.config/iron-forest/%i.env`; do not put
+credentials or adapter configuration in `forest.yaml`, defaults, declarations,
+prompts, skills, or commits. Runs inherit credentials only from the service
+environment. A trusted declaration has those credentials plus filesystem and
 network access. Worktree separation and timeout are not a security sandbox;
 stronger containment belongs to deployment.
 
@@ -75,39 +76,56 @@ in the same order.
 
 ## 3. Add declarations
 
-Create one pair of files per shipped declaration:
+Create one pair of prompt files per shipped declaration, one shared skill
+directory, and optional role-specific skill directories:
 
 ```text
 agents/
+  _shared/
+    skills/
   builder/
     agent.md
     task.md
   verifier/
     agent.md
     task.md
+    skills/
   fixer/
     agent.md
     task.md
 ```
 
 `agent.md` starts with YAML frontmatter containing optional `model`, `tools`,
-`thinking`, and `env`, then the system prompt. `task.md` is the standing user
-prompt. `model` falls through instance defaults and then a built-in last layer.
-Environment values are opaque strings, but never commit a literal secret.
-Credentials belong in the operator profile or host environment. Each
-declaration may ship `agents/<name>/profile/`; every declaration shares
-`agents/_shared/profile/`. A repository layer must not contain credentials or
-symlinks. The Kernel parses this format directly. Keep Git note and merge
-instructions in the prompts. Agents use native `git`; no wrapper is required.
+and `thinking`, then the system prompt. `task.md` is the standing user prompt.
+`model` and `thinking` fall through declaration frontmatter to instance
+defaults; `model` alone has a built-in final value. Defaults contain only
+`model` and `thinking`. Keep Git note, merge, and always-on engineering
+instructions in the system prompts. Agents use native `git`; no wrapper is
+required.
+
+The only skill sources are `agents/_shared/skills` and, when present,
+`agents/<name>/skills`. Their published paths are repository-relative and Pi
+resolves them from the Run worktree. The Runner gives each Run a new writable,
+initially empty `PI_CODING_AGENT_DIR`; it does not inherit operator Pi state.
+It invokes Pi with `--no-extensions`, `--no-skills`,
+`--no-prompt-templates`, and `--no-themes`, plus one explicit `--skill` per
+existing skill source directory. Declaration and Run evidence publish those
+directory paths as `skills`.
 
 ## 4. Build and validate
 
 Choose one deployment mode.
 
+Both modes require a protected environment file named after the managed
+checkout directory. Before running the installer, create
+`~/.config/iron-forest/<checkout-directory-name>.env`, put the required
+provider credential variables in it, and set its mode to `0600`. The installer
+does not create or rewrite this file.
+
 ### Self-host mode
 
 The factory source checkout is also the managed repository. From that checkout,
-build with the pinned toolchain and validate its profile:
+build with the pinned toolchain and validate its declarations:
 
 ```sh
 mise exec -- go build -o forest .
@@ -133,11 +151,15 @@ cd ../<sibling-directory-name>
 
 The one-argument installer always builds the Kernel from the factory source
 checkout into the named sibling. Before restarting either mode, the installer
-runs selfcheck with the service's trusted `PATH`, with
-`PI_CODING_AGENT_DIR=$HOME/.pi/agent`, and without `FOREST_DEFAULTS`. Use a
-systemd drop-in when one instance needs a different defaults file or operator
-profile. The installer stops on any selfcheck error. The Auditor needs a
-completed agent dispatch before it can validate remote Git evidence.
+stops that instance and removes only timestamped legacy `.forest/profiles`
+entries, which may contain credentials copied by an older Kernel. It then runs
+selfcheck with the service's trusted `PATH` and without `FOREST_DEFAULTS`.
+The installed unit reads operator-supplied credentials from
+`%h/.config/iron-forest/%i.env`; use that per-instance file rather than setting
+`PI_CODING_AGENT_DIR` or naming an operator profile. Use a systemd drop-in only
+when one instance needs a different defaults file. The installer stops on any
+selfcheck error. The Auditor needs a completed agent dispatch before it can
+validate remote Git evidence.
 
 The final `cd` keeps all later Kernel and observation commands in the managed
 repository.

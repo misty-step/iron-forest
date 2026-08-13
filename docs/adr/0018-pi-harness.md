@@ -25,17 +25,19 @@ live Run. A factory that cannot complete a Run is not a factory.
 `--mode json` output is JSON Lines whose `turn_end` messages carry a `usage`
 object with `input`, `output`, `cacheRead`, `cacheWrite`, and `reasoning`. That
 is the shape the Ledger already records, so the token classes need no
-translation. `pi` also routes to local `ollama` models, which lets the factory
-run with no money at all.
+translation.
 
 ## Decision
 
-The Runner invokes `pi` with this command shape:
+The Runner invokes `pi` with this command shape, further constrained by
+[0019](0019-explicit-pi-runtime-inputs.md):
 
 ```text
-pi -p --mode json --no-session --approve --model <model> \
-  --system-prompt <instructions> [--tools <comma-separated-tools>] \
-  [--thinking <level>] "<task>"
+pi -p --mode json --no-session --approve \
+  --no-extensions --no-skills --no-prompt-templates --no-themes \
+  --model <model> --system-prompt <instructions> \
+  [--tools <comma-separated-tools>] [--thinking <level>] \
+  [--skill <repository-relative-path>]... "<task>"
 ```
 
 Two omissions from the OMP shape, each deliberate:
@@ -47,23 +49,25 @@ Two omissions from the OMP shape, each deliberate:
   the process group with TERM, a grace period, KILL, and a quiescence probe.
   Delegating the deadline would leave the Runner unable to prove the child died.
 
-Project-local harness configuration is trusted, so the repository's own skills,
-extensions, and prompt templates reach the agent. The first draft of this ADR
-chose `--no-approve` on the reasoning that a Run executes against content the
-factory did not author. That reasoning was wrong twice over, and measuring it
-showed how: a repository-shipped skill became invisible, and the agent reported
-`UNKNOWN` rather than saying a skill existed that it was not allowed to load.
+The declaration system prompt and project context files discovered from the Run
+worktree are trusted repository instructions. Selected repository skills reach
+Pi through explicit arguments. Extension, skill, prompt-template, and theme
+discovery are disabled, while normal project context-file discovery remains
+enabled. The Runner passes only the shared and role-specific repository skill
+directories with repeated `--skill` arguments and gives Pi an empty per-Run
+agent directory, so host Pi resources do not become Run inputs.
 
-It was also incoherent. `AGENTS.md` discovery was already enabled, so
-repository-authored *instructions* were trusted while repository-authored *tools*
-were not, and nothing distinguishes those two. And it bought no safety:
-[0016](0016-isolation-posture.md) states that worktree separation and the timeout
-are the only isolation and that this is not a sandbox. Refusing the repository's
-tooling removed a capability class without closing any boundary.
+The first draft of this ADR chose `--no-approve` on the reasoning that a Run
+executes against content the factory did not author. That was incoherent:
+repository-authored project context, the declaration prompt, and selected
+skills cross the same trusted boundary, while refusing their tools did not
+close a security boundary. [0016](0016-isolation-posture.md) states that
+worktree separation and the timeout are operational boundaries, not a sandbox.
 
 The factory runs agents on a repository at its operator's instruction. That
-repository is the workspace, not hostile input. A declaration already states which
-tools an agent gets; the repository states what those tools know.
+repository is the workspace, not hostile input. A declaration states which
+tools an agent gets, and ADR 0019 excludes undeclared Pi resources without
+excluding trusted project context.
 
 The trusted tool set becomes `git`, `gh`, and `pi`. `forest selfcheck` resolves
 and publishes all three, so a host that cannot dispatch says so before a Run.
@@ -72,11 +76,11 @@ and publishes all three, so a host that cannot dispatch says so before a Run.
 
 - The service unit's `PATH` must reach `pi`. The installer resolves it through
   the operator's mise shim directory, and `selfcheck` fails when it cannot.
-- A declaration's `model` is a pi model pattern, so `provider/id` selects a
-  provider. `ollama/<model>` runs locally and records zero cost.
+- A declaration's `model` is a Pi model pattern. The shipped contract supports
+  providers Pi can resolve without operator agent-directory state.
 - Token classes land in the Ledger unchanged, because pi's usage keys are the
   aliases the Ledger reader already accepts.
 - Replacing the harness again means changing one command shape and one executable
   resolver. The declaration format does not move.
-- Which files the harness sees is composed per Run; see
-  [0019](0019-harness-profile-composition.md).
+- Pi's non-context configuration inputs are explicit per Run; see
+  [0019](0019-explicit-pi-runtime-inputs.md).

@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -72,26 +72,83 @@ type Declaration struct {
 	// instance defaults, or the built-in. A consumer can audit the chain instead
 	// of guessing which file won.
 	ModelSource string `json:"model_source,omitempty"`
-	// Env carries opaque string values declared for the Run. JSON never prints
-	// them.
-	Env map[string]string `json:"-"`
-	// EnvKeys lists declared environment names for the read surface.
-	EnvKeys []string `json:"env,omitempty"`
-	// ProfileFiles lists the files in this declaration's profile layer, so the
-	// read surface can show what the layer contributes without opening it.
-	ProfileFiles        []string `json:"profile_files,omitempty"`
-	BaseProfile         string   `json:"-"`
-	BaseProfileRequired bool     `json:"-"`
+	// SkillPaths lists the explicit repository-relative skill directories that
+	// Pi receives for this declaration.
+	SkillPaths []string `json:"skills"`
 }
 
 type declarationFrontmatter struct {
 	Model    yamlString `yaml:"model"`
 	Tools    yaml.Node  `yaml:"tools"`
 	Thinking yaml.Node  `yaml:"thinking"`
-	Env      yaml.Node  `yaml:"env"`
 }
 
 func declarationDir(root, name string) string { return filepath.Join(root, "agents", name) }
+
+func declarationSkillPaths(root, name string) ([]string, error) {
+	relativePaths := []string{
+		filepath.Join("agents", "_shared", "skills"),
+		filepath.Join("agents", name, "skills"),
+	}
+	paths := make([]string, 0, len(relativePaths))
+	for _, relative := range relativePaths {
+		info, err := os.Lstat(filepath.Join(root, relative))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("inspect skill directory %s: %w", filepath.ToSlash(relative), err)
+		case !info.IsDir():
+			return nil, fmt.Errorf("skill path %s must be a real directory", filepath.ToSlash(relative))
+		}
+		if err := validateSkillDirectory(root, relative); err != nil {
+			return nil, err
+		}
+		paths = append(paths, filepath.ToSlash(relative))
+	}
+	return paths, nil
+}
+
+func validateDeclarationSkillPaths(root, name string, paths []string) error {
+	allowed := map[string]struct{}{
+		filepath.ToSlash(filepath.Join("agents", "_shared", "skills")): {},
+		filepath.ToSlash(filepath.Join("agents", name, "skills")):      {},
+	}
+	for _, relative := range paths {
+		normalized := filepath.ToSlash(filepath.Clean(relative))
+		if _, ok := allowed[normalized]; !ok {
+			return fmt.Errorf("invalid skill path %q for agent %s", relative, name)
+		}
+		local := filepath.FromSlash(normalized)
+		info, err := os.Lstat(filepath.Join(root, local))
+		if err != nil {
+			return fmt.Errorf("inspect skill directory %s: %w", normalized, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("skill path %s must be a real directory", normalized)
+		}
+		if err := validateSkillDirectory(root, local); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSkillDirectory(root, relative string) error {
+	return filepath.WalkDir(filepath.Join(root, relative), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("inspect skill path %s: %w", filepath.ToSlash(relative), err)
+		}
+		if entry.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+		child, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("skill path %s contains symlink %s", filepath.ToSlash(relative), filepath.ToSlash(child))
+	})
+}
 
 func loadDeclaration(root, name string) (Declaration, error) {
 	defaults, _, err := loadDefaults(root)
@@ -121,7 +178,7 @@ func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declarat
 	var metadata declarationFrontmatter
 	decoder := yaml.NewDecoder(bytes.NewReader(front))
 	decoder.KnownFields(true)
-	if err := decoder.Decode(&metadata); err != nil {
+	if err := decoder.Decode(&metadata); err != nil && !errors.Is(err, io.EOF) {
 		return Declaration{}, fmt.Errorf("agent %s frontmatter: %w", name, err)
 	}
 	var extra yaml.Node
@@ -149,10 +206,6 @@ func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declarat
 			return Declaration{}, fmt.Errorf("agent %s frontmatter thinking: %w", name, err)
 		}
 	}
-	env, err := decodeDeclarationEnv(name, &metadata.Env)
-	if err != nil {
-		return Declaration{}, err
-	}
 	if len(bytes.TrimSpace(taskData)) == 0 {
 		return Declaration{}, fmt.Errorf("agent %s task.md is empty", name)
 	}
@@ -172,84 +225,24 @@ func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declarat
 	if thinking == "" {
 		thinking = strings.TrimSpace(defaults.Thinking)
 	}
-	profileFiles, err := declarationProfileFiles(root, name)
+	skillPaths, err := declarationSkillPaths(root, name)
 	if err != nil {
 		return Declaration{}, err
 	}
 	return Declaration{
-		Name:                name,
-		Model:               model,
-		Tools:               tools,
-		Thinking:            strings.TrimSpace(thinking),
-		SystemPrompt:        body,
-		TaskPrompt:          string(taskData),
-		ModelSource:         modelSource,
-		Env:                 env,
-		EnvKeys:             envKeys(env),
-		ProfileFiles:        profileFiles,
-		BaseProfile:         operatorProfile(defaults),
-		BaseProfileRequired: defaults.Profile != "",
+		Name:         name,
+		Model:        model,
+		Tools:        tools,
+		Thinking:     strings.TrimSpace(thinking),
+		SystemPrompt: body,
+		TaskPrompt:   string(taskData),
+		ModelSource:  modelSource,
+		SkillPaths:   skillPaths,
 	}, nil
 }
 
-// defaultModel is the built-in last layer of the model chain. Local models are
-// available by declaring one; they are never the default.
+// defaultModel is the built-in last layer of the model chain.
 const defaultModel = "openrouter/deepseek/deepseek-v4-flash-0731"
-
-// blockedEnvNames are the variables the Kernel owns. A declaration may not
-// restate them, because the Run's identity, liveness, and profile depend on them.
-var blockedEnvNames = []string{
-	"PATH", "HOME", "FOREST_RUN_ID", "PI_CODING_AGENT_DIR",
-	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
-}
-
-var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// decodeDeclarationEnv reads the optional env map. Values pass through
-// unchanged. The read surfaces publish names only.
-func decodeDeclarationEnv(name string, node *yaml.Node) (map[string]string, error) {
-	if node.Kind == 0 {
-		return nil, nil
-	}
-	if node.Kind == yaml.ScalarNode && node.ShortTag() == "!!null" {
-		return nil, nil
-	}
-	if node.Kind != yaml.MappingNode || node.ShortTag() != "!!map" {
-		return nil, fmt.Errorf("agent %s frontmatter env: must be a YAML mapping of string scalars, got %s", name, node.ShortTag())
-	}
-	env := make(map[string]string, len(node.Content)/2)
-	for index := 0; index+1 < len(node.Content); index += 2 {
-		keyNode, valueNode := node.Content[index], node.Content[index+1]
-		key, err := stringScalar(keyNode)
-		if err != nil {
-			return nil, fmt.Errorf("agent %s frontmatter env name %d: %w", name, index/2+1, err)
-		}
-		value, err := stringScalar(valueNode)
-		if err != nil {
-			return nil, fmt.Errorf("agent %s frontmatter env %q: %w", name, key, err)
-		}
-		if !envNamePattern.MatchString(key) {
-			return nil, fmt.Errorf("agent %s frontmatter env %q is not a valid environment name", name, key)
-		}
-		if slices.Contains(blockedEnvNames, key) {
-			return nil, fmt.Errorf("agent %s frontmatter env %q names a variable the Kernel owns", name, key)
-		}
-		if _, exists := env[key]; exists {
-			return nil, fmt.Errorf("agent %s frontmatter env %q is declared twice", name, key)
-		}
-		env[key] = value
-	}
-	return env, nil
-}
-
-func envKeys(env map[string]string) []string {
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
-}
 
 func splitFrontmatter(data []byte) ([]byte, string, error) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
