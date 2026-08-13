@@ -24,6 +24,8 @@ TimeoutStopSec=3900
 # harness cannot be resolved, so a host that cannot dispatch says so before a
 # Kernel starts.
 Environment=PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
+Environment=PI_CODING_AGENT_DIR=%h/.pi/agent
+UnsetEnvironment=FOREST_DEFAULTS
 
 [Install]
 WantedBy=default.target

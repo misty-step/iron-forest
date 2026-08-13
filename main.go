@@ -120,15 +120,24 @@ func serve(root string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
 		}
+		scheduler := NewScheduler(root, cfg, NewRunner(root))
+		if scheduler.startupErr != nil {
+			fmt.Fprintln(os.Stderr, scheduler.startupErr)
+			return exitError
+		}
+		defaults, _, err := loadDefaults(root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitError
+		}
 		for _, name := range agentNames(cfg) {
-			if _, err := loadDeclaration(root, name); err != nil {
+			if _, err := loadDeclarationWithDefaults(root, name, defaults); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				return exitError
 			}
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		scheduler := NewScheduler(root, cfg, NewRunner(root))
 		if err := scheduler.Serve(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
@@ -335,6 +344,13 @@ type selfcheckPayload struct {
 	Repo         string     `json:"repo"`
 	Declarations []string   `json:"declarations"`
 	Tools        []toolPath `json:"tools"`
+	// Defaults reports the instance layer the declarations resolve against, and
+	// DefaultsSource names its file, so a host that supplies no defaults is
+	// visibly different from one that supplies empty ones.
+	Defaults       Defaults `json:"defaults"`
+	DefaultsSource string   `json:"defaults_source,omitempty"`
+	// Profile is the trusted base directory a Run will seed from.
+	Profile string `json:"profile,omitempty"`
 }
 
 // runSelfcheck validates the configuration, the declarations, and the trusted
@@ -345,9 +361,28 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
+	defaults, defaultsSource, err := loadDefaults(flags.root)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	profile := operatorProfile(defaults)
+	if profile != "" {
+		info, statErr := os.Stat(profile)
+		if statErr != nil && (defaults.Profile != "" || !errors.Is(statErr, os.ErrNotExist)) {
+			return failure(exitError, "operator profile %s: %s", profile, statErr)
+		}
+		if statErr == nil && !info.IsDir() {
+			return failure(exitError, "operator profile %s is not a directory", profile)
+		}
+		if inside, pathErr := pathInside(profile, forestPath(flags.root, "profiles")); pathErr != nil {
+			return failure(exitError, "%s", pathErr)
+		} else if inside {
+			return failure(exitError, "operator profile %s contains the Run profile directory", profile)
+		}
+	}
 	names := agentNames(cfg)
 	for _, name := range names {
-		if _, err := loadDeclaration(flags.root, name); err != nil {
+		if _, err := loadDeclarationWithDefaults(flags.root, name, defaults); err != nil {
 			return failure(exitError, "%s", err)
 		}
 	}
@@ -368,11 +403,25 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		}
 		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
+	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
+		oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
+	if defaultsSource != "" {
+		human += fmt.Sprintf("\ndefaults: %s (model=%s)", oneLine(defaultsSource), oneLine(defaults.Model))
+	}
+	if profile != "" {
+		human += fmt.Sprintf("\nprofile: %s", oneLine(profile))
+	}
 	return cliOutcome{
 		Exit: exitOK,
-		Data: selfcheckPayload{Repo: cfg.Repo, Declarations: names, Tools: resolved},
-		Human: fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
-			oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " ")),
+		Data: selfcheckPayload{
+			Repo:           cfg.Repo,
+			Declarations:   names,
+			Tools:          resolved,
+			Defaults:       defaults,
+			DefaultsSource: defaultsSource,
+			Profile:        profile,
+		},
+		Human: human,
 	}
 }
 

@@ -147,7 +147,6 @@ func TestDeclarationYAMLValidation(t *testing.T) {
 		want  string
 	}{
 		{name: "unknown key", agent: "---\nmodel: local/model\nmodle: other/model\n---\nSystem rules\n", task: "Select one item.", want: "field modle not found"},
-		{name: "missing model", agent: "---\nthinking: low\n---\nSystem rules\n", task: "Select one item.", want: "model is required"},
 		{name: "empty task", agent: validAgent, task: " \n\t", want: "task.md is empty"},
 		{name: "missing system prompt", agent: "---\nmodel: local/model\n---", task: "Select one item.", want: "system prompt is empty"},
 		{name: "empty system prompt", agent: "---\nmodel: local/model\n---\n", task: "Select one item.", want: "system prompt is empty"},

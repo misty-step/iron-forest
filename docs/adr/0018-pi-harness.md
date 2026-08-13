@@ -78,3 +78,5 @@ and publishes all three, so a host that cannot dispatch says so before a Run.
   aliases the Ledger reader already accepts.
 - Replacing the harness again means changing one command shape and one executable
   resolver. The declaration format does not move.
+- Which files the harness sees is composed per Run; see
+  [0019](0019-harness-profile-composition.md).

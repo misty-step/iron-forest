@@ -90,11 +90,15 @@ agents/
     task.md
 ```
 
-`agent.md` starts with YAML frontmatter containing `model` and optional `tools`
-and `thinking`, then the system prompt. `task.md` is the standing user prompt.
-`model`, `tools`, and `thinking` belong to each declaration. The Kernel parses
-this format directly. Keep Git note and merge instructions in the prompts.
-Agents use native `git`; no coordination wrapper is required.
+`agent.md` starts with YAML frontmatter containing optional `model`, `tools`,
+`thinking`, and `env`, then the system prompt. `task.md` is the standing user
+prompt. `model` falls through instance defaults and then a built-in last layer.
+Environment values are opaque strings, but never commit a literal secret.
+Credentials belong in the operator profile or host environment. Each
+declaration may ship `agents/<name>/profile/`; every declaration shares
+`agents/_shared/profile/`. A repository layer must not contain credentials or
+symlinks. The Kernel parses this format directly. Keep Git note and merge
+instructions in the prompts. Agents use native `git`; no wrapper is required.
 
 ## 4. Build and validate
 
@@ -129,11 +133,11 @@ cd ../<sibling-directory-name>
 
 The one-argument installer always builds the Kernel from the factory source
 checkout into the named sibling. Before restarting either mode, the installer
-runs the target's selfcheck with
-`PATH=$HOME/.local/bin:$HOME/bin:/usr/local/bin:/usr/bin:/bin`. This path is the
-HOME-expanded form of the service rule above. The installer stops on any
-selfcheck error. The Auditor needs a completed agent dispatch before it can
-validate remote Git evidence.
+runs selfcheck with the service's trusted `PATH`, with
+`PI_CODING_AGENT_DIR=$HOME/.pi/agent`, and without `FOREST_DEFAULTS`. Use a
+systemd drop-in when one instance needs a different defaults file or operator
+profile. The installer stops on any selfcheck error. The Auditor needs a
+completed agent dispatch before it can validate remote Git evidence.
 
 The final `cd` keeps all later Kernel and observation commands in the managed
 repository.

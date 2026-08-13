@@ -264,11 +264,38 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		return record, errors.Join(prepareErr, cleanupErr, finalizeErr, retentionErr, appendErr)
 	}
 
-	invokeErr := r.invoke(runCtx, worktree, declaration, timeoutSeconds, logFile, &record)
+	// The profile is materialized after the worktree exists, because its evidence
+	// belongs to a Run that really started. Refresh OAuth in the shared base first,
+	// so the private copy remains valid for the complete bounded Run.
+	profileErr := r.refreshProfileAuth(runCtx, declaration, timeoutSeconds)
+	var profileDir string
+	var profileFiles []string
+	if profileErr == nil {
+		profileDir, profileFiles, profileErr = materializeRunProfile(runCtx, r.Root, runID, declaration)
+	}
+	harnessRunnable := profileErr == nil
+	if profileErr != nil {
+		record.Exit = runContextExit(ctx, runCtx, 1)
+		_, _ = fmt.Fprintf(logFile, "materialize Run profile: %v\n", profileErr)
+	} else {
+		_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration, profileFiles))
+	}
+	var invokeErr error
+	if harnessRunnable {
+		invokeErr = r.invoke(runCtx, worktree, declaration, profileDir, timeoutSeconds, logFile, &record)
+	}
 	cleanupErr := r.cleanupWorktree(worktree, runID)
 	if cleanupErr != nil {
 		cleanupErr = fmt.Errorf("cleanup worktree: %w", cleanupErr)
 		_, _ = fmt.Fprintln(logFile, cleanupErr)
+		if record.Exit == 0 {
+			record.Exit = 1
+		}
+	}
+	if collectErr := r.cleanupProfile(runProfileDir(r.Root, runID)); collectErr != nil {
+		collectErr = fmt.Errorf("collect Run profile: %w", collectErr)
+		_, _ = fmt.Fprintln(logFile, collectErr)
+		cleanupErr = errors.Join(cleanupErr, collectErr)
 		if record.Exit == 0 {
 			record.Exit = 1
 		}
@@ -284,7 +311,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	// Usage exists only if the harness ran. Demanding it after a failure to start
 	// would report "no usage" as the cause and bury the real one.
 	var usageErr error
-	if invokeErr == nil || record.Exit != harnessUnavailableExit {
+	if harnessRunnable && (invokeErr == nil || record.Exit != harnessUnavailableExit) {
 		usage, parseErr := parseAgentUsage(logPath)
 		if parseErr != nil {
 			usageErr = fmt.Errorf("parse harness usage: %w", parseErr)
@@ -305,7 +332,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		}
 	}
 	appendErr := AppendRun(r.Root, record)
-	if err := errors.Join(invokeErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
+	if err := errors.Join(profileErr, invokeErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
 		return record, err
 	}
 	if record.Exit != 0 {
@@ -349,6 +376,12 @@ func (r *Runner) cleanupWorktree(path, runID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	return r.removeWorktree(ctx, path, runID)
+}
+
+func (r *Runner) cleanupProfile(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupFilesystemExecutionTimeout)
+	defer cancel()
+	return r.removeFilesystem(ctx, path)
 }
 
 func (r *Runner) removeWorktree(ctx context.Context, path, runID string) error {
@@ -505,7 +538,7 @@ func soleExitCode(err error, code int) bool {
 	return leaves == 1 && matching == 1
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, profileDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
 		return err
@@ -537,7 +570,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runnerEnvironment(r.Root, name, email, record.RunID)
+	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, profileDir, declaration)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
 		return err
@@ -706,118 +739,69 @@ func (r *Runner) piExecutable() (string, error) {
 	return trustedExecutable(r.Root, r.PiPath)
 }
 
-// trustedExecutable resolves a tool to a path outside the repository. Symlinks
-// are followed to decide trust, because the target is what actually runs, but the
-// caller's own path is returned to execute. A version-manager shim dispatches on
-// its own name, so running the resolved target would run the manager instead of
-// the tool.
-func trustedExecutable(root, name string) (string, error) {
-	path := name
-	if !strings.ContainsRune(path, os.PathSeparator) {
-		found, err := exec.LookPath(path)
-		if err != nil {
-			return "", err
-		}
-		path = found
+func (r *Runner) refreshProfileAuth(ctx context.Context, declaration Declaration, timeoutSeconds int) error {
+	provider, _, ok := strings.Cut(declaration.Model, "/")
+	if declaration.BaseProfile == "" || !ok {
+		return nil
 	}
-	absolute, err := filepath.Abs(path)
+	authPath := filepath.Join(declaration.BaseProfile, "auth.json")
+	info, err := os.Stat(authPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return "", err
+		return fmt.Errorf("inspect operator auth: %w", err)
 	}
-	resolved := absolute
-	if value, err := filepath.EvalSymlinks(absolute); err == nil {
-		resolved = value
+	if info.Size() > maxProfileFileBytes {
+		return fmt.Errorf("operator auth exceeds %d bytes", maxProfileFileBytes)
 	}
-	inside, err := pathInside(root, resolved)
+	data, err := os.ReadFile(authPath)
 	if err != nil {
-		return "", err
+		return fmt.Errorf("read operator auth: %w", err)
 	}
-	if inside {
-		return "", fmt.Errorf("refuse repository executable %s", resolved)
+	var credentials map[string]struct {
+		Type string `json:"type"`
 	}
-	info, err := os.Stat(resolved)
+	if err := json.Unmarshal(data, &credentials); err != nil {
+		return fmt.Errorf("decode operator auth: %w", err)
+	}
+	if credentials[provider].Type != "oauth" {
+		return nil
+	}
+	executable, err := r.piExecutable()
 	if err != nil {
-		return "", err
+		return err
 	}
-	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("%s is not executable", resolved)
+	path, err := trustedPath(r.Root)
+	if err != nil {
+		return err
 	}
-	return absolute, nil
+	environment := childEnvironment()
+	environment = append(environment, "PATH="+path, "PI_CODING_AGENT_DIR="+declaration.BaseProfile)
+	refresh := exec.Command(executable, "auth", "print-bearer-token", "--model", declaration.Model, "--min-expiry", fmt.Sprintf("%ds", timeoutSeconds+60))
+	refresh.Dir, refresh.Env = r.Root, environment
+	if _, err := processGroupOutput(ctx, refresh); err != nil {
+		return fmt.Errorf("extend operator OAuth lifetime: %w", err)
+	}
+	return nil
 }
 
-func runnerEnvironment(root, name, email, runID string) ([]string, error) {
-	path, err := trustedPath(root)
-	if err != nil {
-		return nil, err
-	}
-	blocked := []string{"PATH=", "FOREST_RUN_ID=", "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL="}
-	environment := make([]string, 0, len(os.Environ())+6)
-	for _, value := range os.Environ() {
-		keep := true
-		for _, prefix := range blocked {
-			if strings.HasPrefix(value, prefix) {
-				keep = false
-				break
-			}
-		}
-		if keep {
-			environment = append(environment, value)
-		}
-	}
-	return append(environment,
-		"PATH="+path,
-		"GIT_AUTHOR_NAME="+name,
-		"GIT_AUTHOR_EMAIL="+email,
-		"GIT_COMMITTER_NAME="+name,
-		"GIT_COMMITTER_EMAIL="+email,
-		"FOREST_RUN_ID="+runID,
-	), nil
-}
-
-func trustedPath(root string) (string, error) {
-	entries := make([]string, 0)
-	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
-		if entry == "" {
-			continue
-		}
-		absolute, err := filepath.Abs(entry)
-		if err != nil {
-			return "", err
-		}
-		// Resolve to decide trust, keep the caller's entry to hand to the child.
-		// A shim directory reached through a symlink must stay a shim directory,
-		// or the agent's own tools break the way the harness did.
-		resolved := absolute
-		if value, err := filepath.EvalSymlinks(absolute); err == nil {
-			resolved = value
-		}
-		inside, err := pathInside(root, resolved)
-		if err != nil {
-			return "", err
-		}
-		if !inside {
-			entries = append(entries, absolute)
-		}
-	}
-	if len(entries) == 0 {
-		return "", fmt.Errorf("PATH has no trusted directories")
-	}
-	return strings.Join(entries, string(os.PathListSeparator)), nil
-}
-
-func pathInside(root, path string) (bool, error) {
-	rootPath, err := filepath.Abs(root)
-	if err != nil {
-		return false, err
-	}
-	if value, err := filepath.EvalSymlinks(rootPath); err == nil {
-		rootPath = value
-	}
-	relative, err := filepath.Rel(rootPath, path)
-	if err != nil {
-		return false, err
-	}
-	return relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator)), nil
+// runEvidenceLine is the Run's manifest: the model and its source, the profile
+// files the agent saw, and the declared environment's keys. Values never appear
+// because they are not the reader's business. The line is JSON, so the harness
+// output parser reads past it, and typed, so a consumer can distinguish it from
+// harness events.
+func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []string) string {
+	line, _ := json.Marshal(map[string]any{
+		"type":         "forest.run",
+		"run_id":       record.RunID,
+		"agent":        declaration.Name,
+		"model":        declaration.Model,
+		"model_source": declaration.ModelSource,
+		"profile":      profileFiles,
+		"env":          envKeys(declaration.Env),
+	})
+	return string(line)
 }
 
 func processExit(err error) int {

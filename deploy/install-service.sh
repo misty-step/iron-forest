@@ -59,8 +59,8 @@ sed -e "s|@FOREST_ROOT@|$root|g" \
 stamp="$(git -C "$factory" rev-parse --short HEAD)"
 (cd "$factory" && mise exec -- go build -o "$target/forest" .)
 
-# Validate with the same trusted PATH that the service receives.
-(cd "$target" && PATH="$service_path" ./forest selfcheck)
+# Validate with the same trusted PATH and profile that the service receives.
+(cd "$target" && env -u FOREST_DEFAULTS PATH="$service_path" PI_CODING_AGENT_DIR="$HOME/.pi/agent" ./forest selfcheck)
 
 systemctl --user daemon-reload
 systemctl --user enable "forest@$name" >/dev/null

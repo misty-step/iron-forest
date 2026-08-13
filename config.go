@@ -73,6 +73,83 @@ func forestPath(root string, parts ...string) string {
 	return filepath.Join(append([]string{root, workspaceName}, parts...)...)
 }
 
+// Defaults are the operator's instance-level values for this Kernel. They sit
+// below every declaration: a declaration field wins over a default, and a
+// default wins over the built-in. The file is optional; an absent file is the
+// zero Defaults, not an error.
+type Defaults struct {
+	Model    string `yaml:"model" json:"model,omitempty"`
+	Thinking string `yaml:"thinking" json:"thinking,omitempty"`
+	// Profile is the operator's base profile directory. It seeds every Run's
+	// harness profile and is the only layer that may carry credentials.
+	Profile string `yaml:"profile" json:"profile,omitempty"`
+}
+
+type defaultsYAML struct {
+	Model    yamlString `yaml:"model"`
+	Thinking yamlString `yaml:"thinking"`
+	Profile  yamlString `yaml:"profile"`
+}
+
+// defaultsPath locates the instance defaults: FOREST_DEFAULTS names the file
+// when set, and the checkout's forest.defaults.yaml is the fallback. A relative
+// override resolves against the checkout, so --root and the engine agree.
+func defaultsPath(root string) string {
+	if path := strings.TrimSpace(os.Getenv("FOREST_DEFAULTS")); path != "" {
+		if !filepath.IsAbs(path) {
+			return filepath.Join(root, path)
+		}
+		return path
+	}
+	return filepath.Join(root, "forest.defaults.yaml")
+}
+
+// loadDefaults reads the instance defaults. The source is returned so the read
+// surface can state where a value came from. A relative profile directory
+// resolves against the checkout. An explicit FOREST_DEFAULTS that is missing
+// is an error: the operator named a file, so silence would hide a typo.
+func loadDefaults(root string) (Defaults, string, error) {
+	path := defaultsPath(root)
+	explicit := strings.TrimSpace(os.Getenv("FOREST_DEFAULTS")) != ""
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if explicit {
+			return Defaults{}, "", fmt.Errorf("read %s: %w", path, err)
+		}
+		return Defaults{}, "", nil
+	}
+	if err != nil {
+		return Defaults{}, "", err
+	}
+	var document defaultsYAML
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&document); err != nil {
+		// An empty or comment-only file is the same as an absent one: the
+		// operator created the slot and has not filled it yet.
+		if errors.Is(err, io.EOF) {
+			return Defaults{}, path, nil
+		}
+		return Defaults{}, "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return Defaults{}, "", fmt.Errorf("parse %s: %w", path, err)
+		}
+		return Defaults{}, "", fmt.Errorf("parse %s: multiple YAML documents", path)
+	}
+	defaults := Defaults{
+		Model:    strings.TrimSpace(string(document.Model)),
+		Thinking: strings.TrimSpace(string(document.Thinking)),
+		Profile:  strings.TrimSpace(string(document.Profile)),
+	}
+	if defaults.Profile != "" && !filepath.IsAbs(defaults.Profile) {
+		defaults.Profile = filepath.Join(root, defaults.Profile)
+	}
+	return defaults, path, nil
+}
+
 func loadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

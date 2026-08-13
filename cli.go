@@ -376,10 +376,14 @@ func runDeclarationList(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
+	defaults, _, err := loadDefaults(flags.root)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
 	names := agentNames(cfg)
 	declarations := make([]Declaration, 0, len(names))
 	for _, name := range names {
-		declaration, loadErr := loadDeclaration(flags.root, name)
+		declaration, loadErr := loadDeclarationWithDefaults(flags.root, name, defaults)
 		if loadErr != nil {
 			return failure(exitError, "%s", loadErr)
 		}
@@ -407,12 +411,16 @@ func runDeclarationShow(rest []string, flags cliFlags) cliOutcome {
 	}
 	// Field labels sit at column zero and prompt bodies are indented, so audited
 	// prompt text cannot pose as a declaration field. An unset field carries no
-	// trailing space.
+	// trailing space. Declared environment prints its keys only: a value is the
+	// Run's business, not the reader's.
 	human := strings.Join([]string{
 		"declaration " + oneLine(declaration.Name),
 		field("model", oneLine(declaration.Model)),
+		field("model_source", oneLine(declaration.ModelSource)),
 		field("tools", strings.Join(declaration.Tools, ",")),
 		field("thinking", oneLine(declaration.Thinking)),
+		field("env", strings.Join(declaration.EnvKeys, ",")),
+		field("profile", "\n"+indentBlock(strings.Join(declaration.ProfileFiles, "\n"))),
 		field("system_prompt", "\n"+indentBlock(declaration.SystemPrompt)),
 		field("task_prompt", "\n"+indentBlock(declaration.TaskPrompt)),
 	}, "\n")

@@ -331,6 +331,7 @@ func TestCLIRejectsEmptyFlagValues(t *testing.T) {
 
 // selfcheck publishes the paths it resolved, not a constant list of names.
 func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
+	t.Setenv("FOREST_DEFAULTS", "")
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")
@@ -364,6 +365,36 @@ func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 		if tool.Path != filepath.Join(bin, tool.Name) {
 			t.Fatalf("tool %s path=%q, want %s", tool.Name, tool.Path, filepath.Join(bin, tool.Name))
 		}
+	}
+	if payload.DefaultsSource != "" || payload.Defaults.Model != "" {
+		t.Fatalf("absent defaults leaked into selfcheck: %#v", payload)
+	}
+	defaultsPath := filepath.Join(root, "forest.defaults.yaml")
+	if err := os.WriteFile(defaultsPath, []byte("model: host/model\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, envelope, _ = decodeEnvelope(t, "selfcheck", "--json", "--root", root)
+	encoded, err = json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.DefaultsSource != defaultsPath || payload.Defaults.Model != "host/model" {
+		t.Fatalf("selfcheck defaults=%#v source=%q", payload.Defaults, payload.DefaultsSource)
+	}
+	if err := os.MkdirAll(forestPath(root, "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(defaultsPath, []byte("profile: .forest/profiles\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"selfcheck", "--root", root})
+	})
+	if code != exitError || !strings.Contains(stderr, "contains the Run profile") {
+		t.Fatalf("nested profile selfcheck code=%d stderr=%q", code, stderr)
 	}
 }
 
