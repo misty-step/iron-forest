@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -75,6 +77,10 @@ type Declaration struct {
 	// SkillPaths lists the explicit repository-relative skill directories that
 	// Pi receives for this declaration.
 	SkillPaths []string `json:"skills"`
+	// DefinitionSHA is the digest over the ordered declaration pair (agent.md
+	// then task.md) as loaded. The Runner recomputes it immediately before exec
+	// so a run executes only the declaration bytes the Kernel loaded (see #144).
+	DefinitionSHA string `json:"definition_sha,omitempty"`
 }
 
 type declarationFrontmatter struct {
@@ -214,6 +220,7 @@ func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declarat
 	}
 	// The model resolves through three layers, declaration first, so an operator
 	// can set one fleet default and a repository can still override it.
+	definitionSHA := declarationPairDigest(agentData, taskData)
 	model := strings.TrimSpace(string(metadata.Model))
 	modelSource := "declaration"
 	if model == "" {
@@ -230,15 +237,28 @@ func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declarat
 		return Declaration{}, err
 	}
 	return Declaration{
-		Name:         name,
-		Model:        model,
-		Tools:        tools,
-		Thinking:     strings.TrimSpace(thinking),
-		SystemPrompt: body,
-		TaskPrompt:   string(taskData),
-		ModelSource:  modelSource,
-		SkillPaths:   skillPaths,
+		Name:          name,
+		Model:         model,
+		Tools:         tools,
+		Thinking:      strings.TrimSpace(thinking),
+		SystemPrompt:  body,
+		TaskPrompt:    string(taskData),
+		ModelSource:   modelSource,
+		SkillPaths:    skillPaths,
+		DefinitionSHA: definitionSHA,
 	}, nil
+}
+
+// declarationPairDigest fingerprints the ordered declaration pair: the bytes of
+// agent.md followed by the bytes of task.md. It is the per-dispatch digest the
+// Kernel verifies immediately before exec so a Run executes only the declared
+// files, unchanged since they were loaded (see #144).
+func declarationPairDigest(agentData, taskData []byte) string {
+	hash := sha256.New()
+	hash.Write(agentData)
+	hash.Write([]byte{0})
+	hash.Write(taskData)
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 // defaultModel is the built-in last layer of the model chain.

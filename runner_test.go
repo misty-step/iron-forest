@@ -172,6 +172,76 @@ func TestRunnerCleansPrivateRefsAfterAgentFailureAndCancellation(t *testing.T) {
 	}
 }
 
+// TestRunnerRejectsChangedDeclarationBundle pins #144: a run executes only the
+// declared agent files, unchanged since they were loaded. Editing agent.md or
+// task.md between load and exec aborts the run with a digest mismatch, records
+// a nonzero-exit Ledger row, and refuses to start Pi. An unchanged declaration
+// dispatches normally and records its digest on the Ledger row.
+func TestRunnerRejectsChangedDeclarationBundle(t *testing.T) {
+	root, _ := testClone(t)
+	writeTestDeclaration(t, root, "builder")
+	runGitDir(t, root, "add", "agents")
+	runGitDir(t, root, "commit", "-m", "declaration")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/master")
+	omp := filepath.Join(t.TempDir(), "omp")
+	marker := filepath.Join(t.TempDir(), "invoked")
+	t.Setenv("MARKER_FILE", marker)
+	script := "#!/bin/sh\nset -eu\nprintf ran > \"$MARKER_FILE\"\nprintf '%s\\n' '{\"type\":\"message_end\",\"message\":{\"usage\":{\"input\":1,\"output\":2}}}'\nprintf '%s\\n' '{\"type\":\"turn_end\",\"message\":{\"usage\":{\"input\":1,\"output\":2}}}'\n"
+	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = omp
+
+	// Load the declaration exactly as the Kernel does; this records the digest.
+	declaration, err := loadDeclaration(root, "builder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if declaration.DefinitionSHA == "" {
+		t.Fatal("loadDeclaration recorded no definition digest")
+	}
+
+	// Unchanged since load, the run dispatches normally and records its digest.
+	record, err := runner.Run(context.Background(), declaration, 10)
+	if err != nil {
+		t.Fatalf("unchanged bundle refused: %v", err)
+	}
+	if record.Exit != 0 || record.DefinitionSHA != declaration.DefinitionSHA {
+		t.Fatalf("record=%#v", record)
+	}
+	if body, readErr := os.ReadFile(marker); readErr != nil || string(body) != "ran" {
+		t.Fatalf("Pi did not start for an unchanged bundle: %q err=%v", body, readErr)
+	}
+	rows, ledgerErr := ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 || rows[0].DefinitionSHA != declaration.DefinitionSHA {
+		t.Fatalf("ledger rows=%v err=%v, want one passing row with the digest", rows, ledgerErr)
+	}
+
+	// A host Write changes task.md after load but before dispatch; Pi must not
+	// start and the Ledger row must record a nonzero exit.
+	if err := os.WriteFile(filepath.Join(root, "agents", "builder", "task.md"), []byte("do the work differently\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	record, err = runner.Run(context.Background(), declaration, 10)
+	if err == nil || !strings.Contains(err.Error(), "bundle changed since load") {
+		t.Fatalf("changed bundle record=%#v err=%v, want digest mismatch", record, err)
+	}
+	if record.Exit == 0 {
+		t.Fatalf("changed bundle exit=%d, want nonzero", record.Exit)
+	}
+	if body, readErr := os.ReadFile(marker); !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("Pi started despite the changed bundle: %q err=%v", body, readErr)
+	}
+	rows, ledgerErr = ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 2 || rows[1].Exit == 0 {
+		t.Fatalf("ledger rows=%v err=%v, want a second nonzero-exit row", rows, ledgerErr)
+	}
+}
+
 func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	root, _ := testClone(t)
 	omp := filepath.Join(t.TempDir(), "omp")

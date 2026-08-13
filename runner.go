@@ -348,7 +348,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	}
 	started := time.Now().UTC()
 	runID := newRunID(declaration.Name, started)
-	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano)}
+	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano), DefinitionSHA: declaration.DefinitionSHA}
 	logPath := runLogPath(r.Root, runID)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return record, err
@@ -799,6 +799,13 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		record.Exit = contextExit(err)
 		return err
 	}
+	// Recompute the declaration digest immediately before exec and refuse the
+	// run when it changed since load, so a Run executes only the declaration
+	// bytes the Kernel loaded (see #144).
+	if err := r.verifyDeclarationDigest(declaration); err != nil {
+		record.Exit = 1
+		return err
+	}
 	path, err := r.piExecutable()
 	if err != nil {
 		record.Exit = harnessUnavailableExit
@@ -996,6 +1003,32 @@ func runContextExit(parent, run context.Context, fallback int) int {
 // needed and a stubbed PATH is honoured.
 func (r *Runner) piExecutable() (string, error) {
 	return trustedExecutable(r.Root, r.PiPath)
+}
+
+// verifyDeclarationDigest recomputes the digest over the ordered declaration
+// pair (agent.md then task.md) from the repository root and compares it with the
+// digest loadDeclaration recorded. The run is refused before Pi starts when any
+// declared file changed after load, because the executed prompt, model, and tool
+// set are otherwise not provably the declared ones (see #144). A declaration
+// without a recorded digest (for example a directly constructed predecessor)
+// has nothing to compare and dispatches normally.
+func (r *Runner) verifyDeclarationDigest(declaration Declaration) error {
+	if declaration.DefinitionSHA == "" {
+		return nil
+	}
+	dir := declarationDir(r.Root, declaration.Name)
+	agentData, err := os.ReadFile(filepath.Join(dir, "agent.md"))
+	if err != nil {
+		return fmt.Errorf("re-read %s agent.md: %w", declaration.Name, err)
+	}
+	taskData, err := os.ReadFile(filepath.Join(dir, "task.md"))
+	if err != nil {
+		return fmt.Errorf("re-read %s task.md: %w", declaration.Name, err)
+	}
+	if got := declarationPairDigest(agentData, taskData); got != declaration.DefinitionSHA {
+		return fmt.Errorf("agent %s bundle changed since load: digest %s != recorded %s", declaration.Name, got, declaration.DefinitionSHA)
+	}
+	return nil
 }
 
 // runEvidenceLine describes the explicit resources and non-secret settings Pi
