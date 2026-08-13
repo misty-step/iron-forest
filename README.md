@@ -123,6 +123,8 @@ the exact first 1 MiB, an explicit marker, and the exact last 1 MiB. The marker
 is the only file content outside the 2 MiB output cap. The Runner retains the 32
 newest completed reserved `.log` files. It does not remove active logs or
 foreign entries.
+Pi's terminal `agent_end` event is authoritative: a terminal assistant error
+fails the Run even when the Pi process exits zero.
 
 A trusted declaration runs with the inherited service credentials and filesystem
 access. Worktree separation and time bounds are

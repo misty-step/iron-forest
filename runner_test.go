@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -195,6 +196,78 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	}
 	if _, statErr := os.Stat(forestPath(root, "worktrees", record.RunID)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("invalid usage worktree survived: %v", statErr)
+	}
+}
+
+func TestRunnerRejectsTerminalPiErrorDespiteZeroProcessExit(t *testing.T) {
+	root, _ := testClone(t)
+	state := t.TempDir()
+	pi := filepath.Join(state, "pi")
+	eventPath := filepath.Join(state, "agent-end.jsonl")
+	event := []byte(`{"type":"agent_end","messages":[{"role":"assistant","content":"`)
+	event = append(event, bytes.Repeat([]byte("x"), 2*runLogHalfLimit+4096)...)
+	event = append(event, []byte(`","usage":{"input":0,"output":0},"stopReason":"error","errorMessage":"401: missing authentication"}],"willRetry":false}`+"\n")...)
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PI_EVENT", eventPath)
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":1,"output":2}}}'
+cat "$PI_EVENT"
+exit 0
+`
+	if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "pi agent ended with error") {
+		t.Fatalf("terminal Pi error record=%#v err=%v, want failing Run", record, err)
+	}
+	if record.TokensIn != 1 || record.TokensOut != 2 {
+		t.Fatalf("terminal Pi error usage=%#v, want earlier valid usage", record)
+	}
+	rows, ledgerErr := ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != 1 {
+		t.Fatalf("terminal Pi error ledger=%v err=%v, want one failing row", rows, ledgerErr)
+	}
+}
+
+func TestRunnerRejectsTerminalPiErrorMessageWithoutStopReason(t *testing.T) {
+	root, _ := testClone(t)
+	pi := filepath.Join(t.TempDir(), "pi")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":1,"output":1}}}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","errorMessage":"provider unavailable"}],"willRetry":false}'
+exit 0
+`
+	if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "pi agent ended with error") {
+		t.Fatalf("terminal Pi errorMessage record=%#v err=%v, want failing Run", record, err)
+	}
+}
+
+func TestRunnerAcceptsSuccessfulAssistantAfterRetriedPiError(t *testing.T) {
+	root, _ := testClone(t)
+	pi := filepath.Join(t.TempDir(), "pi")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":3,"output":5}}}'
+printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"transient"},{"role":"user","content":"retry"},{"role":"assistant","stopReason":"stop"}],"willRetry":false}'
+`
+	if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	if err != nil || record.Exit != 0 || record.TokensIn != 3 || record.TokensOut != 5 {
+		t.Fatalf("successful Pi retry record=%#v err=%v", record, err)
 	}
 }
 

@@ -8,6 +8,7 @@
   Run-profile residue during cutover. Declaration output and Run evidence
   publish `skills`; declaration `env` and the obsolete `profile_files` surface
   are removed. These breaking changes advance CLI envelopes to `forest.cli.v2`.
+  Terminal Pi agent errors now fail the Run even when Pi exits zero.
 
 - 2026-08-10: Reforged Iron Forest as a Kernel plus profile appliance. Git is
   the coordination authority with schema-v1 write-once notes, agent-owned
