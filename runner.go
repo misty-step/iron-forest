@@ -278,7 +278,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	}
 	harnessRunnable := profileErr == nil
 	if profileErr != nil {
-		record.Exit = 1
+		record.Exit = runContextExit(ctx, runCtx, 1)
 		_, _ = fmt.Fprintf(logFile, "materialize Run profile: %v\n", profileErr)
 	} else {
 		_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration, profileFiles))

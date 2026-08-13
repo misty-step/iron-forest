@@ -197,6 +197,7 @@ var blockedEnvNames = []string{
 }
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var mintAliasPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`)
 
 // decodeDeclarationEnv reads the optional env map. A value of `mint:<alias>`
 // becomes the `__mint.<alias>__` marker a Mint-routed client substitutes; every
@@ -228,7 +229,7 @@ func decodeDeclarationEnv(name string, node *yaml.Node) (map[string]string, erro
 		value = strings.TrimSpace(value)
 		if alias, isMint := strings.CutPrefix(value, "mint:"); isMint {
 			alias = strings.TrimSpace(alias)
-			if !envNamePattern.MatchString(strings.ReplaceAll(alias, "-", "_")) {
+			if !validMintAlias(alias) {
 				return nil, fmt.Errorf("agent %s frontmatter env %q has an invalid mint alias %q", name, key, alias)
 			}
 			value = "__mint." + alias + "__"
@@ -245,6 +246,10 @@ func envKeys(env map[string]string) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+func validMintAlias(alias string) bool {
+	return mintAliasPattern.MatchString(alias) && !strings.Contains(alias, "..") && !strings.Contains(alias, "__")
 }
 
 func splitFrontmatter(data []byte) ([]byte, string, error) {

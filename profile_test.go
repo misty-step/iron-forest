@@ -137,6 +137,15 @@ func TestDeclarationEnvRewritesMintAndRejectsOwnedNames(t *testing.T) {
 	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "Kernel owns") {
 		t.Fatalf("owned env err=%v, want Kernel owns", err)
 	}
+	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  KEY: mint:openrouter.default\n", "System rules\n", "Select one item.")
+	declaration, err = loadDeclaration(root, "builder")
+	if err != nil || declaration.Env["KEY"] != "__mint.openrouter.default__" {
+		t.Fatalf("dotted mint alias: %#v err=%v", declaration.Env, err)
+	}
+	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  KEY: mint:OpenRouter\n", "System rules\n", "Select one item.")
+	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "invalid mint alias") {
+		t.Fatalf("uppercase mint alias err=%v", err)
+	}
 }
 
 func TestRepositoryProfileRejectsAuthAndSymlinks(t *testing.T) {
@@ -225,6 +234,35 @@ func TestMaterializeRejectsAFileValuedBaseProfile(t *testing.T) {
 	_, _, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{Profile: base})
 	if err == nil || !strings.Contains(err.Error(), "not a directory") {
 		t.Fatalf("file base err=%v, want not a directory", err)
+	}
+}
+
+func TestOperatorProfileSeedsHostPiAndRejectsNestedTarget(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	host := filepath.Join(home, ".pi", "agent")
+	if err := os.MkdirAll(host, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(host, "auth.json"), []byte(`{"ok":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	target, files, err := materializeRunProfile(context.Background(), root, "1-builder", Declaration{Name: "builder"}, Defaults{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, []string{"auth.json"}) {
+		t.Fatalf("host seed files=%v", files)
+	}
+	got, err := os.ReadFile(filepath.Join(target, "auth.json"))
+	if err != nil || string(got) != `{"ok":true}` {
+		t.Fatalf("host seed=%q err=%v", got, err)
+	}
+	_, _, err = materializeRunProfile(context.Background(), root, "2-builder", Declaration{Name: "builder"}, Defaults{Profile: forestPath(root, "profiles")})
+	if err == nil || !strings.Contains(err.Error(), "contains the Run profile") {
+		t.Fatalf("nested target err=%v", err)
 	}
 }
 

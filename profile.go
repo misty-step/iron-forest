@@ -114,6 +114,22 @@ func declarationProfileDir(root, name string) string {
 }
 
 // sharedProfileDir is the repository layer every declaration shares.
+
+// operatorProfile is the trusted base layer. An explicit defaults.Profile
+// wins. Otherwise the host Pi profile is used, so an upgraded factory keeps
+// the credentials pi already stored under ~/.pi/agent.
+func operatorProfile(defaults Defaults) string {
+	if defaults.Profile != "" {
+		return defaults.Profile
+	}
+	if dir := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")); dir != "" {
+		return dir
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".pi", "agent")
+	}
+	return ""
+}
 func sharedProfileDir(root string) string {
 	return filepath.Join(root, "agents", "_shared", "profile")
 }
@@ -193,8 +209,8 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 		trusted bool
 	}
 	layers := []layer{}
-	if defaults.Profile != "" {
-		layers = append(layers, layer{dir: defaults.Profile, trusted: true})
+	if base := operatorProfile(defaults); base != "" {
+		layers = append(layers, layer{dir: base, trusted: true})
 	}
 	layers = append(layers,
 		layer{dir: sharedProfileDir(root)},
@@ -213,6 +229,11 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 		}
 		if !info.IsDir() {
 			return "", nil, fmt.Errorf("profile layer %s is not a directory", item.dir)
+		}
+		if inside, err := pathInside(item.dir, target); err != nil {
+			return "", nil, err
+		} else if inside {
+			return "", nil, fmt.Errorf("profile layer %s contains the Run profile", item.dir)
 		}
 		walkErr := filepath.WalkDir(item.dir, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -253,6 +274,9 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 				mode |= info.Mode().Perm() & 0o111
 			}
 			if err := os.WriteFile(destination, data, mode); err != nil {
+				return err
+			}
+			if err := os.Chmod(destination, mode); err != nil {
 				return err
 			}
 			manifest[relative] = struct{}{}

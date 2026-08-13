@@ -46,13 +46,14 @@ comment-only defaults file is the zero Defaults, not an error.
 `forest declaration show` publishes the resolved model and its source. `env`
 values are literals or `mint:<alias>` references rewritten to
 `__mint.<alias>__`. The Kernel never prints an env value, including in JSON.
-
 Each Run gets a private harness profile under `.forest/profiles/<run-id>`.
-The operator's base profile (from defaults) copies first and may hold
-credentials. The shared repository layer copies next. The declaration's own
-layer copies last and wins on a name collision. A repository layer may not
-contain `auth.json` or a symlink. The child sees the result through
-`PI_CODING_AGENT_DIR`. Reserved startup GC removes leftover profiles.
+The operator's base profile copies first and may hold credentials. When
+`forest.defaults.yaml` does not name one, the host Pi profile
+(`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) is that base. The shared
+repository layer copies next. The declaration's own layer copies last and
+wins on a name collision. A repository layer may not contain `auth.json` or
+a symlink. The child sees the result through `PI_CODING_AGENT_DIR`.
+Reserved startup GC removes leftover profiles.
 
 This quick start uses self-host mode: the factory source checkout is also the
 managed repository. For a separate sibling managed checkout, use the

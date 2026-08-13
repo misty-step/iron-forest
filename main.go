@@ -346,6 +346,8 @@ type selfcheckPayload struct {
 	// visibly different from one that supplies empty ones.
 	Defaults       Defaults `json:"defaults"`
 	DefaultsSource string   `json:"defaults_source,omitempty"`
+	// Profile is the trusted base directory a Run will seed from.
+	Profile string `json:"profile,omitempty"`
 }
 
 // runSelfcheck validates the configuration, the declarations, and the trusted
@@ -383,10 +385,14 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		}
 		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
+	profile := operatorProfile(defaults)
 	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
 		oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
 	if defaultsSource != "" {
 		human += fmt.Sprintf("\ndefaults: %s (model=%s)", oneLine(defaultsSource), oneLine(defaults.Model))
+	}
+	if profile != "" {
+		human += fmt.Sprintf("\nprofile: %s", oneLine(profile))
 	}
 	return cliOutcome{
 		Exit: exitOK,
@@ -396,6 +402,7 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 			Tools:          resolved,
 			Defaults:       defaults,
 			DefaultsSource: defaultsSource,
+			Profile:        profile,
 		},
 		Human: human,
 	}

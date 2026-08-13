@@ -30,8 +30,11 @@ The Kernel materializes one harness profile per Run, then points the child at
 it with `PI_CODING_AGENT_DIR`. Layers copy in this order; a later file of the
 same relative path replaces an earlier one:
 
-1. The operator's base profile, named by `forest.defaults.yaml` `profile`
-   (or `$FOREST_DEFAULTS`). This is the only layer that may hold credentials.
+1. The operator's base profile. `forest.defaults.yaml` `profile` (or
+   `$FOREST_DEFAULTS`) names it when set. Otherwise the host Pi profile
+   (`$PI_CODING_AGENT_DIR` or `~/.pi/agent`) is used, so an upgraded factory
+   keeps the credentials pi already stored. This is the only layer that may
+   hold credentials.
 2. `agents/_shared/profile/`, the repository layer every declaration shares.
 3. `agents/<name>/profile/`, the declaration's own layer.
 
@@ -49,9 +52,11 @@ they are never the default. `forest declaration show` and the Run log's
 JSON publication of a declaration omits env values.
 
 Declared `env` is a map of string scalars. A value of `mint:<alias>` becomes
-`__mint.<alias>__`. Names the Kernel owns (`PATH`, `HOME`, `FOREST_RUN_ID`,
-`PI_CODING_AGENT_DIR`, and the Git identity variables) are rejected. The
-read surface and the Run evidence publish keys, never values.
+`__mint.<alias>__`. An alias is lowercase letters, digits, `.`, `_`, and `-`,
+starts and ends alphanumeric, and contains no `..` or `__`. Names the Kernel
+owns (`PATH`, `HOME`, `FOREST_RUN_ID`, `PI_CODING_AGENT_DIR`, and the Git
+identity variables) are rejected. The read surface and the Run evidence
+publish keys, never values.
 
 The profile directory is collected with the worktree. Reserved startup GC
 sweeps leftover `.forest/profiles/<run-id>` paths through the trusted
