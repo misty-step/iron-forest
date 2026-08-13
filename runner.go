@@ -295,8 +295,8 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	if profileErr := collectRunProfile(r.Root, runID); profileErr != nil {
-		profileErr = fmt.Errorf("collect Run profile: %w", profileErr)
+	if profileErr := os.RemoveAll(runProfileDir(r.Root, runID)); profileErr != nil {
+		profileErr = fmt.Errorf("collect Run profile: remove Run profile: %w", profileErr)
 		_, _ = fmt.Fprintln(logFile, profileErr)
 		cleanupErr = errors.Join(cleanupErr, profileErr)
 		if record.Exit == 0 {
@@ -736,15 +736,11 @@ func (r *Runner) piExecutable() (string, error) {
 	return trustedExecutable(r.Root, r.PiPath)
 }
 
-// runnerControlledEnvPrefixes are the environment variables the Kernel owns.
-// Anything inherited with one of these prefixes is replaced, never merged.
-var runnerControlledEnvPrefixes = []string{"PATH=", "FOREST_RUN_ID=", "GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=", "GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL="}
-
 // runEvidenceLine is the Run's manifest: the model and its source, the profile
-// files the agent saw, and the declared environment's keys. Values never appear,
-// because a mint marker or a literal is not the reader's business; the shape is.
-// The line is JSON, so the harness output parser reads past it, and typed, so a
-// consumer can distinguish it from harness events.
+// files the agent saw, and the declared environment's keys. Values never appear
+// because they are not the reader's business. The line is JSON, so the harness
+// output parser reads past it, and typed, so a consumer can distinguish it from
+// harness events.
 func runEvidenceLine(record RunRecord, declaration Declaration, profileFiles []string) string {
 	line, err := json.Marshal(map[string]any{
 		"type":         "forest.run",

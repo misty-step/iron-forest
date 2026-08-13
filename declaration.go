@@ -72,9 +72,8 @@ type Declaration struct {
 	// instance defaults, or the built-in. A consumer can audit the chain instead
 	// of guessing which file won.
 	ModelSource string `json:"model_source,omitempty"`
-	// Env carries declared environment for the Run. Values are literals, or a
-	// `mint:` reference already rewritten to its `__mint.<alias>__` marker. A
-	// declaration never carries a secret value, and JSON never prints one.
+	// Env carries opaque string values declared for the Run. JSON never prints
+	// them.
 	Env map[string]string `json:"-"`
 	// EnvKeys lists declared environment names for the read surface.
 	EnvKeys []string `json:"env,omitempty"`
@@ -197,11 +196,9 @@ var blockedEnvNames = []string{
 }
 
 var envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-var mintAliasPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`)
 
-// decodeDeclarationEnv reads the optional env map. A value of `mint:<alias>`
-// becomes the `__mint.<alias>__` marker a Mint-routed client substitutes; every
-// other value passes through as a literal. No value is ever a secret.
+// decodeDeclarationEnv reads the optional env map. Values pass through
+// unchanged. The read surfaces publish names only.
 func decodeDeclarationEnv(name string, node *yaml.Node) (map[string]string, error) {
 	if node.Kind == 0 {
 		return nil, nil
@@ -226,14 +223,6 @@ func decodeDeclarationEnv(name string, node *yaml.Node) (map[string]string, erro
 		if slices.Contains(blockedEnvNames, key) {
 			return nil, fmt.Errorf("agent %s frontmatter env %q names a variable the Kernel owns", name, key)
 		}
-		value = strings.TrimSpace(value)
-		if alias, isMint := strings.CutPrefix(value, "mint:"); isMint {
-			alias = strings.TrimSpace(alias)
-			if !validMintAlias(alias) {
-				return nil, fmt.Errorf("agent %s frontmatter env %q has an invalid mint alias %q", name, key, alias)
-			}
-			value = "__mint." + alias + "__"
-		}
 		env[key] = value
 	}
 	return env, nil
@@ -246,10 +235,6 @@ func envKeys(env map[string]string) []string {
 	}
 	slices.Sort(keys)
 	return keys
-}
-
-func validMintAlias(alias string) bool {
-	return mintAliasPattern.MatchString(alias) && !strings.Contains(alias, "..") && !strings.Contains(alias, "__")
 }
 
 func splitFrontmatter(data []byte) ([]byte, string, error) {

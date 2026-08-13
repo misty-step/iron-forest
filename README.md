@@ -44,8 +44,8 @@ agents/_shared/profile/         # optional; every declaration
 built-in `openrouter/deepseek/deepseek-v4-flash-0731`. An empty or
 comment-only defaults file is the zero Defaults, not an error.
 `forest declaration show` publishes the resolved model and its source. `env`
-values are literals or `mint:<alias>` references rewritten to
-`__mint.<alias>__`. The Kernel never prints an env value, including in JSON.
+values are opaque string scalars. The Kernel never prints an env value,
+including in JSON.
 Each Run gets a private harness profile under `.forest/profiles/<run-id>`.
 The operator's base profile copies first and may hold credentials. When
 `forest.defaults.yaml` does not name one, the host Pi profile

@@ -13,12 +13,10 @@ import (
 )
 
 // This file owns the harness profile: which directories feed it, what a
-// repository layer may contribute, how one is materialized per Run, the child's
-// environment, and how the directory is collected. A Run's evidence must
-// describe exactly what its agent saw, so profiles are built per Run, never
-// cached per declaration.
+// repository layer may contribute, how one is materialized per Run, and the
+// child's environment. A Run's evidence must describe exactly what its agent
+// saw, so profiles are built per Run, never cached per declaration.
 
-// runProfileDir is where one Run's harness profile lives while the Run is live.
 // trustedExecutable resolves a tool to a path outside the repository. Symlinks
 // are followed to decide trust, because the target is what actually runs, but the
 // caller's own path is returned to execute. A version-manager shim dispatches on
@@ -113,8 +111,6 @@ func declarationProfileDir(root, name string) string {
 	return filepath.Join(declarationDir(root, name), "profile")
 }
 
-// sharedProfileDir is the repository layer every declaration shares.
-
 // operatorProfile is the trusted base layer. An explicit defaults.Profile
 // wins. Otherwise the host Pi profile is used, so an upgraded factory keeps
 // the credentials pi already stored under ~/.pi/agent.
@@ -134,9 +130,6 @@ func sharedProfileDir(root string) string {
 	return filepath.Join(root, "agents", "_shared", "profile")
 }
 
-// errProfileAuth is rejected content: credentials never enter a repository
-// layer. They live in the operator's base profile, or as mint references in
-// declared environment.
 var errProfileAuth = errors.New("a repository profile layer must not contain auth.json")
 
 // scanProfileLayer validates one repository profile layer and lists its files.
@@ -210,10 +203,12 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 		required bool
 	}
 	layers := []layer{}
-	if defaults.Profile != "" {
-		layers = append(layers, layer{dir: defaults.Profile, trusted: true, required: true})
-	} else if base := operatorProfile(defaults); base != "" {
-		layers = append(layers, layer{dir: base, trusted: true})
+	if base := operatorProfile(defaults); base != "" {
+		layers = append(layers, layer{
+			dir:      base,
+			trusted:  true,
+			required: defaults.Profile != "",
+		})
 	}
 	layers = append(layers,
 		layer{dir: sharedProfileDir(root)},
@@ -311,16 +306,6 @@ func materializeRunProfile(ctx context.Context, root, runID string, declaration 
 	return target, files, nil
 }
 
-// collectRunProfile removes a Run's profile. It is plain filesystem state, so
-// collection is a plain removal, paired with worktree collection.
-func collectRunProfile(root, runID string) error {
-	err := os.RemoveAll(runProfileDir(root, runID))
-	if err != nil {
-		return fmt.Errorf("remove Run profile: %w", err)
-	}
-	return nil
-}
-
 // runEnvironment composes the child's environment: the inherited environment
 // minus the variables the Kernel owns, the trusted PATH, the Run's Git identity
 // and identity marker, the per-Run harness profile, and the declaration's
@@ -330,17 +315,10 @@ func runEnvironment(root, name, email, runID, profileDir string, declaration Dec
 	if err != nil {
 		return nil, err
 	}
-	controlled := append([]string{"PI_CODING_AGENT_DIR="}, runnerControlledEnvPrefixes...)
 	environment := make([]string, 0, len(os.Environ())+8)
 	for _, value := range os.Environ() {
-		keep := true
-		for _, prefix := range controlled {
-			if strings.HasPrefix(value, prefix) {
-				keep = false
-				break
-			}
-		}
-		if keep {
+		key, _, _ := strings.Cut(value, "=")
+		if key == "HOME" || !slices.Contains(blockedEnvNames, key) {
 			environment = append(environment, value)
 		}
 	}
@@ -353,12 +331,7 @@ func runEnvironment(root, name, email, runID, profileDir string, declaration Dec
 		"FOREST_RUN_ID="+runID,
 		"PI_CODING_AGENT_DIR="+profileDir,
 	)
-	keys := make([]string, 0, len(declaration.Env))
-	for key := range declaration.Env {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	for _, key := range keys {
+	for _, key := range envKeys(declaration.Env) {
 		environment = append(environment, key+"="+declaration.Env[key])
 	}
 	return environment, nil

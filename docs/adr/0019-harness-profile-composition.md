@@ -20,9 +20,8 @@ The second is defaults. Every declaration restated the same model string. An
 operator who wants one fleet default, with a repository override, had nowhere
 to put it.
 
-Credentials must not live in the repository. A declaration may name a Mint
-alias. The Kernel rewrites `mint:<alias>` to `__mint.<alias>__` and never
-prints the value.
+Credentials must not live in the repository. They stay in the operator's base
+profile or host environment. The Kernel never prints a declared env value.
 
 ## Decision
 
@@ -51,12 +50,10 @@ they are never the default. `forest declaration show` and the Run log's
 `forest.run` line publish the resolved model and the layer that supplied it.
 JSON publication of a declaration omits env values.
 
-Declared `env` is a map of string scalars. A value of `mint:<alias>` becomes
-`__mint.<alias>__`. An alias is lowercase letters, digits, `.`, `_`, and `-`,
-starts and ends alphanumeric, and contains no `..` or `__`. Names the Kernel
-owns (`PATH`, `HOME`, `FOREST_RUN_ID`, `PI_CODING_AGENT_DIR`, and the Git
-identity variables) are rejected. The read surface and the Run evidence
-publish keys, never values.
+Declared `env` is a map of opaque string scalars. Names the Kernel owns
+(`PATH`, `HOME`, `FOREST_RUN_ID`, `PI_CODING_AGENT_DIR`, and the Git identity
+variables) are rejected. The read surface and the Run evidence publish keys,
+never values.
 
 The profile directory is collected with the worktree. Reserved startup GC
 sweeps leftover `.forest/profiles/<run-id>` paths through the trusted

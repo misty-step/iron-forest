@@ -111,40 +111,31 @@ func TestEmptyOrCommentOnlyDefaultsAreZero(t *testing.T) {
 	}
 }
 
-func TestDeclarationEnvRewritesMintAndRejectsOwnedNames(t *testing.T) {
+func TestDeclarationEnvPreservesOpaqueValuesAndRejectsOwnedNames(t *testing.T) {
 	root := t.TempDir()
-	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  OPENROUTER_API_KEY: mint:openrouter\n  NOTE: hello\n", "System rules\n", "Select one item.")
+	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  REFERENCE: \"Vendor:Open.Router__\"\n  NOTE: \"  hello  \"\n", "System rules\n", "Select one item.")
 	declaration, err := loadDeclaration(root, "builder")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"OPENROUTER_API_KEY": "__mint.openrouter__", "NOTE": "hello"}
+	want := map[string]string{"REFERENCE": "Vendor:Open.Router__", "NOTE": "  hello  "}
 	if !reflect.DeepEqual(declaration.Env, want) {
 		t.Fatalf("env=%v, want %v", declaration.Env, want)
 	}
-	if !reflect.DeepEqual(declaration.EnvKeys, []string{"NOTE", "OPENROUTER_API_KEY"}) {
+	if !reflect.DeepEqual(declaration.EnvKeys, []string{"NOTE", "REFERENCE"}) {
 		t.Fatalf("env keys=%v", declaration.EnvKeys)
 	}
 	encoded, err := json.Marshal(declaration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "hello") || strings.Contains(string(encoded), "__mint.") {
+	if strings.Contains(string(encoded), "hello") || strings.Contains(string(encoded), "Vendor:") {
 		t.Fatalf("JSON leaked env values: %s", encoded)
 	}
 
 	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  PATH: /tmp\n", "System rules\n", "Select one item.")
 	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "Kernel owns") {
 		t.Fatalf("owned env err=%v, want Kernel owns", err)
-	}
-	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  KEY: mint:openrouter.default\n", "System rules\n", "Select one item.")
-	declaration, err = loadDeclaration(root, "builder")
-	if err != nil || declaration.Env["KEY"] != "__mint.openrouter.default__" {
-		t.Fatalf("dotted mint alias: %#v err=%v", declaration.Env, err)
-	}
-	writeAgentFiles(t, root, "builder", "model: local\nenv:\n  KEY: mint:OpenRouter\n", "System rules\n", "Select one item.")
-	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "invalid mint alias") {
-		t.Fatalf("uppercase mint alias err=%v", err)
 	}
 }
 
@@ -185,7 +176,7 @@ func TestRepositoryProfileRejectsAuthAndSymlinks(t *testing.T) {
 	}
 }
 
-func TestMaterializeRunProfileOverlaysLayersAndCollects(t *testing.T) {
+func TestMaterializeRunProfileOverlaysLayers(t *testing.T) {
 	root := t.TempDir()
 	base := filepath.Join(t.TempDir(), "base")
 	for _, item := range []struct{ dir, name, body string }{
@@ -216,12 +207,6 @@ func TestMaterializeRunProfileOverlaysLayersAndCollects(t *testing.T) {
 	auth, err := os.ReadFile(filepath.Join(target, "auth.json"))
 	if err != nil || string(auth) != `{"token":"base"}` {
 		t.Fatalf("base auth=%q err=%v", auth, err)
-	}
-	if err := collectRunProfile(root, "1-builder"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("collected profile survived: %v", err)
 	}
 }
 
@@ -303,28 +288,32 @@ func TestOperatorProfileSeedsHostPiAndRejectsNestedTarget(t *testing.T) {
 
 func TestRunEnvironmentSetsProfileAndDeclaredKeys(t *testing.T) {
 	root := t.TempDir()
-	declaration := Declaration{Name: "builder", Env: map[string]string{"NOTE": "hello", "OPENROUTER_API_KEY": "__mint.openrouter__"}}
+	t.Setenv("HOME", "/home/operator")
+	t.Setenv("FOREST_RUN_ID", "stale-run")
+	t.Setenv("PI_CODING_AGENT_DIR", "/stale-profile")
+	declaration := Declaration{Name: "builder", Env: map[string]string{"NOTE": "hello", "REFERENCE": "provider:opaque"}}
 	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/profile", declaration)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := map[string]string{}
+	got := map[string][]string{}
 	for _, entry := range environment {
 		key, value, ok := strings.Cut(entry, "=")
 		if !ok {
 			t.Fatalf("malformed env %q", entry)
 		}
-		got[key] = value
+		got[key] = append(got[key], value)
 	}
 	for key, want := range map[string]string{
 		"FOREST_RUN_ID":       "1-builder",
 		"PI_CODING_AGENT_DIR": "/tmp/profile",
 		"GIT_AUTHOR_NAME":     "Iron Forest Builder",
+		"HOME":                "/home/operator",
 		"NOTE":                "hello",
-		"OPENROUTER_API_KEY":  "__mint.openrouter__",
+		"REFERENCE":           "provider:opaque",
 	} {
-		if got[key] != want {
-			t.Fatalf("env %s=%q, want %q", key, got[key], want)
+		if !reflect.DeepEqual(got[key], []string{want}) {
+			t.Fatalf("env %s=%q, want exactly %q", key, got[key], want)
 		}
 	}
 }

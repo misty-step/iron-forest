@@ -308,7 +308,7 @@ func ReadLedgerTail(root string, limit int) ([]RunRecord, error) {
 var errLedgerCursorUnknown = errors.New("run identity is not in the ledger")
 
 // errLedgerIdentityUnusable reports a ledger row whose identity cannot carry a
-// paging cursor: empty, or shared with an older row. Identities are minted
+// paging cursor: empty, or shared with an older row. Identities are made
 // unique, so this is a corrupt ledger rather than a caller mistake. Failing here
 // is what stops a client from looping on a cursor that never advances.
 var errLedgerIdentityUnusable = errors.New("ledger row identity cannot carry a cursor")
