@@ -52,14 +52,17 @@ No extension, ambient skill, prompt template, or theme is available to the
 child, including one installed in the host's Pi directory. Project context-file
 discovery remains enabled for the Run worktree.
 
-The ephemeral Pi session ID is the exact Run ID. OpenRouter's session-affinity
-header therefore gives Broadcast destinations a stable join key for provider
-traces, Ledger records, and retained Run logs without adding credentials or
-prompt content to Kernel evidence.
+The ephemeral Pi session ID is the exact Run ID. For an OpenRouter model, the
+Runner writes a minimal `models.json` override that enables
+`sendSessionAffinityHeaders` with the `openrouter` format. Pi therefore sends
+the Run ID as `x-session-id`, giving Broadcast destinations a stable join key
+for provider traces, Ledger records, and retained Run logs without adding
+credentials or prompt content to Kernel evidence.
 
-For every Run, the Runner creates a new writable, initially empty scratch
-directory and sets the child's `PI_CODING_AGENT_DIR` to it. It starts without
-operator Pi filesystem state. Declarations cannot supply environment entries.
+For every Run, the Runner creates a new writable scratch directory and sets
+the child's `PI_CODING_AGENT_DIR` to it. It starts without operator Pi
+filesystem state; only the credential-free OpenRouter model override may be
+materialized there. Declarations cannot supply environment entries.
 Provider and forge credentials reach Pi only through the inherited service
 environment. The installed service reads that environment from
 `%h/.config/iron-forest/%i.env`; the Runner does not write credential values to

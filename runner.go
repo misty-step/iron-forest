@@ -31,7 +31,18 @@ const (
 	runLogTruncationMarker      = "\n--- Iron Forest Run log truncated; retained first 1 MiB and last 1 MiB ---\n"
 	// harnessUnavailableExit is the shell convention for a command that could not
 	// be executed. A Run that never started has no usage to report.
-	harnessUnavailableExit = 127
+	harnessUnavailableExit    = 127
+	piOpenRouterSessionConfig = `{
+  "providers": {
+    "openrouter": {
+      "compat": {
+        "sendSessionAffinityHeaders": true,
+        "sessionAffinityFormat": "openrouter"
+      }
+    }
+  }
+}
+`
 )
 
 var (
@@ -165,6 +176,17 @@ func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
 		"PI_CODING_AGENT_DIR="+piDir,
 	)
 	return environment, nil
+}
+
+func configurePiSessionAffinity(piDir, model string) error {
+	provider, modelID, found := strings.Cut(model, "/")
+	if !found || provider != "openrouter" || modelID == "" {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(piDir, "models.json"), []byte(piOpenRouterSessionConfig), 0o600); err != nil {
+		return fmt.Errorf("write Pi session-affinity override: %w", err)
+	}
+	return nil
 }
 
 type boundedTransportOutput struct {
@@ -404,8 +426,11 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		// remain in the inherited service environment; no operator Pi files
 		// enter the Run.
 		piDir, piErr = os.MkdirTemp("", "iron-forest-pi-")
+		if piErr == nil {
+			piErr = configurePiSessionAffinity(piDir, declaration.Model)
+		}
 		if piErr != nil {
-			piErr = fmt.Errorf("create Run Pi directory: %w", piErr)
+			piErr = fmt.Errorf("prepare Run Pi directory: %w", piErr)
 			record.Exit = runContextExit(ctx, runCtx, 1)
 			_, _ = fmt.Fprintln(logFile, piErr)
 		} else {
