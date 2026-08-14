@@ -54,6 +54,10 @@ each existing skill source directory with an explicit `--skill`. Those paths
 are repository-relative and Pi resolves them from the Run worktree.
 Declaration and Run evidence publish the directories as `skills`.
 
+Pi's exact session ID is the Run ID. OpenRouter sends it as `x-session-id`, so
+Broadcast destinations can group every model request for a Run and correlate
+the provider trace directly with the Ledger and `.forest/runs/<run-id>.log`.
+
 Credentials come only from the service environment inherited by the Run.
 Declaration frontmatter has no `env` field; unknown metadata fails validation.
 Credentials do not belong in prompts, skills, defaults, or commits. The shared

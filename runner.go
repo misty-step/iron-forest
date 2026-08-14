@@ -130,6 +130,9 @@ func pathInside(root, path string) (bool, error) {
 var overriddenChildEnvNames = []string{
 	"PATH", "FOREST_RUN_ID", "PI_CODING_AGENT_DIR",
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+	"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+	"GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1",
 }
 
 func childEnvironment() []string {
@@ -144,7 +147,7 @@ func childEnvironment() []string {
 }
 
 // runEnvironment composes the child's inherited service values, trusted PATH,
-// Run Git identity and marker, and fresh writable Pi directory.
+// scoped Run Git identity and marker, and fresh writable Pi directory.
 func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
 	path, err := trustedPath(root)
 	if err != nil {
@@ -153,10 +156,11 @@ func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
 	environment := childEnvironment()
 	environment = append(environment,
 		"PATH="+path,
-		"GIT_AUTHOR_NAME="+name,
-		"GIT_AUTHOR_EMAIL="+email,
-		"GIT_COMMITTER_NAME="+name,
-		"GIT_COMMITTER_EMAIL="+email,
+		"GIT_CONFIG_COUNT=2",
+		"GIT_CONFIG_KEY_0=user.name",
+		"GIT_CONFIG_VALUE_0="+name,
+		"GIT_CONFIG_KEY_1=user.email",
+		"GIT_CONFIG_VALUE_1="+email,
 		"FOREST_RUN_ID="+runID,
 		"PI_CODING_AGENT_DIR="+piDir,
 	)
@@ -815,7 +819,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	// skills, prompt templates, and themes are disabled; each declared skill is
 	// resolved from the Run worktree.
 	args := []string{
-		"-p", "--mode", "json", "--no-session", "--approve",
+		"-p", "--mode", "json", "--no-session", "--session-id", record.RunID, "--approve",
 		"--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
 		"--model", declaration.Model,
 		"--system-prompt", declaration.SystemPrompt,
