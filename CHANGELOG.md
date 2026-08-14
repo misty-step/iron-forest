@@ -11,6 +11,7 @@
   Terminal Pi agent errors now fail the Run even when Pi exits zero. Per-Run
   Git identities use scoped Git configuration rather than author/committer
   overrides, so nested verification commands can set deterministic identities.
+  Pi uses the exact Run ID as its provider session ID for trace correlation.
 
 - 2026-08-10: Reforged Iron Forest as a Kernel plus profile appliance. Git is
   the coordination authority with schema-v1 write-once notes, agent-owned

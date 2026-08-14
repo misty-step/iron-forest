@@ -812,7 +812,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	// skills, prompt templates, and themes are disabled; each declared skill is
 	// resolved from the Run worktree.
 	args := []string{
-		"-p", "--mode", "json", "--no-session", "--approve",
+		"-p", "--mode", "json", "--no-session", "--session-id", record.RunID, "--approve",
 		"--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
 		"--model", declaration.Model,
 		"--system-prompt", declaration.SystemPrompt,
