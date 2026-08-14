@@ -29,7 +29,7 @@ thinking level while a declaration can still override either.
 The Runner invokes Pi from the Run worktree with non-context discovery disabled:
 
 ```text
-pi -p --mode json --no-session --approve \
+pi -p --mode json --no-session --session-id <run-id> --approve \
   --no-extensions --no-skills --no-prompt-templates --no-themes \
   --model <model> --system-prompt <instructions> \
   [--tools <comma-separated-tools>] [--thinking <level>] \
@@ -51,6 +51,11 @@ these breaking read-surface changes advance the envelope to `forest.cli.v2`.
 No extension, ambient skill, prompt template, or theme is available to the
 child, including one installed in the host's Pi directory. Project context-file
 discovery remains enabled for the Run worktree.
+
+The ephemeral Pi session ID is the exact Run ID. OpenRouter's session-affinity
+header therefore gives Broadcast destinations a stable join key for provider
+traces, Ledger records, and retained Run logs without adding credentials or
+prompt content to Kernel evidence.
 
 For every Run, the Runner creates a new writable, initially empty scratch
 directory and sets the child's `PI_CODING_AGENT_DIR` to it. It starts without

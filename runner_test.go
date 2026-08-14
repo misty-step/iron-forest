@@ -97,6 +97,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 				"--mode\njson", "--model\nlocal", "--tools\nread,bash",
 				"--system-prompt\nsystem", "Reply", "--approve",
 				"--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
+				"--session-id\n" + record.RunID,
 				"--skill\nagents/_shared/skills", "--skill\nagents/" + test.role + "/skills",
 			} {
 				if !strings.Contains(string(args), value) {
