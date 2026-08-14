@@ -306,6 +306,27 @@ mise exec -- go vet ./...
 mise exec -- go test ./...
 ```
 
+Run the deterministic Harbor role regressions before changing an agent
+declaration, prompt, skill, or publication contract:
+
+```sh
+./evals/run-fast.sh
+```
+
+The manual model tier runs every Builder, Verifier, and Fixer case three times
+through the production `forest` binary. It uses each declaration's model unless
+`FOREST_EVAL_CANDIDATE_MODEL` is set. The independent Judge defaults to
+`openrouter/anthropic/claude-opus-4.8`.
+
+```sh
+export OPENROUTER_API_KEY='...'
+./evals/run-model.sh
+```
+
+The `model evals` GitHub workflow reads the same key from the repository's
+`OPENROUTER_API_KEY` secret. Harbor outputs remain under `evals/jobs/`, which is
+ignored by Git.
+
 The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
 `agent`), timing (`started` and `duration`), `exit`, and the token classes
 `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning`. It never

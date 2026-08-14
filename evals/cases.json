@@ -1,0 +1,183 @@
+{
+  "schema": "forest.evals.v1",
+  "cases": [
+    {
+      "id": "builder-ready-issue",
+      "role": "builder",
+      "summary": "Implement one eligible issue and publish its branch and review request.",
+      "issue": {"number": 1, "title": "Set the release value", "body": "Change value.txt from old to ready. Acceptance: value.txt contains exactly ready followed by a newline."},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "effect": "builder_publish",
+      "expected_files": {"value.txt": "ready\n"}
+    },
+    {
+      "id": "builder-no-eligible-issue",
+      "role": "builder",
+      "summary": "Exit cleanly when no ready issue is eligible.",
+      "issue": null,
+      "check": "true",
+      "effect": "no_effect"
+    },
+    {
+      "id": "builder-fanout-notes",
+      "role": "builder",
+      "summary": "Publish with an existing fanout-form coordination note tree.",
+      "issue": {"number": 2, "title": "Set the fanout value", "body": "Change value.txt from old to fanout. Acceptance: value.txt contains exactly fanout followed by a newline."},
+      "check": "test \"$(cat value.txt)\" = fanout",
+      "note_layout": "fanout",
+      "effect": "builder_publish",
+      "expected_files": {"value.txt": "fanout\n"}
+    },
+    {
+      "id": "builder-canonical-note-race",
+      "role": "builder",
+      "summary": "Recover from one unrelated canonical note race without republishing separately.",
+      "issue": {"number": 3, "title": "Set the raced value", "body": "Change value.txt from old to raced. Acceptance: value.txt contains exactly raced followed by a newline."},
+      "check": "test \"$(cat value.txt)\" = raced",
+      "race": "canonical_note",
+      "effect": "builder_publish",
+      "expected_files": {"value.txt": "raced\n"}
+    },
+    {
+      "id": "builder-branch-race",
+      "role": "builder",
+      "summary": "Fail closed when another writer creates the selected branch before publication.",
+      "issue": {"number": 4, "title": "Set the branch-race value", "body": "Change value.txt from old to branch-race. Acceptance: value.txt contains exactly branch-race followed by a newline."},
+      "check": "test \"$(cat value.txt)\" = branch-race",
+      "race": "branch",
+      "effect": "builder_branch_race",
+      "expected_files": {"value.txt": "branch-race\n"}
+    },
+    {
+      "id": "builder-failed-check",
+      "role": "builder",
+      "summary": "Do not publish an implementation whose declared check fails.",
+      "issue": {"number": 5, "title": "Set a value under a failing gate", "body": "Change value.txt from old to blocked. The repository Check remains authoritative."},
+      "check": "false",
+      "effect": "no_effect",
+      "expected_files": {"value.txt": "blocked\n"}
+    },
+    {
+      "id": "verifier-stale-flat-notes",
+      "role": "verifier",
+      "summary": "Publish changes evidence for a stale Revision whose review request uses a flat note path.",
+      "candidate_files": {"value.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "stale": true,
+      "note_layout": "flat",
+      "effect": "verifier_changes",
+      "verdict_summary": "The Revision is stale and cannot fast-forward current master."
+    },
+    {
+      "id": "verifier-fanout-defect",
+      "role": "verifier",
+      "summary": "Find a planted defect with passing Checks and a fanout review-request note.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "check": "true",
+      "note_layout": "fanout",
+      "effect": "verifier_changes",
+      "verdict_summary": "value.txt violates the requested ready value.",
+      "semantic_contract": "The reviewed change is defective because value.txt must contain ready, not wrong."
+    },
+    {
+      "id": "verifier-clean-approve",
+      "role": "verifier",
+      "summary": "Approve a clean fast-forward Revision and perform the atomic Gate.",
+      "candidate_files": {"value.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "effect": "verifier_approve",
+      "semantic_contract": "The change is complete and has no planted defect. The correct decision is approve."
+    },
+    {
+      "id": "verifier-failed-check",
+      "role": "verifier",
+      "summary": "Publish truthful changes evidence when a declared Check fails.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "effect": "verifier_changes",
+      "verdict_summary": "The declared value Check fails."
+    },
+    {
+      "id": "verifier-conflicting-destination",
+      "role": "verifier",
+      "summary": "Fail closed when a concurrent writer publishes a conflicting Verdict.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "check": "true",
+      "race": "conflicting_verdict",
+      "effect": "verifier_conflict",
+      "semantic_contract": "The change is defective, but conflicting canonical evidence must not be overwritten."
+    },
+    {
+      "id": "verifier-approve-race",
+      "role": "verifier",
+      "summary": "Make one approve attempt and accept a master compare-and-set rejection.",
+      "candidate_files": {"value.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "race": "approve_master",
+      "effect": "verifier_approve_race"
+    },
+    {
+      "id": "fixer-one-finding",
+      "role": "fixer",
+      "summary": "Repair one actionable rejection and publish a fresh review request.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "expected_files": {"value.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "rejection": "value.txt must contain ready, not wrong.",
+      "effect": "fixer_publish"
+    },
+    {
+      "id": "fixer-multiple-findings",
+      "role": "fixer",
+      "summary": "Repair every finding in one rejected Revision.",
+      "candidate_files": {"value.txt": "wrong\n", "second.txt": "wrong\n"},
+      "expected_files": {"value.txt": "ready\n", "second.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready && test \"$(cat second.txt)\" = ready",
+      "rejection": "value.txt and second.txt must both contain ready.",
+      "effect": "fixer_publish"
+    },
+    {
+      "id": "fixer-fanout-notes",
+      "role": "fixer",
+      "summary": "Resolve fanout review, Checks, and Verdict notes before repairing.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "expected_files": {"value.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "note_layout": "fanout",
+      "rejection": "value.txt must contain ready.",
+      "effect": "fixer_publish"
+    },
+    {
+      "id": "fixer-conflicting-destination",
+      "role": "fixer",
+      "summary": "Do not overwrite a concurrent conflicting review request for the repaired Revision.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "expected_files": {"value.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "rejection": "value.txt must contain ready.",
+      "race": "conflicting_review_request",
+      "effect": "fixer_conflict"
+    },
+    {
+      "id": "fixer-branch-race",
+      "role": "fixer",
+      "summary": "Fail closed when the rejected branch moves during repair.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "expected_files": {"value.txt": "ready\n"},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "rejection": "value.txt must contain ready.",
+      "race": "branch",
+      "effect": "fixer_branch_race"
+    },
+    {
+      "id": "fixer-failed-check",
+      "role": "fixer",
+      "summary": "Do not publish a repair while its declared Check still fails.",
+      "candidate_files": {"value.txt": "wrong\n"},
+      "expected_files": {"value.txt": "ready\n"},
+      "check": "false",
+      "rejection": "value.txt must contain ready, and the repository Check must pass.",
+      "effect": "no_effect"
+    }
+  ]
+}

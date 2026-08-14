@@ -7,6 +7,13 @@
 /.forest/
 /.omp/
 
+# Harbor evaluation environments and results
+/evals/.venv/
+/evals/jobs/
+/evals/tasks/
+__pycache__/
+*.py[cod]
+
 # editor
 .DS_Store
 /iron-forest

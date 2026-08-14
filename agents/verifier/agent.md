@@ -19,7 +19,7 @@ Review the exact Revision as an independent engineer. Determine the intended beh
 2. Find a branch tip under `origin/forest/*` with a `review-request` note and no `verdict` note for that exact tip SHA.
 3. If several candidates exist, select one and record the branch and exact SHA.
 4. Verify that the review-request payload names the same branch and exact SHA.
-5. Set `note_path="${sha:0:2}/${sha:2}"` from the exact target SHA. Resolve the review-request note with `git notes --ref=<ref> list <sha>`. Verify its writer with the path-limited log `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`. Never search by blob. Require `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`.
+5. Resolve the review-request note with `git notes --ref=<ref> list <sha>`. Enumerate the actual blob paths with `git ls-tree -r --name-only <ref>`, remove `/` from each path, and require exactly one normalized path equal to the exact target SHA. Verify its writer with `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`. Stop if no path, more than one path, or a non-blob entry matches. Flat and fanout note paths are both valid; never derive one from the SHA and never search by blob. Require `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`.
 6. Stop on any wrong coordination-note identity.
 7. The Kernel already provided the clean detached worktree. Fetch the selected Revision into it, then use `git checkout --detach <sha>` there. Review only that exact SHA; never create a nested worktree or review a moving branch.
 
@@ -62,7 +62,7 @@ verdict_base="refs/notes/forest/private/$FOREST_RUN_ID/verifier/verdict/$revisio
 
 Add the Checks file with `git notes --ref="$checks_private" add -F "$checks_payload_file" "$revision"`. Add the Verdict file with `git notes --ref="$verdict_private" add -F "$verdict_payload_file" "$revision"`. Never use `-m` or `-f`.
 Before the first add and before every retry, use `git ls-remote` to distinguish an absent canonical ref from lookup failure. Fetch the canonical Checks and Verdict refs into `$checks_base` and `$verdict_base`. Treat an absent remote ref as an empty snapshot and delete only its base ref. Any other lookup or fetch error stops.
-Read each destination note from its corresponding base ref. A present note must be byte-identical to its payload; accept an identical note and stop on a conflict. For the exact target `revision`, set `note_path="${revision:0:2}/${revision:2}"` and verify every existing destination note's actor with `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`; never search by blob. Require `Iron Forest Verifier <verifier@forest.invalid>`. Set `$checks_private` to the `$checks_base` tip and `$verdict_private` to the `$verdict_base` tip. Delete only the corresponding publication ref for an absent base tip. If a destination note is absent, add its exact payload file to its publication ref.
+Read each destination note from its corresponding base ref. A present note must be byte-identical to its payload; accept an identical note and stop on a conflict. For every existing destination note, resolve exactly one actual blob path by enumerating `git ls-tree -r --name-only <ref>` and matching the exact target `revision` after removing `/`; then verify its actor with `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`. Stop on zero, duplicate, or non-blob matches. Require `Iron Forest Verifier <verifier@forest.invalid>`. Set `$checks_private` to the `$checks_base` tip and `$verdict_private` to the `$verdict_base` tip. Delete only the corresponding publication ref for an absent base tip. If a destination note is absent, add its exact payload file to its publication ref.
 
 For a `changes` Verdict, publish Checks and Verdict together with one normal atomic push:
 
@@ -87,4 +87,4 @@ This push carries Checks, Verdict, and the exact reviewed SHA together. The exis
 
 ## Stop conditions
 
-Stop and report a clear failure summary for no eligible Revision, malformed or conflicting notes, failed checks, review defects, failed atomic publication, rejected atomic merge, credential exposure, or any unexpected Git state. A clean no-work pass is success and must state that no eligible Revision existed.
+Stop and report a clear failure summary for no eligible Revision, malformed or conflicting notes, failed atomic publication, rejected atomic merge, credential exposure, or any unexpected Git state. Failed Checks or review defects require a truthful `changes` publication; they are review results, not harness failures that omit evidence. A clean no-work pass is success and must state that no eligible Revision existed.
