@@ -24,12 +24,17 @@ trace graders, reference solutions, and an independent model Judge.
 
 The 2026-08-14 production-model baseline ran 54 trials: three attempts for each
 case with `openrouter/deepseek/deepseek-v4-flash-0731` as the candidate and
-`openrouter/openai/gpt-5.4` as the Judge. Deterministic outcomes passed 47/54;
-the Judge passed 43/54; 11/18 case contracts achieved `pass^3`. Builder ignored
-a failed Check in 3/3 attempts, Fixer ignored it in 2/3, and Verifier mishandled
-the stale-Revision case in 2/3. Single Judge failures also found unnecessary
-fixture inspection or incomplete review evidence. The model adoption gate is
-therefore red even though the deterministic reference harness is 18/18.
+`openrouter/openai/gpt-5.4` as the Judge. Deterministic outcomes passed 47/54.
+The Judge passed 43/54, but one Judge failure was an argument-size harness
+error. After the Judge input was bounded, the affected case reran three times
+without an infrastructure error and passed the Judge in 2/3 trials. The
+case-level result is unchanged: 11/18 contracts achieved `pass^3`.
+
+Builder ignored a failed Check in 3/3 attempts, Fixer ignored it in 2/3, and
+Verifier mishandled the stale-Revision case in 2/3. Single Judge failures also
+found unnecessary fixture inspection or incomplete review evidence. The model
+adoption gate is therefore red even though the deterministic reference harness
+is 18/18.
 
 Production runs Pi in ephemeral `--no-session` mode. Pi still auto-compacts
 within that process, so one Run can span context windows, but it cannot resume

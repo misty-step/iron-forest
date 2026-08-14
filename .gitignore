@@ -14,6 +14,16 @@
 __pycache__/
 *.py[cod]
 
+# local environment and secret files
+.env
+.env.*
+*.env
+*.env.*
+!*.env.example
+!*.env.*.example
+.secrets
+*.secrets
+
 # editor
 .DS_Store
 /iron-forest

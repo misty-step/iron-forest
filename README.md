@@ -124,18 +124,19 @@ restart, the installer stops the instance, removes timestamped legacy
 `.forest/profiles` residue, and runs selfcheck with the equivalent
 `$HOME`-expanded environment.
 
-Protect the environment file as mode `0600`. For an OpenRouter-backed instance,
-give it one dedicated completion key:
+Protect the environment file as mode `0600`. The current Runner accepts one
+OpenRouter completion key for the instance:
 
 ```dotenv
 OPENROUTER_API_KEY=<dedicated instance key>
 ```
 
 Do not put an OpenRouter management key in this file. Do not reuse a personal
-interactive key or an evaluation key. Separate role keys do not isolate
-Builder, Verifier, and Fixer in the current deployment because trusted Runs
-share the service user and can read this file; that requires process and
-filesystem containment.
+interactive key or an evaluation key. The intended production layout uses one
+completion key per agent role for OpenRouter and Langfuse cost, latency, and
+failure attribution. It is not a security boundary. The current Runner does not
+select role-specific keys; use the Run ID and agent name in Forest evidence for
+exact attribution until that data path is implemented.
 
 Trusted transport captures keep at most 1 MiB while draining the complete
 output. Output beyond the cap returns an explicit error after the process group

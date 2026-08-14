@@ -156,15 +156,15 @@ stops that instance and removes only timestamped legacy `.forest/profiles`
 entries, which may contain credentials copied by an older Kernel. It then runs
 selfcheck with the service's trusted `PATH` and without `FOREST_DEFAULTS`.
 The installed unit reads operator-supplied credentials from
-`%h/.config/iron-forest/%i.env`; protect it as mode `0600` and set
-`OPENROUTER_API_KEY` to a dedicated completion key for this Forest instance.
-Never put a management, personal interactive, or evaluation key there. Use this
-per-instance file rather than setting `PI_CODING_AGENT_DIR` or naming an
-operator profile. Separate role keys are not an isolation boundary while Runs
-share the service user and can read this file. Use a systemd drop-in only when
-one instance needs a different defaults file. The installer stops on any
-selfcheck error. The Auditor needs a completed agent dispatch before it can
-validate remote Git evidence.
+`%h/.config/iron-forest/%i.env`; protect it as mode `0600`. The current Runner
+accepts `OPENROUTER_API_KEY` as one completion key for the Forest instance.
+Never put a management, personal interactive, or evaluation key there. The
+intended production layout uses one completion key per agent role for
+OpenRouter and Langfuse analytics. This is an attribution control, not an
+isolation boundary. The current Runner does not select role-specific keys. Use
+a systemd drop-in only when one instance needs a different defaults file. The
+installer stops on any selfcheck error. The Auditor needs a completed agent
+dispatch before it can validate remote Git evidence.
 
 The final `cd` keeps all later Kernel and observation commands in the managed
 repository.
