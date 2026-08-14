@@ -1,8 +1,10 @@
 # Changelog
 
 - 2026-08-13: Replaced layered Pi profile composition with explicit per-Run
-  inputs: an empty temporary Pi directory, checked-in shared and role skill
-  directories, and disabled ambient extension/resource discovery. The service
+  inputs: an isolated temporary Pi directory, checked-in shared and role skill
+  directories, and disabled ambient extension/resource discovery. For an
+  OpenRouter model, the temporary directory contains only a generated,
+  credential-free session-affinity override. The service
   now requires a protected per-instance credential environment file and uses a
   private temporary namespace; the installer removes credential-bearing legacy
   Run-profile residue during cutover. Declaration output and Run evidence
@@ -11,7 +13,8 @@
   Terminal Pi agent errors now fail the Run even when Pi exits zero. Per-Run
   Git identities use scoped Git configuration rather than author/committer
   overrides, so nested verification commands can set deterministic identities.
-  Pi uses the exact Run ID as its provider session ID for trace correlation.
+  Pi uses the exact Run ID as its provider session ID; the generated OpenRouter
+  override sends it as `x-session-id` for trace correlation.
 
 - 2026-08-10: Reforged Iron Forest as a Kernel plus profile appliance. Git is
   the coordination authority with schema-v1 write-once notes, agent-owned

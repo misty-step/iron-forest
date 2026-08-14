@@ -105,12 +105,13 @@ required.
 
 The only skill sources are `agents/_shared/skills` and, when present,
 `agents/<name>/skills`. Their published paths are repository-relative and Pi
-resolves them from the Run worktree. The Runner gives each Run a new writable,
-initially empty `PI_CODING_AGENT_DIR`; it does not inherit operator Pi state.
-It invokes Pi with `--no-extensions`, `--no-skills`,
-`--no-prompt-templates`, and `--no-themes`, plus one explicit `--skill` per
-existing skill source directory. Declaration and Run evidence publish those
-directory paths as `skills`.
+resolves them from the Run worktree. The Runner gives each Run a new writable
+`PI_CODING_AGENT_DIR` without operator Pi state. For an OpenRouter model, it
+contains only a generated, credential-free model override that enables the
+Run ID's session-affinity header. The Runner invokes Pi with `--no-extensions`,
+`--no-skills`, `--no-prompt-templates`, and `--no-themes`, plus one explicit
+`--skill` per existing skill source directory. Declaration and Run evidence
+publish those directory paths as `skills`.
 
 ## 4. Build and validate
 

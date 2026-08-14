@@ -46,17 +46,20 @@ and `thinking` resolve through the declaration, then `forest.defaults.yaml` (or
 file is the zero Defaults, not an error. `forest declaration show` publishes
 the resolved model and its source.
 
-Every Run gives Pi a new writable, initially empty agent directory through
-`PI_CODING_AGENT_DIR`; no operator Pi state is inherited. Pi extension, skill,
+Every Run gives Pi a new writable agent directory through
+`PI_CODING_AGENT_DIR`; no operator Pi state is inherited. For an OpenRouter
+model, the Runner writes only a credential-free `models.json` override that
+enables Pi's OpenRouter session-affinity header. Pi extension, skill,
 prompt-template, and theme discovery are disabled with `--no-extensions`,
 `--no-skills`, `--no-prompt-templates`, and `--no-themes`. The Runner passes
 each existing skill source directory with an explicit `--skill`. Those paths
 are repository-relative and Pi resolves them from the Run worktree.
 Declaration and Run evidence publish the directories as `skills`.
 
-Pi's exact session ID is the Run ID. OpenRouter sends it as `x-session-id`, so
-Broadcast destinations can group every model request for a Run and correlate
-the provider trace directly with the Ledger and `.forest/runs/<run-id>.log`.
+Pi's exact session ID is the Run ID. The generated OpenRouter model override
+makes Pi send it as `x-session-id`, so Broadcast destinations can group every
+model request for a Run and correlate the provider trace directly with the
+Ledger and `.forest/runs/<run-id>.log`.
 
 Credentials come only from the service environment inherited by the Run.
 Declaration frontmatter has no `env` field; unknown metadata fails validation.

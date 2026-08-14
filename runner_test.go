@@ -1159,3 +1159,49 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
 		}
 	}
 }
+
+func TestRunnerEnablesOpenRouterSessionCorrelation(t *testing.T) {
+	root, _ := testClone(t)
+	state := t.TempDir()
+	pi := filepath.Join(state, "pi")
+	configFile := filepath.Join(state, "models.json")
+	t.Setenv("MODEL_CONFIG_FILE", configFile)
+	script := `#!/bin/sh
+set -eu
+test "$(stat -c %a "$PI_CODING_AGENT_DIR/models.json")" = 600
+cat "$PI_CODING_AGENT_DIR/models.json" > "$MODEL_CONFIG_FILE"
+printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}'
+`
+	if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	record, err := runner.Run(context.Background(), Declaration{
+		Name:         "verifier",
+		Model:        "openrouter/deepseek/deepseek-v4-flash-0731",
+		SystemPrompt: "system",
+		TaskPrompt:   "task",
+	}, 10)
+	if err != nil || record.Exit != 0 {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+	config, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "providers": {
+    "openrouter": {
+      "compat": {
+        "sendSessionAffinityHeaders": true,
+        "sessionAffinityFormat": "openrouter"
+      }
+    }
+  }
+}
+`
+	if string(config) != want {
+		t.Fatalf("models.json:\n%s\nwant:\n%s", config, want)
+	}
+}
