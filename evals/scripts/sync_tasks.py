@@ -28,6 +28,7 @@ case = "{case["id"]}"
 timeout_sec = 1800.0
 network_mode = "allowlist"
 allowed_hosts = ["openrouter.ai"]
+env = {{ FOREST_EVAL_JUDGE_API_KEY = "${{FOREST_EVAL_JUDGE_API_KEY:-}}", FOREST_EVAL_JUDGE_MODEL = "${{FOREST_EVAL_JUDGE_MODEL:-}}", FOREST_EVAL_REQUIRE_JUDGE = "${{FOREST_EVAL_REQUIRE_JUDGE:-0}}" }}
 
 [agent]
 user = "root"
@@ -37,7 +38,7 @@ allowed_hosts = ["openrouter.ai"]
 [environment]
 docker_image = "iron-forest-eval:local"
 network_mode = "no-network"
-env = {{ OPENROUTER_API_KEY = "${{OPENROUTER_API_KEY:-}}", FOREST_EVAL_JUDGE_MODEL = "${{FOREST_EVAL_JUDGE_MODEL:-}}", FOREST_EVAL_REQUIRE_JUDGE = "${{FOREST_EVAL_REQUIRE_JUDGE:-0}}" }}
+env = {{ OPENROUTER_API_KEY = "${{OPENROUTER_API_KEY:-}}" }}
 '''
 
 

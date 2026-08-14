@@ -115,6 +115,7 @@ def main() -> None:
     eval_dir.mkdir(parents=True, exist_ok=True)
     for stale in ("state.json", "race.json", "race-triggered", "forest-exit", "candidate-model", "reference-run"):
         (eval_dir / stale).unlink(missing_ok=True)
+    (eval_dir / "scenario.json").write_text(json.dumps(scenario, indent=2, sort_keys=True) + "\n")
 
     run(GIT, "init", "--bare", "--initial-branch=master", str(origin))
     run(GIT, "init", "--initial-branch=master", str(workspace))

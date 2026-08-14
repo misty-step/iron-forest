@@ -1,8 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+credential_file="${FOREST_EVAL_ENV_FILE:-$HOME/.config/iron-forest/evals.env}"
+load_credentials() {
+  [[ -f "$credential_file" ]] || return
+  [[ -O "$credential_file" ]] || {
+    echo "evaluation credential file is not owned by the current user: $credential_file" >&2
+    exit 2
+  }
+  [[ "$(stat -c '%a' "$credential_file")" == "600" ]] || {
+    echo "evaluation credential file must have mode 0600: $credential_file" >&2
+    exit 2
+  }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    [[ "$line" == *=* ]] || {
+      echo "invalid evaluation credential entry: $credential_file" >&2
+      exit 2
+    }
+    name="${line%%=*}"
+    value="${line#*=}"
+    case "$name" in
+      OPENROUTER_API_KEY|FOREST_EVAL_JUDGE_API_KEY) ;;
+      *)
+        echo "unsupported evaluation credential name $name: $credential_file" >&2
+        exit 2
+        ;;
+    esac
+    if [[ -z "${!name:-}" ]]; then
+      printf -v "$name" '%s' "$value"
+      export "$name"
+    fi
+  done < "$credential_file"
+}
+if [[ -z "${OPENROUTER_API_KEY:-}" || -z "${FOREST_EVAL_JUDGE_API_KEY:-}" ]]; then
+  load_credentials
+fi
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}"
-: "${FOREST_EVAL_JUDGE_MODEL:=openrouter/anthropic/claude-opus-4.8}"
+: "${FOREST_EVAL_JUDGE_API_KEY:?FOREST_EVAL_JUDGE_API_KEY is required}"
+: "${FOREST_EVAL_JUDGE_MODEL:=openrouter/openai/gpt-5.4}"
 export FOREST_EVAL_JUDGE_MODEL
 if [[ -n "${FOREST_EVAL_CANDIDATE_MODEL:-}" && "$FOREST_EVAL_CANDIDATE_MODEL" == "$FOREST_EVAL_JUDGE_MODEL" ]]; then
   echo "candidate and Judge models must differ" >&2

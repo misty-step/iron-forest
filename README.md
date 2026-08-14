@@ -124,6 +124,19 @@ restart, the installer stops the instance, removes timestamped legacy
 `.forest/profiles` residue, and runs selfcheck with the equivalent
 `$HOME`-expanded environment.
 
+Protect the environment file as mode `0600`. For an OpenRouter-backed instance,
+give it one dedicated completion key:
+
+```dotenv
+OPENROUTER_API_KEY=<dedicated instance key>
+```
+
+Do not put an OpenRouter management key in this file. Do not reuse a personal
+interactive key or an evaluation key. Separate role keys do not isolate
+Builder, Verifier, and Fixer in the current deployment because trusted Runs
+share the service user and can read this file; that requires process and
+filesystem containment.
+
 Trusted transport captures keep at most 1 MiB while draining the complete
 output. Output beyond the cap returns an explicit error after the process group
 stops. Each Run log retains at most 2 MiB of output. When truncated, it contains
@@ -316,16 +329,29 @@ declaration, prompt, skill, or publication contract:
 The manual model tier runs every Builder, Verifier, and Fixer case three times
 through the production `forest` binary. It uses each declaration's model unless
 `FOREST_EVAL_CANDIDATE_MODEL` is set. The independent Judge defaults to
-`openrouter/anthropic/claude-opus-4.8`.
+`openrouter/openai/gpt-5.4`.
+
+Local runs load separate candidate and Judge completion keys from
+`$HOME/.config/iron-forest/evals.env` by default. The file must be owned by the
+current user, have mode `0600`, and contain only:
+
+```dotenv
+OPENROUTER_API_KEY=<evaluation candidate key>
+FOREST_EVAL_JUDGE_API_KEY=<evaluation Judge key>
+```
+
+Existing environment values take precedence. `FOREST_EVAL_ENV_FILE` selects a
+different file. The OpenRouter management key stays outside production and
+evaluation runtime environments.
 
 ```sh
-export OPENROUTER_API_KEY='...'
 ./evals/run-model.sh
 ```
 
-The `model evals` GitHub workflow reads the same key from the repository's
-`OPENROUTER_API_KEY` secret. Harbor outputs remain under `evals/jobs/`, which is
-ignored by Git.
+The `model evals` GitHub workflow maps the distinct repository secrets
+`IRON_FOREST_EVAL_CANDIDATE_API_KEY` and
+`IRON_FOREST_EVAL_JUDGE_API_KEY` into those runtime names. Harbor outputs remain
+under `evals/jobs/`, which is ignored by Git.
 
 The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
 `agent`), timing (`started` and `duration`), `exit`, and the token classes

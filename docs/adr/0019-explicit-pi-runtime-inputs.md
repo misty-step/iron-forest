@@ -68,6 +68,14 @@ environment. The installed service reads that environment from
 `%h/.config/iron-forest/%i.env`; the Runner does not write credential values to
 the Pi scratch directory or Run evidence.
 
+A provider key belongs to one deployed Forest instance. Do not reuse an
+interactive operator key or an evaluation key. Separate keys per role would
+improve accounting but not containment in this deployment: trusted Runs share
+the service user and can read the per-instance environment file. Claiming
+per-role isolation therefore requires a stronger process and filesystem
+boundary, not additional environment variable names. Management credentials
+never enter the service environment.
+
 The model resolves through the declaration, then instance defaults, then the
 built-in `openrouter/deepseek/deepseek-v4-flash-0731`. `thinking` resolves
 through the declaration and then instance defaults; there is no built-in

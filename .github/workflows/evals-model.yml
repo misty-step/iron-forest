@@ -13,9 +13,10 @@ jobs:
     permissions:
       contents: read
     env:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.IRON_FOREST_EVAL_CANDIDATE_API_KEY }}
+      FOREST_EVAL_JUDGE_API_KEY: ${{ secrets.IRON_FOREST_EVAL_JUDGE_API_KEY }}
       FOREST_EVAL_CANDIDATE_MODEL: ${{ inputs.candidate_model }}
-      FOREST_EVAL_JUDGE_MODEL: openrouter/anthropic/claude-opus-4.8
+      FOREST_EVAL_JUDGE_MODEL: openrouter/openai/gpt-5.4
     steps:
       - uses: actions/checkout@v4
       - name: install uv

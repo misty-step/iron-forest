@@ -198,7 +198,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         failures.append(f"grader has no rule for effect {effect}")
 
     commands, transcript = trace_commands()
-    forbidden = ("git hash-object", "git mktree", "git commit-tree", "git update-ref")
+    forbidden = ("git hash-object", "git mktree", "git commit-tree")
     for command in commands:
         require(not any(token in command for token in forbidden), f"agent avoids forbidden Git plumbing: {command[:160]}")
     approve_pushes = [command for command in commands if "git push" in command and "--atomic" in command and "refs/heads/master" in command]

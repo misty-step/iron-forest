@@ -22,6 +22,15 @@ Harbor agent that invokes the production `forest` binary and shipped
 declarations, isolated local Git and forge fixtures, deterministic state and
 trace graders, reference solutions, and an independent model Judge.
 
+The 2026-08-14 production-model baseline ran 54 trials: three attempts for each
+case with `openrouter/deepseek/deepseek-v4-flash-0731` as the candidate and
+`openrouter/openai/gpt-5.4` as the Judge. Deterministic outcomes passed 47/54;
+the Judge passed 43/54; 11/18 case contracts achieved `pass^3`. Builder ignored
+a failed Check in 3/3 attempts, Fixer ignored it in 2/3, and Verifier mishandled
+the stale-Revision case in 2/3. Single Judge failures also found unnecessary
+fixture inspection or incomplete review evidence. The model adoption gate is
+therefore red even though the deterministic reference harness is 18/18.
+
 Production runs Pi in ephemeral `--no-session` mode. Pi still auto-compacts
 within that process, so one Run can span context windows, but it cannot resume
 the agent session after process or service loss. Forest retains the event log as
@@ -34,12 +43,16 @@ production image, runs all 18 reference outcomes, and rejects any reward below
 one. Pull-request CI runs this tier. `evals/run-model.sh` runs every production
 role case three times, requires `pass^3`, and adds the Judge reward. It uses the
 model in each shipped declaration unless `FOREST_EVAL_CANDIDATE_MODEL` overrides
-it. The Judge defaults to `openrouter/anthropic/claude-opus-4.8`, must differ
+it. The Judge defaults to `openrouter/openai/gpt-5.4`, must differ
 from the candidate, has no tools or project context, and receives a
 credential-redacted trace. Task containers start without network access; only
-the agent and Judge phases may reach `openrouter.ai`. Model trials require
-`OPENROUTER_API_KEY`; the manual `model evals` workflow supplies it from the
-repository secret.
+the agent and Judge phases may reach `openrouter.ai`. The candidate receives
+only `OPENROUTER_API_KEY`; Harbor adds `FOREST_EVAL_JUDGE_API_KEY` only to the
+Verifier phase, and the trusted grader replaces the candidate key before
+starting the tool-less Judge. Local runs load both from the mode-`0600`
+`$HOME/.config/iron-forest/evals.env`. The manual workflow maps distinct
+repository secrets into the two runtime names. Neither key is a production,
+personal interactive, or management credential.
 
 The executable suite covers the role-level publication and race contracts. The
 larger capability inventory and whole-Forest scenarios below remain adoption
