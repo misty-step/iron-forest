@@ -29,7 +29,6 @@ type Config struct {
 type AgentConfig struct {
 	Poll     string `yaml:"poll" json:"poll"`
 	Interval int    `yaml:"interval" json:"interval"`
-	Timeout  int    `yaml:"timeout" json:"timeout"`
 }
 
 type Check struct {
@@ -60,7 +59,6 @@ type configYAML struct {
 type agentConfigYAML struct {
 	Poll     yamlString `yaml:"poll"`
 	Interval yamlInt    `yaml:"interval"`
-	Timeout  yamlInt    `yaml:"timeout"`
 }
 
 type checkYAML struct {
@@ -174,7 +172,6 @@ func decodeConfig(data []byte, source string) (Config, error) {
 			cfg.Agents[string(*name)] = AgentConfig{
 				Poll:     string(agent.Poll),
 				Interval: int(agent.Interval),
-				Timeout:  int(agent.Timeout),
 			}
 		}
 	}
@@ -222,12 +219,7 @@ func (c Config) Validate() error {
 		if _, err := durationFromSeconds(agent.Interval); err != nil {
 			return fmt.Errorf("agent %q interval: %w", name, err)
 		}
-		if agent.Timeout <= 0 {
-			return fmt.Errorf("agent %q timeout must be greater than zero", name)
-		}
-		if _, err := durationFromSeconds(agent.Timeout); err != nil {
-			return fmt.Errorf("agent %q timeout: %w", name, err)
-		}
+
 	}
 	if len(c.Checks) == 0 {
 		return errors.New("checks must not be empty")

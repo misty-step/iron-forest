@@ -2,6 +2,9 @@
 
 Status: accepted, 2026-08-12
 
+The agent-Run timeout clause is superseded by
+[0020](0020-unbounded-agent-runs.md).
+
 Supersedes the command shape in [0013](0013-omp-harness-and-declarations.md). The
 declaration format that ADR defines is unchanged.
 
@@ -45,9 +48,9 @@ Two omissions from the OMP shape, each deliberate:
 - No `--cwd`. The Runner already sets the child's working directory to the Run's
   private worktree, so a second statement of the same fact could disagree with
   the first.
-- No `--max-time`. The Runner owns the timeout: it cancels the context and stops
-  the process group with TERM, a grace period, KILL, and a quiescence probe.
-  Delegating the deadline would leave the Runner unable to prove the child died.
+- No `--max-time`. Agent Runs intentionally have no wall-clock deadline. On
+  explicit caller cancellation, the Runner stops the process group with TERM,
+  a grace period, KILL, and a quiescence probe.
 
 The declaration system prompt and project context files discovered from the Run
 worktree are trusted repository instructions. Selected repository skills reach
@@ -62,7 +65,7 @@ executes against content the factory did not author. That was incoherent:
 repository-authored project context, the declaration prompt, and selected
 skills cross the same trusted boundary, while refusing their tools did not
 close a security boundary. [0016](0016-isolation-posture.md) states that
-worktree separation and the timeout are operational boundaries, not a sandbox.
+worktree separation is an operational boundary, not a sandbox.
 
 The factory runs agents on a repository at its operator's instruction. That
 repository is the workspace, not hostile input. A declaration states which

@@ -16,9 +16,9 @@ Create `forest.yaml` in the repository root:
 ```yaml
 repo: misty-step/iron-forest
 agents:
-  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
-  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
-  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
+  builder:  { poll: "./forest poll builder",  interval: 300 }
+  verifier: { poll: "./forest poll verifier", interval: 120 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -107,13 +107,14 @@ clone. Direct `forest poll` execution has a fixed 60-second deadline. The
 Scheduler gives its configured Poll command a separate 65-second bound. The
 supervisor preserves this full 5-second difference as Poll shutdown grace. It
 lets the direct Poll stop Git/GitHub transport groups and remove private note
-snapshot refs before the supervisor force-stops its command group. The
-configured declaration timeout separately bounds worktree preparation and agent
-execution.
-Runner cleanup has a separate 10-second bound. A completed dispatch starts an
-audit with a separate 60-second bound. The systemd unit has a separate
-3900-second service drain bound. This bound covers the shipped declarations'
-concurrent Runs, bounded Runner cleanup, and serialized post-dispatch audits.
+snapshot refs before the supervisor force-stops its command group. Agent Runs
+have no wall-clock deadline. They finish when Pi finishes or an
+operator explicitly cancels a foreground `forest once`; service shutdown stops
+new dispatches and drains active Runs without a systemd deadline. Runner
+cleanup has a separate 10-second bound. A completed dispatch starts an audit
+with a separate 60-second bound. These mechanical bounds do not limit agent
+reasoning or model execution.
+
 The user service receives
 `PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`,
 loads operator-supplied credentials from

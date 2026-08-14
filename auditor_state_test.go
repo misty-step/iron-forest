@@ -107,7 +107,7 @@ func TestAuditorFirstFailureDurablyAnchorsRetryAndDeduplicatesHistory(t *testing
 	runGitDir(t, root, "rm", "-rf", ".")
 	config := []byte(`repo: owner/name
 agents:
-  builder: {poll: "forest poll builder", interval: 1, timeout: 1}
+  builder: {poll: "forest poll builder", interval: 1}
 checks:
   - {name: test, run: "go test ./..."}
 `)

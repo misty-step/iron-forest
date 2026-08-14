@@ -360,7 +360,7 @@ func runConfigShow(_ []string, flags cliFlags) cliOutcome {
 	human := fmt.Sprintf("repo: %s", cfg.Repo)
 	for _, name := range agentNames(cfg) {
 		agent := cfg.Agents[name]
-		human += fmt.Sprintf("\nagent %s: poll=%q interval=%ds timeout=%ds", name, agent.Poll, agent.Interval, agent.Timeout)
+		human += fmt.Sprintf("\nagent %s: poll=%q interval=%ds", name, agent.Poll, agent.Interval)
 	}
 	for _, check := range cfg.Checks {
 		human += fmt.Sprintf("\ncheck %s: run=%q", check.Name, check.Run)

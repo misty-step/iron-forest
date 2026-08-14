@@ -61,7 +61,7 @@ func writeTestConfig(t *testing.T, root string, agents ...string) {
 	t.Helper()
 	config := "repo: owner/name\nagents:\n"
 	for _, agent := range agents {
-		config += "  " + agent + ":\n    poll: \"exit 1\"\n    interval: 1\n    timeout: 1\n"
+		config += "  " + agent + ":\n    poll: \"exit 1\"\n    interval: 1\n"
 	}
 	config += "checks:\n  - name: test\n    run: \"true\"\n"
 	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
@@ -128,10 +128,13 @@ func TestCLIPayloadsUseSnakeCaseKeys(t *testing.T) {
 	if !ok {
 		t.Fatalf("agents.builder is not an object: %v", agents)
 	}
-	for _, key := range []string{"poll", "interval", "timeout"} {
+	for _, key := range []string{"poll", "interval"} {
 		if _, ok := builder[key]; !ok {
 			t.Fatalf("agent payload missing %q: %v", key, builder)
 		}
+	}
+	if _, present := builder["timeout"]; present {
+		t.Fatalf("agent payload retains removed timeout: %v", builder)
 	}
 	if _, leaked := builder["Poll"]; leaked {
 		t.Fatalf("agent payload leaks Go field names: %v", builder)

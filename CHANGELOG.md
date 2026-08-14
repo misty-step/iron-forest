@@ -6,6 +6,10 @@
   the Run with a nonzero-exit Ledger row and refuses to start Pi. The Ledger
   records the digest only after that verification succeeds (#144).
 
+- 2026-08-13: Removed per-agent wall-clock deadlines. `forest.yaml` no longer
+  accepts `timeout`; the Runner does not create a deadline around preparation
+  or Pi execution; and the systemd service drains active Runs indefinitely.
+  Explicit foreground cancellation and bounded mechanical cleanup remain.
 
 - 2026-08-13: Replaced layered Pi profile composition with explicit per-Run
   inputs: an isolated temporary Pi directory, checked-in shared and role skill

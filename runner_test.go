@@ -70,7 +70,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 				SystemPrompt: "system",
 				TaskPrompt:   "Reply",
 				SkillPaths:   []string{"agents/_shared/skills", "agents/" + test.role + "/skills"},
-			}, 10)
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +161,7 @@ func TestRunnerCleansPrivateRefsAfterAgentFailureAndCancellation(t *testing.T) {
 				timer := time.AfterFunc(2*time.Second, cancel)
 				defer timer.Stop()
 			}
-			record, err := runner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+			record, err := runner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 			if record.Exit != wantExit || err == nil {
 				t.Fatalf("record=%#v err=%v, want exit %d", record, err, wantExit)
 			}
@@ -256,7 +256,7 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	}
 	runner := NewRunner(root)
 	runner.PiPath = omp
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 	if err == nil || !strings.Contains(err.Error(), "parse harness usage") || !strings.Contains(err.Error(), "nonnegative") {
 		t.Fatalf("invalid usage record=%#v err=%v", record, err)
 	}
@@ -297,7 +297,7 @@ exit 0
 	}
 	runner := NewRunner(root)
 	runner.PiPath = pi
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 	if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "pi agent ended with error") {
 		t.Fatalf("terminal Pi error record=%#v err=%v, want failing Run", record, err)
 	}
@@ -323,7 +323,7 @@ exit 0
 	}
 	runner := NewRunner(root)
 	runner.PiPath = pi
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 	if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "pi agent ended with error") {
 		t.Fatalf("terminal Pi errorMessage record=%#v err=%v, want failing Run", record, err)
 	}
@@ -341,7 +341,7 @@ printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","stopReason":
 	}
 	runner := NewRunner(root)
 	runner.PiPath = pi
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 	if err != nil || record.Exit != 0 || record.TokensIn != 3 || record.TokensOut != 5 {
 		t.Fatalf("successful Pi retry record=%#v err=%v", record, err)
 	}
@@ -364,7 +364,7 @@ func TestRunnerRejectsUsageWithoutRecognizedAlias(t *testing.T) {
 			}
 			runner := NewRunner(root)
 			runner.PiPath = omp
-			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 			if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "parse harness usage") {
 				t.Fatalf("drifted usage record=%#v err=%v", record, err)
 			}
@@ -499,55 +499,25 @@ func TestParseOMPUsageAllowsEveryAggregateMaxPlusZero(t *testing.T) {
 	}
 }
 
-func TestRunnerDirectTimeoutBoundaries(t *testing.T) {
-	for _, timeoutSeconds := range []int{-1, 0} {
-		t.Run(strconv.Itoa(timeoutSeconds), func(t *testing.T) {
-			root, _ := testClone(t)
-			record, err := NewRunner(root).Run(context.Background(), Declaration{Name: "builder"}, timeoutSeconds)
-			if err == nil || record != (RunRecord{}) {
-				t.Fatalf("timeout %d record=%#v err=%v", timeoutSeconds, record, err)
-			}
-			rows, ledgerErr := ReadLedger(root)
-			if ledgerErr != nil || len(rows) != 0 {
-				t.Fatalf("timeout %d ledger=%v err=%v", timeoutSeconds, rows, ledgerErr)
-			}
-		})
-	}
-	t.Run("1", func(t *testing.T) {
-		root, _ := testClone(t)
-		omp := filepath.Join(t.TempDir(), "omp")
-		if err := os.WriteFile(omp, []byte("#!/bin/sh\nprintf '%s\\n' '{\"usage\":{\"input\":0}}'\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		runner := NewRunner(root)
-		runner.PiPath = omp
-		record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
-		if err != nil || record.Exit != 0 {
-			t.Fatalf("timeout 1 record=%#v err=%v", record, err)
-		}
-		rows, ledgerErr := ReadLedger(root)
-		if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 {
-			t.Fatalf("timeout 1 ledger=%v err=%v", rows, ledgerErr)
-		}
-	})
-}
-
-func TestRunnerRejectsOverflowingDirectTimeout(t *testing.T) {
-	if int64(^uint(0)>>1) <= maxDurationSeconds {
-		t.Skip("int cannot represent an overflowing duration")
-	}
+func TestRunnerAllowsRunsPastFormerMinimumDeadline(t *testing.T) {
 	root, _ := testClone(t)
-	timeoutSeconds := int(maxDurationSeconds + 1)
-	record, err := NewRunner(root).Run(context.Background(), Declaration{Name: "builder"}, timeoutSeconds)
-	if err == nil || !strings.Contains(err.Error(), "overflow") {
-		t.Fatalf("overflow timeout record=%#v err=%v", record, err)
+	pi := filepath.Join(t.TempDir(), "pi")
+	script := "#!/bin/sh\n/bin/sleep 1.2\nprintf '%s\\n' '{\"usage\":{\"input\":0}}'\n"
+	if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if record != (RunRecord{}) {
-		t.Fatalf("overflow timeout started a run: %#v", record)
+	runner := NewRunner(root)
+	runner.PiPath = pi
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
+	if err != nil || record.Exit != 0 {
+		t.Fatalf("long Run record=%#v err=%v", record, err)
 	}
-	rows, readErr := ReadLedger(root)
-	if readErr != nil || len(rows) != 0 {
-		t.Fatalf("overflow timeout ledger=%v err=%v", rows, readErr)
+	if record.Duration < 1 {
+		t.Fatalf("long Run duration=%v, want at least one second", record.Duration)
+	}
+	rows, ledgerErr := ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 {
+		t.Fatalf("long Run ledger=%v err=%v", rows, ledgerErr)
 	}
 }
 
@@ -575,7 +545,7 @@ exit 0
 	}
 	runner := NewRunner(root)
 	runner.PiPath = omp
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("leader-success record=%#v err=%v", record, err)
 	}
@@ -586,7 +556,7 @@ exit 0
 	}
 }
 
-func TestRunnerTerminatesTimedOutProcessTree(t *testing.T) {
+func TestRunnerTerminatesProcessTreeOnCallerDeadline(t *testing.T) {
 	root, _ := testClone(t)
 	omp := filepath.Join(t.TempDir(), "omp")
 	marker := filepath.Join(t.TempDir(), "term")
@@ -597,10 +567,12 @@ func TestRunnerTerminatesTimedOutProcessTree(t *testing.T) {
 	}
 	runner := NewRunner(root)
 	runner.PiPath = omp
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	started := time.Now()
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
+	record, err := runner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 	if err == nil || record.Exit != 124 || time.Since(started) > 4*time.Second {
-		t.Fatalf("timeout record=%#v err=%v elapsed=%v", record, err, time.Since(started))
+		t.Fatalf("deadline record=%#v err=%v elapsed=%v", record, err, time.Since(started))
 	}
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "term" {
 		t.Fatalf("TERM marker=%q err=%v", data, err)
@@ -631,13 +603,15 @@ while :; do sleep 1; done
 	}
 	runner := NewRunner(root)
 	runner.PiPath = omp
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	record, err := runner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 	if err == nil || record.Exit != 124 {
 		t.Fatalf("leader-stop record=%#v err=%v", record, err)
 	}
 	rows, ledgerErr := ReadLedger(root)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 124 {
-		t.Fatalf("leader-stop ledger=%v err=%v, want one timeout row", rows, ledgerErr)
+		t.Fatalf("leader-stop ledger=%v err=%v, want one deadline row", rows, ledgerErr)
 	}
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "leader-term" {
 		t.Fatalf("leader TERM marker=%q err=%v", data, err)
@@ -724,7 +698,7 @@ while :; do sleep 1; done
 	assertProcessQuiescent(t, heartbeat, "Git descendant", "cancellation")
 }
 
-func TestRunnerTimeoutIncludesPreparation(t *testing.T) {
+func TestRunnerCallerDeadlineIncludesPreparation(t *testing.T) {
 	root, _ := testClone(t)
 	slowGit := filepath.Join(t.TempDir(), "git")
 	if err := os.WriteFile(slowGit, []byte("#!/bin/sh\nexec /bin/sleep 10\n"), 0o755); err != nil {
@@ -732,10 +706,12 @@ func TestRunnerTimeoutIncludesPreparation(t *testing.T) {
 	}
 	runner := NewRunner(root)
 	runner.GitPath = slowGit
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	started := time.Now()
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 1)
+	record, err := runner.Run(ctx, Declaration{Name: "builder"})
 	if err == nil || record.Exit != 124 || time.Since(started) > 3*time.Second {
-		t.Fatalf("prepare timeout record=%#v err=%v elapsed=%v", record, err, time.Since(started))
+		t.Fatalf("prepare deadline record=%#v err=%v elapsed=%v", record, err, time.Since(started))
 	}
 	rows, readErr := ReadLedger(root)
 	if readErr != nil || len(rows) != 1 || rows[0].Exit != 124 {
@@ -743,7 +719,7 @@ func TestRunnerTimeoutIncludesPreparation(t *testing.T) {
 	}
 }
 
-func TestRunnerCleansWorktreeWhenAddOutlivesDeadline(t *testing.T) {
+func TestRunnerCleansWorktreeWhenAddOutlivesCallerDeadline(t *testing.T) {
 	root, _ := testClone(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -767,12 +743,14 @@ exec "$REAL_GIT" "$@"
 	}
 	runner := NewRunner(root)
 	runner.GitPath = gitWrapper
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	record, err := runner.Run(ctx, Declaration{Name: "builder"})
 	if err == nil || record.Exit != 124 {
-		t.Fatalf("prepare timeout record=%#v err=%v", record, err)
+		t.Fatalf("prepare deadline record=%#v err=%v", record, err)
 	}
 	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("worktree add did not complete before timeout: %v", err)
+		t.Fatalf("worktree add did not complete before caller deadline: %v", err)
 	}
 	worktree := forestPath(root, "worktrees", record.RunID)
 	if _, err := os.Stat(worktree); !errors.Is(err, os.ErrNotExist) {
@@ -801,7 +779,7 @@ exec "$REAL_GIT" "$@"
 	}
 	runner := NewRunner(root)
 	runner.GitPath = gitWrapper
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder"})
 	if err == nil || record.Exit != 1 {
 		t.Fatalf("prepare failure record=%#v err=%v", record, err)
 	}
@@ -847,7 +825,7 @@ exec "$REAL_GIT" "$@"
 	}
 	runner := NewRunner(root)
 	runner.GitPath, runner.PiPath = gitWrapper, omp
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder"})
 	if err == nil || record.Exit != 1 {
 		t.Fatalf("cleanup record=%#v err=%v", record, err)
 	}
@@ -1163,7 +1141,7 @@ func TestRunnerRejectsSkillSymlinkIntroducedInRunRevision(t *testing.T) {
 		SystemPrompt: "system",
 		TaskPrompt:   "task",
 		SkillPaths:   []string{"agents/_shared/skills"},
-	}, 10)
+	})
 	if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "validate Run skills") {
 		t.Fatalf("record=%#v err=%v, want Run-skill validation failure", record, err)
 	}
@@ -1213,7 +1191,7 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
 	}
 	runner := NewRunner(root)
 	runner.PiPath = pi
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", SystemPrompt: "system", TaskPrompt: "task"}, 10)
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", SystemPrompt: "system", TaskPrompt: "task"})
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("record=%#v err=%v", record, err)
 	}
@@ -1257,7 +1235,7 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
 		Model:        "openrouter/deepseek/deepseek-v4-flash-0731",
 		SystemPrompt: "system",
 		TaskPrompt:   "task",
-	}, 10)
+	})
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("record=%#v err=%v", record, err)
 	}

@@ -46,9 +46,9 @@ Write `forest.yaml` at the root of the managed checkout:
 ```yaml
 repo: owner/name
 agents:
-  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
-  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
-  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
+  builder:  { poll: "./forest poll builder",  interval: 300 }
+  verifier: { poll: "./forest poll verifier", interval: 120 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -58,18 +58,18 @@ checks:
     run: mise exec -- go test ./...
 ```
 
-`repo` is the forge identity. `agents` maps each declaration to a Poll command,
-interval, and preparation-plus-execution timeout. Direct `forest poll`
-execution has a fixed 60-second deadline. The Scheduler gives its configured
-Poll command a separate 65-second bound. The supervisor preserves this full
-5-second difference as Poll shutdown grace. It lets the direct Poll stop
-Git/GitHub transport groups and remove private note snapshot refs before the
-supervisor force-stops its command group. Runner cleanup has a separate
-10-second bound. A completed dispatch starts an audit with a separate 60-second
-bound.
-The systemd service uses a separate 3900-second drain bound. This bound covers
-the shipped declarations' concurrent Runs, bounded Runner cleanup, and
-serialized post-dispatch audits. The model is
+`repo` is the forge identity. `agents` maps each declaration to a Poll command
+and interval. Agent Runs have no wall-clock deadline. They finish when Pi
+finishes or an operator explicitly cancels a foreground `forest once`; service
+shutdown stops new dispatches and drains active Runs without a systemd
+deadline. Direct `forest poll` execution has a fixed 60-second deadline. The
+Scheduler gives its configured Poll command a separate 65-second bound. The
+supervisor preserves this full 5-second difference as Poll shutdown grace. It
+lets the direct Poll stop Git/GitHub transport groups and remove private note
+snapshot refs before the supervisor force-stops its command group. Runner
+cleanup has a separate 10-second bound. A completed dispatch starts an audit
+with a separate 60-second bound. These mechanical bounds do not limit agent
+reasoning or model execution. The model is
 in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.

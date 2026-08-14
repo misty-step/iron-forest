@@ -2,6 +2,9 @@
 
 Status: accepted, 2026-08-10
 
+The agent-Run timeout and finite service-drain clauses are superseded by
+[0020](0020-unbounded-agent-runs.md).
+
 ## Context
 
 The former architecture mixed scheduling, agent policy, coordination, and
@@ -12,12 +15,10 @@ profile that can change agent behavior without changing Kernel code.
 
 The Kernel owns config load and validation, Poll scheduling, worktree
 preparation, per-agent Git identity, OMP invocation, process-local Run
-serialization, read-only auditing, Ledger writes, and the status CLI. The
-configured timeout covers worktree preparation plus agent execution. Runner
-cleanup has a separate 10-second bound. Post-dispatch audit has a separate
-60-second bound. The systemd service uses a separate 3900-second drain bound.
-This bound covers the shipped declarations' concurrent Runs, bounded Runner
-cleanup, and serialized post-dispatch audits.
+serialization, read-only auditing, Ledger writes, and the status CLI. Agent
+Runs have no wall-clock deadline. Runner cleanup has a separate 10-second
+bound. Post-dispatch audit has a separate 60-second bound. The systemd service
+drains active Runs without a deadline.
 
 After each completed dispatch, the Auditor takes a bounded stable snapshot. It
 does not run at startup or after an idle Poll skip. Schema and actor checks cover

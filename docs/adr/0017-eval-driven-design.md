@@ -20,6 +20,9 @@ merge Gate adherence, rejected-work handoff, recovery after process failure,
 and cost in token classes. Do not use a provider or monetary score as the
 architecture authority.
 
+The executable suite and actor-assignment study follow the repository's
+[evaluation strategy](../evaluation-strategy.md).
+
 ## Consequences
 
 The current appliance can ship a small boundary without pretending that the
