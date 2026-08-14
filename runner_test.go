@@ -1015,6 +1015,14 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_DIR", "/operator/pi")
 	t.Setenv("SERVICE_API_TOKEN", "inherited-only")
+	t.Setenv("GIT_AUTHOR_NAME", "ambient")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.invalid")
+	t.Setenv("GIT_COMMITTER_NAME", "ambient")
+	t.Setenv("GIT_COMMITTER_EMAIL", "ambient@example.invalid")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
+	t.Setenv("GIT_CONFIG_VALUE_0", "ambient")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'user.name'='ambient' 'user.email'='ambient@example.invalid'")
 	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi")
 	if err != nil {
 		t.Fatal(err)
@@ -1028,9 +1036,22 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 		"PI_CODING_AGENT_DIR": "/tmp/run-pi",
 		"SERVICE_API_TOKEN":   "inherited-only",
 		"FOREST_RUN_ID":       "1-builder",
+		"GIT_CONFIG_COUNT":    "2",
+		"GIT_CONFIG_KEY_0":    "user.name",
+		"GIT_CONFIG_VALUE_0":  "Iron Forest Builder",
+		"GIT_CONFIG_KEY_1":    "user.email",
+		"GIT_CONFIG_VALUE_1":  "builder@forest.invalid",
 	} {
 		if values[key] != want {
 			t.Fatalf("%s=%q, want %q", key, values[key], want)
+		}
+	}
+	for _, key := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+		"GIT_CONFIG_PARAMETERS",
+	} {
+		if _, exists := values[key]; exists {
+			t.Fatalf("%s leaked into Run environment", key)
 		}
 	}
 }

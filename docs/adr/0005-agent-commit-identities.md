@@ -10,12 +10,14 @@ identity layers.
 
 ## Decision
 
-When the Runner invokes OMP, it injects `GIT_AUTHOR_NAME`,
-`GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` for the
-active declaration. It does not mutate Git configuration during worktree
-preparation. For example, Builder receives `Iron Forest Builder` and
-`builder@forest.invalid`. Git commands run by OMP inherit that identity, so
-coordination note commits use it. The Auditor checks each note identity at the
+When the Runner invokes Pi, it injects the active declaration's `user.name` and
+`user.email` through Git's command-scope `GIT_CONFIG_*` environment protocol.
+It does not mutate shared Git configuration during worktree preparation and
+does not set the stronger `GIT_AUTHOR_*` or `GIT_COMMITTER_*` overrides. For
+example, Builder receives `Iron Forest Builder` and `builder@forest.invalid`.
+Git commands run by Pi inherit that identity, while a nested command can still
+override a fixture identity with `git -c`. Coordination note commits therefore
+use the declaration identity. The Auditor checks each note identity at the
 exact target note-tree path. It does not validate the reviewed Revision's
 commit author.
 
@@ -26,6 +28,8 @@ identity as the other.
 ## Consequences
 
 `git log` attributes commits to Builder, Verifier, or Fixer without extra forge
-accounts. The Auditor detects an unexpected coordination note identity, not an
-unexpected Revision commit author. Deployment may use a separate forge account,
+accounts. Test and tool subprocesses can use explicit command-scoped identities
+without being overridden by the parent Run. The Auditor detects an unexpected
+coordination note identity, not an unexpected Revision commit author.
+Deployment may use a separate forge account,
 but that is outside this ADR.
