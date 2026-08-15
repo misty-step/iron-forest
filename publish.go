@@ -120,14 +120,14 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 			return publishReviewRequestResult{}, err
 		}
 		if input.Role == "builder" {
-			if branchOID != "" && branchOID != revision {
+			if branchOID != "" && (branchOID != revision || destination == nil) {
 				return publishReviewRequestResult{}, fmt.Errorf("branch race")
 			}
 			if branchOID == revision && destination != nil {
 				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
 			}
 		} else {
-			if branchOID == "" || (branchOID != input.Rejected && branchOID != revision) {
+			if branchOID == "" || (branchOID == revision && destination == nil) || (branchOID != input.Rejected && branchOID != revision) {
 				return publishReviewRequestResult{}, fmt.Errorf("branch race")
 			}
 			if branchOID == revision && destination != nil {
@@ -152,8 +152,21 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		if err != nil {
 			return publishReviewRequestResult{}, err
 		}
-		branchReady := (input.Role == "builder" && freshBranch == "") || (input.Role == "fixer" && freshBranch == input.Rejected)
-		if !branchReady {
+		branchUnchanged := (input.Role == "builder" && freshBranch == "") || (input.Role == "fixer" && freshBranch == input.Rejected)
+		if freshBranch == revision {
+			if err := snapshotNoteBase(ctx, input.Root, baseRef, freshNote); err != nil {
+				return publishReviewRequestResult{}, err
+			}
+			destination, destActor, destEmail, err := destinationNote(ctx, input.Root, baseRef, revision)
+			if err != nil {
+				return publishReviewRequestResult{}, err
+			}
+			if destination != nil && bytes.Equal(destination, payload) && validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
+				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
+			}
+			return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped: %w", pushErr)
+		}
+		if !branchUnchanged {
 			return publishReviewRequestResult{}, fmt.Errorf("branch race")
 		}
 		if freshNote == "" || freshNote == noteOID || attempt == reviewRequestAttempts {
@@ -254,14 +267,15 @@ func removePublishWorktree(root, dir string) error {
 
 func snapshotNoteBase(ctx context.Context, root, baseRef, noteOID string) error {
 	if noteOID == "" {
-		_ = gitRun(ctx, root, "update-ref", "-d", baseRef)
-		return nil
+		return gitRun(ctx, root, "update-ref", "-d", baseRef)
 	}
 	return gitRun(ctx, root, "fetch", "origin", reviewRequestNoteRef+":"+baseRef)
 }
 
 func rebuildPublicationRef(ctx context.Context, root, role, privateRef, baseRef, noteOID, revision string, payload []byte, identical bool) error {
-	_ = gitRun(ctx, root, "update-ref", "-d", privateRef)
+	if err := gitRun(ctx, root, "update-ref", "-d", privateRef); err != nil {
+		return err
+	}
 	if noteOID != "" {
 		if err := gitRun(ctx, root, "update-ref", privateRef, baseRef); err != nil {
 			return err
@@ -271,7 +285,34 @@ func rebuildPublicationRef(ctx context.Context, root, role, privateRef, baseRef,
 		return nil
 	}
 	name, email := publicationIdentity(role)
-	return gitInput(ctx, root, payload, "-c", "user.name="+name, "-c", "user.email="+email, "notes", "--ref="+privateRef, "add", "-F", "-", revision)
+	return gitNotesAdd(ctx, root, name, email, privateRef, revision, payload)
+}
+
+func gitNotesAdd(ctx context.Context, root, name, email, ref, revision string, payload []byte) error {
+	path, err := trustedExecutable(root, "git")
+	if err != nil {
+		return err
+	}
+	command := exec.CommandContext(ctx, path, "-C", root, "notes", "--ref="+ref, "add", "-F", "-", revision)
+	command.Stdin = bytes.NewReader(payload)
+	command.Env = publicationGitEnv(name, email)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("git notes add: %w\n%s", err, stderr.Bytes())
+	}
+	return nil
+}
+
+func publicationGitEnv(name, email string) []string {
+	environment := childEnvironment()
+	return append(environment,
+		"GIT_AUTHOR_NAME="+name,
+		"GIT_AUTHOR_EMAIL="+email,
+		"GIT_COMMITTER_NAME="+name,
+		"GIT_COMMITTER_EMAIL="+email,
+	)
 }
 
 func publicationIdentity(role string) (string, string) {

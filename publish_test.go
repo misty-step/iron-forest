@@ -69,6 +69,113 @@ func TestPublishReviewRequestCreatesBranchAndNote(t *testing.T) {
 	}
 }
 
+func TestPublishReviewRequestIgnoresHostileGitIdentity(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	t.Setenv("GIT_AUTHOR_NAME", "Eve")
+	t.Setenv("GIT_AUTHOR_EMAIL", "eve@invalid")
+	t.Setenv("GIT_COMMITTER_NAME", "Eve")
+	t.Setenv("GIT_COMMITTER_EMAIL", "eve@invalid")
+	if _, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "builder", Branch: "forest/1-ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"), RunID: "1-builder",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "fetch", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
+	identity := strings.TrimSpace(string(runGitDir(t, root, "log", "-1", "--format=%an <%ae>", reviewRequestNoteRef)))
+	if identity != "Iron Forest Builder <builder@forest.invalid>" {
+		t.Fatalf("note actor=%q", identity)
+	}
+}
+
+func TestPublishReviewRequestAcceptsPushThatSucceededOnOrigin(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapperDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if printf '%s' \"$*\" | grep -q 'push --atomic'; then\n" +
+		"  \"" + realGit + "\" \"$@\"\n" +
+		"  test $? -eq 0 && exit 1\n" +
+		"  exit $?\n" +
+		"fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "builder", Branch: "forest/1-ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"), RunID: "1-builder",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "identical" || result.Attempts != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestPublishReviewRequestAcceptsThirdPushClientFailure(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	work := t.TempDir()
+	runGit(t, "clone", origin, work)
+	configGit(t, work, "Iron Forest Builder", "builder@forest.invalid")
+	if err := os.WriteFile(filepath.Join(work, "other"), []byte("other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, work, "add", "other")
+	runGitDir(t, work, "commit", "-m", "competitor")
+	competitor := strings.TrimSpace(string(runGitDir(t, work, "rev-parse", "HEAD")))
+	runGitDir(t, work, "push", "origin", "HEAD:refs/heads/forest/9-other")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	countPath := filepath.Join(t.TempDir(), "pushes")
+	wrapperDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if printf '%s' \"$*\" | grep -q 'push --atomic'; then\n" +
+		"  count=0\n" +
+		"  if [ -f \"" + countPath + "\" ]; then count=$(cat \"" + countPath + "\"); fi\n" +
+		"  count=$((count + 1))\n" +
+		"  printf '%s' \"$count\" > \"" + countPath + "\"\n" +
+		"  if [ \"$count\" -lt 3 ]; then\n" +
+		"    \"" + realGit + "\" -C \"" + origin + "\" -c user.name='Iron Forest Builder' -c user.email='builder@forest.invalid' notes --ref=refs/notes/forest/review-request add -f -m \"{\\\"schema\\\":\\\"forest.review-request.v1\\\",\\\"issue\\\":9,\\\"branch\\\":\\\"forest/9-other\\\",\\\"revision\\\":\\\"" + competitor + "\\\",\\\"time\\\":\\\"2026-08-15T00:00:0${count}Z\\\"}\" \"" + competitor + "\"\n" +
+		"    exit 1\n" +
+		"  fi\n" +
+		"  \"" + realGit + "\" \"$@\"\n" +
+		"  test $? -eq 0 && exit 1\n" +
+		"  exit $?\n" +
+		"fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "builder", Branch: "forest/1-ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"), RunID: "1-builder",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "identical" || result.Attempts != 3 {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
 func TestPublishReviewRequestRefusesFailedCheck(t *testing.T) {
 	root, _ := testClone(t)
 	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"false\"}\n"), 0o644); err != nil {
@@ -111,6 +218,41 @@ func TestPublishReviewRequestDetectsBranchRace(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "branch race") {
 		t.Fatalf("error=%v other=%s", err, other)
+	}
+}
+
+func TestPublishReviewRequestBuilderRejectsBranchWithoutNote(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1-ready")
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "builder", Branch: "forest/1-ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"), RunID: "1-builder",
+	})
+	if err == nil || !strings.Contains(err.Error(), "branch race") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPublishReviewRequestFixerRejectsBranchWithoutNote(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	rejected := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "commit", "-am", "fix")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1-ready")
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "fixer", Branch: "forest/1-ready", Rejected: rejected,
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"), RunID: "2-fixer",
+	})
+	if err == nil || !strings.Contains(err.Error(), "branch race") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -159,6 +301,46 @@ func TestPublishReviewRequestRetriesCanonicalNoteRace(t *testing.T) {
 	}
 	if result.Attempts < 2 {
 		t.Fatalf("expected a retry, got %#v", result)
+	}
+}
+
+func TestPublishReviewRequestStopsWhenRefDeleteFails(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "git.log")
+	wrapperDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$arg\" = \"-d\" ]; then\n" +
+		"    echo delete-blocked >&2\n" +
+		"    exit 1\n" +
+		"  fi\n" +
+		"done\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err = publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "builder", Branch: "forest/1-ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"), RunID: "1-builder",
+	})
+	if err == nil || !strings.Contains(err.Error(), "update-ref") {
+		t.Fatalf("error=%v", err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logged), "notes add") || strings.Contains(string(logged), "push --atomic") {
+		t.Fatalf("delete failure continued:\n%s", logged)
 	}
 }
 
