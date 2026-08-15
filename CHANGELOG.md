@@ -1,7 +1,9 @@
 # Changelog
 
-- 2026-08-15: Shipped default model is
-  `openrouter/deepseek/deepseek-v4-pro-0813`.
+- 2026-08-15: Builder and Fixer publish review-requests through
+  `forest publish review-request`. The Kernel owns the write-once note, role
+  identity, configured Check gate, and bounded atomic retry. Shipped default
+  model is `openrouter/deepseek/deepseek-v4-pro-0813`.
 
 - 2026-08-13: Dispatch now verifies the agent bundle. The Kernel digests the
   ordered declaration pair (`agent.md` then `task.md`) at load and recomputes

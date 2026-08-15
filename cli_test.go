@@ -419,6 +419,7 @@ func TestCLIGroupNameReportsItsSubcommands(t *testing.T) {
 		"trigger":     "list, show, reset",
 		"declaration": "list, show",
 		"audit":       "show, log",
+		"publish":     "review-request",
 	} {
 		_, _, stderr := captureCLIOutput(t, func() int { return runSurfaceCommand([]string{group}) })
 		if !strings.Contains(stderr, group+" requires a subcommand: "+want) {

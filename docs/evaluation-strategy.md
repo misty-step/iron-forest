@@ -36,6 +36,9 @@ found unnecessary fixture inspection or incomplete review evidence. The model
 adoption gate is therefore red even though the deterministic reference harness
 is 18/18.
 
+The Builder canonical-note race is now Kernel-owned
+(`forest publish review-request`; ADR 0021).
+
 Production runs Pi in ephemeral `--no-session` mode. Pi still auto-compacts
 within that process, so one Run can span context windows, but it cannot resume
 the agent session after process or service loss. Forest retains the event log as

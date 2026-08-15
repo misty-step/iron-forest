@@ -55,9 +55,10 @@ violations after profile Effects. It does not block, authorize, reject, or
 enforce a merge.
 
 The profile owns `forest.yaml`, agent declarations, Poll commands, Subject
-selection, Checks commands, workflow notes, branch pushes, and merges.
+selection, Checks commands, and Verifier notes, branch pushes, and merges.
 Declarations own `model`, `tools`, and `thinking`; the host owns OMP provider
-routing. The Kernel never writes workflow notes and never selects a Subject.
+routing. The Kernel writes review-request notes and their paired branch push
+only through `forest publish review-request`. It never selects a Subject.
 
 Each Ledger row records Run identity, timing, exit, and token classes. The
 Ledger never records or computes money.

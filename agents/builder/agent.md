@@ -29,13 +29,13 @@ The selector must choose exactly one Issue. The poll only wakes this declaration
 1. Read the Issue and repository conventions.
 2. Implement the Issue in the new branch.
 3. Add tests for changed behavior when repository conventions require them.
-4. Run the relevant repository checks.
-5. Commit the implementation and set `revision` to the full new commit SHA.
-6. Write the review-request payload for that exact `revision`.
-7. Publish the branch and review-request note in one normal atomic push:
-   `git push --atomic origin "$review_private:refs/notes/forest/review-request" "$revision:refs/heads/$branch"`.
-8. Open a GitHub PR Projection with `Closes #<n>` in its body using `gh`. The PR is for humans and is not coordination authority.
-9. If implementation reveals a separate problem, file a new GitHub Issue with `gh` and describe the evidence. Do not expand the selected Issue to hide it.
+4. Run the relevant repository checks, including every command in `forest.yaml` `checks:`. A nonzero exit is a failed Check.
+5. If any Check fails, stop. Do not commit. Do not publish a branch, review-request note, or PR. Do not edit `forest.yaml` to make a Check pass.
+6. Commit the implementation and set `revision` to the full new commit SHA.
+7. Write the review-request payload for that exact `revision` to a temporary file outside the repository.
+8. Publish with `forest publish review-request builder "$branch" "$payload_file"`. Do not run `git notes` or `git push` for this Effect. A nonzero exit is a stop.
+9. Open a GitHub PR Projection with `Closes #<n>` in its body using `gh`. The PR is for humans and is not coordination authority.
+10. If implementation reveals a separate problem, file a new GitHub Issue with `gh` and describe the evidence. Do not expand the selected Issue to hide it.
 
 ## Coordination schema v1
 
@@ -47,26 +47,16 @@ Use this payload verbatim, with the placeholders replaced by values:
 
 Builder writes the initial review-request note. Fixer writes each fresh review-request note after a rejected Revision.
 
-## Write-once note and branch publication
+## Publication
 
-Write the complete review-request JSON object to a temporary file outside the repository. The Runner supplies the exact `FOREST_RUN_ID`; never change it. For this Run and exact target `revision`, use only these run-private refs:
+The Kernel owns the write-once note and atomic branch push. After the payload file exists, call only:
 
 ```sh
-review_private="refs/notes/forest/private/$FOREST_RUN_ID/builder/review-request/$revision/publication"
-review_base="refs/notes/forest/private/$FOREST_RUN_ID/builder/review-request/$revision/base"
+forest publish review-request builder "$branch" "$payload_file"
 ```
 
-Add the file with `git notes --ref="$review_private" add -F "$payload_file" "$revision"`; never use `-m` or `-f`.
-
-For every note actor check, enumerate the actual blob paths with `git ls-tree -r --name-only <ref>`, remove `/` from each path, and require exactly one normalized path equal to the exact target `revision`. Use that actual path with `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`. Stop if no path, more than one path, or a non-blob entry matches. Flat and fanout note paths are both valid; never derive one from the SHA and never search by blob.
-Before the first add and before every retry, use `git ls-remote` to distinguish an absent canonical ref from lookup failure, then fetch `refs/notes/forest/review-request` into `$review_base`. Treat an absent remote ref as an empty snapshot and delete only `$review_base`. Any other lookup or fetch error stops.
-Read the destination note from `$review_base`. A present note must be byte-identical to the payload; accept an identical note and stop on a conflict. Verify every existing destination note's actor with the exact target-path log above and require `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`. Set `$review_private` to the fetched `$review_base` tip, deleting only `$review_private` for an absent tip. If the destination note is absent, add the exact payload file to `$review_private`.
-Before each atomic attempt, read `refs/heads/$branch` with `git ls-remote`. Builder publication requires that branch to be absent. If it is present at the target `revision`, accept success only when the canonical note is byte-identical to the payload. Any other present branch revision is a branch race and stops. Run the atomic push above with the private ref and exact `revision`.
-
-If that push is rejected, re-read the branch and canonical note. Retry only when the branch is still absent and the canonical note ref changed, rebuilding the private ref from the fresh snapshot and re-adding the payload. A canonical note race gets at most three total attempts. An unchanged note ref, any branch revision, or a conflicting note stops. Never force-push or push the branch and note separately.
-
-Use an RFC 3339 timestamp and the exact commit SHA in every payload. Do not overwrite another note.
+Use the Runner `FOREST_RUN_ID`. Do not invent refs, retry loops, or force flags.
 
 ## Stop conditions
 
-Stop and report a clear failure summary for missing refs, ambiguous Issue identity, failed checks, failed atomic publication, conflicting notes, branch races, credential exposure, or any unexpected Git state. A clean no-work pass is success and must state that no eligible Issue existed.
+Stop and report a clear failure summary for missing refs, ambiguous Issue identity, failed checks, failed atomic publication, conflicting notes, branch races, credential exposure, or any unexpected Git state. A failed Check is a stop, not a reason to publish. A clean no-work pass is success and must state that no eligible Issue existed.

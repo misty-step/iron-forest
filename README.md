@@ -163,22 +163,23 @@ Every record binds to an exact Revision. The schema and writer sets are defined
 in [ADR 0009](docs/adr/0009-git-coordination-authority.md): Builder and Fixer
 write review requests, while Verifier writes Checks and Verdict notes.
 
-Notes are write-once. Agents write each JSON payload to a temporary file, add it
-with `git notes ... add -F`, and never use force. Builder and Fixer publish the
-branch and review-request note through one normal `git push --atomic`. Their
-canonical note race recovery permits at most three total atomic attempts; a
-branch race stops. For a `changes` Verdict, the Verifier publishes Checks and
-Verdict together and permits at most three total atomic attempts after a
-canonical note race. For `approve`, the Verifier makes exactly one
-non-retryable atomic attempt carrying Checks, Verdict, and the exact
-fast-forward `master` advance. The existing review-request remains durable Gate
-evidence; no standalone master push is valid. See [ADR
-0009](docs/adr/0009-git-coordination-authority.md) for the absent-ref and
-bounded retry protocol.
+Notes are write-once. Builder and Fixer write the review-request payload, then
+call `forest publish review-request`. The Kernel adds the note with
+`git notes ... add -F`, stamps the role identity, and publishes the branch and
+note through one normal `git push --atomic`. Canonical note race recovery
+permits at most three total atomic attempts; a branch race stops. For a
+`changes` Verdict, the Verifier still publishes Checks and Verdict together
+and permits at most three total atomic attempts after a canonical note race.
+For `approve`, the Verifier makes exactly one non-retryable atomic attempt
+carrying Checks, Verdict, and the exact fast-forward `master` advance. The
+existing review-request remains durable Gate evidence; no standalone master
+push is valid. See [ADR 0021](docs/adr/0021-kernel-review-request-publication.md)
+and [ADR 0009](docs/adr/0009-git-coordination-authority.md).
 
-Agents own workflow Effects. The Kernel never writes workflow notes or merges a
-branch. See [managed-repository onboarding](docs/onboarding-managed-repo.md)
-for the operator procedure.
+Agents own Issue selection, implementation, and the decision to publish.
+The Kernel owns the review-request race loop. The Verifier still owns Checks,
+Verdict, and merge. See [managed-repository
+onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
 
 ## Poll protocol
 
@@ -252,17 +253,18 @@ Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 | `forest run logs [--follow] <run-id>` | Print a Run log, or stream it until the Run completes. |
 | `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
 | `forest audit log` | Print audit history. |
+| `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer review-request note and branch. |
 
 ### Reading the factory
 
 `serve`, `once`, and `poll` are the engine: they hold the Kernel lock and write.
-Every other row is the read surface. Each read-surface command accepts
-`--root <dir>` to read another checkout and `--json` to emit one envelope, and
-each refuses a directory that holds no `forest.yaml` rather than reporting an
-empty factory. Two of them write: `trigger reset` and `audit show --rescan` hold
-the Kernel lock across the write and exit `5` while a Kernel holds it. Every
-other read-surface command only reads, under a shared lock that never blocks the
-Kernel.
+`publish review-request` writes without taking that lock, so a Run that already
+holds it can publish. Every other row is the read surface. Each read-surface
+command accepts `--json` and `--root <dir>`. `--json` emits one
+`forest.cli.v2` envelope on stdout; human text stays on stderr. `--root`
+answers from another checkout. `trigger reset` and `audit show --rescan` take
+the Kernel lock and refuse while a Kernel runs. `publish review-request` does
+not.
 
 `--json` emits exactly one envelope on stdout, including on failure:
 

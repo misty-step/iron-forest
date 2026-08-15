@@ -11,10 +11,12 @@ create bespoke policy and a second coordination authority.
 
 ## Decision
 
-Agents own coordination Effects through prompts and native `git`; no bespoke
-wrapper tool mediates note writes or merges. The Verifier runs configured
-Checks, reviews the exact Revision, writes Checks and Verdict notes, and on
-approval performs the merge.
+Agents own Issue selection, implementation, review judgment, and the decision
+to publish. Native `git` remains the durable store. `forest publish
+review-request` is the Kernel-owned execution of the review-request race loop
+(see [0021](0021-kernel-review-request-publication.md)). The Verifier still
+runs configured Checks, writes Checks and Verdict notes, and on approval
+performs the merge.
 
 The profile Gate contract is fixed:
 
@@ -31,9 +33,9 @@ The profile Gate contract is fixed:
    ```
 5. No force flag is allowed. A non-fast-forward rejection is the compare-and-set
    failure.
-6. Builder and Fixer publish their branch and review-request note through one
-   normal `git push --atomic`. A canonical note race permits at most three total
-   attempts.
+6. Builder and Fixer publish their branch and review-request note through
+   `forest publish review-request`. A canonical note race permits at most three
+   total attempts.
 7. For a `changes` Verdict, the Verifier publishes Checks and Verdict through
    one atomic push without advancing `master`. A canonical note race permits at
    most three total attempts.
@@ -66,9 +68,9 @@ deployment isolation. Those paths are not implemented in this slice.
 
 ## Consequences
 
-The profile owns workflow intent and durable Effects. The Kernel remains small
-and deterministic. The merge decision is inspectable from notes and Git
-history, with explicit residual risks instead of hidden assumptions.
+The profile owns workflow intent. The Kernel owns the review-request race
+loop. The merge decision remains inspectable from notes and Git history, with
+explicit residual risks instead of hidden assumptions.
 
 A bad prompt can request a bad Effect. Independent Verifier review and the
 read-only Auditor can detect an observable invalid final state. They cannot

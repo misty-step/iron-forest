@@ -209,10 +209,11 @@ Poll exits 0. A healthy Poll skip exits 1 without an agent Run.
 ## 6. Observe the first Subject
 
 After an Issue receives `forest:ready`, the Builder selects it and creates a
-`forest/<issue>-<slug>` branch. It writes a review-request note on the exact
-Revision and publishes the branch and note with one normal atomic push. A
-canonical note race permits at most three total atomic attempts; a branch race
-stops. The Builder may open a pull request as a human Projection.
+`forest/<issue>-<slug>` branch. It writes a review-request payload and calls
+`forest publish review-request`, which publishes the branch and note with one
+normal atomic push. A canonical note race permits at most three total atomic
+attempts; a branch race stops. The Builder may open a pull request as a human
+Projection.
 
 The Verifier selects that branch and runs every configured Check. For `changes`,
 it publishes Checks and Verdict together. A canonical note race permits at most
