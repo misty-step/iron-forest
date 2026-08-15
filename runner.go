@@ -352,7 +352,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	}
 	started := time.Now().UTC()
 	runID := newRunID(declaration.Name, started)
-	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano), DefinitionSHA: declaration.DefinitionSHA}
+	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano)}
 	logPath := runLogPath(r.Root, runID)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return record, err
@@ -414,8 +414,9 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	}
 	harnessRunnable := skillErr == nil && piErr == nil
 	var invokeErr error
+	harnessStarted := false
 	if harnessRunnable {
-		invokeErr = r.invoke(runCtx, worktree, declaration, piDir, timeoutSeconds, logFile, &record)
+		invokeErr, harnessStarted = r.invoke(runCtx, worktree, declaration, piDir, timeoutSeconds, logFile, &record)
 	}
 	var piCleanupErr error
 	if piDir != "" {
@@ -443,10 +444,10 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	// Usage exists only if the harness ran. Demanding it after a failure to start
-	// would report "no usage" as the cause and bury the real one.
+	// Usage exists only if the harness started. Demanding it after a refusal to
+	// start would report "no usage" as the cause and bury the real one.
 	var usageErr error
-	if harnessRunnable && (invokeErr == nil || record.Exit != harnessUnavailableExit) {
+	if harnessStarted {
 		usage, parseErr := parseAgentUsage(logPath)
 		if parseErr != nil {
 			usageErr = fmt.Errorf("parse harness usage: %w", parseErr)
@@ -798,22 +799,15 @@ func (t *agentOutcomeTracker) Err() error {
 	return nil
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) (err error, started bool) {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
-		return err
-	}
-	// Recompute the declaration digest immediately before exec and refuse the
-	// run when it changed since load, so a Run executes only the declaration
-	// bytes the Kernel loaded (see #144).
-	if err := r.verifyDeclarationDigest(declaration); err != nil {
-		record.Exit = 1
-		return err
+		return err, false
 	}
 	path, err := r.piExecutable()
 	if err != nil {
 		record.Exit = harnessUnavailableExit
-		return err
+		return err, false
 	}
 	// Pi receives a complete explicit resource contract. Global extensions,
 	// skills, prompt templates, and themes are disabled; each declared skill is
@@ -842,18 +836,23 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
-		return err
+		return err, false
 	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		record.Exit = harnessUnavailableExit
-		return fmt.Errorf("open harness output pipe: %w", err)
+		return fmt.Errorf("open harness output pipe: %w", err), false
 	}
 	command.Stdout = writer
 	command.Stderr = writer
+	if err := r.verifyDeclarationDigest(declaration); err != nil {
+		record.Exit = 1
+		return errors.Join(err, writer.Close(), reader.Close()), false
+	}
+	record.DefinitionSHA = declaration.DefinitionSHA
 	if err := command.Start(); err != nil {
 		record.Exit = harnessUnavailableExit
-		return errors.Join(fmt.Errorf("start pi: %w", err), writer.Close(), reader.Close())
+		return errors.Join(fmt.Errorf("start pi: %w", err), writer.Close(), reader.Close()), false
 	}
 	writerCloseErr := writer.Close()
 	outcome := newAgentOutcomeTracker()
@@ -898,7 +897,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	if err != nil && record.Exit == 0 {
 		record.Exit = 1
 	}
-	return err
+	return err, true
 }
 
 const (

@@ -2,10 +2,10 @@
 
 - 2026-08-13: Dispatch now verifies the agent bundle. The Kernel digests the
   ordered declaration pair (`agent.md` then `task.md`) at load and recomputes
-  that digest immediately before exec; a file changed after load aborts the Run
-  with a nonzero-exit Ledger row and refuses to start Pi, so a Run executes only
-  the declaration bytes the Kernel loaded. The verified digest is recorded on
-  the Ledger row for that Run (#144).
+  that digest immediately before starting Pi; a file changed after load aborts
+  the Run with a nonzero-exit Ledger row and refuses to start Pi. The Ledger
+  records the digest only after that verification succeeds (#144).
+
 
 - 2026-08-13: Replaced layered Pi profile composition with explicit per-Run
   inputs: an empty temporary Pi directory, checked-in shared and role skill

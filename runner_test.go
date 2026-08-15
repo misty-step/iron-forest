@@ -231,16 +231,21 @@ func TestRunnerRejectsChangedDeclarationBundle(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "bundle changed since load") {
 		t.Fatalf("changed bundle record=%#v err=%v, want digest mismatch", record, err)
 	}
+	if strings.Contains(err.Error(), "parse harness usage") {
+		t.Fatalf("mismatch error leaked usage parse: %v", err)
+	}
 	if record.Exit == 0 {
 		t.Fatalf("changed bundle exit=%d, want nonzero", record.Exit)
 	}
+
 	if body, readErr := os.ReadFile(marker); !errors.Is(readErr, os.ErrNotExist) {
 		t.Fatalf("Pi started despite the changed bundle: %q err=%v", body, readErr)
 	}
 	rows, ledgerErr = ReadLedger(root)
-	if ledgerErr != nil || len(rows) != 2 || rows[1].Exit == 0 {
-		t.Fatalf("ledger rows=%v err=%v, want a second nonzero-exit row", rows, ledgerErr)
+	if ledgerErr != nil || len(rows) != 2 || rows[1].Exit == 0 || rows[1].DefinitionSHA != "" {
+		t.Fatalf("ledger rows=%v err=%v, want a second nonzero-exit row without a verified digest", rows, ledgerErr)
 	}
+
 }
 
 func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
