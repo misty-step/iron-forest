@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from hidden import ISSUE_CREATED, PR_CREATED, SCENARIO
+
+
+def emit(value) -> None:
+    print(json.dumps(value, separators=(",", ":")))
+
+
+def option(args: list[str], *names: str) -> str | None:
+    for index, arg in enumerate(args):
+        if arg in names and index + 1 < len(args):
+            return args[index + 1]
+        for name in names:
+            if arg.startswith(name + "="):
+                return arg.split("=", 1)[1]
+    return None
+
+
+def main() -> int:
+    scenario = json.loads(SCENARIO.read_text())
+    args = sys.argv[1:]
+    issue = scenario.get("issue")
+    if args[:2] == ["issue", "list"]:
+        if issue is None:
+            emit([])
+        else:
+            emit([{
+                "number": issue["number"],
+                "title": issue["title"],
+                "body": issue["body"],
+                "labels": [{"name": "forest:ready"}],
+                "url": f"https://github.invalid/local/eval/issues/{issue['number']}",
+            }])
+        return 0
+    if args[:2] == ["issue", "view"]:
+        if issue is None:
+            print("issue not found", file=sys.stderr)
+            return 1
+        emit({
+            "number": issue["number"],
+            "title": issue["title"],
+            "body": issue["body"],
+            "labels": [{"name": "forest:ready"}],
+            "state": "OPEN",
+            "url": f"https://github.invalid/local/eval/issues/{issue['number']}",
+        })
+        return 0
+    if args[:2] == ["pr", "list"]:
+        emit([])
+        return 0
+    if args[:2] == ["pr", "create"]:
+        if any(arg in {"--help", "-h"} for arg in args[2:]):
+            print("unsupported gh fixture invocation: " + " ".join(args), file=sys.stderr)
+            return 2
+        record = {
+            "head": option(args, "--head"),
+            "base": option(args, "--base") or "master",
+            "title": option(args, "--title"),
+            "body": option(args, "--body"),
+        }
+        PR_CREATED.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        print("https://github.invalid/local/eval/pull/1")
+        return 0
+    if args[:2] == ["issue", "create"]:
+        if any(arg in {"--help", "-h"} for arg in args[2:]):
+            print("unsupported gh fixture invocation: " + " ".join(args), file=sys.stderr)
+            return 2
+        ISSUE_CREATED.write_text(json.dumps({"args": args[2:]}, indent=2) + "\n")
+        print("https://github.invalid/local/eval/issues/999")
+        return 0
+    if args[:2] == ["repo", "view"]:
+        emit({"nameWithOwner": "local/eval", "defaultBranchRef": {"name": "master"}})
+        return 0
+    if args and args[0] == "auth":
+        return 0
+    print(f"unsupported gh fixture invocation: {' '.join(args)}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

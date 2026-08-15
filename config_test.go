@@ -18,7 +18,7 @@ func TestConfigAndDeclarationValidation(t *testing.T) {
 	root := t.TempDir()
 	config := `repo: owner/name
 agents:
-  builder: {poll: "forest poll builder", interval: 5, timeout: 20}
+  builder: {poll: "forest poll builder", interval: 5}
 checks:
   - {name: test, run: "go test ./..."}
 `
@@ -49,7 +49,7 @@ checks:
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicated") {
 		t.Fatalf("expected duplicate check error, got %v", err)
 	}
-	bad := Config{Repo: "owner", Agents: map[string]AgentConfig{"builder": {Poll: "x", Interval: 1, Timeout: 1}}}
+	bad := Config{Repo: "owner", Agents: map[string]AgentConfig{"builder": {Poll: "x", Interval: 1}}}
 	if err := bad.Validate(); err == nil {
 		t.Fatal("expected invalid repo error")
 	}
@@ -58,7 +58,7 @@ checks:
 func TestConfigYAMLIsStrictAndSingleDocument(t *testing.T) {
 	const valid = `repo: owner/name
 agents:
-  builder: {poll: "forest poll builder", interval: 5, timeout: 20}
+  builder: {poll: "forest poll builder", interval: 5}
 checks:
   - {name: test, run: "go test ./..."}
 `
@@ -68,14 +68,14 @@ checks:
 		want string
 	}{
 		{name: "unknown top-level key", data: valid + "repository: owner/name\n", want: "field repository not found"},
-		{name: "unknown nested key", data: strings.Replace(valid, "timeout: 20}", "timeout: 20, timeuot: 20}", 1), want: "field timeuot not found"},
-		{name: "extra document", data: valid + "---\nrepo: owner/other\nagents:\n  builder: {poll: x, interval: 1, timeout: 1}\n", want: "multiple YAML documents"},
+		{name: "unknown nested key", data: strings.Replace(valid, "interval: 5", "interval: 5, timeuot: 20", 1), want: "field timeuot not found"},
+		{name: "removed timeout key", data: strings.Replace(valid, "interval: 5", "interval: 5, timeout: 20", 1), want: "field timeout not found"},
+		{name: "extra document", data: valid + "---\nrepo: owner/other\nagents:\n  builder: {poll: x, interval: 1}\n", want: "multiple YAML documents"},
 		{name: "boolean repo", data: strings.Replace(valid, "repo: owner/name", "repo: true", 1), want: "must be a YAML string scalar"},
 		{name: "numeric agent name", data: strings.Replace(valid, "builder:", "1:", 1), want: "must be a YAML string scalar"},
 		{name: "boolean poll", data: strings.Replace(valid, `"forest poll builder"`, "true", 1), want: "must be a YAML string scalar"},
 		{name: "numeric check name", data: strings.Replace(valid, "name: test", "name: 1", 1), want: "must be a YAML string scalar"},
 		{name: "fractional interval", data: strings.Replace(valid, "interval: 5", "interval: 1.5", 1), want: "must be a YAML integer scalar"},
-		{name: "fractional timeout", data: strings.Replace(valid, "timeout: 20", "timeout: 20.9", 1), want: "must be a YAML integer scalar"},
 		{name: "string interval", data: strings.Replace(valid, "interval: 5", `interval: "5"`, 1), want: "must be a YAML integer scalar"},
 		{name: "mapping check command", data: strings.Replace(valid, `run: "go test ./..."`, "run: {command: test}", 1), want: "must be a YAML string scalar"},
 	}
@@ -91,7 +91,7 @@ checks:
 func TestLoadConfigRequiresNonemptyChecks(t *testing.T) {
 	const config = `repo: owner/name
 agents:
-  builder: {poll: "forest poll builder", interval: 5, timeout: 20}
+  builder: {poll: "forest poll builder", interval: 5}
 `
 	tests := []struct {
 		name   string
@@ -223,15 +223,11 @@ func TestConfigRejectsDurationOverflow(t *testing.T) {
 	}
 	cfg := Config{
 		Repo:   "owner/name",
-		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: overflow, Timeout: 1}},
+		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: overflow}},
 		Checks: []Check{{Name: "test", Run: "true"}},
 	}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
 		t.Fatalf("interval overflow error=%v", err)
-	}
-	cfg.Agents["builder"] = AgentConfig{Poll: "poll", Interval: 1, Timeout: overflow}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
-		t.Fatalf("timeout overflow error=%v", err)
 	}
 }
 func writeAgentFiles(t *testing.T, root, name, frontmatter, body, task string) {

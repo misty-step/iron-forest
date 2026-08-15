@@ -19,7 +19,7 @@ func runCLI(args []string) int {
 		return exitInvalidArg
 	}
 	// Engine commands act on the current checkout and hold the Kernel lock, so
-	// they take no flags. Everything else is the read surface.
+	// they take no flags. Everything else is the flag-bearing surface.
 	switch args[0] {
 	case "serve", "once", "poll":
 		return runEngineCommand(args[0], args[1:])
@@ -78,6 +78,7 @@ flags:
   --after <id>  continue a listing after one identity
   --rescan      re-run the Auditor before reporting (audit show)
   --follow      stream a Run log until it completes; excludes --json (run logs)
+  --rejected S  fixer review-request: the rejected SHA that must still be the branch tip
   exit: 0 ok, 1 no work, 2 error, 4 not found, 5 conflict, 6 invalid arg
         run logs --follow instead exits with the followed Run's own code`)
 	fmt.Fprintln(os.Stderr, usage.String())

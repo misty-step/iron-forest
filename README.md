@@ -16,9 +16,9 @@ Create `forest.yaml` in the repository root:
 ```yaml
 repo: misty-step/iron-forest
 agents:
-  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
-  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
-  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
+  builder:  { poll: "./forest poll builder",  interval: 300 }
+  verifier: { poll: "./forest poll verifier", interval: 120 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -42,7 +42,7 @@ agents/<name>/skills/           # optional; this declaration only
 followed by the system prompt. `task.md` is the standing user prompt. `model`
 and `thinking` resolve through the declaration, then `forest.defaults.yaml` (or
 `$FOREST_DEFAULTS`), then — for `model` only — the built-in
-`openrouter/deepseek/deepseek-v4-flash-0731`. An empty or comment-only defaults
+`openrouter/deepseek/deepseek-v4-pro-0813`. An empty or comment-only defaults
 file is the zero Defaults, not an error. `forest declaration show` publishes
 the resolved model and its source.
 
@@ -107,13 +107,14 @@ clone. Direct `forest poll` execution has a fixed 60-second deadline. The
 Scheduler gives its configured Poll command a separate 65-second bound. The
 supervisor preserves this full 5-second difference as Poll shutdown grace. It
 lets the direct Poll stop Git/GitHub transport groups and remove private note
-snapshot refs before the supervisor force-stops its command group. The
-configured declaration timeout separately bounds worktree preparation and agent
-execution.
-Runner cleanup has a separate 10-second bound. A completed dispatch starts an
-audit with a separate 60-second bound. The systemd unit has a separate
-3900-second service drain bound. This bound covers the shipped declarations'
-concurrent Runs, bounded Runner cleanup, and serialized post-dispatch audits.
+snapshot refs before the supervisor force-stops its command group. Agent Runs
+have no wall-clock deadline. They finish when Pi finishes or an
+operator explicitly cancels a foreground `forest once`; service shutdown stops
+new dispatches and drains active Runs without a systemd deadline. Runner
+cleanup has a separate 10-second bound. A completed dispatch starts an audit
+with a separate 60-second bound. These mechanical bounds do not limit agent
+reasoning or model execution.
+
 The user service receives
 `PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`,
 loads operator-supplied credentials from
@@ -122,6 +123,20 @@ loads operator-supplied credentials from
 restart, the installer stops the instance, removes timestamped legacy
 `.forest/profiles` residue, and runs selfcheck with the equivalent
 `$HOME`-expanded environment.
+
+Protect the environment file as mode `0600`. The current Runner accepts one
+OpenRouter completion key for the instance:
+
+```dotenv
+OPENROUTER_API_KEY=<dedicated instance key>
+```
+
+Do not put an OpenRouter management key in this file. Do not reuse a personal
+interactive key or an evaluation key. The intended production layout uses one
+completion key per agent role for OpenRouter and Langfuse cost, latency, and
+failure attribution. It is not a security boundary. The current Runner does not
+select role-specific keys; use the Run ID and agent name in Forest evidence for
+exact attribution until that data path is implemented.
 
 Trusted transport captures keep at most 1 MiB while draining the complete
 output. Output beyond the cap returns an explicit error after the process group
@@ -148,22 +163,23 @@ Every record binds to an exact Revision. The schema and writer sets are defined
 in [ADR 0009](docs/adr/0009-git-coordination-authority.md): Builder and Fixer
 write review requests, while Verifier writes Checks and Verdict notes.
 
-Notes are write-once. Agents write each JSON payload to a temporary file, add it
-with `git notes ... add -F`, and never use force. Builder and Fixer publish the
-branch and review-request note through one normal `git push --atomic`. Their
-canonical note race recovery permits at most three total atomic attempts; a
-branch race stops. For a `changes` Verdict, the Verifier publishes Checks and
-Verdict together and permits at most three total atomic attempts after a
-canonical note race. For `approve`, the Verifier makes exactly one
-non-retryable atomic attempt carrying Checks, Verdict, and the exact
-fast-forward `master` advance. The existing review-request remains durable Gate
-evidence; no standalone master push is valid. See [ADR
-0009](docs/adr/0009-git-coordination-authority.md) for the absent-ref and
-bounded retry protocol.
+Notes are write-once. Builder and Fixer write the review-request payload, then
+call `forest publish review-request`. The Kernel adds the note with
+`git notes ... add -F`, stamps the role identity, and publishes the branch and
+note through one normal `git push --atomic`. Canonical note race recovery
+permits at most three total atomic attempts; a branch race stops. For a
+`changes` Verdict, the Verifier still publishes Checks and Verdict together
+and permits at most three total atomic attempts after a canonical note race.
+For `approve`, the Verifier makes exactly one non-retryable atomic attempt
+carrying Checks, Verdict, and the exact fast-forward `master` advance. The
+existing review-request remains durable Gate evidence; no standalone master
+push is valid. See [ADR 0021](docs/adr/0021-kernel-review-request-publication.md)
+and [ADR 0009](docs/adr/0009-git-coordination-authority.md).
 
-Agents own workflow Effects. The Kernel never writes workflow notes or merges a
-branch. See [managed-repository onboarding](docs/onboarding-managed-repo.md)
-for the operator procedure.
+Agents own Issue selection, implementation, and the decision to publish.
+The Kernel owns the review-request race loop. The Verifier still owns Checks,
+Verdict, and merge. See [managed-repository
+onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
 
 ## Poll protocol
 
@@ -237,17 +253,18 @@ Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 | `forest run logs [--follow] <run-id>` | Print a Run log, or stream it until the Run completes. |
 | `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
 | `forest audit log` | Print audit history. |
+| `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer review-request note and branch. |
 
 ### Reading the factory
 
 `serve`, `once`, and `poll` are the engine: they hold the Kernel lock and write.
-Every other row is the read surface. Each read-surface command accepts
-`--root <dir>` to read another checkout and `--json` to emit one envelope, and
-each refuses a directory that holds no `forest.yaml` rather than reporting an
-empty factory. Two of them write: `trigger reset` and `audit show --rescan` hold
-the Kernel lock across the write and exit `5` while a Kernel holds it. Every
-other read-surface command only reads, under a shared lock that never blocks the
-Kernel.
+`publish review-request` writes without taking that lock, so a Run that already
+holds it can publish. Every other row is the read surface. Each read-surface
+command accepts `--json` and `--root <dir>`. `--json` emits one
+`forest.cli.v2` envelope on stdout; human text stays on stderr. `--root`
+answers from another checkout. `trigger reset` and `audit show --rescan` take
+the Kernel lock and refuse while a Kernel runs. `publish review-request` does
+not.
 
 `--json` emits exactly one envelope on stdout, including on failure:
 
@@ -304,6 +321,40 @@ mise exec -- go build ./...
 mise exec -- go vet ./...
 mise exec -- go test ./...
 ```
+
+Run the deterministic Harbor role regressions before changing an agent
+declaration, prompt, skill, or publication contract:
+
+```sh
+./evals/run-fast.sh
+```
+
+The manual model tier runs every Builder, Verifier, and Fixer case three times
+through the production `forest` binary. It uses each declaration's model unless
+`FOREST_EVAL_CANDIDATE_MODEL` is set. The independent Judge defaults to
+`openrouter/google/gemini-3.7-flash`.
+
+Local runs load separate candidate and Judge completion keys from
+`$HOME/.config/iron-forest/evals.env` by default. The file must be owned by the
+current user, have mode `0600`, and contain only:
+
+```dotenv
+OPENROUTER_API_KEY=<evaluation candidate key>
+FOREST_EVAL_JUDGE_API_KEY=<evaluation Judge key>
+```
+
+Existing environment values take precedence. `FOREST_EVAL_ENV_FILE` selects a
+different file. The OpenRouter management key stays outside production and
+evaluation runtime environments.
+
+```sh
+./evals/run-model.sh
+```
+
+The `model evals` GitHub workflow maps the distinct repository secrets
+`IRON_FOREST_EVAL_CANDIDATE_API_KEY` and
+`IRON_FOREST_EVAL_JUDGE_API_KEY` into those runtime names. Harbor outputs remain
+under `evals/jobs/`, which is ignored by Git.
 
 The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
 `agent`), timing (`started` and `duration`), `exit`, and the token classes

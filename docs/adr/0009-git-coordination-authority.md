@@ -26,15 +26,16 @@ Revisions:
 - `refs/notes/forest/verdict` uses `forest.verdict.v1` with `revision`,
   `verdict`, `summary`, and `time`.
 
-The writer sets are fixed: Builder and Fixer write review requests; Verifier
-writes Checks and Verdicts. Notes are write-once for each Revision. Writers
-store each complete JSON payload in a temporary file and add it with
-`git notes --ref=<private-ref> add -F <payload-file>`, never `-m` or `-f`.
-Each run-private notes ref starts from a remote canonical snapshot fetched into
-a unique base ref. Writers compare the exact destination payload before every
-attempt. A byte-identical remote note is success; a conflict fails closed.
+The writer sets are fixed: Builder and Fixer author review-request payloads;
+Verifier writes Checks and Verdicts. Notes are write-once for each Revision.
+Builder and Fixer call `forest publish review-request`, which stores the
+complete JSON payload with `git notes --ref=<private-ref> add -F <payload-file>`,
+never `-m` or `-f`. Each run-private notes ref starts from a remote canonical
+snapshot fetched into a unique base ref. The command compares the exact
+destination payload before every attempt. A byte-identical remote note is
+success; a conflict fails closed.
 
-Builder and Fixer publish the branch and review-request note with one normal
+The Kernel publishes the branch and review-request note with one normal
 atomic push. A canonical notes-ref race may fetch a new stable snapshot, rebuild
 the private ref, and retry at most three total attempts. A branch race, a
 conflicting note, or an unchanged rejected ref stops; the branch and note are

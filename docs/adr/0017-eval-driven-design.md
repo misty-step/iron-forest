@@ -11,14 +11,19 @@ no eval harness in this slice.
 ## Decision
 
 Use evals as the decision instrument for agent-versus-Kernel questions. File a
-follow-up issue for an eval harness and for an actor-assignment study comparing
-prompted agents, bespoke tools, and Kernel-owned Effects. Keep the current
-agent-owned Effects assignment provisional until those evals produce evidence.
+follow-up issue for remaining actor-assignment studies. The 2026-08-15 Builder
+canonical-note race (3/3 failures under the current prompt and model) moved
+review-request publication into the Kernel; see
+[0021](0021-kernel-review-request-publication.md). Keep remaining agent-owned
+Effects provisional until later evals produce evidence.
 
 Evaluate observable outcomes: note-schema compliance, exact-Revision evidence,
 merge Gate adherence, rejected-work handoff, recovery after process failure,
 and cost in token classes. Do not use a provider or monetary score as the
 architecture authority.
+
+The executable suite and actor-assignment study follow the repository's
+[evaluation strategy](../evaluation-strategy.md).
 
 ## Consequences
 

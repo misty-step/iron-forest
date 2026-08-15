@@ -84,7 +84,7 @@ type Scheduler struct {
 	Root       string
 	Config     Config
 	Poll       func(context.Context, string) PollResult
-	Run        func(context.Context, Declaration, int) (RunRecord, error)
+	Run        func(context.Context, Declaration) (RunRecord, error)
 	mu         sync.Mutex
 	runs       sync.WaitGroup
 	health     map[string]TriggerHealth
@@ -131,14 +131,14 @@ func NewScheduler(root string, cfg Config, runner *Runner) *Scheduler {
 }
 
 func (s *Scheduler) Tick(ctx context.Context, agent string) (bool, error) {
-	declaration, timeout, run, claimed, err := s.claimRun(ctx, agent)
+	declaration, run, claimed, err := s.claimRun(ctx, agent)
 	if err != nil || !claimed {
 		return false, err
 	}
 	s.runs.Add(1)
 	go func() {
 		defer s.runs.Done()
-		record, runErr := run(context.Background(), declaration, timeout)
+		record, runErr := run(context.Background(), declaration)
 		if err := s.completeRun(agent, record, runErr); err != nil {
 			fmt.Fprintf(os.Stderr, "scheduler state %s: %v\n", agent, err)
 		}
@@ -147,36 +147,36 @@ func (s *Scheduler) Tick(ctx context.Context, agent string) (bool, error) {
 }
 
 func (s *Scheduler) Once(ctx context.Context, agent string) (bool, error) {
-	declaration, timeout, run, claimed, err := s.claimRun(ctx, agent)
+	declaration, run, claimed, err := s.claimRun(ctx, agent)
 	if err != nil || !claimed {
 		return false, err
 	}
-	record, runErr := run(ctx, declaration, timeout)
+	record, runErr := run(ctx, declaration)
 	if err := s.completeRun(agent, record, runErr); err != nil && runErr == nil {
 		runErr = err
 	}
 	return true, runErr
 }
 
-func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, int, func(context.Context, Declaration, int) (RunRecord, error), bool, error) {
+func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, func(context.Context, Declaration) (RunRecord, error), bool, error) {
 	cfg, ok := s.Config.Agents[agent]
 	if !ok {
-		return Declaration{}, 0, nil, false, fmt.Errorf("agent %q is not configured", agent)
+		return Declaration{}, nil, false, fmt.Errorf("agent %q is not configured", agent)
 	}
 	s.mu.Lock()
 	if s.startupErr != nil {
 		err := s.startupErr
 		s.mu.Unlock()
-		return Declaration{}, 0, nil, false, err
+		return Declaration{}, nil, false, err
 	}
 	if s.health[agent].Running || s.inFlight[agent] {
 		s.mu.Unlock()
-		return Declaration{}, 0, nil, false, nil
+		return Declaration{}, nil, false, nil
 	}
 	poll := s.Poll
 	if poll == nil {
 		s.mu.Unlock()
-		return Declaration{}, 0, nil, false, fmt.Errorf("poller is not configured")
+		return Declaration{}, nil, false, fmt.Errorf("poller is not configured")
 	}
 	s.inFlight[agent] = true
 	s.mu.Unlock()
@@ -209,31 +209,31 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, in
 	persistErr := s.saveHealthLocked()
 	s.mu.Unlock()
 	if persistErr != nil {
-		return Declaration{}, 0, nil, false, fmt.Errorf("persist trigger state: %w", persistErr)
+		return Declaration{}, nil, false, fmt.Errorf("persist trigger state: %w", persistErr)
 	}
 	if result.Code > 1 {
-		return Declaration{}, 0, nil, false, fmt.Errorf("poll %s failed (exit %d): %s", agent, result.Code, health.PollError)
+		return Declaration{}, nil, false, fmt.Errorf("poll %s failed (exit %d): %s", agent, result.Code, health.PollError)
 	}
 	if result.Code != 0 {
-		return Declaration{}, 0, nil, false, nil
+		return Declaration{}, nil, false, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return Declaration{}, 0, nil, false, err
+		return Declaration{}, nil, false, err
 	}
 	declaration, err := loadDeclaration(s.Root, agent)
 	if err != nil {
-		return Declaration{}, 0, nil, false, err
+		return Declaration{}, nil, false, err
 	}
 
 	s.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		s.mu.Unlock()
-		return Declaration{}, 0, nil, false, err
+		return Declaration{}, nil, false, err
 	}
 	run := s.Run
 	if run == nil {
 		s.mu.Unlock()
-		return Declaration{}, 0, nil, false, fmt.Errorf("runner is not configured")
+		return Declaration{}, nil, false, fmt.Errorf("runner is not configured")
 	}
 	health = s.health[agent]
 	health.Agent = agent
@@ -243,11 +243,11 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, in
 		health.Running = false
 		s.health[agent] = health
 		s.mu.Unlock()
-		return Declaration{}, 0, nil, false, fmt.Errorf("persist running state: %w", err)
+		return Declaration{}, nil, false, fmt.Errorf("persist running state: %w", err)
 	}
 	runStarted = true
 	s.mu.Unlock()
-	return declaration, cfg.Timeout, run, true, nil
+	return declaration, run, true, nil
 }
 
 func (s *Scheduler) completeRun(agent string, record RunRecord, runErr error) error {

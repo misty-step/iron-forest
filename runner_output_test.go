@@ -96,7 +96,7 @@ cat "$FIRST_OUTPUT" "$MIDDLE_OUTPUT" "$TAIL_OUTPUT"
 	runner := NewRunner(root)
 	runner.PiPath = omp
 	declaration := Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}
-	record, err := runner.Run(context.Background(), declaration, 10)
+	record, err := runner.Run(context.Background(), declaration)
 	if err != nil || record.Exit != 0 {
 		t.Fatalf("noisy Run record=%#v err=%v", record, err)
 	}
@@ -187,7 +187,7 @@ printf '%s\n' '{"usage":{"input":1}}'
 	activeRunner.PiPath = activeHarness
 	go func() {
 		defer close(activeDone)
-		record, err := activeRunner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"}, 10)
+		record, err := activeRunner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
 		activeResult <- runResult{record: record, err: err}
 	}()
 	t.Cleanup(func() {
@@ -203,7 +203,7 @@ printf '%s\n' '{"usage":{"input":1}}'
 
 	quickRunner := NewRunner(root)
 	quickRunner.PiPath = quickHarness
-	quickRecord, err := quickRunner.Run(context.Background(), Declaration{Name: "fixer", Model: "local", TaskPrompt: "x"}, 10)
+	quickRecord, err := quickRunner.Run(context.Background(), Declaration{Name: "fixer", Model: "local", TaskPrompt: "x"})
 	if err != nil || quickRecord.Exit != 0 {
 		t.Fatalf("quick Run record=%#v err=%v", quickRecord, err)
 	}

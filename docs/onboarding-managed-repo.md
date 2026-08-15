@@ -46,9 +46,9 @@ Write `forest.yaml` at the root of the managed checkout:
 ```yaml
 repo: owner/name
 agents:
-  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
-  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
-  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
+  builder:  { poll: "./forest poll builder",  interval: 300 }
+  verifier: { poll: "./forest poll verifier", interval: 120 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -58,18 +58,18 @@ checks:
     run: mise exec -- go test ./...
 ```
 
-`repo` is the forge identity. `agents` maps each declaration to a Poll command,
-interval, and preparation-plus-execution timeout. Direct `forest poll`
-execution has a fixed 60-second deadline. The Scheduler gives its configured
-Poll command a separate 65-second bound. The supervisor preserves this full
-5-second difference as Poll shutdown grace. It lets the direct Poll stop
-Git/GitHub transport groups and remove private note snapshot refs before the
-supervisor force-stops its command group. Runner cleanup has a separate
-10-second bound. A completed dispatch starts an audit with a separate 60-second
-bound.
-The systemd service uses a separate 3900-second drain bound. This bound covers
-the shipped declarations' concurrent Runs, bounded Runner cleanup, and
-serialized post-dispatch audits. The model is
+`repo` is the forge identity. `agents` maps each declaration to a Poll command
+and interval. Agent Runs have no wall-clock deadline. They finish when Pi
+finishes or an operator explicitly cancels a foreground `forest once`; service
+shutdown stops new dispatches and drains active Runs without a systemd
+deadline. Direct `forest poll` execution has a fixed 60-second deadline. The
+Scheduler gives its configured Poll command a separate 65-second bound. The
+supervisor preserves this full 5-second difference as Poll shutdown grace. It
+lets the direct Poll stop Git/GitHub transport groups and remove private note
+snapshot refs before the supervisor force-stops its command group. Runner
+cleanup has a separate 10-second bound. A completed dispatch starts an audit
+with a separate 60-second bound. These mechanical bounds do not limit agent
+reasoning or model execution. The model is
 in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.
@@ -156,11 +156,15 @@ stops that instance and removes only timestamped legacy `.forest/profiles`
 entries, which may contain credentials copied by an older Kernel. It then runs
 selfcheck with the service's trusted `PATH` and without `FOREST_DEFAULTS`.
 The installed unit reads operator-supplied credentials from
-`%h/.config/iron-forest/%i.env`; use that per-instance file rather than setting
-`PI_CODING_AGENT_DIR` or naming an operator profile. Use a systemd drop-in only
-when one instance needs a different defaults file. The installer stops on any
-selfcheck error. The Auditor needs a completed agent dispatch before it can
-validate remote Git evidence.
+`%h/.config/iron-forest/%i.env`; protect it as mode `0600`. The current Runner
+accepts `OPENROUTER_API_KEY` as one completion key for the Forest instance.
+Never put a management, personal interactive, or evaluation key there. The
+intended production layout uses one completion key per agent role for
+OpenRouter and Langfuse analytics. This is an attribution control, not an
+isolation boundary. The current Runner does not select role-specific keys. Use
+a systemd drop-in only when one instance needs a different defaults file. The
+installer stops on any selfcheck error. The Auditor needs a completed agent
+dispatch before it can validate remote Git evidence.
 
 The final `cd` keeps all later Kernel and observation commands in the managed
 repository.
@@ -205,10 +209,11 @@ Poll exits 0. A healthy Poll skip exits 1 without an agent Run.
 ## 6. Observe the first Subject
 
 After an Issue receives `forest:ready`, the Builder selects it and creates a
-`forest/<issue>-<slug>` branch. It writes a review-request note on the exact
-Revision and publishes the branch and note with one normal atomic push. A
-canonical note race permits at most three total atomic attempts; a branch race
-stops. The Builder may open a pull request as a human Projection.
+`forest/<issue>-<slug>` branch. It writes a review-request payload and calls
+`forest publish review-request`, which publishes the branch and note with one
+normal atomic push. A canonical note race permits at most three total atomic
+attempts; a branch race stops. The Builder may open a pull request as a human
+Projection.
 
 The Verifier selects that branch and runs every configured Check. For `changes`,
 it publishes Checks and Verdict together. A canonical note race permits at most

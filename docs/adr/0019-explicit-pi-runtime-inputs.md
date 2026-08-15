@@ -68,8 +68,18 @@ environment. The installed service reads that environment from
 `%h/.config/iron-forest/%i.env`; the Runner does not write credential values to
 the Pi scratch directory or Run evidence.
 
+The current deployment supplies one completion key to all roles in one Forest
+instance. This is not a containment boundary. The intended production layout
+uses one completion key for each agent role so OpenRouter usage and Broadcast
+destinations such as Langfuse can group cost, latency, and failures by role.
+That separation is an attribution control only: trusted Runs still share the
+service user and can read the per-instance environment file. Until the Runner
+selects a role key, exact attribution uses the Run ID and agent name in Forest
+evidence. Do not reuse an interactive operator key or an evaluation key.
+Management credentials never enter the service environment.
+
 The model resolves through the declaration, then instance defaults, then the
-built-in `openrouter/deepseek/deepseek-v4-flash-0731`. `thinking` resolves
+built-in `openrouter/deepseek/deepseek-v4-pro-0813`. `thinking` resolves
 through the declaration and then instance defaults; there is no built-in
 thinking level. Defaults contain only `model` and `thinking`. An empty or
 comment-only defaults file is the zero Defaults, not an error. `forest
@@ -78,9 +88,8 @@ its source.
 
 The explicit inputs do not create a sandbox. A trusted declaration still runs
 with the service user's inherited credentials, filesystem access, and network
-access. Worktree separation and time bounds remain operational boundaries;
-stronger credential and process containment belongs to the deployment
-substrate.
+access. Worktree separation remains an operational boundary; stronger
+credential and process containment belongs to the deployment substrate.
 
 ## Consequences
 

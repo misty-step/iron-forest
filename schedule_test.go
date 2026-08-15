@@ -54,13 +54,13 @@ func TestPollLeaderDeadlineWinsCompletedShellAndPreventsDispatch(t *testing.T) {
 	writeTestDeclaration(t, root, "builder")
 	cfg := Config{
 		Repo:   "owner/name",
-		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}},
+		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}},
 		Checks: []Check{{Name: "test", Run: "true"}},
 	}
 	scheduler := NewScheduler(root, cfg, nil)
 	scheduler.Poll = func(context.Context, string) PollResult { return result }
 	runCalled := false
-	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
 		runCalled = true
 		return RunRecord{}, nil
 	}
@@ -134,12 +134,12 @@ func TestPollCommandDiscardsOutput(t *testing.T) {
 func TestSchedulerServeDrainsInFlightRun(t *testing.T) {
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
 	scheduler := NewScheduler(root, cfg, nil)
 	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
 	started := make(chan struct{})
 	release := make(chan struct{})
-	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
 		close(started)
 		<-release
 		return RunRecord{Started: "drained"}, nil
@@ -186,7 +186,7 @@ func TestSchedulerSerializesConcurrentDispatches(t *testing.T) {
 			writeTestDeclaration(t, root, "builder")
 			cfg := Config{
 				Repo:   "owner/name",
-				Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}},
+				Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}},
 				Checks: []Check{{Name: "test", Run: "true"}},
 			}
 			scheduler := NewScheduler(root, cfg, nil)
@@ -206,7 +206,7 @@ func TestSchedulerSerializesConcurrentDispatches(t *testing.T) {
 			runRelease := make(chan struct{})
 			releaseRun := sync.OnceFunc(func() { close(runRelease) })
 			defer releaseRun()
-			scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+			scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
 				runCalls.Add(1)
 				runEntered <- struct{}{}
 				<-runRelease
@@ -288,8 +288,8 @@ func TestSchedulerRestartDropsRemovedDeclarationHealth(t *testing.T) {
 	cfg := Config{
 		Repo: "owner/name",
 		Agents: map[string]AgentConfig{
-			"builder": {Poll: "poll", Interval: 1, Timeout: 1},
-			"fixer":   {Poll: "poll", Interval: 1, Timeout: 1},
+			"builder": {Poll: "poll", Interval: 1},
+			"fixer":   {Poll: "poll", Interval: 1},
 		},
 		Checks: []Check{{Name: "test", Run: "true"}},
 	}
@@ -326,12 +326,12 @@ func TestSchedulerRestartDropsRemovedDeclarationHealth(t *testing.T) {
 func TestSchedulerSkipWhileRunningAndUnhealthy(t *testing.T) {
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
 	scheduler := NewScheduler(root, cfg, nil)
 	var release = make(chan struct{})
 	var once sync.Once
 	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
-	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
 		once.Do(func() { <-release })
 		return RunRecord{Started: "now"}, nil
 	}
@@ -369,11 +369,11 @@ func TestSchedulerSkipWhileRunningAndUnhealthy(t *testing.T) {
 func TestSchedulerOnceRunsBeforeReturn(t *testing.T) {
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
 	scheduler := NewScheduler(root, cfg, nil)
 	called := false
 	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
-	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
 		called = true
 		return RunRecord{Started: "now"}, nil
 	}
@@ -392,13 +392,13 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 	runGitDir(t, root, "remote", "remove", "origin")
 	cfg := Config{
 		Repo:   "owner/name",
-		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}},
+		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}},
 		Checks: []Check{{Name: "test", Run: "true"}},
 	}
 	scheduler := NewScheduler(root, cfg, nil)
 	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
 	runFailure := errors.New("run failed")
-	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
 		return RunRecord{Started: "failed"}, runFailure
 	}
 	dispatched, err := scheduler.Once(context.Background(), "builder")
@@ -464,7 +464,7 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 	}
 
 	runGitDir(t, root, "remote", "remove", "origin")
-	scheduler.Run = func(context.Context, Declaration, int) (RunRecord, error) {
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
 		return RunRecord{Started: "passed"}, nil
 	}
 	dispatched, err = scheduler.Once(context.Background(), "builder")
@@ -500,7 +500,7 @@ func TestNewSchedulerRunsReservedGarbageCollectionBeforeHealth(t *testing.T) {
 	if err := os.WriteFile(forestPath(root, "triggers.json"), []byte(health), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
 
 	scheduler := NewScheduler(root, cfg, NewRunner(root))
 	if scheduler.startupErr != nil {
@@ -524,7 +524,7 @@ func TestNewSchedulerCleanupFailureBlocksBeforeHealthLoad(t *testing.T) {
 	}
 	runner := NewRunner(root)
 	runner.GitPath = filepath.Join(t.TempDir(), "missing-git")
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
 
 	scheduler := NewScheduler(root, cfg, runner)
 	if scheduler.startupErr == nil || !strings.Contains(scheduler.startupErr.Error(), "reserved garbage collection") {
@@ -553,7 +553,7 @@ func TestNewSchedulerWithoutRunnerSkipsReservedGarbageCollection(t *testing.T) {
 	if err := os.WriteFile(staleTemp, []byte("stale\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1, Timeout: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
 
 	scheduler := NewScheduler(root, cfg, nil)
 	if scheduler.startupErr != nil {

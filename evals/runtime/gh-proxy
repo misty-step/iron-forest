@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import os
+import sys
+
+os.execv("/usr/bin/sudo", ["sudo", "-n", "/opt/iron-forest-eval/gh", *sys.argv[1:]])

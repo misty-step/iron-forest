@@ -65,27 +65,30 @@ func failure(exit int, format string, args ...any) cliOutcome {
 // Optional flag names. --json and --root are universal; every other flag is
 // declared per command so an unsupported flag is an error, not a no-op.
 const (
-	flagLimit  = "--limit"
-	flagAfter  = "--after"
-	flagFollow = "--follow"
-	flagRescan = "--rescan"
+	flagLimit    = "--limit"
+	flagAfter    = "--after"
+	flagFollow   = "--follow"
+	flagRescan   = "--rescan"
+	flagRejected = "--rejected"
 )
 
 type cliFlags struct {
-	root   string
-	json   bool
-	limit  int
-	after  string
-	follow bool
-	rescan bool
+	root     string
+	json     bool
+	limit    int
+	after    string
+	follow   bool
+	rescan   bool
+	rejected string
 	// seen records the optional flags the caller actually passed. Presence is
 	// recorded here rather than inferred from values, so an empty value cannot
 	// slip past a command's allowlist.
 	seen []string
 }
 
-// cliCommand is one row of the read surface. The table is the only statement of
-// the grammar: dispatch, arity, accepted flags, and usage text all read from it.
+// cliCommand is one row of the flag-bearing surface. The table is the only
+// statement of the grammar: dispatch, arity, accepted flags, and usage text all
+// read from it.
 type cliCommand struct {
 	phrase   string
 	args     int
@@ -110,6 +113,7 @@ func cliCommands() []cliCommand {
 		{phrase: "audit show", optional: []string{flagRescan}, run: runAuditShow},
 		{phrase: "audit log", optional: []string{flagLimit}, run: runAuditLog},
 		{phrase: "scan-secrets", args: 1, operands: "<dir>", run: runScanSecrets},
+		{phrase: "publish review-request", args: 3, operands: "<role> <branch> <payload>", optional: []string{flagRejected}, run: runPublishReviewRequest},
 	}
 }
 
@@ -135,6 +139,10 @@ func (c cliCommand) usage() string {
 		return head + " [--json] [--root <dir>], or " + head + " --follow [--root <dir>]"
 	}
 	for _, name := range c.optional {
+		if name == flagRejected {
+			head += " [" + name + " <sha>]"
+			continue
+		}
 		head += " [" + name + "]"
 	}
 	return head + " [--json] [--root <dir>]"
@@ -335,6 +343,13 @@ func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 			}
 			flags.limit, index = limit, next
 			flags.seen = append(flags.seen, flagLimit)
+		case flagRejected:
+			rejected, next, err := value(index, name)
+			if err != nil {
+				return positional, flags, err
+			}
+			flags.rejected, index = rejected, next
+			flags.seen = append(flags.seen, flagRejected)
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return positional, flags, fmt.Errorf("unknown flag %q", arg)
@@ -360,7 +375,7 @@ func runConfigShow(_ []string, flags cliFlags) cliOutcome {
 	human := fmt.Sprintf("repo: %s", cfg.Repo)
 	for _, name := range agentNames(cfg) {
 		agent := cfg.Agents[name]
-		human += fmt.Sprintf("\nagent %s: poll=%q interval=%ds timeout=%ds", name, agent.Poll, agent.Interval, agent.Timeout)
+		human += fmt.Sprintf("\nagent %s: poll=%q interval=%ds", name, agent.Poll, agent.Interval)
 	}
 	for _, check := range cfg.Checks {
 		human += fmt.Sprintf("\ncheck %s: run=%q", check.Name, check.Run)

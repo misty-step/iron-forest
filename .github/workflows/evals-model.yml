@@ -1,0 +1,32 @@
+name: model evals
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_model:
+        description: Optional Pi model override
+        required: false
+        type: string
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.IRON_FOREST_EVAL_CANDIDATE_API_KEY }}
+      FOREST_EVAL_JUDGE_API_KEY: ${{ secrets.IRON_FOREST_EVAL_JUDGE_API_KEY }}
+      FOREST_EVAL_CANDIDATE_MODEL: ${{ inputs.candidate_model }}
+      FOREST_EVAL_JUDGE_MODEL: openrouter/google/gemini-3.7-flash
+    steps:
+      - uses: actions/checkout@v4
+      - name: install uv
+        run: pipx install uv==0.12.0
+      - name: run pass-cubed model regressions
+        run: ./evals/run-model.sh
+      - name: retain Harbor results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iron-forest-model-evals
+          path: evals/jobs/model
+          if-no-files-found: error

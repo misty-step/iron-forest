@@ -189,7 +189,7 @@ func TestPollSupervisorCancellationDrainsPrivateSnapshotCleanup(t *testing.T) {
 	}
 
 	root, _ := testClone(t)
-	config := "repo: owner/name\nagents:\n  verifier: {poll: \"forest poll verifier\", interval: 1, timeout: 1}\nchecks:\n  - {name: test, run: \"true\"}\n"
+	config := "repo: owner/name\nagents:\n  verifier: {poll: \"forest poll verifier\", interval: 1}\nchecks:\n  - {name: test, run: \"true\"}\n"
 	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +599,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 
 func writeCLIConfig(t *testing.T, root, poll string) {
 	t.Helper()
-	config := "repo: owner/name\nagents:\n  builder:\n    poll: " + poll + "\n    interval: 1\n    timeout: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
+	config := "repo: owner/name\nagents:\n  builder:\n    poll: " + poll + "\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
 	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}

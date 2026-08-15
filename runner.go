@@ -367,11 +367,7 @@ func NewRunner(root string) *Runner {
 	return &Runner{Root: root, GitPath: "git", PiPath: "pi"}
 }
 
-func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSeconds int) (RunRecord, error) {
-	timeout, err := durationFromSeconds(timeoutSeconds)
-	if err != nil {
-		return RunRecord{}, err
-	}
+func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, error) {
 	started := time.Now().UTC()
 	runID := newRunID(declaration.Name, started)
 	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano)}
@@ -384,10 +380,8 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		return record, err
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	worktree := forestPath(r.Root, "worktrees", runID)
-	worktreeMayExist, prepareErr := r.prepareWorktree(runCtx, worktree)
+	worktreeMayExist, prepareErr := r.prepareWorktree(ctx, worktree)
 	if prepareErr != nil {
 		var cleanupErr error
 		if worktreeMayExist {
@@ -397,7 +391,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 				_, _ = fmt.Fprintln(logFile, cleanupErr)
 			}
 		}
-		record.Exit = runContextExit(ctx, runCtx, 1)
+		record.Exit = runContextExit(ctx, 1)
 		record.Duration = time.Since(started).Seconds()
 		_, _ = fmt.Fprintf(logFile, "prepare worktree: %v\n", prepareErr)
 		finalizeErr := logFile.Finalize()
@@ -415,7 +409,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	skillErr := validateDeclarationSkillPaths(worktree, declaration.Name, declaration.SkillPaths)
 	if skillErr != nil {
 		skillErr = fmt.Errorf("validate Run skills: %w", skillErr)
-		record.Exit = runContextExit(ctx, runCtx, 1)
+		record.Exit = runContextExit(ctx, 1)
 		_, _ = fmt.Fprintln(logFile, skillErr)
 	}
 
@@ -431,7 +425,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 		}
 		if piErr != nil {
 			piErr = fmt.Errorf("prepare Run Pi directory: %w", piErr)
-			record.Exit = runContextExit(ctx, runCtx, 1)
+			record.Exit = runContextExit(ctx, 1)
 			_, _ = fmt.Fprintln(logFile, piErr)
 		} else {
 			_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration))
@@ -441,7 +435,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	var invokeErr error
 	harnessStarted := false
 	if harnessRunnable {
-		invokeErr, harnessStarted = r.invoke(runCtx, worktree, declaration, piDir, timeoutSeconds, logFile, &record)
+		invokeErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, &record)
 	}
 	var piCleanupErr error
 	if piDir != "" {
@@ -824,7 +818,7 @@ func (t *agentOutcomeTracker) Err() error {
 	return nil
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) (err error, started bool) {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, logFile io.Writer, record *RunRecord) (err error, started bool) {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
 		return err, false
@@ -889,7 +883,6 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	wait := make(chan error, 1)
 	go func() { wait <- command.Wait() }()
 	var runErr, cleanupErr error
-	timedOut := false
 	select {
 	case waitErr := <-wait:
 		record.Exit, runErr = processResult(ctx, waitErr)
@@ -900,12 +893,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	case <-ctx.Done():
 		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
 		record.Exit = contextExit(ctx.Err())
-		if record.Exit == 124 {
-			timedOut = true
-			runErr = fmt.Errorf("pi timed out after %ds", timeoutSeconds)
-		} else {
-			runErr = ctx.Err()
-		}
+		runErr = ctx.Err()
 	}
 	var readerCloseErr error
 	if cleanupErr != nil {
@@ -915,9 +903,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	if cleanupErr == nil {
 		readerCloseErr = reader.Close()
 	}
-	if timedOut {
-		_, _ = fmt.Fprintln(logFile, "pi wall-clock timeout")
-	}
+
 	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, outcome.Err())
 	if err != nil && record.Exit == 0 {
 		record.Exit = 1
@@ -1015,11 +1001,8 @@ func contextExit(err error) int {
 	return 130
 }
 
-func runContextExit(parent, run context.Context, fallback int) int {
-	if err := run.Err(); err != nil {
-		return contextExit(err)
-	}
-	if err := parent.Err(); err != nil {
+func runContextExit(ctx context.Context, fallback int) int {
+	if err := ctx.Err(); err != nil {
 		return contextExit(err)
 	}
 	return fallback

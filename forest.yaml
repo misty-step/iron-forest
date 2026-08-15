@@ -1,8 +1,8 @@
 repo: misty-step/iron-forest        # forge identity (owner/name)
 agents:
-  builder:  { poll: "./forest poll builder",  interval: 300, timeout: 3600 }
-  verifier: { poll: "./forest poll verifier", interval: 120, timeout: 1800 }
-  fixer:    { poll: "./forest poll fixer",    interval: 300, timeout: 3600 }
+  builder:  { poll: "./forest poll builder",  interval: 300 }
+  verifier: { poll: "./forest poll verifier", interval: 120 }
+  fixer:    { poll: "./forest poll fixer",    interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...

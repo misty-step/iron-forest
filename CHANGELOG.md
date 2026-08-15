@@ -1,11 +1,20 @@
 # Changelog
 
+- 2026-08-15: Builder and Fixer publish review-requests through
+  `forest publish review-request`. The Kernel owns the write-once note, role
+  identity, configured Check gate, and bounded atomic retry. Shipped default
+  model is `openrouter/deepseek/deepseek-v4-pro-0813`.
+
 - 2026-08-13: Dispatch now verifies the agent bundle. The Kernel digests the
   ordered declaration pair (`agent.md` then `task.md`) at load and recomputes
   that digest immediately before starting Pi; a file changed after load aborts
   the Run with a nonzero-exit Ledger row and refuses to start Pi. The Ledger
   records the digest only after that verification succeeds (#144).
 
+- 2026-08-13: Removed per-agent wall-clock deadlines. `forest.yaml` no longer
+  accepts `timeout`; the Runner does not create a deadline around preparation
+  or Pi execution; and the systemd service drains active Runs indefinitely.
+  Explicit foreground cancellation and bounded mechanical cleanup remain.
 
 - 2026-08-13: Replaced layered Pi profile composition with explicit per-Run
   inputs: an isolated temporary Pi directory, checked-in shared and role skill

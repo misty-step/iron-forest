@@ -18,10 +18,10 @@ ExecStartPre=@FOREST_ROOT@/%i/forest selfcheck
 ExecStart=@FOREST_ROOT@/%i/forest serve
 Restart=always
 RestartSec=10
-# Signal only the Kernel first; systemd may kill the cgroup after the drain bound.
+# Signal only the Kernel first. It stops new dispatches and drains active Runs.
 KillMode=mixed
-# 3900 seconds covers concurrent declared Runs, Runner cleanup, and serialized audits.
-TimeoutStopSec=3900
+# Agent Runs are intentionally unbounded; service shutdown must not add a deadline.
+TimeoutStopSec=infinity
 # The mise shim directory is included because Pi is version managed and absent
 # from the base directories. Selfcheck fails before ExecStart when a host cannot
 # dispatch.

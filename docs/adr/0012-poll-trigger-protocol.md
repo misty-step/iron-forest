@@ -2,6 +2,9 @@
 
 Status: accepted, 2026-08-10
 
+The declaration-timeout clause is superseded by
+[0020](0020-unbounded-agent-runs.md).
+
 ## Context
 
 The Kernel must wake declarations without passing hidden selection context or
@@ -14,9 +17,9 @@ A Poll trigger is an executable plus an interval. Direct `forest poll`
 execution has a fixed 60-second deadline. The Scheduler gives its configured
 Poll command a separate 65-second bound. This 5-second allowance lets the
 direct Poll cancel and drain its Git/GitHub transport process groups before the
-supervisor stops its command group. The declaration's configured timeout
-separately bounds worktree preparation and agent execution. It cannot extend
-either Poll bound. Exit 0 means work exists and dispatches the declaration.
+supervisor stops its command group. Agent Runs have no wall-clock deadline and
+cannot extend either Poll bound. Exit 0 means work exists and dispatches the
+declaration.
 Exit 1 means no work and is a healthy skip. Exit greater than 1, deadline
 expiry, or malformed behavior is an error. The Kernel skips the tick, logs the
 error, counts consecutive failures, and shows the unhealthy trigger in

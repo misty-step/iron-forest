@@ -88,7 +88,7 @@ func TestRunReportsOnlyTheHarnessFailureWhenItCannotStart(t *testing.T) {
 	runner.PiPath = filepath.Join(t.TempDir(), "absent-harness")
 
 	declaration := Declaration{Name: "builder", Model: "local", SystemPrompt: "system", TaskPrompt: "Reply"}
-	record, err := runner.Run(context.Background(), declaration, 10)
+	record, err := runner.Run(context.Background(), declaration)
 	if err == nil {
 		t.Fatal("a missing harness must fail the Run")
 	}
