@@ -1232,7 +1232,7 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
 	runner.PiPath = pi
 	record, err := runner.Run(context.Background(), Declaration{
 		Name:         "verifier",
-		Model:        "openrouter/deepseek/deepseek-v4-flash-0731",
+		Model:        "openrouter/deepseek/deepseek-v4-pro-0813",
 		SystemPrompt: "system",
 		TaskPrompt:   "task",
 	})

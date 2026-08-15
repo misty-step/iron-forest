@@ -79,7 +79,7 @@ evidence. Do not reuse an interactive operator key or an evaluation key.
 Management credentials never enter the service environment.
 
 The model resolves through the declaration, then instance defaults, then the
-built-in `openrouter/deepseek/deepseek-v4-flash-0731`. `thinking` resolves
+built-in `openrouter/deepseek/deepseek-v4-pro-0813`. `thinking` resolves
 through the declaration and then instance defaults; there is no built-in
 thinking level. Defaults contain only `model` and `thinking`. An empty or
 comment-only defaults file is the zero Defaults, not an error. `forest

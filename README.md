@@ -42,7 +42,7 @@ agents/<name>/skills/           # optional; this declaration only
 followed by the system prompt. `task.md` is the standing user prompt. `model`
 and `thinking` resolve through the declaration, then `forest.defaults.yaml` (or
 `$FOREST_DEFAULTS`), then — for `model` only — the built-in
-`openrouter/deepseek/deepseek-v4-flash-0731`. An empty or comment-only defaults
+`openrouter/deepseek/deepseek-v4-pro-0813`. An empty or comment-only defaults
 file is the zero Defaults, not an error. `forest declaration show` publishes
 the resolved model and its source.
 

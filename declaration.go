@@ -262,7 +262,7 @@ func declarationPairDigest(agentData, taskData []byte) string {
 }
 
 // defaultModel is the built-in last layer of the model chain.
-const defaultModel = "openrouter/deepseek/deepseek-v4-flash-0731"
+const defaultModel = "openrouter/deepseek/deepseek-v4-pro-0813"
 
 func splitFrontmatter(data []byte) ([]byte, string, error) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
