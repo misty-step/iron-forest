@@ -1,5 +1,10 @@
 # Changelog
 
+- 2026-08-15: Recorded the product lock in `VISION.md`. One Kernel serves
+  one repository on one machine. The CLI is the operations surface. The host
+  vendor is an operator choice. Mint, Powder, Habitat, Fly Sprites, and a
+  dashboard are out of product.
+
 - 2026-08-15: Builder and Fixer publish review-requests through
   `forest publish review-request`. The Kernel owns the write-once note, role
   identity, configured Check gate, and bounded atomic retry. Shipped default
@@ -32,15 +37,16 @@
   Pi uses the exact Run ID as its provider session ID; the generated OpenRouter
   override sends it as `x-session-id` for trace correlation.
 
-- 2026-08-10: Reforged Iron Forest as a Kernel plus profile appliance. Git is
+- 2026-08-10: Reforged Iron Forest as a Kernel plus declarations. Git is
   the coordination authority with schema-v1 write-once notes, agent-owned
   Effects, an evidence-first fast-forward Gate, and a read-only Auditor. The
-  Builder, Verifier, and Fixer declarations use OMP files under `agents/`,
+  Builder, Verifier, and Fixer declarations use files under `agents/`,
   Polls use explicit exit semantics, and one Kernel serves each repository.
-  Forge adapters start with GitHub. Stronger isolation targets the deployment
-  substrate, and evals remain the instrument for future actor-boundary changes.
+  Evals remain the instrument for actor-boundary changes.
 
-Current behavior is defined by `README.md`, the shipped declarations, and the
-accepted ADRs.
+
+Current behavior is defined by `VISION.md`, `README.md`, the shipped
+declarations, and the accepted ADRs.
+
 
 Historical pre-reforge entries remain in repository history before 2026-08-10.

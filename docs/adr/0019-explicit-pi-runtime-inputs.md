@@ -89,7 +89,8 @@ its source.
 The explicit inputs do not create a sandbox. A trusted declaration still runs
 with the service user's inherited credentials, filesystem access, and network
 access. Worktree separation remains an operational boundary; stronger
-credential and process containment belongs to the deployment substrate.
+containment belongs to the host the operator chooses.
+
 
 ## Consequences
 

@@ -1,13 +1,15 @@
 # Iron Forest
 
-Iron Forest is a self-hosted software factory. It is a small deterministic
-Kernel plus agent-owned declarations, shipped as an appliance. The Kernel
-handles mechanics. Declarations state what agents think and do.
+Iron Forest is a headless software factory. Exactly one live Kernel serves
+one repository, on a machine the operator chooses. The Kernel handles
+mechanics. Declarations state what agents think and do. See
+[VISION.md](VISION.md).
 
-The shipped roster has Builder, Verifier, and Fixer declarations. A Builder
-turns a ready Tracker Issue into a branch. A Verifier checks and reviews the
-exact Revision. A Fixer repairs a rejected Revision and sends it back for
-review.
+
+The shipped roster has Builder, Verifier, and Fixer. A Builder turns a ready
+GitHub Issue into a branch. A Verifier checks and reviews the exact Revision.
+A Fixer repairs a rejected Revision and sends it back for review.
+
 
 ## Quick start
 
@@ -148,16 +150,17 @@ foreign entries.
 Pi's terminal `agent_end` event is authoritative: a terminal assistant error
 fails the Run even when the Pi process exits zero.
 
-A trusted declaration runs with the inherited service credentials and filesystem
-access. Worktree separation and time bounds are
-operational boundaries, not a security sandbox. Stronger credential and process
-containment belongs to the deployment substrate.
+A trusted declaration runs with the inherited service credentials and
+filesystem access. Worktree separation and time bounds are operational
+boundaries, not a security sandbox. Stronger containment belongs to the host
+the operator chooses.
 
 ## Git coordination
 
 Git is the coordination authority. Branches, commits, and notes under
-`refs/notes/forest/*` hold workflow state. GitHub is the day-one forge adapter;
-pull requests are disposable human Projections, never authority.
+`refs/notes/forest/*` hold workflow state. GitHub Issues are the Tracker.
+Pull requests are disposable human Projections, never authority.
+
 
 Every record binds to an exact Revision. The schema and writer sets are defined
 in [ADR 0009](docs/adr/0009-git-coordination-authority.md): Builder and Fixer

@@ -23,15 +23,17 @@ the operating-system user's configured credentials and can access the
 filesystem and network. The Kernel does not claim process, filesystem,
 credential, or network containment beyond worktree separation.
 
-Stronger process and credential isolation belongs to the deployment substrate. A
-Fly.io instance per agent is the direction for that substrate, not a Kernel
-responsibility.
+Stronger process and credential isolation belongs to the host the operator
+chooses. The Kernel has no host-vendor API and no per-Run sandbox. Isolation
+is exactly one live Kernel per repository, on an operator-chosen machine.
+See [VISION.md](../../VISION.md).
+
+
 
 ## Consequences
 
-The Kernel stays portable and deterministic across supported hosts. Operators
-must choose a substrate that supplies stronger containment when agent trust or
-network risk requires it.
+The Kernel stays portable. Operators choose a host that supplies stronger
+containment when agent trust or network risk requires it.
 
-An untrusted agent must not be treated as contained by the day-one posture.
-Deployment requirements and substrate evaluation are explicit follow-up work.
+An untrusted agent must not be treated as contained by worktree isolation.
+

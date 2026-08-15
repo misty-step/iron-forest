@@ -10,7 +10,7 @@ Sibling mode keeps a separate managed checkout beside the factory source.
 Install these tools on the host:
 
 - Git with push access to the managed repository;
-- `gh` for the day-one GitHub adapter;
+- `gh` for GitHub Issues and pull-request Projections;
 - `mise` and the managed repository's declared check tools;
 - `pi`; the shipped contract uses its built-in providers. It is the agent harness; see [ADR 0018](adr/0018-pi-harness.md).
 
@@ -19,11 +19,12 @@ The user service resolves these tools through
 
 Configure forge access and Pi provider credentials for the service. Put its
 credential variables in `%h/.config/iron-forest/%i.env`; do not put
-credentials or adapter configuration in `forest.yaml`, defaults, declarations,
-prompts, skills, or commits. Runs inherit credentials only from the service
-environment. A trusted declaration has those credentials plus filesystem and
-network access. Worktree separation and timeout are not a security sandbox;
-stronger containment belongs to deployment.
+credentials in `forest.yaml`, defaults, declarations, prompts, skills, or
+commits. Runs inherit credentials only from the service environment. A trusted
+declaration has those credentials plus filesystem and network access. Worktree
+separation is not a security sandbox. Stronger containment belongs to the
+host the operator chooses. See [VISION.md](../VISION.md).
+
 
 ## 1. Create the ready label
 

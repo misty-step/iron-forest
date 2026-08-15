@@ -68,9 +68,10 @@ machinery, a Manager Flow, money accounting, MCP, webhooks, and a report Gate
 beyond read-only Auditor validation. The Kernel does not self-update in place.
 Deployment updates are a tracker issue, not Kernel behavior.
 
-Day-one worktree separation and timeout are not a security sandbox. A trusted
+Day-one worktree separation is not a security sandbox. A trusted
 declaration can access host credentials, filesystem, and network. Stronger
-credential and process containment belongs to the deployment substrate.
+credential and process containment belongs to the host the operator chooses.
+
 
 The archived `overhaul/independent-flows` branch and its ADRs were not adopted.
 
