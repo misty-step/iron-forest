@@ -24,7 +24,7 @@ func writeTree(t *testing.T, dir, rel, content string) {
 // it, so a host without the scanner can never silently skip the scan.
 func TestScanSecretsMissingScannerFailsClosed(t *testing.T) {
 	orig := scanEnv.lookPath
-	scanEnv.lookPath = func(string) (string, error) {
+	scanEnv.lookPath = func(string, string) (string, error) {
 		return "", errors.New("executable file not found")
 	}
 	defer func() { scanEnv.lookPath = orig }()
@@ -38,11 +38,9 @@ func TestScanSecretsMissingScannerFailsClosed(t *testing.T) {
 	}
 }
 
-// TestScanSecretsCleanWorktreePasses proves a clean worktree exits 0 even when
-// the scanner is present but reports nothing.
 func TestScanSecretsCleanWorktreePasses(t *testing.T) {
 	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
-	scanEnv.lookPath = func(string) (string, error) { return "stub", nil }
+	scanEnv.lookPath = func(string, string) (string, error) { return "stub", nil }
 	scanEnv.runGeneric = func(string, string, []string) ([]secretFinding, error) { return nil, nil }
 	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
 
@@ -54,13 +52,11 @@ func TestScanSecretsCleanWorktreePasses(t *testing.T) {
 	}
 }
 
-// TestScanSecretsFindingFails proves a worktree carrying credential-shaped
-// material fails the check with a nonzero exit and reports the match.
 func TestScanSecretsFindingFails(t *testing.T) {
 	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
-	scanEnv.lookPath = func(string) (string, error) { return "stub", nil }
+	scanEnv.lookPath = func(string, string) (string, error) { return "stub", nil }
 	scanEnv.runGeneric = func(string, string, []string) ([]secretFinding, error) {
-		return []secretFinding{{Path: ".opencode/agents/builder.md", Rule: "Mint", Match: "sk-or-abc"}}, nil
+		return []secretFinding{{Path: ".opencode/agents/builder.md", Rule: "Mint"}}, nil
 	}
 	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
 
@@ -71,14 +67,14 @@ func TestScanSecretsFindingFails(t *testing.T) {
 	if !strings.Contains(outcome.ErrText, ".opencode/agents/builder.md") {
 		t.Fatalf("finding should name the offending path, got %q", outcome.ErrText)
 	}
+	if strings.Contains(outcome.ErrText, "sk-or-abc") {
+		t.Fatalf("finding leaked the credential: %q", outcome.ErrText)
+	}
 }
 
-// TestScanSecretsLoadsFixtureExclusions merges the defaults and the explicit
-// fixture list from forest.secrets.yaml into the list handed to the generic
-// scanner, so a legitimate fixture on the list is excluded and passes.
 func TestScanSecretsLoadsFixtureExclusions(t *testing.T) {
 	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
-	scanEnv.lookPath = func(string) (string, error) { return "stub", nil }
+	scanEnv.lookPath = func(string, string) (string, error) { return "stub", nil }
 	var got []string
 	scanEnv.runGeneric = func(_ string, _ string, excludes []string) ([]secretFinding, error) {
 		got = excludes
@@ -103,6 +99,32 @@ func TestScanSecretsLoadsFixtureExclusions(t *testing.T) {
 		if !found {
 			t.Fatalf("scanner should have received exclusion %q, got %v", pattern, got)
 		}
+	}
+}
+
+func TestScanSecretsRefusesRepositoryScanner(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, secretScanner)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho PLANTED\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	outcome := runScanSecrets([]string{dir}, cliFlags{})
+	if outcome.Exit == exitOK || !strings.Contains(outcome.ErrText, "refuse repository executable") {
+		t.Fatalf("code=%d err=%q", outcome.Exit, outcome.ErrText)
+	}
+}
+
+func TestScanSecretsMalformedScannerOutputFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(t.TempDir(), secretScanner)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'not-json\\n'\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(script)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	outcome := runScanSecrets([]string{dir}, cliFlags{})
+	if outcome.Exit == exitOK || !strings.Contains(outcome.ErrText, "parse") {
+		t.Fatalf("code=%d err=%q", outcome.Exit, outcome.ErrText)
 	}
 }
 

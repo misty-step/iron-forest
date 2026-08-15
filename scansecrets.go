@@ -27,12 +27,9 @@ const secretScanner = "trufflehog"
 // to content.
 var defaultScanExcludes = []string{".git", ".forest"}
 
-// secretFinding is one place in a working tree that carries leaked credential
-// material: the file, which detector matched, and the matched value.
 type secretFinding struct {
-	Path  string
-	Rule  string
-	Match string
+	Path string
+	Rule string
 }
 
 // secretsConfig is forest.secrets.yaml: the explicit exclusion path for
@@ -45,10 +42,10 @@ type secretsConfig struct {
 // scanEnv holds the two seams a scan needs and a test can substitute: where to
 // find the external scanner binary, and how to run the generic scan once found.
 var scanEnv = struct {
-	lookPath   func(string) (string, error)
+	lookPath   func(root, name string) (string, error)
 	runGeneric func(bin, dir string, excludes []string) ([]secretFinding, error)
 }{
-	lookPath:   exec.LookPath,
+	lookPath:   trustedExecutable,
 	runGeneric: runTrufflehog,
 }
 
@@ -85,7 +82,7 @@ func loadSecretsConfig(dir string) (secretsConfig, error) {
 // silently skipping the scan. The exclusions are handed to the scanner too, so a
 // legitimate fixture on the list cannot fail.
 func scanGeneric(dir string, excludes []string) ([]secretFinding, error) {
-	bin, err := scanEnv.lookPath(secretScanner)
+	bin, err := scanEnv.lookPath(dir, secretScanner)
 	if err != nil {
 		return nil, fmt.Errorf("%s not found on PATH; failing closed instead of skipping the generic high-entropy scan: %w", secretScanner, err)
 	}
@@ -130,7 +127,6 @@ func runTrufflehog(bin, dir string, excludes []string) ([]secretFinding, error) 
 		}
 		var f struct {
 			DetectorName   string `json:"DetectorName"`
-			Raw            string `json:"Raw"`
 			SourceMetadata struct {
 				Data struct {
 					Filesystem struct {
@@ -140,7 +136,7 @@ func runTrufflehog(bin, dir string, excludes []string) ([]secretFinding, error) 
 			} `json:"SourceMetadata"`
 		}
 		if err := json.Unmarshal([]byte(line), &f); err != nil {
-			continue
+			return nil, fmt.Errorf("parse %s output: %w", secretScanner, err)
 		}
 		path := f.SourceMetadata.Data.Filesystem.File
 		if path == "" {
@@ -150,8 +146,9 @@ func runTrufflehog(bin, dir string, excludes []string) ([]secretFinding, error) 
 		if rule == "" {
 			rule = "generic-secret"
 		}
-		findings = append(findings, secretFinding{Path: path, Rule: rule, Match: f.Raw})
+		findings = append(findings, secretFinding{Path: path, Rule: rule})
 	}
+
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("parse %s output: %w", secretScanner, err)
 	}

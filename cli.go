@@ -759,8 +759,9 @@ func runScanSecrets(rest []string, flags cliFlags) cliOutcome {
 	}
 	var b strings.Builder
 	for _, f := range findings {
-		fmt.Fprintf(&b, "\n%s %q in %s", f.Rule, oneLine(f.Match), oneLine(f.Path))
+		fmt.Fprintf(&b, "\n%s in %s", f.Rule, oneLine(f.Path))
 	}
+
 	return failure(exitError, "scan-secrets: leaked credential material in the worktree%s", b.String())
 }
 
