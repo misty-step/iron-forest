@@ -54,6 +54,10 @@ type RunRecord struct {
 	CacheRead  int64   `json:"cache_read"`
 	CacheWrite int64   `json:"cache_write"`
 	Reasoning  int64   `json:"reasoning"`
+	// DefinitionSHA records the verified declaration digest (the ordered
+	// agent.md + task.md pair) that was loaded and confirmed unchanged at
+	// dispatch, so a later check can see which declaration a Run executed.
+	DefinitionSHA string `json:"definition_sha,omitempty"`
 }
 
 func ledgerPath(root string) string { return filepath.Join(root, workspaceName, "runs.jsonl") }

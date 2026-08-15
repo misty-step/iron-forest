@@ -439,8 +439,9 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 	}
 	harnessRunnable := skillErr == nil && piErr == nil
 	var invokeErr error
+	harnessStarted := false
 	if harnessRunnable {
-		invokeErr = r.invoke(runCtx, worktree, declaration, piDir, timeoutSeconds, logFile, &record)
+		invokeErr, harnessStarted = r.invoke(runCtx, worktree, declaration, piDir, timeoutSeconds, logFile, &record)
 	}
 	var piCleanupErr error
 	if piDir != "" {
@@ -468,10 +469,10 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration, timeoutSecond
 			record.Exit = 1
 		}
 	}
-	// Usage exists only if the harness ran. Demanding it after a failure to start
-	// would report "no usage" as the cause and bury the real one.
+	// Usage exists only if the harness started. Demanding it after a refusal to
+	// start would report "no usage" as the cause and bury the real one.
 	var usageErr error
-	if harnessRunnable && (invokeErr == nil || record.Exit != harnessUnavailableExit) {
+	if harnessStarted {
 		usage, parseErr := parseAgentUsage(logPath)
 		if parseErr != nil {
 			usageErr = fmt.Errorf("parse harness usage: %w", parseErr)
@@ -823,15 +824,15 @@ func (t *agentOutcomeTracker) Err() error {
 	return nil
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) error {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, timeoutSeconds int, logFile io.Writer, record *RunRecord) (err error, started bool) {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
-		return err
+		return err, false
 	}
 	path, err := r.piExecutable()
 	if err != nil {
 		record.Exit = harnessUnavailableExit
-		return err
+		return err, false
 	}
 	// Pi receives a complete explicit resource contract. Global extensions,
 	// skills, prompt templates, and themes are disabled; each declared skill is
@@ -860,18 +861,23 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
-		return err
+		return err, false
 	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		record.Exit = harnessUnavailableExit
-		return fmt.Errorf("open harness output pipe: %w", err)
+		return fmt.Errorf("open harness output pipe: %w", err), false
 	}
 	command.Stdout = writer
 	command.Stderr = writer
+	if err := r.verifyDeclarationDigest(declaration); err != nil {
+		record.Exit = 1
+		return errors.Join(err, writer.Close(), reader.Close()), false
+	}
+	record.DefinitionSHA = declaration.DefinitionSHA
 	if err := command.Start(); err != nil {
 		record.Exit = harnessUnavailableExit
-		return errors.Join(fmt.Errorf("start pi: %w", err), writer.Close(), reader.Close())
+		return errors.Join(fmt.Errorf("start pi: %w", err), writer.Close(), reader.Close()), false
 	}
 	writerCloseErr := writer.Close()
 	outcome := newAgentOutcomeTracker()
@@ -916,7 +922,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	if err != nil && record.Exit == 0 {
 		record.Exit = 1
 	}
-	return err
+	return err, true
 }
 
 const (
@@ -1025,6 +1031,32 @@ func runContextExit(parent, run context.Context, fallback int) int {
 // needed and a stubbed PATH is honoured.
 func (r *Runner) piExecutable() (string, error) {
 	return trustedExecutable(r.Root, r.PiPath)
+}
+
+// verifyDeclarationDigest recomputes the digest over the ordered declaration
+// pair (agent.md then task.md) from the repository root and compares it with the
+// digest loadDeclaration recorded. The run is refused before Pi starts when any
+// declared file changed after load, because the executed prompt, model, and tool
+// set are otherwise not provably the declared ones (see #144). A declaration
+// without a recorded digest (for example a directly constructed predecessor)
+// has nothing to compare and dispatches normally.
+func (r *Runner) verifyDeclarationDigest(declaration Declaration) error {
+	if declaration.DefinitionSHA == "" {
+		return nil
+	}
+	dir := declarationDir(r.Root, declaration.Name)
+	agentData, err := os.ReadFile(filepath.Join(dir, "agent.md"))
+	if err != nil {
+		return fmt.Errorf("re-read %s agent.md: %w", declaration.Name, err)
+	}
+	taskData, err := os.ReadFile(filepath.Join(dir, "task.md"))
+	if err != nil {
+		return fmt.Errorf("re-read %s task.md: %w", declaration.Name, err)
+	}
+	if got := declarationPairDigest(agentData, taskData); got != declaration.DefinitionSHA {
+		return fmt.Errorf("agent %s bundle changed since load: digest %s != recorded %s", declaration.Name, got, declaration.DefinitionSHA)
+	}
+	return nil
 }
 
 // runEvidenceLine describes the explicit resources and non-secret settings Pi
