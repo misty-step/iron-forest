@@ -204,7 +204,7 @@ func TestRunnerRejectsChangedDeclarationBundle(t *testing.T) {
 	}
 
 	// Unchanged since load, the run dispatches normally and records its digest.
-	record, err := runner.Run(context.Background(), declaration, 10)
+	record, err := runner.Run(context.Background(), declaration)
 	if err != nil {
 		t.Fatalf("unchanged bundle refused: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestRunnerRejectsChangedDeclarationBundle(t *testing.T) {
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
 	}
-	record, err = runner.Run(context.Background(), declaration, 10)
+	record, err = runner.Run(context.Background(), declaration)
 	if err == nil || !strings.Contains(err.Error(), "bundle changed since load") {
 		t.Fatalf("changed bundle record=%#v err=%v, want digest mismatch", record, err)
 	}
