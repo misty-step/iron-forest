@@ -54,6 +54,9 @@ type RunRecord struct {
 	CacheRead  int64   `json:"cache_read"`
 	CacheWrite int64   `json:"cache_write"`
 	Reasoning  int64   `json:"reasoning"`
+	// Error records the Run's failure cause when the exit is nonzero, such as an
+	// operator cancellation. It stays empty for successful Runs.
+	Error string `json:"error,omitempty"`
 	// DefinitionSHA records the verified declaration digest (the ordered
 	// agent.md + task.md pair) that was loaded and confirmed unchanged at
 	// dispatch, so a later check can see which declaration a Run executed.

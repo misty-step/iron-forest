@@ -109,6 +109,7 @@ func cliCommands() []cliCommand {
 		{phrase: "trigger reset", args: 1, operands: "<agent>", run: runTriggerReset},
 		{phrase: "run list", optional: []string{flagLimit, flagAfter}, run: runRunList},
 		{phrase: "run show", args: 1, operands: "<run-id>", run: runRunShow},
+		{phrase: "run cancel", args: 1, operands: "<run-id>", run: runRunCancel},
 		{phrase: "run logs", args: 1, operands: "<run-id>", optional: []string{flagFollow}, run: runRunLogs},
 		{phrase: "audit show", optional: []string{flagRescan}, run: runAuditShow},
 		{phrase: "audit log", optional: []string{flagLimit}, run: runAuditLog},
@@ -606,6 +607,9 @@ func runRunShow(rest []string, flags cliFlags) cliOutcome {
 		"  tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
 		oneLine(record.RunID), oneLine(record.Agent), record.Exit, record.Duration, oneLine(record.Started),
 		record.TokensIn, record.TokensOut, record.CacheRead, record.CacheWrite, record.Reasoning)
+	if record.Error != "" {
+		human += "\n  error=" + oneLine(record.Error)
+	}
 	return cliOutcome{Exit: exitOK, Data: record, Human: human}
 }
 
@@ -827,8 +831,12 @@ func auditStateHuman(state AuditState, cap int) string {
 func runRecordsHuman(records []RunRecord, indent string) string {
 	rows := make([]string, 0, len(records))
 	for _, record := range records {
-		rows = append(rows, fmt.Sprintf("%s%s agent=%s exit=%d duration=%.3fs",
-			indent, oneLine(record.RunID), oneLine(record.Agent), record.Exit, record.Duration))
+		row := fmt.Sprintf("%s%s agent=%s exit=%d duration=%.3fs",
+			indent, oneLine(record.RunID), oneLine(record.Agent), record.Exit, record.Duration)
+		if record.Error != "" {
+			row += " error=" + oneLine(record.Error)
+		}
+		rows = append(rows, row)
 	}
 	return strings.Join(rows, "\n")
 }

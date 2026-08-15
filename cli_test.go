@@ -415,7 +415,7 @@ func TestCLIEveryCommandRefusesADirectoryThatIsNotAForest(t *testing.T) {
 // A group name is incomplete, not unknown: the answer names its subcommands.
 func TestCLIGroupNameReportsItsSubcommands(t *testing.T) {
 	for group, want := range map[string]string{
-		"run":         "list, show, logs",
+		"run":         "list, show, cancel, logs",
 		"trigger":     "list, show, reset",
 		"declaration": "list, show",
 		"audit":       "show, log",

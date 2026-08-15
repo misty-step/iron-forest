@@ -1068,6 +1068,7 @@ while :; do /bin/sleep 1; done
 func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_DIR", "/operator/pi")
+	t.Setenv("FOREST_ROOT", "/ambient-root")
 	t.Setenv("SERVICE_API_TOKEN", "inherited-only")
 	t.Setenv("GIT_AUTHOR_NAME", "ambient")
 	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.invalid")
@@ -1090,6 +1091,7 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 		"PI_CODING_AGENT_DIR": "/tmp/run-pi",
 		"SERVICE_API_TOKEN":   "inherited-only",
 		"FOREST_RUN_ID":       "1-builder",
+		"FOREST_ROOT":         root,
 		"GIT_CONFIG_COUNT":    "2",
 		"GIT_CONFIG_KEY_0":    "user.name",
 		"GIT_CONFIG_VALUE_0":  "Iron Forest Builder",

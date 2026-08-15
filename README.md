@@ -250,6 +250,7 @@ Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 | `forest trigger reset <agent>` | Clear one agent's accumulated errors. Refuses while a Kernel runs. |
 | `forest run list` | Page the Ledger, newest first. |
 | `forest run show <run-id>` | Print one Ledger row. |
+| `forest run cancel <run-id>` | Stop a live Run's process group and record the cancellation in the Ledger. |
 | `forest run logs [--follow] <run-id>` | Print a Run log, or stream it until the Run completes. |
 | `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
 | `forest audit log` | Print audit history. |
@@ -259,8 +260,9 @@ Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 
 `serve`, `once`, and `poll` are the engine: they hold the Kernel lock and write.
 `publish review-request` writes without taking that lock, so a Run that already
-holds it can publish. Every other row is the read surface. Each read-surface
-command accepts `--json` and `--root <dir>`. `--json` emits one
+holds it can publish. `run cancel` also writes without taking the Kernel lock,
+because the live Run's Runner already holds it. Every other row is the read
+surface. Each read-surface command accepts `--json` and `--root <dir>`. `--json` emits one
 `forest.cli.v2` envelope on stdout; human text stays on stderr. `--root`
 answers from another checkout. `trigger reset` and `audit show --rescan` take
 the Kernel lock and refuse while a Kernel runs. `publish review-request` does

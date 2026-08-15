@@ -139,7 +139,7 @@ func pathInside(root, path string) (bool, error) {
 }
 
 var overriddenChildEnvNames = []string{
-	"PATH", "FOREST_RUN_ID", "PI_CODING_AGENT_DIR",
+	"PATH", "FOREST_RUN_ID", "FOREST_ROOT", "PI_CODING_AGENT_DIR",
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 	"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
 	"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
@@ -164,6 +164,10 @@ func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve checkout root: %w", err)
+	}
 	environment := childEnvironment()
 	environment = append(environment,
 		"PATH="+path,
@@ -173,6 +177,7 @@ func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
 		"GIT_CONFIG_KEY_1=user.email",
 		"GIT_CONFIG_VALUE_1="+email,
 		"FOREST_RUN_ID="+runID,
+		"FOREST_ROOT="+absoluteRoot,
 		"PI_CODING_AGENT_DIR="+piDir,
 	)
 	return environment, nil
@@ -437,6 +442,11 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 	if harnessRunnable {
 		invokeErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, &record)
 	}
+	if hasRunCancellationMarker(r.Root, runID) {
+		record.Error = runCancelledError
+		record.Exit = runCancelledExit
+		invokeErr = errors.Join(invokeErr, errRunCancelled)
+	}
 	var piCleanupErr error
 	if piDir != "" {
 		if removeErr := r.cleanupFilesystem(piDir); removeErr != nil {
@@ -487,10 +497,19 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 		}
 	}
 	appendErr := AppendRun(r.Root, record)
+	if appendErr == nil {
+		// The cancellation marker exists only until the Runner has recorded the
+		// cancelled outcome. Once the Ledger row exists, a later cancel finds it
+		// first, so marker removal is best-effort and never changes the outcome.
+		_ = os.Remove(runCancellationMarkerPath(r.Root, runID))
+	}
 	if err := errors.Join(skillErr, piErr, invokeErr, piCleanupErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
 		return record, err
 	}
 	if record.Exit != 0 {
+		if record.Error != "" {
+			return record, fmt.Errorf("agent %s %s", declaration.Name, record.Error)
+		}
 		return record, fmt.Errorf("agent %s exited with %d", declaration.Name, record.Exit)
 	}
 	return record, nil
