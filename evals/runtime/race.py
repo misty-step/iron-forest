@@ -24,6 +24,14 @@ def run(*args: str, cwd: Path, env: dict[str, str] | None = None) -> str:
     return completed.stdout.strip()
 
 
+def restore_origin_owner() -> None:
+    stat = os.stat(ORIGIN)
+    for path, dirs, files in os.walk(ORIGIN):
+        os.chown(path, stat.st_uid, stat.st_gid)
+        for name in dirs + files:
+            os.chown(os.path.join(path, name), stat.st_uid, stat.st_gid)
+
+
 def race_env() -> dict[str, str]:
     env = os.environ.copy()
     env.update({
@@ -123,6 +131,7 @@ def main() -> None:
         publish_conflict(cwd, args, "refs/notes/forest/review-request", "review-request")
     else:
         raise RuntimeError(f"unknown race: {kind}")
+    restore_origin_owner()
     RACE_TRIGGERED.write_text(kind + "\n")
 
 

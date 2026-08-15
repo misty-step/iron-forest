@@ -152,13 +152,10 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 			return publishReviewRequestResult{}, err
 		}
 		branchReady := (input.Role == "builder" && freshBranch == "") || (input.Role == "fixer" && freshBranch == input.Rejected)
-		if !branchReady || freshNote == "" || freshNote == noteOID || attempt == reviewRequestAttempts {
-			if !branchReady {
-				return publishReviewRequestResult{}, fmt.Errorf("branch race")
-			}
-			if freshNote == noteOID || freshNote == "" {
-				return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped: %w", pushErr)
-			}
+		if !branchReady {
+			return publishReviewRequestResult{}, fmt.Errorf("branch race")
+		}
+		if freshNote == "" || freshNote == noteOID || attempt == reviewRequestAttempts {
 			return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped: %w", pushErr)
 		}
 	}
