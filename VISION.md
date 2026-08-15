@@ -61,8 +61,9 @@ The shipped roster is Builder, Verifier, and Fixer
 
 ## Boundaries
 
-The Kernel owns mechanics: the lock, Poll, worktree, Pi start, declaration
+The Kernel owns mechanics: the lock, Poll, worktree, harness start, declaration
 digest, and review-request publication ([ADR 0021](docs/adr/0021-kernel-review-request-publication.md)).
+
 
 Agents own Issue selection, implementation, review judgment, and the decision
 to publish ([ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md)).
