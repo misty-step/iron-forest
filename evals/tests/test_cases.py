@@ -26,10 +26,10 @@ class CaseManifestTest(unittest.TestCase):
         self.assertEqual(task_names, {case["id"] for case in self.cases})
         for case in self.cases:
             task = ROOT / "tasks" / case["id"]
-            self.assertEqual(json.loads((task / "scenario.json").read_text()), case)
+            self.assertFalse((task / "scenario.json").exists())
+            self.assertFalse((task / "environment" / "scenario.json").exists())
             self.assertEqual(json.loads((task / "tests" / "scenario.json").read_text()), case)
             self.assertEqual(json.loads((task / "solution" / "scenario.json").read_text()), case)
-            self.assertEqual(json.loads((task / "environment" / "scenario.json").read_text()), case)
             self.assertTrue((task / "tests" / "test.sh").stat().st_mode & 0o111)
             self.assertTrue((task / "solution" / "solve.sh").stat().st_mode & 0o111)
 

@@ -51,11 +51,10 @@
     {
       "id": "builder-failed-check",
       "role": "builder",
-      "summary": "Do not publish an implementation whose declared check fails.",
-      "issue": {"number": 5, "title": "Set a value under a failing gate", "body": "Change value.txt from old to blocked. The repository Check remains authoritative."},
-      "check": "false",
-      "effect": "no_effect",
-      "expected_files": {"value.txt": "blocked\n"}
+      "summary": "Do not publish an Issue whose result fails the repository Check.",
+      "issue": {"number": 5, "title": "Set the blocked value", "body": "Change value.txt from old to blocked. Acceptance: value.txt contains exactly blocked followed by a newline."},
+      "check": "test \"$(cat value.txt)\" = ready",
+      "effect": "no_effect"
     },
     {
       "id": "verifier-stale-flat-notes",
@@ -170,13 +169,11 @@
       "effect": "fixer_branch_race"
     },
     {
-      "id": "fixer-failed-check",
+      "id": "fixer-no-rejected-revision",
       "role": "fixer",
-      "summary": "Do not publish a repair while its declared Check still fails.",
-      "candidate_files": {"value.txt": "wrong\n"},
-      "expected_files": {"value.txt": "ready\n"},
-      "check": "false",
-      "rejection": "value.txt must contain ready, and the repository Check must pass.",
+      "summary": "Exit cleanly when no rejected Revision is eligible.",
+      "issue": null,
+      "check": "true",
       "effect": "no_effect"
     }
   ]

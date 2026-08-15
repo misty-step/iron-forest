@@ -9,6 +9,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pwd
+
+from hidden import CANDIDATE_MODEL, RACE, ROLE, SCENARIO, STATE, ensure
+
+
+
 GIT = "/usr/bin/git"
 TIME = "2026-08-14T00:00:00Z"
 
@@ -109,14 +115,12 @@ def main() -> None:
 
     workspace = Path("/workspace")
     origin = Path("/origin.git")
-    eval_dir = Path("/eval")
+    hidden = ensure()
     shutil.rmtree(workspace, ignore_errors=True)
     shutil.rmtree(origin, ignore_errors=True)
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    for stale in ("state.json", "race.json", "race-triggered", "forest-exit", "candidate-model", "reference-run"):
-        (eval_dir / stale).unlink(missing_ok=True)
-    (eval_dir / "scenario.json").write_text(json.dumps(scenario, indent=2, sort_keys=True) + "\n")
-
+    for stale in ("state.json", "race.json", "race-triggered", "forest-exit", "candidate-model", "reference-run", "scenario.json", "role", "pr-created.json", "issue-created.json"):
+        (hidden / stale).unlink(missing_ok=True)
+    SCENARIO.write_text(json.dumps(scenario, indent=2, sort_keys=True) + "\n")
     run(GIT, "init", "--bare", "--initial-branch=master", str(origin))
     run(GIT, "init", "--initial-branch=master", str(workspace))
     git(workspace, "remote", "add", "origin", str(origin))
@@ -130,7 +134,7 @@ def main() -> None:
         for line in (workspace / "agents" / scenario["role"] / "agent.md").read_text().splitlines()
         if line.startswith("model:")
     )
-    (eval_dir / "candidate-model").write_text(declaration_model + "\n")
+    CANDIDATE_MODEL.write_text(declaration_model + "\n")
     base_files = {
         "value.txt": "old\n",
         "CONTRACT.md": "The requested final value is documented by the selected Issue or rejection evidence.\n",
@@ -240,12 +244,25 @@ def main() -> None:
         git(workspace, "update-ref", "-d", temporary)
 
     git(workspace, "checkout", "master")
-    git(workspace, "fetch", "origin", "+refs/notes/forest/*:refs/notes/forest/*")
-    git(workspace, "status", "--porcelain")
-    (eval_dir / "role").write_text(scenario["role"] + "\n")
-    (eval_dir / "state.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    ROLE.write_text(scenario["role"] + "\n")
+    run_dir = Path("/run/forest-eval")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "role").write_text(scenario["role"] + "\n")
+    os.chmod(run_dir / "role", 0o644)
+    STATE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
     if scenario.get("race"):
-        (eval_dir / "race.json").write_text(json.dumps({"type": scenario["race"], **state}, indent=2, sort_keys=True) + "\n")
+        RACE.write_text(json.dumps({"type": scenario["race"], **state}, indent=2, sort_keys=True) + "\n")
+
+    try:
+        forest = pwd.getpwnam("forest")
+    except KeyError:
+        forest = None
+    if forest is not None:
+        for root in (workspace, origin):
+            for dirpath, dirnames, filenames in os.walk(root):
+                os.chown(dirpath, forest.pw_uid, forest.pw_gid)
+                for name in dirnames + filenames:
+                    os.chown(os.path.join(dirpath, name), forest.pw_uid, forest.pw_gid)
 
 
 if __name__ == "__main__":

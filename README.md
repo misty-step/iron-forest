@@ -332,7 +332,7 @@ declaration, prompt, skill, or publication contract:
 The manual model tier runs every Builder, Verifier, and Fixer case three times
 through the production `forest` binary. It uses each declaration's model unless
 `FOREST_EVAL_CANDIDATE_MODEL` is set. The independent Judge defaults to
-`openrouter/openai/gpt-5.4`.
+`openrouter/google/gemini-3.7-flash`.
 
 Local runs load separate candidate and Judge completion keys from
 `$HOME/.config/iron-forest/evals.env` by default. The file must be owned by the

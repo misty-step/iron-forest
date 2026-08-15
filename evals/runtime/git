@@ -5,16 +5,14 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 REAL_GIT = "/usr/bin/git"
-RACE = Path("/eval/race.json")
-TRIGGERED = Path("/eval/race-triggered")
+RACE = "/opt/iron-forest-eval/race.py"
 
 args = sys.argv[1:]
-if RACE.is_file() and not TRIGGERED.exists() and "push" in args and "--atomic" in args:
+if "push" in args and "--atomic" in args:
     completed = subprocess.run(
-        ["python3", "/opt/iron-forest-eval/race.py", os.getcwd(), json.dumps(args)],
+        ["sudo", "-n", RACE, os.getcwd(), json.dumps(args)],
         check=False,
     )
     if completed.returncode != 0:

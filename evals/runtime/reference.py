@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hidden import PR_CREATED, REFERENCE_RUN, STATE
+
 from setup import GIT, TIME, git, identity, note_add, run, write_files
 
 WORKSPACE = Path("/workspace")
@@ -79,7 +81,7 @@ def publish_builder(scenario: dict, state: dict) -> None:
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/notes/forest/review-request", state["race_note_tip"])
     private = add_canonical("refs/notes/forest/review-request", revision, review_payload(issue["number"], branch, revision), "builder")
     git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
-    Path("/eval/pr-created.json").write_text(json.dumps({"head": branch, "base": "master"}) + "\n")
+    PR_CREATED.write_text(json.dumps({"head": branch, "base": "master"}) + "\n")
 
 
 def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
@@ -115,8 +117,8 @@ def publish_conflicting_note(canonical: str, target: str, payload: dict) -> None
 def main() -> None:
     scenario_path = Path(sys.argv[1])
     scenario = json.loads(scenario_path.read_text())
-    state = json.loads(Path("/eval/state.json").read_text())
-    Path("/eval/reference-run").write_text("oracle\n")
+    state = json.loads(STATE.read_text())
+    REFERENCE_RUN.write_text("oracle\n")
     effect = scenario["effect"]
     if effect == "builder_publish":
         publish_builder(scenario, state)

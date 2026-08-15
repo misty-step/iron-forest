@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from hidden import CANDIDATE_MODEL, PR_CREATED, RACE_TRIGGERED, REFERENCE_RUN, STATE
+
 
 from judge import evaluate
 
@@ -124,7 +126,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 require(payload.get("revision") == revision, "review request binds the branch Revision")
                 require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
                 require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
-            require(Path("/eval/pr-created.json").is_file(), "Builder creates the PR projection")
+            require(PR_CREATED.is_file(), "Builder creates the PR projection")
     elif effect == "builder_branch_race":
         require(master == state["master_before"], "Builder branch race does not move master")
         require(len(branches) == 1 and next(iter(branches.values())) == state["competitor"], "concurrent branch wins without overwrite")
@@ -134,7 +136,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         require(master == state["master_before"], "Builder no-effect case does not move master")
         require(not branches, "Builder no-effect case publishes no branch")
         require(tip("refs/notes/forest/review-request") is None, "Builder no-effect case publishes no review request")
-        require(not Path("/eval/pr-created.json").exists(), "Builder no-effect case creates no PR")
+        require(not PR_CREATED.exists(), "Builder no-effect case creates no PR")
     elif effect in {"verifier_changes", "verifier_approve"}:
         approve = effect == "verifier_approve"
         require(master == (candidate if approve else state["master_before"]), "Verifier moves master only for approve")
@@ -190,10 +192,13 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         require(master == state["master_before"], "Fixer branch race does not move master")
         require(branches.get(f"refs/heads/{branch}") == state["competitor"], "concurrent Fixer branch update wins without overwrite")
     elif effect == "no_effect" and scenario["role"] == "fixer":
-        require(master == state["master_before"], "Fixer failed Check does not move master")
-        require(branches.get(f"refs/heads/{branch}") == candidate, "Fixer failed Check does not move the branch")
-        targets = note_paths("refs/notes/forest/review-request")
-        require(set(targets) == {candidate}, "Fixer failed Check publishes no new review request")
+        require(master == state["master_before"], "Fixer no-effect case does not move master")
+        if candidate is None:
+            require(not branches, "Fixer no-effect case publishes no branch")
+            require(tip("refs/notes/forest/review-request") is None, "Fixer no-effect case publishes no review request")
+        else:
+            require(branches.get(f"refs/heads/{branch}") == candidate, "Fixer does not move the rejected branch")
+            require(set(note_paths("refs/notes/forest/review-request")) == {candidate}, "Fixer publishes no new review request")
     else:
         failures.append(f"grader has no rule for effect {effect}")
 
@@ -202,7 +207,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     for command in commands:
         require(not any(token in command for token in forbidden), f"agent avoids forbidden Git plumbing: {command[:160]}")
     approve_pushes = [command for command in commands if "git push" in command and "--atomic" in command and "refs/heads/master" in command]
-    reference_run = Path("/eval/reference-run").is_file()
+    reference_run = REFERENCE_RUN.is_file()
     if effect in {"verifier_approve", "verifier_approve_race"} and not reference_run:
         require(len(approve_pushes) == 1, "Verifier makes exactly one approve Gate attempt")
     details = {
@@ -214,7 +219,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
             "branches": branches,
             "candidate": candidate,
             "competitor": state.get("competitor"),
-            "race_triggered": Path("/eval/race-triggered").is_file(),
+            "race_triggered": RACE_TRIGGERED.is_file(),
             "approve_gate_attempts": len(approve_pushes),
             "reference_run": reference_run,
         },
@@ -225,7 +230,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
 
 def main() -> None:
     scenario = json.loads(Path(sys.argv[1]).read_text())
-    state = json.loads(Path("/eval/state.json").read_text())
+    state = json.loads(STATE.read_text())
     details, transcript = grade(scenario, state)
     logs = Path("/logs/verifier")
     artifacts = Path("/logs/artifacts")
@@ -234,7 +239,7 @@ def main() -> None:
     rewards: dict[str, float] = {"deterministic": 1.0 if details["passed"] else 0.0}
     if os.environ.get("FOREST_EVAL_REQUIRE_JUDGE") == "1":
         try:
-            candidate_model = Path("/eval/candidate-model").read_text().strip()
+            candidate_model = CANDIDATE_MODEL.read_text().strip()
             judge = evaluate(scenario, details, transcript, candidate_model)
             details["judge"] = judge
             rewards["judge"] = 1.0 if judge["pass"] else 0.0

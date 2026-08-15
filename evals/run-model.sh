@@ -38,7 +38,7 @@ if [[ -z "${OPENROUTER_API_KEY:-}" || -z "${FOREST_EVAL_JUDGE_API_KEY:-}" ]]; th
 fi
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}"
 : "${FOREST_EVAL_JUDGE_API_KEY:?FOREST_EVAL_JUDGE_API_KEY is required}"
-: "${FOREST_EVAL_JUDGE_MODEL:=openrouter/openai/gpt-5.4}"
+: "${FOREST_EVAL_JUDGE_MODEL:=openrouter/google/gemini-3.7-flash}"
 export FOREST_EVAL_JUDGE_MODEL
 if [[ -n "${FOREST_EVAL_CANDIDATE_MODEL:-}" && "$FOREST_EVAL_CANDIDATE_MODEL" == "$FOREST_EVAL_JUDGE_MODEL" ]]; then
   echo "candidate and Judge models must differ" >&2

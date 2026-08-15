@@ -22,22 +22,19 @@ Harbor agent that invokes the production `forest` binary and shipped
 declarations, isolated local Git and forge fixtures, deterministic state and
 trace graders, reference solutions, and an independent model Judge.
 
-The 2026-08-14 production-model baseline ran 54 trials: three attempts for each
+The 2026-08-15 production-model baseline ran 54 trials: three attempts for each
 case with `openrouter/deepseek/deepseek-v4-flash-0731` as the candidate and
-`openrouter/openai/gpt-5.4` as the Judge. Deterministic outcomes passed 47/54.
-The Judge passed 43/54, but one Judge failure was an argument-size harness
-error. After the Judge input was bounded, the affected case reran three times
-without an infrastructure error and passed the Judge in 2/3 trials. The
-case-level result is unchanged: 11/18 contracts achieved `pass^3`.
+`openrouter/google/gemini-3.7-flash` as the Judge. Deterministic outcomes
+passed 48/54. The Judge passed 48/54. 14/18 case contracts achieved `pass^3`.
+Fixer passed every case. Builder failed the canonical-note race in 3/3.
+That race is now Kernel-owned (`forest publish review-request`; ADR 0021).
+Verifier approved a planted defect in 1/3, mishandled one conflicting
+destination, and republished after one rejected approve Gate. The model
+adoption gate remains red for Verifier judgment even though the
+deterministic reference harness is 18/18.
 
-Builder ignored a failed Check in 3/3 attempts, Fixer ignored it in 2/3, and
-Verifier mishandled the stale-Revision case in 2/3. Single Judge failures also
-found unnecessary fixture inspection or incomplete review evidence. The model
-adoption gate is therefore red even though the deterministic reference harness
-is 18/18.
-
-The Builder canonical-note race is now Kernel-owned
-(`forest publish review-request`; ADR 0021).
+The 2026-08-14 baseline used `openrouter/openai/gpt-5.4` as the Judge and
+scored 11/18 `pass^3`. That run is historical.
 
 Production runs Pi in ephemeral `--no-session` mode. Pi still auto-compacts
 within that process, so one Run can span context windows, but it cannot resume
@@ -51,7 +48,7 @@ production image, runs all 18 reference outcomes, and rejects any reward below
 one. Pull-request CI runs this tier. `evals/run-model.sh` runs every production
 role case three times, requires `pass^3`, and adds the Judge reward. It uses the
 model in each shipped declaration unless `FOREST_EVAL_CANDIDATE_MODEL` overrides
-it. The Judge defaults to `openrouter/openai/gpt-5.4`, must differ
+it. The Judge defaults to `openrouter/google/gemini-3.7-flash`, must differ
 from the candidate, has no tools or project context, and receives a
 credential-redacted trace. Task containers start without network access; only
 the agent and Judge phases may reach `openrouter.ai`. The candidate receives
@@ -100,9 +97,14 @@ invokes the production declaration and skills unchanged. Each trial records:
 - model, provider, token classes, turns, latency, and cost.
 
 Trials are isolated. No origin, checkout, Pi directory, provider session, or
-credential-bearing environment is shared. Every task has a reference outcome
-that passes all deterministic graders. A case is invalid if two domain experts
-cannot independently agree on pass or fail from its written contract.
+credential-bearing environment is shared. The candidate runs as user `forest`.
+Case contracts, grader state, race fixtures, and evaluator source live under
+root-only `/hidden` and `/opt/iron-forest-eval`. The candidate sees the
+repository, Git remotes, and the normal `gh` interface. Harbor copies `tests/`
+and `solution/` only after the agent phase. Instructions do not include the
+case summary. Every task has a reference outcome that passes all deterministic
+graders. A case is invalid if two domain experts cannot independently agree on
+pass or fail from its written contract.
 
 Run multiple trials because agent behavior is non-deterministic. Regression
 cases use `pass^3`: all three trials must pass. Capability suites report
@@ -159,7 +161,7 @@ issue, no eligible issue, existing fanout notes, a canonical-note race, a
 branch race, and a failed Check. Verifier covers stale flat notes, a planted
 defect in fanout notes, clean approval, a failed Check, a conflicting Verdict,
 and an approval race. Fixer covers one finding, multiple findings, fanout notes,
-a conflicting destination, a branch race, and failed repair verification.
+a conflicting destination, a branch race, and no rejected Revision.
 
 ### Builder
 

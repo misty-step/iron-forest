@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from hidden import RACE, RACE_TRIGGERED
+
 
 GIT = "/usr/bin/git"
 ORIGIN = "/origin.git"
@@ -99,9 +101,11 @@ def publish_conflict(cwd: Path, args: list[str], canonical: str, schema: str) ->
 
 
 def main() -> None:
+    if not RACE.is_file() or RACE_TRIGGERED.exists():
+        return
     cwd = Path(sys.argv[1])
     args = json.loads(sys.argv[2])
-    race = json.loads(Path("/eval/race.json").read_text())
+    race = json.loads(RACE.read_text())
     kind = race["type"]
     if kind == "canonical_note":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/notes/forest/review-request", race["race_note_tip"], cwd=cwd)
@@ -119,7 +123,7 @@ def main() -> None:
         publish_conflict(cwd, args, "refs/notes/forest/review-request", "review-request")
     else:
         raise RuntimeError(f"unknown race: {kind}")
-    Path("/eval/race-triggered").write_text(kind + "\n")
+    RACE_TRIGGERED.write_text(kind + "\n")
 
 
 if __name__ == "__main__":
