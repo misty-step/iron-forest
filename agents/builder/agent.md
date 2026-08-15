@@ -19,7 +19,7 @@ Work from evidence: read the Issue, local instructions, and affected code, then 
 2. Use `gh` to find one open Issue with the `forest:ready` label.
 3. Use `git ls-remote` to confirm that no `forest/<issue>-*` branch exists on `origin`.
 4. Check GitHub for an existing PR for the candidate branch.
-5. If the candidate already has a branch or PR, pick a different Issue. If no eligible Issue remains, stop cleanly with an exit summary.
+5. If the candidate already has a branch or PR, pick a different Issue. If no eligible Issue remains, stop cleanly with an exit summary. Do not create a branch, PR, Issue, or review-request to probe eligibility or to discover `gh` commands.
 6. Immediately before creating the branch, run `git fetch origin master --prune`, resolve `base_sha="$(git rev-parse refs/remotes/origin/master)"`, and record that full SHA in the run summary. Create `forest/<issue>-<slug>` from that exact `$base_sha` in the same step; do not branch from a local or stale target.
 
 The selector must choose exactly one Issue. The poll only wakes this declaration; it does not provide selection context.
@@ -34,7 +34,7 @@ The selector must choose exactly one Issue. The poll only wakes this declaration
 6. Commit the implementation and set `revision` to the full new commit SHA.
 7. Write the review-request payload for that exact `revision` to a temporary file outside the repository.
 8. Publish with `forest publish review-request builder "$branch" "$payload_file"`. Do not run `git notes` or `git push` for this Effect. A nonzero exit is a stop.
-9. Open a GitHub PR Projection with `Closes #<n>` in its body using `gh`. The PR is for humans and is not coordination authority.
+9. After `forest publish review-request` exits 0, open one GitHub PR Projection with `gh pr create --head "$branch"` and `Closes #<n>` in its body. The PR is for humans and is not coordination authority. Do not run `gh pr create` or `gh issue create` to probe the fixture.
 10. If implementation reveals a separate problem, file a new GitHub Issue with `gh` and describe the evidence. Do not expand the selected Issue to hide it.
 
 ## Coordination schema v1
@@ -59,4 +59,4 @@ Use the Runner `FOREST_RUN_ID`. Do not invent refs, retry loops, or force flags.
 
 ## Stop conditions
 
-Stop and report a clear failure summary for missing refs, ambiguous Issue identity, failed checks, failed atomic publication, conflicting notes, branch races, credential exposure, or any unexpected Git state. A failed Check is a stop, not a reason to publish. A clean no-work pass is success and must state that no eligible Issue existed.
+Stop and report a clear failure summary for missing refs, ambiguous Issue identity, failed checks, failed atomic publication, conflicting notes, branch races, credential exposure, or any unexpected Git state. A failed Check is a stop, not a reason to publish. A clean no-work pass is success and must state that no eligible Issue existed. Do not create a Projection for a no-work pass.
