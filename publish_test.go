@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -358,7 +359,7 @@ func TestPublishReviewRequestCleansCanceledCheckWorktree(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		listed := string(runGitDir(t, root, "worktree", "list", "--porcelain"))
-		if strings.Contains(listed, "forest-publish-") {
+		if strings.Contains(listed, "-checks") {
 			cancel()
 			break
 		}
@@ -377,7 +378,7 @@ func TestPublishReviewRequestCleansCanceledCheckWorktree(t *testing.T) {
 		t.Fatal("publish did not return after cancel")
 	}
 	listed := string(runGitDir(t, root, "worktree", "list", "--porcelain"))
-	if strings.Contains(listed, "forest-publish-") {
+	if strings.Contains(listed, "-checks") {
 		t.Fatalf("stale worktree remains:\n%s", listed)
 	}
 }
@@ -412,4 +413,76 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestPublishCheckWorktreeIsReservedAndSweptAfterKill(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runID := "1786820000000000001-builder"
+	dir := forestPath(root, "worktrees", runID+"-checks")
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "worktree", "add", "--detach", dir, "HEAD")
+	if !isReservedRunID(runID + "-checks") {
+		t.Fatal("check worktree name is not reserved")
+	}
+	if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reserved check worktree survived: %v", err)
+	}
+	listed := string(runGitDir(t, root, "worktree", "list", "--porcelain"))
+	if strings.Contains(listed, "-checks") {
+		t.Fatalf("registered check worktree survived:\n%s", listed)
+	}
+}
+
+func TestPublishCheckWorktreeKilledProcessIsSwept(t *testing.T) {
+	if os.Getenv("FOREST_PUBLISH_CHILD") == "1" {
+		root := os.Getenv("FOREST_PUBLISH_ROOT")
+		revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+		_, _ = publishReviewRequest(context.Background(), publishReviewRequestInput{
+			Root: root, Role: "builder", Branch: "forest/1-ready",
+			PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"),
+			RunID:       "1786820000000000002-builder",
+		})
+		os.Exit(0)
+	}
+	root, _ := testClone(t)
+	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"sleep 30\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "commit", "-am", "slow check")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPublishCheckWorktreeKilledProcessIsSwept$", "-test.v=false")
+	cmd.Env = append(os.Environ(), "FOREST_PUBLISH_CHILD=1", "FOREST_PUBLISH_ROOT="+root)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	dir := forestPath(root, "worktrees", "1786820000000000002-builder-checks")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatal("check worktree did not appear")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = cmd.Process.Wait()
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("killed process left no worktree to sweep: %v", err)
+	}
+	if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("killed check worktree survived: %v", err)
+	}
 }

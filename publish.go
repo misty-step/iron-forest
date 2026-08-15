@@ -88,7 +88,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if note.Branch != input.Branch {
 		return publishReviewRequestResult{}, fmt.Errorf("payload branch %q does not match %q", note.Branch, input.Branch)
 	}
-	if err := runConfiguredChecks(ctx, input.Root, revision); err != nil {
+	if err := runConfiguredChecks(ctx, input.Root, input.RunID, revision); err != nil {
 		return publishReviewRequestResult{}, err
 	}
 
@@ -162,18 +162,15 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped")
 }
 
-func runConfiguredChecks(ctx context.Context, root, revision string) (err error) {
+func runConfiguredChecks(ctx context.Context, root, runID, revision string) (err error) {
 	shell, err := trustedExecutable(root, "sh")
 	if err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp("", "forest-publish-")
-	if err != nil {
+	if err := os.MkdirAll(forestPath(root, "worktrees"), 0o755); err != nil {
 		return err
 	}
-	if err := os.Remove(dir); err != nil {
-		return err
-	}
+	dir := forestPath(root, "worktrees", runID+"-checks")
 	if addErr := gitRun(ctx, root, "worktree", "add", "--detach", dir, revision); addErr != nil {
 		return errors.Join(addErr, os.RemoveAll(dir))
 	}
