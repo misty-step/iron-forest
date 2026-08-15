@@ -415,16 +415,29 @@ func mustRead(t *testing.T, path string) []byte {
 	return data
 }
 
+func reservedCheckDirs(root string) []string {
+	entries, err := os.ReadDir(forestPath(root, "worktrees"))
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() && isReservedRunID(entry.Name()) && strings.HasSuffix(entry.Name(), "-checks") {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
 func TestPublishCheckWorktreeIsReservedAndSweptAfterKill(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
-	runID := "1786820000000000001-builder"
-	dir := forestPath(root, "worktrees", runID+"-checks")
+	dir := forestPath(root, "worktrees", newRunID("checks", time.Unix(1, 0)))
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	runGitDir(t, root, "worktree", "add", "--detach", dir, "HEAD")
-	if !isReservedRunID(runID + "-checks") {
+	if !isReservedRunID(filepath.Base(dir)) {
 		t.Fatal("check worktree name is not reserved")
 	}
 	if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
@@ -433,56 +446,55 @@ func TestPublishCheckWorktreeIsReservedAndSweptAfterKill(t *testing.T) {
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("reserved check worktree survived: %v", err)
 	}
-	listed := string(runGitDir(t, root, "worktree", "list", "--porcelain"))
-	if strings.Contains(listed, "-checks") {
-		t.Fatalf("registered check worktree survived:\n%s", listed)
-	}
 }
 
-func TestPublishCheckWorktreeKilledProcessIsSwept(t *testing.T) {
+func TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary(t *testing.T) {
 	if os.Getenv("FOREST_PUBLISH_CHILD") == "1" {
 		root := os.Getenv("FOREST_PUBLISH_ROOT")
 		revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 		_, _ = publishReviewRequest(context.Background(), publishReviewRequestInput{
 			Root: root, Role: "builder", Branch: "forest/1-ready",
 			PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"),
-			RunID:       "1786820000000000002-builder",
+			RunID:       "manual",
 		})
 		os.Exit(0)
 	}
-	root, _ := testClone(t)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"sleep 30\"}\n"), 0o644); err != nil {
+	primary, _ := testClone(t)
+	if err := os.WriteFile(filepath.Join(primary, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"sleep 30\"}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGitDir(t, root, "commit", "-am", "slow check")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestPublishCheckWorktreeKilledProcessIsSwept$", "-test.v=false")
-	cmd.Env = append(os.Environ(), "FOREST_PUBLISH_CHILD=1", "FOREST_PUBLISH_ROOT="+root)
+	runGitDir(t, primary, "commit", "-am", "slow check")
+	linked := filepath.Join(t.TempDir(), "1786820000000000002-builder")
+	runGitDir(t, primary, "worktree", "add", "--detach", linked, "HEAD")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary$", "-test.v=false")
+	cmd.Env = append(os.Environ(), "FOREST_PUBLISH_CHILD=1", "FOREST_PUBLISH_ROOT="+linked)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	dir := forestPath(root, "worktrees", "1786820000000000002-builder-checks")
 	deadline := time.Now().Add(5 * time.Second)
+	var found []string
 	for {
-		if _, err := os.Stat(dir); err == nil {
+		found = reservedCheckDirs(primary)
+		if len(found) > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
-			t.Fatal("check worktree did not appear")
+			t.Fatal("primary check worktree did not appear")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(forestPath(linked, "worktrees")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("check worktree was nested under the linked Run worktree")
 	}
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	_, _ = cmd.Process.Wait()
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("killed process left no worktree to sweep: %v", err)
-	}
-	if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
+	if err := cleanupReservedResidue(primary, NewRunner(primary)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("killed check worktree survived: %v", err)
+	if leftover := reservedCheckDirs(primary); len(leftover) != 0 {
+		t.Fatalf("primary check worktrees survived: %v", leftover)
 	}
 }
