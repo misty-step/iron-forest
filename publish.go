@@ -52,9 +52,18 @@ func runPublishReviewRequest(rest []string, flags cliFlags) cliOutcome {
 	return cliOutcome{Exit: exitOK, Data: result, Human: human}
 }
 
+type publishConflictError struct{ err error }
+
+func (e publishConflictError) Error() string { return e.err.Error() }
+func (e publishConflictError) Unwrap() error { return e.err }
+
+func conflictError(format string, args ...any) error {
+	return publishConflictError{err: fmt.Errorf(format, args...)}
+}
+
 func publishConflict(err error) bool {
-	text := err.Error()
-	return strings.Contains(text, "conflict") || strings.Contains(text, "branch race") || strings.Contains(text, "canonical note race")
+	var conflict publishConflictError
+	return errors.As(err, &conflict)
 }
 
 func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) (publishReviewRequestResult, error) {
@@ -109,10 +118,10 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		}
 		if destination != nil {
 			if !bytes.Equal(destination, payload) {
-				return publishReviewRequestResult{}, fmt.Errorf("conflicting review-request note")
+				return publishReviewRequestResult{}, conflictError("conflicting review-request note")
 			}
 			if !validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
-				return publishReviewRequestResult{}, fmt.Errorf("wrong author identity on review-request")
+				return publishReviewRequestResult{}, conflictError("wrong author identity on review-request")
 			}
 		}
 		branchOID, err := remoteOID(ctx, input.Root, "refs/heads/"+input.Branch)
@@ -121,14 +130,14 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		}
 		if input.Role == "builder" {
 			if branchOID != "" && (branchOID != revision || destination == nil) {
-				return publishReviewRequestResult{}, fmt.Errorf("branch race")
+				return publishReviewRequestResult{}, conflictError("branch race")
 			}
 			if branchOID == revision && destination != nil {
 				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
 			}
 		} else {
 			if branchOID == "" || (branchOID == revision && destination == nil) || (branchOID != input.Rejected && branchOID != revision) {
-				return publishReviewRequestResult{}, fmt.Errorf("branch race")
+				return publishReviewRequestResult{}, conflictError("branch race")
 			}
 			if branchOID == revision && destination != nil {
 				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
@@ -164,16 +173,16 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 			if destination != nil && bytes.Equal(destination, payload) && validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
 				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
 			}
-			return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped: %w", pushErr)
+			return publishReviewRequestResult{}, conflictError("canonical note race stopped: %w", pushErr)
 		}
 		if !branchUnchanged {
-			return publishReviewRequestResult{}, fmt.Errorf("branch race")
+			return publishReviewRequestResult{}, conflictError("branch race")
 		}
 		if freshNote == "" || freshNote == noteOID || attempt == reviewRequestAttempts {
-			return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped: %w", pushErr)
+			return publishReviewRequestResult{}, conflictError("canonical note race stopped: %w", pushErr)
 		}
 	}
-	return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped")
+	return publishReviewRequestResult{}, conflictError("canonical note race stopped")
 }
 
 func runConfiguredChecks(ctx context.Context, root, revision string) (err error) {

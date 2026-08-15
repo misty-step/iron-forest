@@ -385,6 +385,23 @@ func TestCLIPublishReviewRequestNeedsRunID(t *testing.T) {
 	}
 }
 
+func TestCLIPublishReviewRequestWrongAuthorIsConflict(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	payload := writeReviewPayload(t, root, revision, "forest/1-ready")
+	addNote(t, root, reviewRequestNoteRef, revision, string(mustRead(t, payload)), "Eve", "eve@invalid")
+	runGitDir(t, root, "push", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
+	t.Setenv("FOREST_RUN_ID", "1-builder")
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"publish", "review-request", "builder", "forest/1-ready", payload, "--json", "--root", root})
+	})
+	if code != exitConflict || !strings.Contains(stdout+stderr, "wrong author identity") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
 func TestPublishReviewRequestConflictsOnWhitespaceOnlyNote(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
