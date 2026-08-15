@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -76,7 +77,6 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if err != nil {
 		return publishReviewRequestResult{}, fmt.Errorf("read payload: %w", err)
 	}
-	payload = bytes.TrimSpace(payload)
 	revision, err := gitLine(ctx, input.Root, "rev-parse", "HEAD")
 	if err != nil {
 		return publishReviewRequestResult{}, err
@@ -88,7 +88,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if note.Branch != input.Branch {
 		return publishReviewRequestResult{}, fmt.Errorf("payload branch %q does not match %q", note.Branch, input.Branch)
 	}
-	if err := runConfiguredChecks(ctx, input.Root); err != nil {
+	if err := runConfiguredChecks(ctx, input.Root, revision); err != nil {
 		return publishReviewRequestResult{}, err
 	}
 
@@ -107,7 +107,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 			return publishReviewRequestResult{}, err
 		}
 		if destination != nil {
-			if !bytes.Equal(bytes.TrimSpace(destination), payload) {
+			if !bytes.Equal(destination, payload) {
 				return publishReviewRequestResult{}, fmt.Errorf("conflicting review-request note")
 			}
 			if destActor != "" && !validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
@@ -133,7 +133,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
 			}
 		}
-		if err := rebuildPublicationRef(ctx, input.Root, input.Role, privateRef, baseRef, noteOID, revision, payloadPath, destination != nil); err != nil {
+		if err := rebuildPublicationRef(ctx, input.Root, input.Role, privateRef, baseRef, noteOID, revision, payload, destination != nil); err != nil {
 			return publishReviewRequestResult{}, err
 		}
 		pushErr := gitRun(ctx, input.Root, "push", "--atomic", "origin",
@@ -162,20 +162,78 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	return publishReviewRequestResult{}, fmt.Errorf("canonical note race stopped")
 }
 
-func runConfiguredChecks(ctx context.Context, root string) error {
-	cfg, err := loadConfig(configPath(root))
+func runConfiguredChecks(ctx context.Context, root, revision string) (err error) {
+	shell, err := trustedExecutable(root, "sh")
 	if err != nil {
 		return err
 	}
+	dir, err := os.MkdirTemp("", "forest-publish-")
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(dir); err != nil {
+		return err
+	}
+	if addErr := gitRun(ctx, root, "worktree", "add", "--detach", dir, revision); addErr != nil {
+		return errors.Join(addErr, os.RemoveAll(dir))
+	}
+	defer func() {
+		err = errors.Join(err, removePublishWorktree(root, dir))
+	}()
+	cfg, loadErr := loadConfig(configPath(dir))
+	if loadErr != nil {
+		return loadErr
+	}
+	path, pathErr := trustedPath(root)
+	if pathErr != nil {
+		return pathErr
+	}
 	for _, check := range cfg.Checks {
-		command := exec.CommandContext(ctx, "sh", "-c", check.Run)
-		command.Dir = root
-		output, runErr := command.CombinedOutput()
+		command := exec.CommandContext(ctx, shell, "-c", check.Run)
+		command.Dir = dir
+		command.Env = checkEnvironment(path)
+		var stderr bytes.Buffer
+		command.Stderr = &stderr
+		output, runErr := processGroupOutput(ctx, command)
 		if runErr != nil {
-			return fmt.Errorf("check %q failed: %w\n%s", check.Name, runErr, output)
+			return fmt.Errorf("check %q failed: %w\n%s%s", check.Name, runErr, output, stderr.Bytes())
 		}
 	}
 	return nil
+}
+
+func checkEnvironment(path string) []string {
+	environment := os.Environ()
+	replaced := false
+	for index, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if name == "PATH" {
+			environment[index] = "PATH=" + path
+			replaced = true
+		}
+	}
+	if !replaced {
+		environment = append(environment, "PATH="+path)
+	}
+	return environment
+}
+
+func removePublishWorktree(root, dir string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	removeErr := gitRun(ctx, root, "worktree", "remove", "--force", dir)
+	if removeErr != nil {
+		removeErr = fmt.Errorf("git worktree remove: %w", removeErr)
+	}
+	filesystemErr := os.RemoveAll(dir)
+	if filesystemErr != nil {
+		filesystemErr = fmt.Errorf("remove worktree path: %w", filesystemErr)
+	}
+	pruneErr := gitRun(ctx, root, "worktree", "prune", "--expire=now")
+	if pruneErr != nil {
+		pruneErr = fmt.Errorf("git worktree prune: %w", pruneErr)
+	}
+	return errors.Join(removeErr, filesystemErr, pruneErr)
 }
 
 func snapshotNoteBase(ctx context.Context, root, baseRef, noteOID string) error {
@@ -186,7 +244,7 @@ func snapshotNoteBase(ctx context.Context, root, baseRef, noteOID string) error 
 	return gitRun(ctx, root, "fetch", "origin", reviewRequestNoteRef+":"+baseRef)
 }
 
-func rebuildPublicationRef(ctx context.Context, root, role, privateRef, baseRef, noteOID, revision, payloadPath string, identical bool) error {
+func rebuildPublicationRef(ctx context.Context, root, role, privateRef, baseRef, noteOID, revision string, payload []byte, identical bool) error {
 	_ = gitRun(ctx, root, "update-ref", "-d", privateRef)
 	if noteOID != "" {
 		if err := gitRun(ctx, root, "update-ref", privateRef, baseRef); err != nil {
@@ -197,7 +255,7 @@ func rebuildPublicationRef(ctx context.Context, root, role, privateRef, baseRef,
 		return nil
 	}
 	name, email := publicationIdentity(role)
-	return gitRun(ctx, root, "-c", "user.name="+name, "-c", "user.email="+email, "notes", "--ref="+privateRef, "add", "-F", payloadPath, revision)
+	return gitInput(ctx, root, payload, "-c", "user.name="+name, "-c", "user.email="+email, "notes", "--ref="+privateRef, "add", "-F", "-", revision)
 }
 
 func publicationIdentity(role string) (string, string) {
@@ -289,8 +347,24 @@ func gitRun(ctx context.Context, root string, args ...string) error {
 	return err
 }
 
+func gitInput(ctx context.Context, root string, input []byte, args ...string) error {
+	_, err := gitOutputInput(ctx, root, input, args...)
+	return err
+}
+
 func gitOutput(ctx context.Context, root string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
+	return gitOutputInput(ctx, root, nil, args...)
+}
+
+func gitOutputInput(ctx context.Context, root string, input []byte, args ...string) ([]byte, error) {
+	path, err := trustedExecutable(root, "git")
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, path, append([]string{"-C", root}, args...)...)
+	if input != nil {
+		command.Stdin = bytes.NewReader(input)
+	}
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
