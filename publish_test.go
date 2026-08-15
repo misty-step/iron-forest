@@ -381,3 +381,35 @@ func TestPublishReviewRequestCleansCanceledCheckWorktree(t *testing.T) {
 		t.Fatalf("stale worktree remains:\n%s", listed)
 	}
 }
+
+func TestPublishReviewRequestRejectsEmptyNoteAuthor(t *testing.T) {
+	name, email := parseNoteIdentity(" <nobody@invalid>")
+	if name != "" || email != "nobody@invalid" {
+		t.Fatalf("parseNoteIdentity=%q %q", name, email)
+	}
+	if validIdentity(noteEntry{Author: name, Email: email}, "builder", "fixer") {
+		t.Fatal("empty author accepted")
+	}
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	payload := writeReviewPayload(t, root, revision, "forest/1-ready")
+	addNote(t, root, reviewRequestNoteRef, revision, string(mustRead(t, payload)), "Eve", "eve@invalid")
+	runGitDir(t, root, "push", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "builder", Branch: "forest/1-ready", PayloadPath: payload, RunID: "1-builder",
+	})
+	if err == nil || !strings.Contains(err.Error(), "wrong author identity") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}

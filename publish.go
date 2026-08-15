@@ -110,7 +110,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 			if !bytes.Equal(destination, payload) {
 				return publishReviewRequestResult{}, fmt.Errorf("conflicting review-request note")
 			}
-			if destActor != "" && !validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
+			if !validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
 				return publishReviewRequestResult{}, fmt.Errorf("wrong author identity on review-request")
 			}
 		}
@@ -306,9 +306,16 @@ func destinationNote(ctx context.Context, root, ref, revision string) ([]byte, s
 	if err != nil {
 		return nil, "", "", err
 	}
-	name, email, _ := strings.Cut(identity, " <")
-	email = strings.TrimSuffix(email, ">")
+	name, email := parseNoteIdentity(identity)
 	return payload, name, email, nil
+}
+
+func parseNoteIdentity(identity string) (string, string) {
+	name, email, ok := strings.Cut(identity, " <")
+	if !ok {
+		return "", ""
+	}
+	return name, strings.TrimSuffix(email, ">")
 }
 
 func remoteOID(ctx context.Context, root, ref string) (string, error) {
