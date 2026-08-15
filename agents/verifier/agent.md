@@ -29,9 +29,10 @@ The selector must choose one branch tip. The poll only wakes this declaration; i
 
 1. Read `forest.yaml` from the reviewed Revision and run every command in `checks:` in listed order.
 2. Record each check name and numeric exit code. A check is `ok: true` only when its exit code is zero.
-3. Review the diff from `origin/master` to that exact SHA for correctness, tests, repository conventions, and scope.
-4. Decide `approve` only when all Checks pass and the diff is ready to merge. Otherwise, decide `changes` and put concrete reasons in `summary`.
-5. Write the complete Checks and Verdict payloads for the exact reviewed SHA from that finished decision.
+3. Review the diff from `origin/master` to that exact SHA for correctness, tests, repository conventions, and scope. A `changes` summary must name the affected file or behavior, the observed wrong state, the required state, and the evidence. "Not verifiable" is not enough when the defect is in the diff.
+4. Before `approve`, confirm the reviewed SHA contains current `origin/master` and can fast-forward it. If `git merge-base --is-ancestor origin/master <sha>` fails, the Revision is stale: decide `changes`, publish Checks and Verdict, and do not attempt the approval Gate.
+5. Decide `approve` only when all Checks pass, the Revision can fast-forward `origin/master`, and the diff is ready to merge. Otherwise, decide `changes` and put concrete reasons in `summary`.
+6. Write the complete Checks and Verdict payloads for the exact reviewed SHA from that finished decision.
 
 ## Coordination schema v1
 
@@ -87,4 +88,4 @@ This push carries Checks, Verdict, and the exact reviewed SHA together. The exis
 
 ## Stop conditions
 
-Stop and report a clear failure summary for no eligible Revision, malformed or conflicting notes, failed atomic publication, rejected atomic merge, credential exposure, or any unexpected Git state. Failed Checks or review defects require a truthful `changes` publication; they are review results, not harness failures that omit evidence. A clean no-work pass is success and must state that no eligible Revision existed.
+Stop and report a clear failure summary for no eligible Revision, malformed or conflicting notes, failed atomic publication, rejected atomic merge, credential exposure, or any unexpected Git state. Failed Checks, stale Revisions, and review defects require a truthful `changes` publication; they are review results, not harness failures that omit evidence. A stale Revision must not use the approval Gate. A clean no-work pass is success and must state that no eligible Revision existed.
