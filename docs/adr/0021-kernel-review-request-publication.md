@@ -30,7 +30,11 @@ the paired branch push. It implements the ADR 0010 profile contract exactly:
 - Fixer: branch must remain at the rejected SHA, or already at the Revision
   with an identical note
 - at most three attempts, and only when the canonical note ref changed
-- never force, never push the branch and note separately
+- never `--force`; never push the branch and note separately
+- the atomic push compare-and-swaps both destination refs with
+  `--force-with-lease=<ref>:<expected>`: notes at the snapshotted OID
+  (empty when absent); Builder branch empty; Fixer branch the rejected SHA
+
 
 The command also runs every configured `forest.yaml` Check at `HEAD`. A
 nonzero exit refuses publication. That is the declared Check, not a

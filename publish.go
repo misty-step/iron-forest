@@ -146,10 +146,22 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		if err := rebuildPublicationRef(ctx, input.Root, input.Role, privateRef, baseRef, noteOID, revision, payload, destination != nil); err != nil {
 			return publishReviewRequestResult{}, err
 		}
-		pushErr := gitRun(ctx, input.Root, "push", "--atomic", "origin",
+		expectedNote := noteOID
+		if expectedNote == "" {
+			expectedNote = strings.Repeat("0", 40)
+		}
+		expectedBranch := strings.Repeat("0", 40)
+		if input.Role == "fixer" {
+			expectedBranch = input.Rejected
+		}
+		pushErr := gitRun(ctx, input.Root, "push", "--atomic",
+			"--force-with-lease="+reviewRequestNoteRef+":"+expectedNote,
+			"--force-with-lease=refs/heads/"+input.Branch+":"+expectedBranch,
+			"origin",
 			privateRef+":"+reviewRequestNoteRef,
 			revision+":refs/heads/"+input.Branch,
 		)
+
 		if pushErr == nil {
 			return publishReviewRequestResult{Status: "published", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
 		}
