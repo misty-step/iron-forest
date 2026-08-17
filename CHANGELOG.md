@@ -1,5 +1,9 @@
 # Changelog
 
+- 2026-08-17: Onboarding states which identity may create or update which
+  Git ref. A read-only forge credential is refused. Branch protection cannot
+  see evidence refs (#255).
+
 - 2026-08-17: Poll and Auditor read `refs/forest/v1/*`. Leftover notes are
   unread. Verifier calls `forest publish verdict`. Builder/Fixer dual-write
   a request evidence ref with the existing note (#279).

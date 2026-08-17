@@ -39,6 +39,42 @@ declaration has those credentials plus filesystem and network access. Worktree
 separation is not a security sandbox. Stronger containment belongs to the
 host the operator chooses. See [VISION.md](../VISION.md).
 
+## Forge identities and references
+
+The Kernel process uses one forge credential. A read-only token breaks every
+role. Builder and Fixer must create branches and request evidence. Verifier
+must create Checks and Verdict evidence and, on approve, fast-forward `master`.
+
+| Actor | Command | May create | May update |
+| --- | --- | --- | --- |
+| Builder / Fixer | `forest publish review-request` | `refs/heads/forest/<issue>-*`, `refs/forest/v1/request/<sha>`, `refs/notes/forest/review-request` | nothing else |
+| Verifier | `forest publish verdict` | `refs/forest/v1/checks/<sha>`, `refs/forest/v1/verdict/<sha>` | `refs/heads/master` on approve only, fast-forward |
+| Operator | forge ruleset | — | restrict who may update `master` |
+
+Committer identities on evidence commits are `Iron Forest Builder
+<builder@forest.invalid>`, `Iron Forest Fixer <fixer@forest.invalid>`, and
+`Iron Forest Verifier <verifier@forest.invalid>`. Those are Git identities,
+not forge logins. The forge account is the host credential that performs the
+push.
+
+GitHub branch protection matches `refs/heads/*` only. It cannot allow or deny
+`refs/forest/v1/*` or `refs/notes/forest/*`. Create-only evidence refs are
+enforced by the Kernel (`--force-with-lease` against an empty expected OID),
+not by the forge.
+
+Put this ruleset on `master` as deployment, not Kernel policy:
+
+1. Target `refs/heads/master`.
+2. Block force pushes.
+3. Restrict updates to the one factory account or GitHub App that the Kernel
+   uses.
+4. Do not require a pull-request review for the factory actor. The Gate is the
+   atomic evidence push, not a GitHub review.
+
+The request note is a dual-write leftover. Poll and Auditor read
+`refs/forest/v1/*`. Do not delete old notes.
+
+
 
 ## 1. Create the ready label
 
