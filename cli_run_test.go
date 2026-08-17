@@ -415,3 +415,57 @@ func TestCLIRunLogsOmitsExitForAnIncompleteRun(t *testing.T) {
 		t.Fatalf("payload=%v, want no exit code for an incomplete Run", keys)
 	}
 }
+
+func TestCLIRunRowShowsExitInside80Columns(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	runID := strings.Repeat("n", 200)
+	agent := strings.Repeat("builder", 20)
+	if err := AppendRun(root, RunRecord{RunID: runID, Agent: agent, Exit: 0, Duration: 1.25}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, listOut, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "list", "--root", root})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("run list code=%d stderr=%q", code, stderr)
+	}
+	code, showOut, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "show", runID, "--root", root})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("run show code=%d stderr=%q", code, stderr)
+	}
+	code, statusOut, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"status", "--root", root})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("status code=%d stderr=%q", code, stderr)
+	}
+
+	for name, out := range map[string]string{"run list": listOut, "run show": showOut, "status": statusOut} {
+		line := strings.Split(out, "\n")[0]
+		if name == "status" {
+			for _, candidate := range strings.Split(out, "\n") {
+				if strings.Contains(candidate, "exit=0") {
+					line = candidate
+					break
+				}
+			}
+		}
+		head := line
+		if len(head) > 80 {
+			head = head[:80]
+		}
+		if !strings.Contains(head, "exit=0") || !strings.Contains(head, "duration=1.250s") {
+			t.Fatalf("%s first 80=%q, want exit and duration", name, head)
+		}
+	}
+
+	_, envelope, _ := decodeEnvelope(t, "run", "show", runID, "--json", "--root", root)
+	keys := payloadKeys(t, envelope)
+	if keys["run_id"] != runID || keys["agent"] != agent {
+		t.Fatalf("JSON hid identity: %v", keys)
+	}
+}

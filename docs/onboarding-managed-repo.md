@@ -5,6 +5,20 @@ repository's `forest.yaml`, agent declarations, Git refs, and local Ledger.
 Self-host mode uses the factory source checkout as the managed repository.
 Sibling mode keeps a separate managed checkout beside the factory source.
 
+## Topology
+
+One Kernel serves one repository on one machine. The Kernel and its agents
+share that machine. The machine may be a workstation, a virtual machine, or a
+droplet. The Kernel has no host-vendor API and no per-Run sandbox substrate.
+
+Several repositories means several Kernels, possibly on several machines.
+An operator on another machine inspects and steers through SSH and the `forest`
+CLI. Isolation is the host, not a Kernel feature.
+
+Self-host and sibling, below, are install layouts on that one machine. They
+are not a second topology.
+
+
 ## Prerequisites
 
 Install these tools on the host:

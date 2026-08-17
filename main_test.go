@@ -426,7 +426,7 @@ audit violation: policy-7
 audit violation: policy-8
 audit violation: policy-9
 recent runs (oldest first, at most 10):
-  status-run agent=builder exit=0 duration=1.250s
+  exit=0 duration=1.250s agent=builder run=status-run
 `
 	if stdout != want {
 		t.Fatalf("status stdout:\n%s\nwant:\n%s", stdout, want)
@@ -458,7 +458,7 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 	}
 	var runLines []string
 	for _, line := range strings.Split(stdout, "\n") {
-		if strings.HasPrefix(line, "  status-run-") {
+		if strings.Contains(line, " run=status-run-") {
 			runLines = append(runLines, line)
 		}
 	}
@@ -467,9 +467,9 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 	}
 	for i, line := range runLines {
 		index := i + 2
-		want := "  status-run-" + strconv.Itoa(index) +
-			" agent=builder exit=" + strconv.Itoa(index) +
-			" duration=" + strconv.Itoa(index) + ".000s"
+		want := "  exit=" + strconv.Itoa(index) +
+			" duration=" + strconv.Itoa(index) + ".000s" +
+			" agent=builder run=status-run-" + strconv.Itoa(index)
 		if line != want {
 			t.Fatalf("recent run line %d=%q, want %q", i, line, want)
 		}

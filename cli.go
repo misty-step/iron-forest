@@ -603,13 +603,9 @@ func runRunShow(rest []string, flags cliFlags) cliOutcome {
 		}
 		return failure(exitNotFound, "run %q not found; see forest run list", rest[0])
 	}
-	human := fmt.Sprintf("%s agent=%s exit=%d duration=%.3fs started=%s\n"+
-		"  tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
-		oneLine(record.RunID), oneLine(record.Agent), record.Exit, record.Duration, oneLine(record.Started),
-		record.TokensIn, record.TokensOut, record.CacheRead, record.CacheWrite, record.Reasoning)
-	if record.Error != "" {
-		human += "\n  error=" + oneLine(record.Error)
-	}
+	human := runRecordHuman(record, "")
+	human += fmt.Sprintf("\n  started=%s tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
+		oneLine(record.Started), record.TokensIn, record.TokensOut, record.CacheRead, record.CacheWrite, record.Reasoning)
 	return cliOutcome{Exit: exitOK, Data: record, Human: human}
 }
 
@@ -805,7 +801,8 @@ func indentBlock(body string) string {
 }
 
 // auditStateHuman renders audit state, showing at most cap violations and
-// reporting the remainder as a count.
+// reporting the remainder as a count. master= is the tip the last completed
+// Audit observed (audited_master), not the last-good ancestry anchor.
 func auditStateHuman(state AuditState, cap int) string {
 	shown := min(len(state.Violations), cap)
 	var human strings.Builder
@@ -816,7 +813,7 @@ func auditStateHuman(state AuditState, cap int) string {
 		if state.LastAt != "" {
 			fmt.Fprintf(&human, " at=%s", oneLine(state.LastAt))
 		}
-		fmt.Fprintf(&human, " master=%s\n", oneLine(state.LastMaster))
+		fmt.Fprintf(&human, " master=%s\n", oneLine(auditReportedMaster(state)))
 	}
 	fmt.Fprintf(&human, "audit violations: total=%d", len(state.Violations))
 	if omitted := len(state.Violations) - shown; omitted > 0 {
@@ -828,15 +825,26 @@ func auditStateHuman(state AuditState, cap int) string {
 	return human.String()
 }
 
+func auditReportedMaster(state AuditState) string {
+	if state.AuditedMaster != "" {
+		return state.AuditedMaster
+	}
+	return state.LastMaster
+}
+
+func runRecordHuman(record RunRecord, indent string) string {
+	row := fmt.Sprintf("%sexit=%d duration=%.3fs agent=%s run=%s",
+		indent, record.Exit, record.Duration, oneLine(record.Agent), oneLine(record.RunID))
+	if record.Error != "" {
+		row += " error=" + oneLine(record.Error)
+	}
+	return row
+}
+
 func runRecordsHuman(records []RunRecord, indent string) string {
 	rows := make([]string, 0, len(records))
 	for _, record := range records {
-		row := fmt.Sprintf("%s%s agent=%s exit=%d duration=%.3fs",
-			indent, oneLine(record.RunID), oneLine(record.Agent), record.Exit, record.Duration)
-		if record.Error != "" {
-			row += " error=" + oneLine(record.Error)
-		}
-		rows = append(rows, row)
+		rows = append(rows, runRecordHuman(record, indent))
 	}
 	return strings.Join(rows, "\n")
 }

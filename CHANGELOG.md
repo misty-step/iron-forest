@@ -1,5 +1,12 @@
 # Changelog
 
+- 2026-08-17: VISION names evidence refs `refs/forest/v1/*` and Kernel
+  `publish verdict` as the destination (#277). The running binary still
+  follows ADR 0021 until #238 and #278. Onboarding states one Kernel per
+  repository per machine (#248). `audit show` prints `audited_master` as
+  `master=` and keeps `last_master` as the last-good ancestry tip (#264).
+  Human Run rows lead with `exit` and `duration` (#263).
+
 - 2026-08-15: Recorded the product lock in `VISION.md`. One Kernel serves
   one repository on one machine. The CLI is the operations surface. The host
   vendor is an operator choice. Mint, Powder, Habitat, Fly Sprites, and a
