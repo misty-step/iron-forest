@@ -14,8 +14,8 @@ import (
 
 func addValidReviewAndChecks(t *testing.T, root, sha, name, email string) {
 	t.Helper()
-	addRemoteNote(t, root, reviewRequestNoteRef, sha, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-fixed","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`, name, email)
-	addRemoteNote(t, root, checksNoteRef, sha, `{"schema":"forest.checks.v1","revision":"`+sha+`","results":[{"name":"test","ok":true,"exit":0}],"time":"2026-08-10T00:00:00Z"}`, "Iron Forest Verifier", "verifier@forest.invalid")
+	pushEvidence(t, root, "request", sha, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-fixed","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`+"\n", name, email)
+	pushEvidence(t, root, "checks", sha, `{"schema":"forest.checks.v1","revision":"`+sha+`","results":[{"name":"test","ok":true,"exit":0}],"time":"2026-08-10T00:00:00Z"}`+"\n", "Iron Forest Verifier", "verifier@forest.invalid")
 }
 
 func addRemoteNote(t *testing.T, root, ref, sha, payload, name, email string) {
@@ -102,14 +102,14 @@ func newAdvancedAuditFixture(t *testing.T, config string) (string, string) {
 
 func addGateNotes(t *testing.T, root, sha, results string) {
 	t.Helper()
-	addRemoteNote(t, root, reviewRequestNoteRef, sha, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-gate","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`, "Iron Forest Builder", "builder@forest.invalid")
+	pushEvidence(t, root, "request", sha, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-gate","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`+"\n", "Iron Forest Builder", "builder@forest.invalid")
 	addVerifierGateNotes(t, root, sha, results)
 }
 
 func addVerifierGateNotes(t *testing.T, root, sha, results string) {
 	t.Helper()
-	addRemoteNote(t, root, checksNoteRef, sha, `{"schema":"forest.checks.v1","revision":"`+sha+`","results":`+results+`,"time":"2026-08-10T00:00:00Z"}`, "Iron Forest Verifier", "verifier@forest.invalid")
-	addRemoteNote(t, root, verdictNoteRef, sha, `{"schema":"forest.verdict.v1","revision":"`+sha+`","verdict":"approve","summary":"ok","time":"2026-08-10T00:00:00Z"}`, "Iron Forest Verifier", "verifier@forest.invalid")
+	pushEvidence(t, root, "checks", sha, `{"schema":"forest.checks.v1","revision":"`+sha+`","results":`+results+`,"time":"2026-08-10T00:00:00Z"}`+"\n", "Iron Forest Verifier", "verifier@forest.invalid")
+	pushEvidence(t, root, "verdict", sha, `{"schema":"forest.verdict.v1","revision":"`+sha+`","verdict":"approve","summary":"ok","time":"2026-08-10T00:00:00Z"}`+"\n", "Iron Forest Verifier", "verifier@forest.invalid")
 }
 
 func installAuditGitWrapper(t *testing.T, script string) {

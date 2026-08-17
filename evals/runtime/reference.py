@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hidden import PR_CREATED, REFERENCE_RUN, STATE
 
-from setup import GIT, TIME, git, identity, note_add, run, write_files
+from setup import GIT, TIME, evidence_push, git, identity, note_add, run, write_files
 
 WORKSPACE = Path("/workspace")
 ORIGIN = Path("/origin.git")
@@ -79,7 +79,9 @@ def publish_builder(scenario: dict, state: dict) -> None:
     revision = commit_files(state["master_before"], branch, scenario["expected_files"], "builder", "eval: reference implementation")
     if scenario.get("race") == "canonical_note":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/notes/forest/review-request", state["race_note_tip"])
-    private = add_canonical("refs/notes/forest/review-request", revision, review_payload(issue["number"], branch, revision), "builder")
+    payload = review_payload(issue["number"], branch, revision)
+    private = add_canonical("refs/notes/forest/review-request", revision, payload, "builder")
+    evidence_push(WORKSPACE, "request", revision, payload, "builder")
     git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
     PR_CREATED.write_text(json.dumps({"head": branch, "base": "master"}) + "\n")
 
@@ -89,8 +91,12 @@ def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
     check_ok = scenario["id"] != "verifier-failed-check"
     verdict = "approve" if approve else "changes"
     summary = scenario.get("verdict_summary", "The Revision satisfies the review contract." if approve else "The Revision requires changes.")
-    checks_private = add_canonical("refs/notes/forest/checks", revision, checks_payload(revision, check_ok), "verifier")
-    verdict_private = add_canonical("refs/notes/forest/verdict", revision, verdict_payload(revision, verdict, summary), "verifier")
+    checks = checks_payload(revision, check_ok)
+    verdict_body = verdict_payload(revision, verdict, summary)
+    checks_private = add_canonical("refs/notes/forest/checks", revision, checks, "verifier")
+    verdict_private = add_canonical("refs/notes/forest/verdict", revision, verdict_body, "verifier")
+    evidence_push(WORKSPACE, "checks", revision, checks, "verifier")
+    evidence_push(WORKSPACE, "verdict", revision, verdict_body, "verifier")
     refspecs = [
         f"{checks_private}:refs/notes/forest/checks",
         f"{verdict_private}:refs/notes/forest/verdict",
@@ -100,12 +106,16 @@ def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
     git(WORKSPACE, "push", "--atomic", "origin", *refspecs)
 
 
+
 def publish_fixer(scenario: dict, state: dict) -> str:
     branch = state["branch"]
     revision = commit_files(state["candidate"], branch, scenario["expected_files"], "fixer", "eval: reference repair")
-    private = add_canonical("refs/notes/forest/review-request", revision, review_payload(100, branch, revision), "fixer")
+    payload = review_payload(100, branch, revision)
+    private = add_canonical("refs/notes/forest/review-request", revision, payload, "fixer")
+    evidence_push(WORKSPACE, "request", revision, payload, "fixer")
     git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
     return revision
+
 
 
 def publish_conflicting_note(canonical: str, target: str, payload: dict) -> None:

@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	evidenceRequestRefPrefix = "refs/forest/v1/request/"
 	evidenceChecksRefPrefix  = "refs/forest/v1/checks/"
 	evidenceVerdictRefPrefix = "refs/forest/v1/verdict/"
 )
@@ -141,6 +142,10 @@ func payloadRevision(data []byte) (string, error) {
 }
 
 func commitEvidence(ctx context.Context, root, name string, payload []byte, message string) (string, error) {
+	return commitEvidenceAs(ctx, root, name, payload, message, "Iron Forest Verifier", "verifier@forest.invalid")
+}
+
+func commitEvidenceAs(ctx context.Context, root, name string, payload []byte, message, author, email string) (string, error) {
 	blob, err := gitHashObject(ctx, root, payload)
 	if err != nil {
 		return "", err
@@ -149,7 +154,7 @@ func commitEvidence(ctx context.Context, root, name string, payload []byte, mess
 	if err != nil {
 		return "", err
 	}
-	return gitCommitTree(ctx, root, tree, message)
+	return gitCommitTreeAs(ctx, root, tree, message, author, email)
 }
 
 func gitHashObject(ctx context.Context, root string, payload []byte) (string, error) {
@@ -172,13 +177,13 @@ func gitLineInput(ctx context.Context, root string, input []byte, args ...string
 	return line, nil
 }
 
-func gitCommitTree(ctx context.Context, root, tree, message string) (string, error) {
+func gitCommitTreeAs(ctx context.Context, root, tree, message, author, email string) (string, error) {
 	path, err := trustedExecutable(root, "git")
 	if err != nil {
 		return "", err
 	}
 	command := exec.CommandContext(ctx, path, "-C", root, "commit-tree", tree, "-m", message)
-	command.Env = publicationGitEnv("Iron Forest Verifier", "verifier@forest.invalid")
+	command.Env = publicationGitEnv(author, email)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr

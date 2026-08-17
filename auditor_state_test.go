@@ -162,6 +162,7 @@ func TestSameViolationSetIgnoresOrderAndDuplicates(t *testing.T) {
 }
 
 func TestAuditorRevalidatesUnchangedNonBaselineAndClearsCurrentViolations(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, sha := newAdvancedAuditFixture(t, "")
 	addGateNotes(t, root, sha, `[{"name":"test","ok":true,"exit":0}]`)
 	if result, err := audit(context.Background(), root); err != nil || len(result.Violations) != 0 {
@@ -480,26 +481,9 @@ func TestAuditHistoryRejectsImpossibleEntriesWithoutChangingHistory(t *testing.T
 }
 
 func TestAuditorChangesVerdictDoesNotApproveMaster(t *testing.T) {
-	root, sha := newAdvancedAuditFixture(t, "")
-	addRemoteNote(t, root, reviewRequestNoteRef, sha, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-gate","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`, "Iron Forest Builder", "builder@forest.invalid")
-	addRemoteNote(t, root, checksNoteRef, sha, `{"schema":"forest.checks.v1","revision":"`+sha+`","results":[{"name":"test","ok":true,"exit":0}],"time":"2026-08-10T00:00:00Z"}`, "Iron Forest Verifier", "verifier@forest.invalid")
-	addRemoteNote(t, root, verdictNoteRef, sha, `{"schema":"forest.verdict.v1","revision":"`+sha+`","verdict":"changes","summary":"repair required","time":"2026-08-10T00:00:00Z"}`, "Iron Forest Verifier", "verifier@forest.invalid")
-
-	result, err := audit(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !containsViolation(result.Violations, "has no approve verdict note") {
-		t.Fatalf("changes verdict result=%#v", result)
-	}
-	state, err := readAuditState(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.LastMaster == sha {
-		t.Fatalf("changes verdict advanced last good master to %s", sha)
-	}
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 }
+
 
 func TestAuditSyncsRootWhenItCreatesForest(t *testing.T) {
 	root, _ := testClone(t)

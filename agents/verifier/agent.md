@@ -48,43 +48,20 @@ Use these payloads verbatim, with the placeholders replaced by values:
 
 Use an RFC 3339 timestamp and the exact commit SHA in both payloads.
 
-Builder and Fixer write review-request notes. Verifier writes Checks and Verdict notes.
+Builder and Fixer write review-request evidence. Verifier writes Checks and Verdict files and calls the Kernel.
 
-## Write-once notes and atomic Gate
+## Publication
 
-Write each complete Checks or Verdict JSON object to its own temporary file outside the repository. Call their paths `checks_payload_file` and `verdict_payload_file`. The Runner supplies the exact `FOREST_RUN_ID`; never change it. For this Run and exact target `revision`, use only these run-private refs:
-
-```sh
-checks_private="refs/notes/forest/private/$FOREST_RUN_ID/verifier/checks/$revision/publication"
-checks_base="refs/notes/forest/private/$FOREST_RUN_ID/verifier/checks/$revision/base"
-verdict_private="refs/notes/forest/private/$FOREST_RUN_ID/verifier/verdict/$revision/publication"
-verdict_base="refs/notes/forest/private/$FOREST_RUN_ID/verifier/verdict/$revision/base"
-```
-
-Add the Checks file with `git notes --ref="$checks_private" add -F "$checks_payload_file" "$revision"`. Add the Verdict file with `git notes --ref="$verdict_private" add -F "$verdict_payload_file" "$revision"`. Never use `-m` or `-f`.
-Before the first add and before every retry, use `git ls-remote` to distinguish an absent canonical ref from lookup failure. Fetch the canonical Checks and Verdict refs into `$checks_base` and `$verdict_base`. Treat an absent remote ref as an empty snapshot and delete only its base ref. Any other lookup or fetch error stops.
-Read each destination note from its corresponding base ref. A present note must be byte-identical to its payload; accept an identical note and stop on a conflict. For every existing destination note, resolve exactly one actual blob path by enumerating `git ls-tree -r --name-only <ref>` and matching the exact target `revision` after removing `/`; then verify its actor with `git log -1 --format='%an <%ae>' <ref> -- "$note_path"`. Stop on zero, duplicate, or non-blob matches. Require `Iron Forest Verifier <verifier@forest.invalid>`. Set `$checks_private` to the `$checks_base` tip and `$verdict_private` to the `$verdict_base` tip. Delete only the corresponding publication ref for an absent base tip. If a destination note is absent, add its exact payload file to its publication ref.
-
-For a `changes` Verdict, publish Checks and Verdict together with one normal atomic push:
+Write each complete Checks or Verdict JSON object to its own temporary file outside the repository. After both files exist, call only:
 
 ```sh
-git push --atomic origin \
-  "$checks_private:refs/notes/forest/checks" \
-  "$verdict_private:refs/notes/forest/verdict"
+forest publish verdict "$checks_payload_file" "$verdict_payload_file"
 ```
 
-If that push is rejected, re-read both canonical destinations. If both now hold byte-identical payloads, accept success. Otherwise retry only when the rejected ref changed without a conflicting payload, rebuilding both private refs from fresh snapshots and re-adding missing payloads. A canonical note race gets at most three total atomic attempts. A conflict or unchanged destination stops. Do not touch `master` for `changes`.
+The Kernel validates the payloads, writes create-only `refs/forest/v1/checks/<sha>` and `refs/forest/v1/verdict/<sha>`, and on `approve` runs configured Checks then fast-forwards `master` in the same atomic push. Do not run `git notes` or `git push` for this Effect. A nonzero exit is a stop. Never force, retry, or push a different SHA.
 
-For an `approve` Verdict, require one valid Builder-or-Fixer review-request, passing Checks, and an approve Verdict for the same exact `revision`. Then perform exactly one non-retryable evidence-before-effect Gate attempt after writing both Verifier notes locally:
+The existing review-request remains durable Gate evidence and is not republished. `forest status` reports the audited `master` and the evidence refs that bind it.
 
-```sh
-git push --atomic origin \
-  "$checks_private:refs/notes/forest/checks" \
-  "$verdict_private:refs/notes/forest/verdict" \
-  "$revision:refs/heads/master"
-```
-
-This push carries Checks, Verdict, and the exact reviewed SHA together. The existing review-request remains durable Gate evidence and is not republished. A rejection is the fast-forward compare-and-set failure. Never force, retry, or push a different SHA. The read-only Auditor detects observable final-state violations after the Effect. It cannot prove check execution, atomic push ordering, or force absence.
 
 ## Stop conditions
 
