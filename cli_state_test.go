@@ -581,3 +581,41 @@ func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
 		t.Fatalf("JSON=%s, want explicit skill directory", encoded)
 	}
 }
+
+func TestCLIAuditShowNamesTheAuditedMaster(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	audited := "01a624d6a38df40d6bda16cfdd2baee666e2bf6e"
+	lastGood := "6d99997ef8c68181a0ff8ff15ef1e1ae677ac89a"
+	state := AuditState{
+		Baseline:      lastGood,
+		LastMaster:    lastGood,
+		AuditedMaster: audited,
+		LastAt:        "2026-08-12T00:00:00Z",
+		LastResult:    "violations",
+		Violations:    []string{"master " + audited + " does not have exactly one valid review-request note"},
+	}
+	if err := writeAuditState(root, state, defaultAuditDependencies()); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"audit", "show", "--root", root})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("audit show code=%d stderr=%q stdout=%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "master="+audited) {
+		t.Fatalf("audit show=%q, want master=%s", stdout, audited)
+	}
+	if strings.Contains(stdout, "master="+lastGood) {
+		t.Fatalf("audit show=%q, reported last-good as the audited tip", stdout)
+	}
+	_, envelope, _ := decodeEnvelope(t, "audit", "show", "--json", "--root", root)
+	keys := payloadKeys(t, envelope)
+	if keys["audited_master"] != audited || keys["last_master"] != lastGood {
+		t.Fatalf("payload=%v, want audited_master and last_master split", keys)
+	}
+}

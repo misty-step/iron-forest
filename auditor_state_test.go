@@ -60,6 +60,9 @@ func TestAuditorBaselineAndLastGoodRevision(t *testing.T) {
 	if state.Baseline != baseline || state.LastMaster != baseline {
 		t.Fatalf("unsafe revision became last-good: %#v", state)
 	}
+	if state.AuditedMaster != result.Master || state.AuditedMaster == state.LastMaster {
+		t.Fatalf("audited tip=%q last-good=%q result=%q", state.AuditedMaster, state.LastMaster, result.Master)
+	}
 	if state.LastResult != "violations" || !containsViolation(state.Violations, "exactly one valid review-request note") {
 		t.Fatalf("unsafe revision status=%#v", state)
 	}

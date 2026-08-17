@@ -18,11 +18,12 @@ import (
 )
 
 type AuditState struct {
-	Baseline   string   `json:"baseline"`
-	LastMaster string   `json:"last_master"`
-	LastAt     string   `json:"last_at"`
-	LastResult string   `json:"last_result"`
-	Violations []string `json:"violations"`
+	Baseline      string   `json:"baseline"`
+	LastMaster    string   `json:"last_master"`
+	AuditedMaster string   `json:"audited_master"`
+	LastAt        string   `json:"last_at"`
+	LastResult    string   `json:"last_result"`
+	Violations    []string `json:"violations"`
 }
 
 type auditSnapshot struct {
@@ -148,6 +149,7 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 		return result, err
 	}
 	state.LastAt = time.Now().UTC().Format(time.RFC3339Nano)
+	state.AuditedMaster = master
 	if len(result.Violations) == 0 {
 		state.LastMaster = master
 		state.LastResult = "pass"

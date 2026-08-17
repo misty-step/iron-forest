@@ -238,6 +238,25 @@ prior persisted set. A passing Audit clears current violations and adds no
 history. Audit history retains exactly the latest 1,000 violation entries. The
 Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
 
+`audit show` and `status` publish these audit keys:
+
+| Key | Meaning |
+| --- | --- |
+| `baseline` | First observed remote `master`. It is not Gate-checked. |
+| `last_master` | Last Audit that passed. Ancestry checks start from this tip. |
+| `audited_master` | Remote `master` the last completed Audit observed, pass or not. |
+| `last_at` | When that Audit finished. |
+| `last_result` | `pass` or `violations`. Empty means no Audit has completed. |
+| `violations` | Current violation set. Empty on a pass. |
+
+Human `master=` is `audited_master`. It is not `last_master`. A violating Audit
+names the tip it scanned.
+
+Human Run rows put `exit=` and `duration=` first so they stay inside 80
+columns when the Run identity is long. `--json` still carries the full
+`run_id` and `agent`.
+
+
 ## Commands
 
 | Command | Purpose |
