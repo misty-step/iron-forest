@@ -277,18 +277,21 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
 | `forest audit log` | Print audit history. |
 | `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer review-request note and branch. |
+| `forest publish verdict <checks> <verdict>` | Publish Checks and Verdict evidence refs; approve also fast-forwards `master`. |
 
 ### Reading the factory
 
 `serve`, `once`, and `poll` are the engine: they hold the Kernel lock and write.
-`publish review-request` writes without taking that lock, so a Run that already
-holds it can publish. `run cancel` also writes without taking the Kernel lock,
-because the live Run's Runner already holds it. Every other row is the read
-surface. Each read-surface command accepts `--json` and `--root <dir>`. `--json` emits one
+`publish review-request` and `publish verdict` write without taking that lock, so a
+Run that already holds it can publish. `run cancel` also writes without taking
+the Kernel lock, because the live Run's Runner already holds it. Every other
+row is the read surface. Each read-surface command accepts `--json` and
+`--root <dir>`. `--json` emits one
 `forest.cli.v2` envelope on stdout; human text stays on stderr. `--root`
 answers from another checkout. `trigger reset` and `audit show --rescan` take
-the Kernel lock and refuse while a Kernel runs. `publish review-request` does
-not.
+the Kernel lock and refuse while a Kernel runs. `publish review-request` and
+`publish verdict` do not.
+
 
 `--json` emits exactly one envelope on stdout, including on failure:
 
