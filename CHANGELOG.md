@@ -1,5 +1,10 @@
 # Changelog
 
+- 2026-08-17: `forest publish verdict` owns Checks and Verdict evidence refs
+  (`refs/forest/v1/checks/<sha>`, `refs/forest/v1/verdict/<sha>`). Approve
+  runs configured Checks and fast-forwards `master` in the same atomic push
+  (#238, #278, ADR 0022). Poll still reads notes until #279.
+
 - 2026-08-17: VISION names evidence refs `refs/forest/v1/*` and Kernel
   `publish verdict` as the destination (#277). The running binary still
   follows ADR 0021 until #238 and #278. Onboarding states one Kernel per

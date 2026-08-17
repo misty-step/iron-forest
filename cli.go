@@ -115,6 +115,7 @@ func cliCommands() []cliCommand {
 		{phrase: "audit log", optional: []string{flagLimit}, run: runAuditLog},
 		{phrase: "scan-secrets", args: 1, operands: "<dir>", run: runScanSecrets},
 		{phrase: "publish review-request", args: 3, operands: "<role> <branch> <payload>", optional: []string{flagRejected}, run: runPublishReviewRequest},
+		{phrase: "publish verdict", args: 2, operands: "<checks> <verdict>", run: runPublishVerdict},
 	}
 }
 
