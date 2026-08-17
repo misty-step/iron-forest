@@ -38,12 +38,11 @@ publication.
 The Verifier still decides approve versus changes and writes the files. It
 does not push `master`.
 
-Poll and Auditor still read `refs/notes/forest/*` until
-[issue 279](https://github.com/misty-step/iron-forest/issues/279). This ADR
-does not switch the prompt off prompted notes.
+Poll and Auditor read `refs/forest/v1/*` (#279). Leftover notes are unread.
+The Verifier prompt calls `forest publish verdict`.
 
 ## Consequences
 
 One Kernel publish family covers every Effect. Review taste stays in the
-agent. A later Poll/status cutover can stop reading notes without inventing a
-second publisher.
+agent. Old factory notes no longer fail Poll or Audit.
+

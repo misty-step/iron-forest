@@ -160,21 +160,9 @@ func (p *Poller) verifier(ctx context.Context) (code int, pollErr error) {
 	if len(branches) == 0 {
 		return exitNoWork, nil
 	}
-	notes, err := p.fetchNotes(ctx)
-	if err != nil {
-		return exitError, err
-	}
-	defer func() {
-		if err := p.deleteNotes(notes); err != nil {
-			code, pollErr = exitError, err
-		}
-	}()
 	for _, tip := range branches {
-		review, reviewErr := p.coordinationNote(ctx, notes.ReviewRequest.Ref, tip.SHA, "builder", "fixer")
+		review, reviewErr := p.evidencePayload(ctx, "request", tip.SHA, "builder", "fixer")
 		if reviewErr != nil {
-			if errors.Is(reviewErr, pollEnumerationSkip) {
-				return exitNoWork, nil
-			}
 			if !isMissingNote(reviewErr) {
 				return exitError, reviewErr
 			}
@@ -183,20 +171,18 @@ func (p *Poller) verifier(ctx context.Context) (code int, pollErr error) {
 		if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
 			return exitError, err
 		}
-		verdict, verdictErr := p.coordinationNote(ctx, notes.Verdict.Ref, tip.SHA, "verifier")
+		_, verdictErr := p.evidencePayload(ctx, "verdict", tip.SHA, "verifier")
 		if verdictErr == nil {
-			if _, err := decodeVerdict(verdict, tip.SHA); err != nil {
-				return exitError, err
-			}
 			continue
-		}
-		if errors.Is(verdictErr, pollEnumerationSkip) {
-			return exitNoWork, nil
 		}
 		if !isMissingNote(verdictErr) {
 			return exitError, verdictErr
 		}
-		if err := p.confirmSnapshot(ctx, tip, notes); err != nil {
+		requestOID, err := p.remoteEvidenceOID(ctx, "request", tip.SHA)
+		if err != nil {
+			return exitError, err
+		}
+		if err := p.confirmEvidence(ctx, tip, requestOID, ""); err != nil {
 			return exitError, err
 		}
 		return exitOK, nil
@@ -212,21 +198,9 @@ func (p *Poller) fixer(ctx context.Context) (code int, pollErr error) {
 	if len(branches) == 0 {
 		return exitNoWork, nil
 	}
-	notes, err := p.fetchNotes(ctx)
-	if err != nil {
-		return exitError, err
-	}
-	defer func() {
-		if err := p.deleteNotes(notes); err != nil {
-			code, pollErr = exitError, err
-		}
-	}()
 	for _, tip := range branches {
-		verdict, verdictErr := p.coordinationNote(ctx, notes.Verdict.Ref, tip.SHA, "verifier")
+		verdict, verdictErr := p.evidencePayload(ctx, "verdict", tip.SHA, "verifier")
 		if verdictErr != nil {
-			if errors.Is(verdictErr, pollEnumerationSkip) {
-				return exitNoWork, nil
-			}
 			if !isMissingNote(verdictErr) {
 				return exitError, verdictErr
 			}
@@ -236,22 +210,28 @@ func (p *Poller) fixer(ctx context.Context) (code int, pollErr error) {
 		if err != nil {
 			return exitError, err
 		}
-		if parsed.Verdict == "changes" {
-			review, reviewErr := p.coordinationNote(ctx, notes.ReviewRequest.Ref, tip.SHA, "builder", "fixer")
-			if reviewErr != nil {
-				if errors.Is(reviewErr, pollEnumerationSkip) {
-					return exitNoWork, nil
-				}
-				return exitError, reviewErr
-			}
-			if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
-				return exitError, err
-			}
-			if err := p.confirmSnapshot(ctx, tip, notes); err != nil {
-				return exitError, err
-			}
-			return exitOK, nil
+		if parsed.Verdict != "changes" {
+			continue
 		}
+		review, reviewErr := p.evidencePayload(ctx, "request", tip.SHA, "builder", "fixer")
+		if reviewErr != nil {
+			return exitError, reviewErr
+		}
+		if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
+			return exitError, err
+		}
+		requestOID, err := p.remoteEvidenceOID(ctx, "request", tip.SHA)
+		if err != nil {
+			return exitError, err
+		}
+		verdictOID, err := p.remoteEvidenceOID(ctx, "verdict", tip.SHA)
+		if err != nil {
+			return exitError, err
+		}
+		if err := p.confirmEvidence(ctx, tip, requestOID, verdictOID); err != nil {
+			return exitError, err
+		}
+		return exitOK, nil
 	}
 	return exitNoWork, nil
 }

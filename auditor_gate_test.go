@@ -11,6 +11,7 @@ import (
 )
 
 func TestAuditorRejectsMissingAndMalformedNotes(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	t.Run("missing verdict", func(t *testing.T) {
 		root, sha := newAdvancedAuditFixture(t, "")
 		addValidReviewAndChecks(t, root, sha, "Iron Forest Builder", "builder@forest.invalid")
@@ -50,6 +51,7 @@ func TestAuditorRejectsMissingAndMalformedNotes(t *testing.T) {
 }
 
 func TestAuditorRejectsEveryWrongWriterWithoutAdvancingLastMaster(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	cases := []struct {
 		name string
 		ref  string
@@ -122,6 +124,7 @@ func TestAuditorRejectsEveryWrongWriterWithoutAdvancingLastMaster(t *testing.T) 
 }
 
 func TestAuditorRejectsPaddedNoteActorsAtAuditEntrypoint(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	tests := []struct {
 		name   string
 		prefix string
@@ -264,6 +267,7 @@ func TestAuditorRequiresExactlyOneValidReviewRequest(t *testing.T) {
 }
 
 func TestAuditorBindsNoteIdentityToExactTargetPath(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	other := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD^{tree}")))
@@ -295,6 +299,7 @@ func TestAuditorBindsNoteIdentityToExactTargetPath(t *testing.T) {
 }
 
 func TestAuditorFlagsDuplicateNoteTreePaths(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	payloadPath := filepath.Join(t.TempDir(), "payload")
@@ -339,6 +344,7 @@ func TestAuditorFlagsDuplicateNoteTreePaths(t *testing.T) {
 }
 
 func TestAuditorIgnoresLocalOnlyWorkflowNotes(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, sha := newAdvancedAuditFixture(t, "")
 	addNote(t, root, reviewRequestNoteRef, sha, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-local","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`, "Iron Forest Builder", "builder@forest.invalid")
 	addNote(t, root, checksNoteRef, sha, `{"schema":"forest.checks.v1","revision":"`+sha+`","results":[{"name":"test","ok":true,"exit":0}],"time":"2026-08-10T00:00:00Z"}`, "Iron Forest Verifier", "verifier@forest.invalid")

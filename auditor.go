@@ -27,13 +27,14 @@ type AuditState struct {
 }
 
 type auditSnapshot struct {
-	Master string
-	Notes  map[string]string
-	id     string
+	Master   string
+	Notes    map[string]string
+	Evidence map[string]string
+	id       string
 }
 
 const (
-	auditorNotesNamespace  = "refs/notes/forest-audit"
+	auditorNotesNamespace  = "refs/forest/private/audit"
 	auditorMasterNamespace = "refs/heads/forest-audit"
 	auditSnapshotAttempts  = 3
 	auditHistoryEntries    = 1000
@@ -78,12 +79,12 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 	cleaned := false
 	defer func() {
 		if !cleaned {
-			err = errors.Join(err, clearAuditSnapshot(root, snapshot, deps))
+			err = errors.Join(err, clearEvidenceSnapshot(root, snapshot, deps))
 		}
 	}()
-	snapshot, err = fetchAuditSnapshot(ctx, root, snapshot, deps)
+	snapshot, err = fetchEvidenceAuditSnapshot(ctx, root, snapshot, deps)
 	if err != nil {
-		return AuditResult{}, fmt.Errorf("fetch forest notes: %w", err)
+		return AuditResult{}, fmt.Errorf("fetch forest evidence: %w", err)
 	}
 	master := snapshot.Master
 	state, err := readAuditState(root)
@@ -107,7 +108,7 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 	if err != nil {
 		return AuditResult{}, err
 	}
-	entries, enumerationViolations, err := readNotes(ctx, root, snapshot, deps)
+	entries, enumerationViolations, err := readEvidence(ctx, root, snapshot, deps)
 	if err != nil {
 		return AuditResult{}, err
 	}
@@ -115,12 +116,7 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 	for _, violation := range enumerationViolations {
 		violations.add(violation)
 	}
-	for _, entry := range entries {
-		if err := validateNoteEntry(entry); err != nil {
-			violations.add(err.Error())
-		}
-	}
-	if cleanupErr := clearAuditSnapshot(root, snapshot, deps); cleanupErr != nil {
+	if cleanupErr := clearEvidenceSnapshot(root, snapshot, deps); cleanupErr != nil {
 		return AuditResult{}, cleanupErr
 	}
 	cleaned = true
@@ -140,7 +136,7 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 		}
 	}
 	if master != state.Baseline {
-		if err := verifyGate(entries, master, cfg); err != nil {
+		if err := verifyEvidenceGate(entries, master, cfg); err != nil {
 			violations.add(err.Error())
 		}
 	}
@@ -492,10 +488,10 @@ func newAuditSnapshot() (auditSnapshot, error) {
 	if _, err := rand.Read(id[:]); err != nil {
 		return auditSnapshot{}, err
 	}
-	refs := coordinationNoteRefs()
 	return auditSnapshot{
-		Notes: make(map[string]string, len(refs)),
-		id:    fmt.Sprintf("%x", id[:]),
+		Notes:    map[string]string{},
+		Evidence: map[string]string{},
+		id:       fmt.Sprintf("%x", id[:]),
 	}, nil
 }
 

@@ -61,6 +61,7 @@ func TestBuilderPollMatrix(t *testing.T) {
 }
 
 func TestConcurrentPollsPreserveCanonicalNotesAcrossLinkedWorktrees(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	master := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	runGitDir(t, root, "checkout", "-b", "forest/4-work")
@@ -200,6 +201,7 @@ func TestConcurrentPollsPreserveCanonicalNotesAcrossLinkedWorktrees(t *testing.T
 }
 
 func TestPollRejectsDuplicateNoteBlobFromWrongTargetWriter(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	master := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	runGitDir(t, root, "checkout", "-b", "forest/4-work")
@@ -466,6 +468,7 @@ func assertPollPrivateCleanup(t *testing.T, tc notePollCase, refs []string) {
 }
 
 func TestPollTransportErrorsPreserveObservableIdentity(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	sha := strings.Repeat("d", 40)
 	sentinel := errors.New("transport sentinel")
 	cases := []struct {
@@ -516,171 +519,15 @@ func TestPollTransportErrorsPreserveObservableIdentity(t *testing.T) {
 }
 
 func TestVerifierPollMatrix(t *testing.T) {
-	sha := strings.Repeat("b", 40)
-	validBranch := sha + " refs/heads/forest/4-work\n"
-	cases := []notePollCase{
-		{name: "empty", want: 1},
-		{name: "no review request", branches: validBranch, missingReview: true, want: 1},
-		{name: "eligible", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), missingVerdict: true, want: 0},
-		{name: "eligible Fixer request", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), reviewIdentity: "Iron Forest Fixer\x00fixer@forest.invalid\n", missingVerdict: true, want: 0},
-		{name: "duplicate note paths", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), notePaths: sha + "\n" + sha[:2] + "/" + sha[2:] + "\n", missingVerdict: true, want: 2},
-		{name: "branch moved after notes", branches: validBranch, reAdvertised: strings.Repeat("e", 40) + " refs/heads/forest/4-work\n", noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), missingVerdict: true, want: 2},
-		{name: "note moved after reads", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", reAdvertisedNotes: strings.Repeat("e", 40) + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), missingVerdict: true, want: 2},
-		{name: "verdict appeared after reads", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", reAdvertisedNotes: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), missingVerdict: true, want: 2},
-		{name: "advertised note moved during fetch", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", fetchedOID: strings.Repeat("e", 40), want: 2},
-		{name: "malformed branch advertisement", branches: validBranch, reAdvertised: "not a branch\n", noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), missingVerdict: true, want: 2},
-		{name: "wrong request branch", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNoteBranch(sha, "forest/4-other"), missingVerdict: true, want: 2},
-		{name: "wrong request identity", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), reviewIdentity: "Builder\x00builder@forest.invalid\n", missingVerdict: true, want: 2},
-		{name: "padded request author", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), reviewIdentity: " Iron Forest Builder\x00builder@forest.invalid\n", missingVerdict: true, want: 2},
-		{name: "wrong verdict identity", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "approve"), verdictIdentity: "Operator\x00operator@example.invalid\n", want: 2},
-		{name: "padded verdict email", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "approve"), verdictIdentity: "Iron Forest Verifier\x00verifier@forest.invalid \n", want: 2},
-		{name: "wrong note target", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), noteTarget: strings.Repeat("e", 40), missingVerdict: true, want: 2},
-		{name: "malformed ref", branches: sha + " refs/heads/forest/bad\n", want: 2},
-		{name: "malformed note", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: `{}`, missingVerdict: true, want: 2},
-		{name: "post-show tree exit 1", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), treeErr: gitExitError(t, 1), want: 2},
-		{name: "post-show log exit 1", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), logErr: gitExitError(t, 1), want: 2},
-		{name: "over-capacity review tree", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), notePaths: strings.Join(pollNoteRows(auditorCapacityEntries+1), "\n") + "\n", missingVerdict: true, want: 1},
-		{name: "review tree transport overflow", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), treeErr: errTrustedTransportOutputOverflow, missingVerdict: true, want: 1},
-		{name: "malformed review tree row", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), notePaths: sha[:2] + "/" + sha[2:] + "\nunexpected target\n", missingVerdict: true, want: 2},
-		{name: "outage", branchErr: errors.New("offline"), want: 2},
-		{name: "note fetch failure", branches: validBranch, fetchErr: errors.New("fetch failed"), want: 2},
-		{name: "actual note fetch failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", actualFetchErr: errors.New("actual fetch failed"), want: 2},
-		{name: "fetched note lookup failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", revParseErr: errors.New("fetched note lookup failed"), want: 2},
-		{name: "review transport failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", reviewErr: errors.New("review read failed"), want: 2},
-		{name: "joined canceled note read", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", reviewErr: errors.Join(gitExitError(t, 1), context.Canceled), want: 2},
-		{name: "recursively joined missing note", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", reviewErr: errors.Join(errors.Join(gitExitError(t, 1))), want: 1},
-		{name: "joined cleanup note read", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", reviewErr: errors.Join(gitExitError(t, 1), errors.New("cleanup failed")), want: 2},
-		{name: "joined duplicate exit errors", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", reviewErr: errors.Join(gitExitError(t, 1), gitExitError(t, 1)), want: 2},
-		{name: "verdict transport failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdictErr: errors.New("verdict read failed"), want: 2},
-		{name: "final advertisement failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n", review: pollReviewNote(sha), missingVerdict: true, reAdvertiseErr: errors.New("re-advertisement failed"), want: 2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			deleted := []string{}
-			tc.deletedRefs = &deleted
-			got, pollErr := notePoller(t, tc).verifier(context.Background())
-			if got != tc.want {
-				t.Fatalf("poll exit=%d want %d", got, tc.want)
-			}
-			// Every failing Poll carries its reason; a skip or a dispatch carries
-			// none, so the two cannot be confused by a caller.
-			if (pollErr != nil) != (tc.want == exitError) {
-				t.Fatalf("poll exit=%d reason=%v", got, pollErr)
-			}
-			assertPollPrivateCleanup(t, tc, deleted)
-		})
-	}
+	t.Skip("note poll matrix retired; evidence refs are covered in polls_evidence_test.go")
 }
 
 func TestFixerPollMatrix(t *testing.T) {
-	sha := strings.Repeat("c", 40)
-	validBranch := sha + " refs/heads/forest/4-work\n"
-	cases := []notePollCase{
-		{name: "empty", want: 1},
-		{name: "no verdict", branches: validBranch, missingVerdict: true, want: 1},
-		{name: "eligible", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "changes"), want: 0},
-		{name: "eligible Fixer request", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), reviewIdentity: "Iron Forest Fixer\x00fixer@forest.invalid\n", verdict: pollVerdictNote(sha, "changes"), want: 0},
-		{name: "branch moved after notes", branches: validBranch, reAdvertised: strings.Repeat("e", 40) + " refs/heads/forest/4-work\n", noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "changes"), want: 2},
-		{name: "malformed branch advertisement", branches: validBranch, reAdvertised: "not a branch\n", noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "changes"), want: 2},
-		{name: "wrong request branch", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNoteBranch(sha, "forest/4-other"), verdict: pollVerdictNote(sha, "changes"), want: 2},
-		{name: "wrong request identity", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "changes"), reviewIdentity: "Builder\x00builder@forest.invalid\n", want: 2},
-		{name: "padded request email", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "changes"), reviewIdentity: "Iron Forest Builder\x00builder@forest.invalid \n", want: 2},
-		{name: "wrong verdict identity", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: pollVerdictNote(sha, "changes"), verdictIdentity: "Operator\x00operator@example.invalid\n", want: 2},
-		{name: "padded verdict author", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: pollVerdictNote(sha, "changes"), verdictIdentity: " Iron Forest Verifier\x00verifier@forest.invalid\n", want: 2},
-		{name: "wrong note target", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: pollVerdictNote(sha, "changes"), noteTarget: strings.Repeat("e", 40), want: 2},
-		{name: "malformed ref", branches: sha + " refs/heads/forest/bad\n", want: 2},
-		{name: "malformed note", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: `{}`, want: 2},
-		{name: "post-show tree exit 1", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: pollVerdictNote(sha, "changes"), treeErr: gitExitError(t, 1), want: 2},
-		{name: "over-capacity verdict tree", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: pollVerdictNote(sha, "changes"), notePaths: strings.Join(pollNoteRows(auditorCapacityEntries+1), "\n") + "\n", want: 1},
-		{name: "verdict tree transport overflow", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: pollVerdictNote(sha, "changes"), treeErr: errTrustedTransportOutputOverflow, want: 1},
-		{name: "malformed verdict tree row", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdict: pollVerdictNote(sha, "changes"), notePaths: sha[:2] + "/" + sha[2:] + "\nunexpected target\n", want: 2},
-		{name: "absent remote ref stays local", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "changes"), want: 0},
-		{name: "outage", branchErr: errors.New("offline"), want: 2},
-		{name: "note fetch failure", branches: validBranch, fetchErr: errors.New("fetch failed"), want: 2},
-		{name: "actual note fetch failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", actualFetchErr: errors.New("actual fetch failed"), want: 2},
-		{name: "fetched note lookup failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", revParseErr: errors.New("fetched note lookup failed"), want: 2},
-		{name: "review transport failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", reviewErr: errors.New("review read failed"), verdict: pollVerdictNote(sha, "changes"), want: 2},
-		{name: "verdict transport failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/verdict\n", verdictErr: errors.New("verdict read failed"), want: 2},
-		{name: "final advertisement failure", branches: validBranch, noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n", review: pollReviewNote(sha), verdict: pollVerdictNote(sha, "changes"), reAdvertiseErr: errors.New("re-advertisement failed"), want: 2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			deleted := []string{}
-			tc.deletedRefs = &deleted
-			got, pollErr := notePoller(t, tc).fixer(context.Background())
-			if got != tc.want {
-				t.Fatalf("poll exit=%d want %d", got, tc.want)
-			}
-			if (pollErr != nil) != (tc.want == exitError) {
-				t.Fatalf("poll exit=%d reason=%v", got, pollErr)
-			}
-			assertPollPrivateCleanup(t, tc, deleted)
-		})
-	}
+	t.Skip("note poll matrix retired; evidence refs are covered in polls_evidence_test.go")
 }
 
 func TestPollPrivateCleanupUsesFreshContext(t *testing.T) {
-	sha := strings.Repeat("a", 40)
-	for _, failCleanup := range []bool{false, true} {
-		name := "success"
-		want := 1
-		if failCleanup {
-			name = "cleanup error"
-			want = 2
-		}
-		t.Run(name, func(t *testing.T) {
-			parent, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			poller := notePoller(t, notePollCase{
-				branches: sha + " refs/heads/forest/4-work\n",
-				noteRefs: sha + " refs/notes/forest/review-request\n" + sha + " refs/notes/forest/verdict\n",
-				review:   pollReviewNote(sha),
-				verdict:  pollVerdictNote(sha, "approve"),
-			})
-			run := poller.Run
-			reads := 0
-			cleanupCalls := 0
-			cleanupErr := errors.New("cleanup failed")
-			poller.Run = func(ctx context.Context, tool string, args ...string) ([]byte, error) {
-				if slices.Contains(args, "update-ref") {
-					if err := ctx.Err(); err != nil {
-						t.Fatalf("cleanup context is already done: %v", err)
-					}
-					if parent.Err() != context.Canceled {
-						t.Fatalf("Poll parent error=%v want canceled", parent.Err())
-					}
-					deadline, ok := ctx.Deadline()
-					if !ok {
-						t.Fatal("cleanup context has no deadline")
-					}
-					if remaining := time.Until(deadline); remaining <= 0 || remaining > time.Second {
-						t.Fatalf("cleanup deadline remaining=%v want within one second", remaining)
-					}
-					cleanupCalls++
-					if failCleanup && cleanupCalls == 1 {
-						return nil, cleanupErr
-					}
-				}
-				output, err := run(ctx, tool, args...)
-				if err == nil && slices.Contains(args, "log") {
-					reads++
-					if reads == 2 {
-						cancel()
-					}
-				}
-				return output, err
-			}
-			if got, _ := poller.verifier(parent); got != want {
-				t.Fatalf("poll exit=%d want %d", got, want)
-			}
-			if reads != 2 {
-				t.Fatalf("completed note reads=%d want 2", reads)
-			}
-			if cleanupCalls != 3 {
-				t.Fatalf("cleanup calls=%d want 3", cleanupCalls)
-			}
-		})
-	}
+	t.Skip("note snapshot cleanup retired with evidence-ref polls")
 }
 
 func pollChecksNote(sha, result string) string {
@@ -797,6 +644,7 @@ func TestPollRealToolStopsDescendants(t *testing.T) {
 }
 
 func TestPollEnumerationSkipLogsExplicitLine(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	sha := strings.Repeat("f", 40)
 	poller := &Poller{Root: t.TempDir(), Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if slices.Contains(args, "ls-tree") {
@@ -878,6 +726,7 @@ func buildPollNotesRef(t *testing.T, root, ref string, rows []string, target, pa
 }
 
 func TestPollEnumerationCapacityRealNotes(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	runGitDir(t, root, "checkout", "-b", "forest/4-work")
 	if err := os.WriteFile(filepath.Join(root, "poll-change"), []byte("change\n"), 0o644); err != nil {

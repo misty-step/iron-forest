@@ -177,6 +177,7 @@ func TestCLISignalsStopPollDescendants(t *testing.T) {
 }
 
 func TestPollSupervisorCancellationDrainsPrivateSnapshotCleanup(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	const helper = "FOREST_POLL_DRAIN_HELPER"
 	if os.Getenv(helper) == "1" {
 		if err := os.WriteFile(os.Getenv("FOREST_POLL_PID"), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {

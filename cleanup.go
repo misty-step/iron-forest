@@ -126,10 +126,11 @@ func cleanupReservedRefs(ctx context.Context, root string, runner *Runner) error
 	return nil
 }
 
-func reservedRefNamespaces() [4]string {
-	return [4]string{
+func reservedRefNamespaces() [5]string {
+	return [5]string{
 		runnerPrivateNotesPrefix,
 		pollNotesNamespace + "/",
+		"refs/notes/forest-audit/",
 		auditorNotesNamespace + "/",
 		auditorMasterNamespace + "/",
 	}

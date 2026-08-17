@@ -66,6 +66,14 @@ def note_add(workspace: Path, ref: str, target: str, payload: dict, actor: str, 
         fanout_notes(workspace, ref)
 
 
+def evidence_push(workspace: Path, kind: str, sha: str, payload: dict, actor: str) -> None:
+    identity(workspace, actor)
+    blob = git(workspace, "hash-object", "-w", "--stdin", input=json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+    tree = git(workspace, "mktree", input=f"100644 blob {blob}\t{kind}.json\n")
+    commit = git(workspace, "commit-tree", tree, "-m", f"eval {kind} {sha}")
+    git(workspace, "push", "origin", f"{commit}:refs/forest/v1/{kind}/{sha}")
+
+
 def fanout_notes(workspace: Path, ref: str) -> None:
     old_tip = git(workspace, "rev-parse", ref)
     entries: dict[str, list[tuple[str, str]]] = {}
@@ -185,6 +193,8 @@ def main() -> None:
         }
         note_add(workspace, "refs/notes/forest/review-request", candidate, review_request, request_actor, scenario.get("note_layout", "flat"))
         push_note(workspace, "refs/notes/forest/review-request")
+        evidence_push(workspace, "request", candidate, review_request, request_actor)
+
 
         if scenario["role"] == "fixer":
             checks = {
@@ -204,6 +214,9 @@ def main() -> None:
             note_add(workspace, "refs/notes/forest/verdict", candidate, verdict, "verifier", scenario.get("note_layout", "flat"))
             push_note(workspace, "refs/notes/forest/checks")
             push_note(workspace, "refs/notes/forest/verdict")
+            evidence_push(workspace, "checks", candidate, checks, "verifier")
+            evidence_push(workspace, "verdict", candidate, verdict, "verifier")
+
 
         git(workspace, "checkout", "master")
 

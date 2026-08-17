@@ -154,13 +154,37 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		if input.Role == "fixer" {
 			expectedBranch = input.Rejected
 		}
-		pushErr := gitRun(ctx, input.Root, "push", "--atomic",
-			"--force-with-lease="+reviewRequestNoteRef+":"+expectedNote,
-			"--force-with-lease=refs/heads/"+input.Branch+":"+expectedBranch,
-			"origin",
-			privateRef+":"+reviewRequestNoteRef,
-			revision+":refs/heads/"+input.Branch,
-		)
+		requestRef := evidenceRequestRefPrefix + revision
+		existingRequest, err := remoteOID(ctx, input.Root, requestRef)
+		if err != nil {
+			return publishReviewRequestResult{}, err
+		}
+		if existingRequest != "" {
+			got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json")
+			if err != nil {
+				return publishReviewRequestResult{}, err
+			}
+			if !bytes.Equal(got, payload) {
+				return publishReviewRequestResult{}, conflictError("conflicting request evidence for %s", revision)
+			}
+		}
+		pushArgs := []string{
+			"push", "--atomic",
+			"--force-with-lease=" + reviewRequestNoteRef + ":" + expectedNote,
+			"--force-with-lease=refs/heads/" + input.Branch + ":" + expectedBranch,
+		}
+		if existingRequest == "" {
+			name, email := publicationIdentity(input.Role)
+			requestCommit, err := commitEvidenceAs(ctx, input.Root, "request.json", payload, "forest request "+revision, name, email)
+			if err != nil {
+				return publishReviewRequestResult{}, err
+			}
+			pushArgs = append(pushArgs, "--force-with-lease="+requestRef+":")
+			pushArgs = append(pushArgs, "origin", privateRef+":"+reviewRequestNoteRef, revision+":refs/heads/"+input.Branch, requestCommit+":"+requestRef)
+		} else {
+			pushArgs = append(pushArgs, "origin", privateRef+":"+reviewRequestNoteRef, revision+":refs/heads/"+input.Branch)
+		}
+		pushErr := gitRun(ctx, input.Root, pushArgs...)
 
 		if pushErr == nil {
 			return publishReviewRequestResult{Status: "published", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil

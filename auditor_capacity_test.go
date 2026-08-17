@@ -203,6 +203,7 @@ func TestViolationCollectorTruncatesOversizedEntry(t *testing.T) {
 }
 
 func TestAuditorFailsClosedOnRealOverCapacityRef(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := newAdvancedAuditFixture(t, "")
 	ref := reviewRequestNoteRef
 	index := filepath.Join(t.TempDir(), "index")
@@ -249,6 +250,7 @@ func TestAuditorFailsClosedOnRealOverCapacityRef(t *testing.T) {
 }
 
 func TestAuditorBoundsOversizedPayloadAndDeduplicatesHistory(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, sha := newAdvancedAuditFixture(t, "")
 	big := strings.Repeat("x", auditHistoryEntryBytes+1)
 	addRemoteNote(t, root, reviewRequestNoteRef, sha, big, "Iron Forest Builder", "builder@forest.invalid")
@@ -549,6 +551,7 @@ func TestReadNotesFlagsShowMissingNoteAndContinues(t *testing.T) {
 }
 
 func TestAuditorFlagsCorruptNoteListState(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	cases := []struct {
 		name     string
 		mode     string
@@ -599,6 +602,7 @@ exec "$AUDIT_REAL_GIT" -C "$root" "$@"
 }
 
 func TestAuditorFlagsMissingNoteObject(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	ref := reviewRequestNoteRef
@@ -618,6 +622,7 @@ func TestAuditorFlagsMissingNoteObject(t *testing.T) {
 }
 
 func TestAuditorContinuesValidNotesAfterCorruptTreeRow(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, sha := newAdvancedAuditFixture(t, "")
 	addGateNotes(t, root, sha, `[{"name":"test","ok":true,"exit":0}]`)
 	fields := strings.Fields(string(runGitDir(t, root, "notes", "--ref="+reviewRequestNoteRef, "list")))

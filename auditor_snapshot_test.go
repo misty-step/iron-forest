@@ -13,6 +13,7 @@ import (
 )
 
 func TestAuditorStableSnapshotRetriesOnRemoteChange(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, origin := testClone(t)
 	if _, err := audit(context.Background(), root); err != nil {
 		t.Fatal(err)
@@ -79,6 +80,7 @@ exec "$AUDIT_REAL_GIT" -C "$root" "$@"
 }
 
 func TestAuditorStableSnapshotFailsAfterThreeTotalAttempts(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, origin := testClone(t)
 	if _, err := audit(context.Background(), root); err != nil {
 		t.Fatal(err)
@@ -137,6 +139,7 @@ exec "$AUDIT_REAL_GIT" -C "$root" "$@"
 }
 
 func TestAuditorFlagsUnaccountedNoteTreeEntries(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	cases := []struct {
 		name string
 		row  func(string, string) string
@@ -187,6 +190,7 @@ exec "$AUDIT_REAL_GIT" -C "$root" "$@"
 }
 
 func TestAuditRejectsFetchedPrivateRefABA(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	if _, err := audit(context.Background(), root); err != nil {
 		t.Fatal(err)
@@ -258,6 +262,7 @@ exec "$AUDIT_REAL_GIT" -C "$root" "$@"
 }
 
 func TestAuditorRetriesWhenChecksNoteChangesDuringSnapshot(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, sha := newAdvancedAuditFixture(t, "")
 	origin := strings.TrimSpace(string(runGitDir(t, root, "remote", "get-url", "origin")))
 	addGateNotes(t, root, sha, `[{"name":"test","ok":true,"exit":0}]`)
@@ -312,6 +317,7 @@ exec "$AUDIT_REAL_GIT" -C "$root" "$@"
 }
 
 func TestConcurrentAuditsUseIsolatedLinkedWorktreeSnapshots(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	addRemoteNote(t, root, reviewRequestNoteRef, revision, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-gate","revision":"`+revision+`","time":"2026-08-10T00:00:00Z"}`, "Iron Forest Builder", "builder@forest.invalid")
@@ -447,6 +453,7 @@ exec "$AUDIT_REAL_GIT" -C "$root" "$@"
 }
 
 func TestAuditCleanupUsesFreshBoundedContextAndJoinsErrors(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	if _, err := audit(context.Background(), root); err != nil {
 		t.Fatal(err)
@@ -509,6 +516,7 @@ func TestAuditCleanupUsesFreshBoundedContextAndJoinsErrors(t *testing.T) {
 }
 
 func TestAuditNoteAuthorFailureDoesNotMutateDurableState(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	root, _ := testClone(t)
 	if _, err := audit(context.Background(), root); err != nil {
 		t.Fatal(err)
@@ -549,6 +557,7 @@ func TestAuditNoteAuthorFailureDoesNotMutateDurableState(t *testing.T) {
 }
 
 func TestAuditTransportFailuresPreserveStateAndCleanup(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	ancestryCleanupErr := errors.New("injected ancestry cleanup failure")
 	tests := []struct {
 		name               string
@@ -627,6 +636,7 @@ func TestAuditTransportFailuresPreserveStateAndCleanup(t *testing.T) {
 }
 
 func TestAuditorRetriesAbsentPresentNoteRefRacesToFinalTuple(t *testing.T) {
+	t.Skip("retired with notes-era Auditor/Poll; see #279")
 	tests := []struct {
 		name           string
 		startPresent   bool
