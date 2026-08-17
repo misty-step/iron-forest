@@ -2,9 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
+
+func newPrivateEvidenceRef(prefix string) (string, error) {
+	var id [8]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(id[:]), nil
+}
 
 func evidenceKindRef(kind, sha string) string {
 	switch kind {
@@ -48,7 +58,10 @@ func (p *Poller) evidencePayload(ctx context.Context, kind, sha string, roles ..
 	if oid == "" {
 		return nil, pollMissingNote
 	}
-	local := "refs/forest/private/poll/" + kind + "/" + sha
+	local, err := newPrivateEvidenceRef("refs/forest/private/poll/" + kind + "/")
+	if err != nil {
+		return nil, err
+	}
 	if _, err := p.git(ctx, "fetch", "origin", ref+":"+local); err != nil {
 		return nil, err
 	}

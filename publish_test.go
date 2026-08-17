@@ -69,6 +69,26 @@ func TestPublishReviewRequestCreatesBranchAndNote(t *testing.T) {
 	}
 }
 
+func TestPublishReviewRequestConflictsMismatchedRequestRef(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1-ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	other := `{"schema":"forest.review-request.v1","issue":9,"branch":"forest/1-ready","revision":"` + revision + `","time":"2026-08-17T00:00:00Z"}` + "\n"
+	pushEvidence(t, root, "request", revision, other, "Iron Forest Builder", "builder@forest.invalid")
+	t.Setenv("FOREST_RUN_ID", "1-builder")
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root:        root,
+		Role:        "builder",
+		Branch:      "forest/1-ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1-ready"),
+		RunID:       "1-builder",
+	})
+	if !publishConflict(err) {
+		t.Fatalf("error=%v, want conflicting request evidence", err)
+	}
+}
+
 func TestPublishReviewRequestIgnoresHostileGitIdentity(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)

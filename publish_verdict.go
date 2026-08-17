@@ -216,7 +216,10 @@ func identicalEvidence(ctx context.Context, root, checksRef, verdictRef, checksO
 }
 
 func evidenceBlob(ctx context.Context, root, ref, name string) ([]byte, error) {
-	local := "refs/forest/private/compare/" + strings.TrimPrefix(ref, "refs/forest/")
+	local, err := newPrivateEvidenceRef("refs/forest/private/compare/")
+	if err != nil {
+		return nil, err
+	}
 	if err := gitRun(ctx, root, "fetch", "origin", ref+":"+local); err != nil {
 		return nil, err
 	}

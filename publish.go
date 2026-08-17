@@ -159,6 +159,15 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		if err != nil {
 			return publishReviewRequestResult{}, err
 		}
+		if existingRequest != "" {
+			got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json")
+			if err != nil {
+				return publishReviewRequestResult{}, err
+			}
+			if !bytes.Equal(got, payload) {
+				return publishReviewRequestResult{}, conflictError("conflicting request evidence for %s", revision)
+			}
+		}
 		pushArgs := []string{
 			"push", "--atomic",
 			"--force-with-lease=" + reviewRequestNoteRef + ":" + expectedNote,
