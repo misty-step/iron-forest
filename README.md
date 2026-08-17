@@ -157,32 +157,27 @@ the operator chooses.
 
 ## Git coordination
 
-Git is the coordination authority. Branches, commits, and notes under
-`refs/notes/forest/*` hold workflow state. GitHub Issues are the Tracker.
-Pull requests are disposable human Projections, never authority.
+Git is the coordination authority. Live workflow state is create-only evidence
+under `refs/forest/v1/{request,checks,verdict}/<sha>`, plus `forest/*` branches
+and `master`. GitHub Issues are the Tracker. Pull requests are disposable
+human Projections, never authority.
 
+Builder and Fixer call `forest publish review-request`. The Kernel publishes
+the branch and a request evidence commit, and still dual-writes
+`refs/notes/forest/review-request`. Verifier calls `forest publish verdict`.
+The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
+`master` in the same atomic push. See [ADR 0021](docs/adr/0021-kernel-review-request-publication.md)
+and [ADR 0022](docs/adr/0022-kernel-verdict-publication.md).
 
-Every record binds to an exact Revision. The schema and writer sets are defined
-in [ADR 0009](docs/adr/0009-git-coordination-authority.md): Builder and Fixer
-write review requests, while Verifier writes Checks and Verdict notes.
-
-Notes are write-once. Builder and Fixer write the review-request payload, then
-call `forest publish review-request`. The Kernel adds the note with
-`git notes ... add -F`, stamps the role identity, and publishes the branch and
-note through one normal `git push --atomic`. Canonical note race recovery
-permits at most three total atomic attempts; a branch race stops. For a
-`changes` Verdict, the Verifier still publishes Checks and Verdict together
-and permits at most three total atomic attempts after a canonical note race.
-For `approve`, the Verifier makes exactly one non-retryable atomic attempt
-carrying Checks, Verdict, and the exact fast-forward `master` advance. The
-existing review-request remains durable Gate evidence; no standalone master
-push is valid. See [ADR 0021](docs/adr/0021-kernel-review-request-publication.md)
-and [ADR 0009](docs/adr/0009-git-coordination-authority.md).
+Which identity may create or update which ref is in
+[onboarding](docs/onboarding-managed-repo.md#forge-identities-and-references).
+A read-only forge credential breaks every declaration. Branch protection cannot
+see evidence refs. Restrict `master` with a forge ruleset.
 
 Agents own Issue selection, implementation, and the decision to publish.
-The Kernel owns the review-request race loop. The Verifier still owns Checks,
-Verdict, and merge. See [managed-repository
+The Kernel owns publication. See [managed-repository
 onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
+
 
 ## Poll protocol
 
@@ -193,50 +188,33 @@ than 1, timeout, or malformed behavior records an unhealthy trigger. See
 [ADR 0012](docs/adr/0012-poll-trigger-protocol.md) and the
 [onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
 
-Verifier and Fixer Poll note enumeration is bounded at 500 entries per
-canonical notes tree. A larger tree, or a note-enumeration transport-output
-overflow, is a healthy exit-1 skip with an explicit log line. It never marks
-the trigger unhealthy; the Auditor reports durable note growth as a bounded
-policy violation.
+Verifier and Fixer Poll `ls-remote` evidence refs for each `forest/*` tip.
+Leftover `refs/notes/forest/*` are unread. A missing evidence ref is no work.
 
 ## Merge Gate
 
-The Gate requires exactly one valid Builder-or-Fixer review-request, passing
-Checks, and an approving Verdict for the same exact Revision, plus a
-fast-forward of `master` to that Revision. The approve publication is one atomic
-push containing Checks, Verdict, and the exact `master` advance. The existing
-review-request is not republished. The merge never uses force. The Gate is a
-role contract. Except for the trusted first `master` baseline, the Auditor
-checks its observable final state after the Effect; it does not enforce it. See [ADR
-0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md) for the Gate and its
-accepted client-side risks.
+The Gate requires one valid request evidence ref, passing Checks, and an
+approve Verdict for the same Revision, plus a fast-forward of `master` to that
+Revision. `forest publish verdict` performs that push. The existing request is
+not republished. The merge never uses force. Except for the trusted first
+`master` baseline, the Auditor checks the observable final state after the
+Effect; it does not enforce it. See [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
 
 ## Auditor and trust boundary
 
 The Kernel Auditor is read-only. The first observed remote `master` tip becomes
-a trusted baseline and is not Gate-checked. In each bounded stable snapshot,
-ancestry and Gate checks target only the final observed remote `master` tip.
-Schema and actor checks cover each snapshotted `refs/notes/forest/*` entry
-within a 500-entry-per-ref capacity bound. A ref that exceeds that bound, a
-note enumeration or note-show transport-output overflow, a note payload
-above 64 KiB, or malformed or unresolvable canonical note state (malformed
-list or tree rows, a listed note without its tree entry, a mismatched,
-unexpected, or duplicate tree entry, a non-SHA path, a non-blob entry, or a
-note object missing from the object database) becomes a bounded persisted
-policy violation and a non-pass Audit
-result, never an AuditError. Current Audit results retain at most 999 concrete
-violation entries, each at most 1 KiB, plus one exact omission summary. Remote
-history
-cannot reveal a tip that advanced again between audits; such intermediate tips
-are not independently Gate-checked. The audit covers only observable final Git
-state. It cannot prove check execution, atomic push ordering, or force absence.
+a trusted baseline and is not Gate-checked. Each snapshot fetches
+`refs/forest/v1/*` and checks schema, committer identity, and the Gate on the
+final remote `master`. Leftover notes are unread. The Auditor cannot prove
+check execution, atomic push ordering, or force absence.
 
 The Auditor runs after a completed dispatch. It stores current violations in
 `audit.json` and marks the last Audit as `violations` in `forest status`. It
 appends violations to `audit.log` only when the current set differs from the
 prior persisted set. A passing Audit clears current violations and adds no
-history. Audit history retains exactly the latest 1,000 violation entries. The
-Auditor never blocks a merge. Startup and idle Poll skips do not start an Audit.
+history. The Auditor never blocks a merge. Startup and idle Poll skips do not
+start an Audit.
+
 
 `audit show` and `status` publish these audit keys:
 
