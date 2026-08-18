@@ -135,10 +135,8 @@ func runRunCancel(rest []string, flags cliFlags) cliOutcome {
 	if strings.TrimSpace(runID) == "" {
 		return failure(exitInvalidArg, "run id must not be empty")
 	}
-	if _, found, err := FindRun(flags.root, runID); err != nil {
-		return failure(exitError, "%s", err)
-	} else if found {
-		return cancelRunOutcome(runID, "already_finished")
+	if outcome, done := cancelAlreadyFinished(flags.root, runID); done {
+		return outcome
 	}
 
 	groups, err := findLiveRunProcessGroups(flags.root, runID)
@@ -146,8 +144,10 @@ func runRunCancel(rest []string, flags cliFlags) cliOutcome {
 		return failure(exitError, "%s", err)
 	}
 	if len(groups) == 0 {
-		if hasRunCancellationMarker(flags.root, runID) {
-			return cancelRunOutcome(runID, "already_finished")
+		// The Runner may have appended the Ledger row and removed the marker
+		// after the first lookup. Check both again before saying not found.
+		if outcome, done := cancelAlreadyFinished(flags.root, runID); done {
+			return outcome
 		}
 		return failure(exitNotFound, "run %q not found; see forest run list", runID)
 	}
@@ -165,6 +165,18 @@ func runRunCancel(rest []string, flags cliFlags) cliOutcome {
 		return failure(exitError, "%s", stopErr)
 	}
 	return cancelRunOutcome(runID, "cancelled")
+}
+
+func cancelAlreadyFinished(root, runID string) (cliOutcome, bool) {
+	if _, found, err := FindRun(root, runID); err != nil {
+		return failure(exitError, "%s", err), true
+	} else if found {
+		return cancelRunOutcome(runID, "already_finished"), true
+	}
+	if hasRunCancellationMarker(root, runID) {
+		return cancelRunOutcome(runID, "already_finished"), true
+	}
+	return cliOutcome{}, false
 }
 
 func cancelRunOutcome(runID, state string) cliOutcome {

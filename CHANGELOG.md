@@ -1,5 +1,7 @@
 # Changelog
 
+- 2026-08-18: A second `forest run cancel` after the Runner records the
+  Ledger row reports `already_finished` instead of not-found (#289).
 - 2026-08-18: Poll and Auditor drop leftover notes-era read machinery.
   They still ignore `refs/notes/forest/*`. Publish still dual-writes
   the request note (#287).
