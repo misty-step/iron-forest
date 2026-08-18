@@ -1,5 +1,8 @@
 # Changelog
 
+- 2026-08-18: Poll and Auditor drop leftover notes-era read machinery.
+  They still ignore `refs/notes/forest/*`. Publish still dual-writes
+  the request note (#287).
 - 2026-08-18: Gate proof on disposable repo `misty-step/forest-gate-127`.
   A non-compiling Revision produced failing Checks, a `changes` Verdict,
   unchanged `master`, and Run `1787065161454179061-verifier`. Transcript

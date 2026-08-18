@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -158,80 +157,6 @@ func TestSameViolationSetIgnoresOrderAndDuplicates(t *testing.T) {
 	}
 	if sameViolationSet([]string{"first"}, []string{"second"}) {
 		t.Fatal("different violation sets matched")
-	}
-}
-
-func TestAuditorRevalidatesUnchangedNonBaselineAndClearsCurrentViolations(t *testing.T) {
-	t.Skip("retired with notes-era Auditor/Poll; see #279")
-	root, sha := newAdvancedAuditFixture(t, "")
-	addGateNotes(t, root, sha, `[{"name":"test","ok":true,"exit":0}]`)
-	if result, err := audit(context.Background(), root); err != nil || len(result.Violations) != 0 {
-		t.Fatalf("initial passing audit result=%#v err=%v", result, err)
-	}
-	runGitDir(t, root, "notes", "--ref="+checksNoteRef, "remove", sha)
-	runGitDir(t, root, "push", "--force", "origin", checksNoteRef+":"+checksNoteRef)
-	result, err := audit(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Advanced || !containsViolation(result.Violations, "no passing checks") {
-		t.Fatalf("unchanged evidence loss result=%#v", result)
-	}
-	state, err := readAuditState(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.LastMaster != sha || len(state.Violations) == 0 {
-		t.Fatalf("violation state=%#v", state)
-	}
-	if state.LastResult != "violations" || !containsViolation(state.Violations, "no passing checks") {
-		t.Fatalf("violation status=%#v", state)
-	}
-	if state.LastAt == "" {
-		t.Fatal("violation LastAt is empty")
-	}
-	if _, err := time.Parse(time.RFC3339Nano, state.LastAt); err != nil {
-		t.Fatalf("violation LastAt=%q: %v", state.LastAt, err)
-	}
-	violatingAt := state.LastAt
-	checksPayload := `{"schema":"forest.checks.v1","revision":"` + sha + `","results":[{"name":"test","ok":true,"exit":0}],"time":"2026-08-10T00:00:00Z"}`
-	addRemoteNote(t, root, checksNoteRef, sha, checksPayload, "Iron Forest Verifier", "verifier@forest.invalid")
-	result, err = audit(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.Violations) != 0 {
-		t.Fatalf("cleared violations=%v", result.Violations)
-	}
-	persisted, err := os.ReadFile(auditStatePath(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var current AuditState
-	if err := json.Unmarshal(persisted, &current); err != nil {
-		t.Fatal(err)
-	}
-	if len(current.Violations) != 0 {
-		t.Fatalf("stale current violations=%v", current.Violations)
-	}
-	if current.LastResult != "pass" {
-		t.Fatalf("cleared status=%#v", current)
-	}
-	if current.LastAt == "" {
-		t.Fatal("cleared LastAt is empty")
-	}
-	if _, err := time.Parse(time.RFC3339Nano, current.LastAt); err != nil {
-		t.Fatalf("cleared LastAt=%q: %v", current.LastAt, err)
-	}
-	if current.LastAt == violatingAt {
-		t.Fatalf("passing audit did not update LastAt from %q", violatingAt)
-	}
-	logData, err := os.ReadFile(auditLogPath(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(logData), "no passing checks") {
-		t.Fatal("audit history did not retain prior violation")
 	}
 }
 
@@ -479,11 +404,6 @@ func TestAuditHistoryRejectsImpossibleEntriesWithoutChangingHistory(t *testing.T
 		})
 	}
 }
-
-func TestAuditorChangesVerdictDoesNotApproveMaster(t *testing.T) {
-	t.Skip("retired with notes-era Auditor/Poll; see #279")
-}
-
 
 func TestAuditSyncsRootWhenItCreatesForest(t *testing.T) {
 	root, _ := testClone(t)

@@ -28,7 +28,6 @@ type AuditState struct {
 
 type auditSnapshot struct {
 	Master   string
-	Notes    map[string]string
 	Evidence map[string]string
 	id       string
 }
@@ -41,7 +40,6 @@ const (
 	auditHistoryEntryBytes = 64 * 1024
 	auditLogTempPrefix     = ".audit.log-"
 
-	auditorCapacityEntries     = 500
 	auditorConcreteViolations  = 999
 	auditorViolationEntryBytes = 1 << 10
 )
@@ -311,26 +309,6 @@ func truncateViolation(violation string) string {
 	return truncated
 }
 
-func auditCapacityViolation(ref string) string {
-	return fmt.Sprintf("note ref %s exceeds %d-entry audit enumeration capacity", ref, auditorCapacityEntries)
-}
-
-func auditPayloadViolation(ref, revision string) string {
-	return fmt.Sprintf("note payload on %s for %s exceeds %d-byte limit", ref, revision, auditHistoryEntryBytes)
-}
-
-func auditShowOverflowViolation(ref, revision string) string {
-	return fmt.Sprintf("note transport output overflow on %s for %s", ref, revision)
-}
-
-func auditMissingNoteViolation(ref, revision string) string {
-	return fmt.Sprintf("missing note on %s for %s", ref, revision)
-}
-
-func auditMissingNoteObjectViolation(ref, revision string) string {
-	return fmt.Sprintf("missing note object on %s for %s", ref, revision)
-}
-
 func appendAuditLog(ctx context.Context, root string, violations []string, deps auditDependencies) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -489,324 +467,13 @@ func newAuditSnapshot() (auditSnapshot, error) {
 		return auditSnapshot{}, err
 	}
 	return auditSnapshot{
-		Notes:    map[string]string{},
 		Evidence: map[string]string{},
 		id:       fmt.Sprintf("%x", id[:]),
 	}, nil
 }
 
-func auditorNoteRef(snapshot auditSnapshot, ref string) string {
-	return auditorNotesNamespace + "/" + snapshot.id + "/" + strings.TrimPrefix(ref, "refs/notes/forest/")
-}
-
 func auditorMasterRef(snapshot auditSnapshot) string {
 	return auditorMasterNamespace + "/" + snapshot.id + "/master"
-}
-
-func readNotes(ctx context.Context, root string, snapshot auditSnapshot, deps auditDependencies) ([]noteEntry, []string, error) {
-	var entries []noteEntry
-	var violations []string
-	for _, ref := range coordinationNoteRefs() {
-		if snapshot.Notes[ref] == "" {
-			continue
-		}
-		snapshotRef := auditorNoteRef(snapshot, ref)
-		list, err := deps.runGit(ctx, root, "notes", "--ref="+snapshotRef, "list")
-		if err != nil {
-			if errors.Is(err, errTrustedTransportOutputOverflow) {
-				violations = append(violations, auditCapacityViolation(ref))
-				continue
-			}
-			return nil, nil, err
-		}
-		pathsByRevision, treeViolations, err := notePaths(ctx, root, snapshotRef, ref, deps)
-		if err != nil {
-			if errors.Is(err, errTrustedTransportOutputOverflow) {
-				violations = append(violations, auditCapacityViolation(ref))
-				continue
-			}
-			return nil, nil, err
-		}
-		violations = append(violations, treeViolations...)
-		text := strings.TrimSpace(string(list))
-		if text == "" {
-			if len(pathsByRevision) != 0 {
-				violations = append(violations, fmt.Sprintf("unexpected note tree entry on %s", ref))
-			}
-			continue
-		}
-		lines := strings.Split(text, "\n")
-		if len(lines) > auditorCapacityEntries || len(pathsByRevision) > auditorCapacityEntries {
-			violations = append(violations, auditCapacityViolation(ref))
-			continue
-		}
-		for _, line := range lines {
-			fields := strings.Fields(line)
-			if len(fields) != 2 || !isSHA(fields[0]) || !isSHA(fields[1]) {
-				violations = append(violations, fmt.Sprintf("malformed note list on %s", ref))
-				continue
-			}
-			treeEntry, ok := pathsByRevision[fields[1]]
-			if !ok {
-				violations = append(violations, fmt.Sprintf("missing note tree entry for %s on %s", fields[1], ref))
-				continue
-			}
-			if treeEntry.blob != fields[0] {
-				violations = append(violations, fmt.Sprintf("note blob mismatch for %s on %s", fields[1], ref))
-				delete(pathsByRevision, fields[1])
-				continue
-			}
-			delete(pathsByRevision, fields[1])
-			payload, err := deps.runGit(ctx, root, "notes", "--ref="+snapshotRef, "show", fields[1])
-			if err != nil {
-				if errors.Is(err, errTrustedTransportOutputOverflow) {
-					violations = append(violations, auditShowOverflowViolation(ref, fields[1]))
-					continue
-				}
-				if soleExitCode(err, 1) {
-					violations = append(violations, auditMissingNoteViolation(ref, fields[1]))
-					continue
-				}
-				if soleExitCode(err, 128) {
-					violations = append(violations, auditMissingNoteObjectViolation(ref, fields[1]))
-					continue
-				}
-				return nil, nil, err
-			}
-			if len(payload) > auditHistoryEntryBytes {
-				violations = append(violations, auditPayloadViolation(ref, fields[1]))
-				continue
-			}
-			author, email, err := noteAuthor(ctx, root, snapshotRef, treeEntry.path, deps)
-			if err != nil {
-				return nil, nil, fmt.Errorf("read note author on %s for %s: %w", ref, fields[1], err)
-			}
-			entries = append(entries, noteEntry{Ref: ref, Revision: fields[1], Payload: payload, Author: author, Email: email})
-		}
-		if len(pathsByRevision) != 0 {
-			violations = append(violations, fmt.Sprintf("unexpected note tree entry on %s", ref))
-		}
-	}
-	return entries, violations, nil
-}
-
-type noteTreeEntry struct {
-	blob string
-	path string
-}
-
-// notePaths reads the note tree at gitRef and returns tree entries keyed by
-// revision. Corrupt rows are reported as note-specific bounded violations
-// named for messageRef and skipped so valid rows still enumerate. Transport,
-// process, pipe, and deadline failures from runGit stay operational errors.
-func notePaths(ctx context.Context, root, gitRef, messageRef string, deps auditDependencies) (map[string]noteTreeEntry, []string, error) {
-	output, err := deps.runGit(ctx, root, "ls-tree", "-r", "--full-tree", gitRef)
-	if err != nil {
-		return nil, nil, err
-	}
-	paths := make(map[string]noteTreeEntry)
-	var violations []string
-	text := string(output)
-	if text == "" {
-		return paths, violations, nil
-	}
-	text = strings.TrimSuffix(text, "\n")
-	for _, line := range strings.Split(text, "\n") {
-		left, path, ok := strings.Cut(line, "\t")
-		if !ok || path == "" || strings.Contains(path, "\t") {
-			violations = append(violations, fmt.Sprintf("malformed note tree row on %s", messageRef))
-			continue
-		}
-		fields := strings.Split(left, " ")
-		if len(fields) != 3 {
-			violations = append(violations, fmt.Sprintf("malformed note tree row on %s", messageRef))
-			continue
-		}
-		if fields[0] != "100644" || fields[1] != "blob" {
-			violations = append(violations, fmt.Sprintf("non-blob note tree entry on %s: %s", messageRef, path))
-			continue
-		}
-		if !isSHA(fields[2]) {
-			violations = append(violations, fmt.Sprintf("malformed note tree row on %s", messageRef))
-			continue
-		}
-		revision := strings.ReplaceAll(path, "/", "")
-		if !isSHA(revision) {
-			violations = append(violations, fmt.Sprintf("non-SHA note tree path on %s: %s", messageRef, path))
-			continue
-		}
-		if previous, ok := paths[revision]; ok {
-			violations = append(violations, fmt.Sprintf("duplicate note paths for %s on %s: %s and %s", revision, messageRef, previous.path, path))
-			continue
-		}
-		paths[revision] = noteTreeEntry{blob: fields[2], path: path}
-	}
-	return paths, violations, nil
-}
-
-func noteAuthor(ctx context.Context, root, ref, path string, deps auditDependencies) (string, string, error) {
-	output, err := deps.runGit(ctx, root, "log", "-1", "--format=%an%x00%ae", ref, "--", path)
-	if err != nil {
-		return "", "", err
-	}
-	record, err := exactGitLine(output)
-	if err != nil {
-		return "", "", fmt.Errorf("invalid note author for %s:%s: %w", ref, path, err)
-	}
-	parts := strings.SplitN(record, "\x00", 2)
-	if len(parts) != 2 {
-		return "", "", fmt.Errorf("missing note author for %s:%s", ref, path)
-	}
-	return parts[0], parts[1], nil
-}
-
-func verifyGate(entries []noteEntry, master string, cfg Config) error {
-	var reviewRequest noteEntry
-	var reviewRequestCount int
-	var approved bool
-	var checksNotes []checksNote
-	for _, entry := range entries {
-		if entry.Revision != master {
-			continue
-		}
-		switch entry.Ref {
-		case reviewRequestNoteRef:
-			reviewRequest = entry
-			reviewRequestCount++
-		case verdictNoteRef:
-			if note, err := decodeVerdict(entry.Payload, master); err == nil && note.Verdict == "approve" {
-				approved = true
-			}
-		case checksNoteRef:
-			if note, err := decodeChecks(entry.Payload, master); err == nil {
-				checksNotes = append(checksNotes, note)
-			}
-		}
-	}
-	if reviewRequestCount != 1 {
-		return fmt.Errorf("master %s does not have exactly one valid review-request note", master)
-	}
-	if _, err := decodeReview(reviewRequest.Payload, master); err != nil || !validIdentity(reviewRequest, "builder", "fixer") {
-		return fmt.Errorf("master %s does not have exactly one valid review-request note", master)
-	}
-	if !approved {
-		return fmt.Errorf("master %s has no approve verdict note", master)
-	}
-	if len(cfg.Checks) == 0 {
-		return fmt.Errorf("master %s has no configured checks", master)
-	}
-	if len(checksNotes) != 1 {
-		return fmt.Errorf("master %s has no passing checks note", master)
-	}
-	reported := checksNotes[0].Results
-	if len(reported) == 0 {
-		return fmt.Errorf("master %s has an empty checks note", master)
-	}
-	if len(reported) != len(cfg.Checks) {
-		return fmt.Errorf("master %s checks note does not match configured checks", master)
-	}
-	for i, check := range cfg.Checks {
-		result := reported[i]
-		if result.Name != check.Name {
-			return fmt.Errorf("master %s checks note does not match configured checks", master)
-		}
-		if !result.OK || result.Exit != 0 {
-			return fmt.Errorf("master %s has no passing checks note", master)
-		}
-	}
-	return nil
-}
-
-func fetchAuditSnapshot(ctx context.Context, root string, acquisition auditSnapshot, deps auditDependencies) (auditSnapshot, error) {
-	for attempt := range auditSnapshotAttempts {
-		advertised, err := advertiseAuditSnapshot(ctx, root, deps)
-		if err != nil {
-			return acquisition, err
-		}
-		advertised.id = acquisition.id
-		if err := fetchSnapshotRefs(ctx, root, advertised, deps); err != nil {
-			if cleanupErr := clearAuditSnapshot(root, acquisition, deps); cleanupErr != nil {
-				return acquisition, errors.Join(err, cleanupErr)
-			}
-			if attempt+1 < auditSnapshotAttempts {
-				continue
-			}
-			return acquisition, err
-		}
-		observed, err := advertiseAuditSnapshot(ctx, root, deps)
-		if err != nil {
-			return acquisition, err
-		}
-		observed.id = acquisition.id
-		if sameAuditSnapshot(advertised, observed) {
-			return observed, nil
-		}
-		if err := clearAuditSnapshot(root, acquisition, deps); err != nil {
-			return acquisition, err
-		}
-	}
-	return acquisition, fmt.Errorf("remote snapshot changed during audit")
-}
-
-func advertiseAuditSnapshot(ctx context.Context, root string, deps auditDependencies) (auditSnapshot, error) {
-	refs := coordinationNoteRefs()
-	args := append([]string{"ls-remote", "origin", "refs/heads/master"}, refs...)
-	output, err := deps.runGit(ctx, root, args...)
-	if err != nil {
-		return auditSnapshot{}, fmt.Errorf("read remote snapshot: %w", err)
-	}
-	snapshot := auditSnapshot{Notes: make(map[string]string, len(refs))}
-	for _, ref := range refs {
-		snapshot.Notes[ref] = ""
-	}
-	seen := make(map[string]bool, len(refs)+1)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) != 2 || !isSHA(fields[0]) || seen[fields[1]] {
-			return auditSnapshot{}, fmt.Errorf("malformed remote snapshot")
-		}
-		ref := fields[1]
-		if ref == "refs/heads/master" {
-			snapshot.Master = fields[0]
-		} else {
-			if _, ok := snapshot.Notes[ref]; !ok {
-				return auditSnapshot{}, fmt.Errorf("malformed remote snapshot ref %s", ref)
-			}
-			snapshot.Notes[ref] = fields[0]
-		}
-		seen[ref] = true
-	}
-	if snapshot.Master == "" {
-		return auditSnapshot{}, fmt.Errorf("origin/master is missing or malformed")
-	}
-	return snapshot, nil
-}
-
-func sameAuditSnapshot(left, right auditSnapshot) bool {
-	if left.Master != right.Master {
-		return false
-	}
-	for _, ref := range coordinationNoteRefs() {
-		if left.Notes[ref] != right.Notes[ref] {
-			return false
-		}
-	}
-	return true
-}
-
-func fetchSnapshotRefs(ctx context.Context, root string, snapshot auditSnapshot, deps auditDependencies) error {
-	if err := fetchSnapshotRef(ctx, root, "refs/heads/master", auditorMasterRef(snapshot), snapshot.Master, deps); err != nil {
-		return err
-	}
-	for _, ref := range coordinationNoteRefs() {
-		if err := fetchSnapshotRef(ctx, root, ref, auditorNoteRef(snapshot, ref), snapshot.Notes[ref], deps); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func fetchSnapshotRef(ctx context.Context, root, source, destination, oid string, deps auditDependencies) error {
@@ -835,23 +502,6 @@ func verifyAuditRef(ctx context.Context, root, ref, expected string, deps auditD
 		return fmt.Errorf("fetched %s does not match advertised object", ref)
 	}
 	return nil
-}
-
-func clearAuditSnapshot(root string, snapshot auditSnapshot, deps auditDependencies) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	var cleanup error
-	for _, ref := range coordinationNoteRefs() {
-		privateRef := auditorNoteRef(snapshot, ref)
-		if _, err := deps.runGit(ctx, root, "update-ref", "-d", privateRef); err != nil {
-			cleanup = errors.Join(cleanup, fmt.Errorf("clear %s: %w", privateRef, err))
-		}
-	}
-	privateMaster := auditorMasterRef(snapshot)
-	if _, err := deps.runGit(ctx, root, "update-ref", "-d", privateMaster); err != nil {
-		cleanup = errors.Join(cleanup, fmt.Errorf("clear %s: %w", privateMaster, err))
-	}
-	return cleanup
 }
 
 func runAuditGit(ctx context.Context, root string, args ...string) ([]byte, error) {
