@@ -17,10 +17,6 @@ const (
 	verdictNoteRef       = "refs/notes/forest/verdict"
 )
 
-func coordinationNoteRefs() []string {
-	return []string{reviewRequestNoteRef, checksNoteRef, verdictNoteRef}
-}
-
 type noteEntry struct {
 	Ref      string
 	Revision string
@@ -295,34 +291,4 @@ func decodeVerdict(data []byte, sha string) (verdictNote, error) {
 		return note, fmt.Errorf("invalid verdict note")
 	}
 	return note, nil
-}
-
-func validateNoteEntry(entry noteEntry) error {
-	if !json.Valid(entry.Payload) {
-		return fmt.Errorf("malformed JSON note on %s for %s", entry.Ref, entry.Revision)
-	}
-	var err error
-	switch entry.Ref {
-	case reviewRequestNoteRef:
-		_, err = decodeReview(entry.Payload, entry.Revision)
-		if err == nil && !validIdentity(entry, "builder", "fixer") {
-			err = fmt.Errorf("wrong author identity on review-request %s", entry.Revision)
-		}
-	case checksNoteRef:
-		_, err = decodeChecks(entry.Payload, entry.Revision)
-		if err == nil && !validIdentity(entry, "verifier") {
-			err = fmt.Errorf("wrong author identity on checks %s", entry.Revision)
-		}
-	case verdictNoteRef:
-		_, err = decodeVerdict(entry.Payload, entry.Revision)
-		if err == nil && !validIdentity(entry, "verifier") {
-			err = fmt.Errorf("wrong author identity on verdict %s", entry.Revision)
-		}
-	default:
-		err = fmt.Errorf("unknown forest note ref %s", entry.Ref)
-	}
-	if err != nil {
-		return fmt.Errorf("invalid note %s for %s: %v", entry.Ref, entry.Revision, err)
-	}
-	return nil
 }

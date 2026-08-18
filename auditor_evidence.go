@@ -61,7 +61,7 @@ func advertiseEvidenceSnapshot(ctx context.Context, root string, deps auditDepen
 	if err != nil {
 		return auditSnapshot{}, fmt.Errorf("read remote snapshot: %w", err)
 	}
-	snapshot := auditSnapshot{Notes: map[string]string{}, Evidence: map[string]string{}}
+	snapshot := auditSnapshot{Evidence: map[string]string{}}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if strings.TrimSpace(line) == "" {
