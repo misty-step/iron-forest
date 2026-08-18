@@ -15,12 +15,11 @@ Work from evidence: read the Issue, local instructions, and affected code, then 
 
 ## Select one Issue
 
-1. Fetch the Git notes refs before reading or writing coordination state.
-2. Use `gh` to find one open Issue with the `forest:ready` label.
-3. Use `git ls-remote` to confirm that no `forest/<issue>-*` branch exists on `origin`.
-4. Check GitHub for an existing PR for the candidate branch.
-5. If the candidate already has a branch or PR, pick a different Issue. If no eligible Issue remains, stop cleanly with an exit summary. Do not create a branch, PR, Issue, or review-request.
-6. Immediately before creating the branch, run `git fetch origin master --prune`, resolve `base_sha="$(git rev-parse refs/remotes/origin/master)"`, and record that full SHA in the run summary. Create `forest/<issue>-<slug>` from that exact `$base_sha` in the same step; do not branch from a local or stale target.
+1. Use `gh` to find one open Issue with the `forest:ready` label.
+2. Use `git ls-remote origin 'refs/heads/forest/<issue>-*'` to confirm that no branch exists for that Issue on `origin`.
+3. Check GitHub for an existing PR for the candidate branch.
+4. If the candidate already has a branch or PR, pick a different Issue. If no eligible Issue remains, stop cleanly with an exit summary. Do not create a branch, PR, Issue, or review-request.
+5. Immediately before creating the branch, run `git fetch origin`, resolve `base_sha="$(git rev-parse refs/remotes/origin/master)"`, and record that full SHA in the run summary. Create `forest/<issue>-<slug>` from that exact `$base_sha` in the same step; do not branch from a local or stale target.
 
 The selector must choose exactly one Issue. The poll only wakes this declaration; it does not provide selection context.
 
@@ -45,11 +44,11 @@ Use this payload verbatim, with the placeholders replaced by values:
 {"schema":"forest.review-request.v1","issue":<n>,"branch":"...","revision":"<sha>","time":"<rfc3339>"}
 ```
 
-Builder writes the initial review-request note. Fixer writes each fresh review-request note after a rejected Revision.
+Builder writes the initial review-request evidence. Fixer writes each fresh review-request evidence after a rejected Revision.
 
 ## Publication
 
-The Kernel owns the write-once note and atomic branch push. After the payload file exists, call only:
+The Kernel owns the write-once evidence ref and atomic branch push. After the payload file exists, call only:
 
 ```sh
 forest publish review-request builder "$branch" "$payload_file"
@@ -59,4 +58,4 @@ Use the Runner `FOREST_RUN_ID`. Do not invent refs, retry loops, or force flags.
 
 ## Stop conditions
 
-Stop and report a clear failure summary for missing refs, ambiguous Issue identity, failed checks, failed atomic publication, conflicting notes, branch races, credential exposure, or any unexpected Git state. A failed Check is a stop, not a reason to publish. A clean no-work pass is success and must state that no eligible Issue existed. Do not create a Projection for a no-work pass.
+Stop and report a clear failure summary for missing refs, ambiguous Issue identity, failed checks, failed atomic publication, conflicting evidence refs, branch races, credential exposure, or any unexpected Git state. A failed Check is a stop, not a reason to publish. A clean no-work pass is success and must state that no eligible Issue existed. Do not create a Projection for a no-work pass.
