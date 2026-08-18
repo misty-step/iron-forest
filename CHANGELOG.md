@@ -1,5 +1,10 @@
 # Changelog
 
+- 2026-08-18: Gate proof on disposable repo `misty-step/forest-gate-127`.
+  A non-compiling Revision produced failing Checks, a `changes` Verdict,
+  unchanged `master`, and Run `1787065161454179061-verifier`. Transcript
+  in `VERIFY.md` (#127).
+
 - 2026-08-17: Onboarding states which identity may create or update which
   Git ref. A read-only forge credential is refused. Branch protection cannot
   see evidence refs (#255).
