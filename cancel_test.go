@@ -43,6 +43,21 @@ func TestRunCancelAlreadyFinishedAndUnknown(t *testing.T) {
 	}
 }
 
+func TestRunCancelAlreadyFinishedFromMarker(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	if err := writeRunCancellationMarker(root, "run-2-builder"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "cancel", "run-2-builder", "--root", root})
+	})
+	if code != exitOK || stderr != "" || !strings.Contains(stdout, "already_finished") {
+		t.Fatalf("marker cancel code=%d stderr=%q stdout=%q, want already_finished", code, stderr, stdout)
+	}
+}
+
 func TestRunCancelStopsLiveRunAndRecordsCancellation(t *testing.T) {
 	root, _ := testClone(t)
 	state := t.TempDir()
