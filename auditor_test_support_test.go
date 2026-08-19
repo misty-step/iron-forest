@@ -47,7 +47,7 @@ func newAdvancedAuditFixture(t *testing.T, config string) (string, string) {
 
 func addGateNotes(t *testing.T, root, sha, results string) {
 	t.Helper()
-	pushEvidence(t, root, "request", sha, `{"schema":"forest.review-request.v1","issue":1,"branch":"forest/1-gate","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`+"\n", "Iron Forest Builder", "builder@forest.invalid")
+	pushEvidence(t, root, "request", sha, `{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/gate","revision":"`+sha+`","time":"2026-08-10T00:00:00Z"}`+"\n", "Iron Forest Builder", "builder@forest.invalid")
 	addVerifierGateNotes(t, root, sha, results)
 }
 

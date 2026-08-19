@@ -9,7 +9,7 @@ import (
 func TestNoteDecoderOmitsHugeKeyFromError(t *testing.T) {
 	sha := strings.Repeat("e", 40)
 	hugeKey := strings.Repeat("z", 8*1024)
-	payload := `{"schema":"forest.review-request.v1","` + hugeKey + `":1,"issue":1,"branch":"forest/1-gate","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
+	payload := `{"schema":"forest.review-request.v2","` + hugeKey + `":1,"subject":"1","branch":"forest/1/gate","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
 	if _, err := decodeReview([]byte(payload), sha); err == nil {
 		t.Fatal("huge unknown key accepted")
 	} else if len(err.Error()) > auditorViolationEntryBytes {

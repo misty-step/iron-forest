@@ -93,8 +93,8 @@ def publish_conflict(cwd: Path, args: list[str], canonical: str, schema: str) ->
         }
     else:
         payload = {
-            "schema": "forest.review-request.v1", "issue": 100,
-            "branch": "forest/100-candidate", "revision": target, "time": TIME,
+            "schema": "forest.review-request.v2", "subject": "100",
+            "branch": "forest/100/candidate", "revision": target, "time": TIME,
         }
     with tempfile.NamedTemporaryFile("w", delete=False) as handle:
         json.dump(payload, handle, separators=(",", ":"), sort_keys=True)

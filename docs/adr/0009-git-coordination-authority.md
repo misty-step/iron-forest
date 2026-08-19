@@ -19,8 +19,10 @@ Git is the coordination authority. Workflow state uses branch names and
 `refs/notes/forest/*`. The schema is versioned and binds evidence to exact
 Revisions:
 
-- `refs/notes/forest/review-request` uses
+- `refs/notes/forest/review-request` used
   `forest.review-request.v1` with `issue`, `branch`, `revision`, and `time`.
+  [0023](0023-powder-jobs-and-review-request-v2.md) replaces that with
+  `forest.review-request.v2` and `subject`.
 - `refs/notes/forest/checks` uses `forest.checks.v1` with `revision`, `results`,
   and `time`.
 - `refs/notes/forest/verdict` uses `forest.verdict.v1` with `revision`,

@@ -20,14 +20,14 @@ func pushEvidence(t *testing.T, root, kind, sha, payload, author, email string) 
 
 func TestFixerPollIgnoresLegacyNotes(t *testing.T) {
 	root, _ := testClone(t)
-	runGitDir(t, root, "checkout", "-b", "forest/4-work")
+	runGitDir(t, root, "checkout", "-b", "forest/4/work")
 	if err := os.WriteFile(filepath.Join(root, "work"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGitDir(t, root, "add", "work")
 	runGitDir(t, root, "commit", "-m", "work")
 	tip := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4-work")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4/work")
 	addNote(t, root, verdictNoteRef, tip, pollVerdictNote(tip, "changes"), "phaedrus", "phraznikov@gmail.com")
 	runGitDir(t, root, "push", "origin", verdictNoteRef+":"+verdictNoteRef)
 
@@ -39,14 +39,14 @@ func TestFixerPollIgnoresLegacyNotes(t *testing.T) {
 
 func TestVerifierPollDispatchesOnRequestRef(t *testing.T) {
 	root, _ := testClone(t)
-	runGitDir(t, root, "checkout", "-b", "forest/4-work")
+	runGitDir(t, root, "checkout", "-b", "forest/4/work")
 	if err := os.WriteFile(filepath.Join(root, "work"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGitDir(t, root, "add", "work")
 	runGitDir(t, root, "commit", "-m", "work")
 	tip := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4-work")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4/work")
 	pushEvidence(t, root, "request", tip, pollReviewNote(tip), "Iron Forest Builder", "builder@forest.invalid")
 
 	code, err := NewPoller(root, "owner/name").verifier(context.Background())
@@ -57,14 +57,14 @@ func TestVerifierPollDispatchesOnRequestRef(t *testing.T) {
 
 func TestFixerPollDispatchesOnChangesRef(t *testing.T) {
 	root, _ := testClone(t)
-	runGitDir(t, root, "checkout", "-b", "forest/4-work")
+	runGitDir(t, root, "checkout", "-b", "forest/4/work")
 	if err := os.WriteFile(filepath.Join(root, "work"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runGitDir(t, root, "add", "work")
 	runGitDir(t, root, "commit", "-m", "work")
 	tip := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4-work")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4/work")
 	pushEvidence(t, root, "request", tip, pollReviewNote(tip), "Iron Forest Builder", "builder@forest.invalid")
 	pushEvidence(t, root, "verdict", tip, pollVerdictNote(tip, "changes"), "Iron Forest Verifier", "verifier@forest.invalid")
 

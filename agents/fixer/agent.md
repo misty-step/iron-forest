@@ -34,14 +34,14 @@ The selector must choose one rejected Revision. The poll only wakes this declara
 4. Commit the repair and set `revision` to the full new commit SHA.
 5. Write a fresh review-request payload for that exact `revision` to a temporary file outside the repository.
 6. Publish with `forest publish review-request fixer "$branch" "$payload_file" --rejected "$rejected_sha"`. Do not run `git push` for this Effect. A nonzero exit is a stop.
-7. Do not edit or overwrite old Checks or Verdict evidence refs. Do not open a second Projection for the same Issue. The Verifier owns the next review.
+7. Do not edit or overwrite old Checks or Verdict evidence refs. Do not open a second Projection for the same Subject. The Verifier owns the next review.
 
-## Coordination schema v1
+## Coordination schema
 
-Use this payload verbatim, with the placeholders replaced by values:
+Reuse the selected request's `subject` and `branch`. Replace only `revision` and `time`.
 
 ```json
-{"schema":"forest.review-request.v1","issue":<n>,"branch":"...","revision":"<sha>","time":"<rfc3339>"}
+{"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>"}
 ```
 
 Builder writes the initial review-request evidence. Fixer writes each fresh review-request evidence after a rejected Revision.

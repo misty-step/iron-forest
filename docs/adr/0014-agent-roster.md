@@ -13,7 +13,7 @@ Issue when it finds a problem.
 The shipped roster is Builder, Verifier, and Fixer. There is no Manager agent.
 Polls are disjoint.
 
-The Builder creates `forest/<issue>-<slug>` and does not return to that branch
+The Builder creates `forest/<subject>/<slug>` and does not return to that branch
 after its initial Revision. The Verifier reviews the exact Revision and owns
 the approving merge. When the Verdict is `changes`, the Fixer owns the branch,
 creates a repaired Revision, and writes a fresh

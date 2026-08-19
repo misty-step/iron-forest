@@ -7,8 +7,8 @@ mechanics. Declarations state what agents think and do. See
 
 
 The shipped roster has Builder, Verifier, and Fixer. A Builder turns a ready
-GitHub Issue into a branch. A Verifier checks and reviews the exact Revision.
-A Fixer repairs a rejected Revision and sends it back for review.
+GitHub Issue or takeable Powder job into a branch. A Verifier checks and reviews
+the exact Revision. A Fixer repairs a rejected Revision and sends it back for review.
 
 
 ## Quick start
@@ -131,7 +131,13 @@ OpenRouter completion key for the instance:
 
 ```dotenv
 OPENROUTER_API_KEY=<dedicated instance key>
+POWDER_URL=<origin>
+POWDER_API_KEY=<key>
+POWDER_AGENT=forest-<repo-slug>
 ```
+
+`POWDER_AGENT` opts the Kernel into listing Powder jobs. Omit it for
+GitHub-only selection. Use one agent identity per repository Kernel.
 
 Do not put an OpenRouter management key in this file. Do not reuse a personal
 interactive key or an evaluation key. The intended production layout uses one
@@ -159,7 +165,7 @@ the operator chooses.
 
 Git is the coordination authority. Live workflow state is create-only evidence
 under `refs/forest/v1/{request,checks,verdict}/<sha>`, plus `forest/*` branches
-and `master`. GitHub Issues are the Tracker. Pull requests are disposable
+and `master`. GitHub Issues and Powder jobs are the Tracker. Pull requests are disposable
 human Projections, never authority.
 
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
@@ -174,7 +180,7 @@ Which identity may create or update which ref is in
 A read-only forge credential breaks every declaration. Branch protection cannot
 see evidence refs. Restrict `master` with a forge ruleset.
 
-Agents own Issue selection, implementation, and the decision to publish.
+Agents own Subject selection, implementation, and the decision to publish.
 The Kernel owns publication. See [managed-repository
 onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
 
@@ -187,6 +193,9 @@ command. Exit 0 dispatches work, exit 1 is a healthy skip, and exit greater
 than 1, timeout, or malformed behavior records an unhealthy trigger. See
 [ADR 0012](docs/adr/0012-poll-trigger-protocol.md) and the
 [onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
+
+Builder Poll also wakes on a takeable or held Powder job for `forest.yaml`
+`repo` when `POWDER_AGENT` is set. The Kernel only lists jobs.
 
 Verifier and Fixer Poll `ls-remote` evidence refs for each `forest/*` tip.
 Leftover `refs/notes/forest/*` are unread. A missing evidence ref is no work.

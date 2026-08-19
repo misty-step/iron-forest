@@ -5,15 +5,15 @@ one repository, on a machine the operator chooses. The Kernel is small and
 deterministic. Agents judge.
 
 This file is the product lock. Accepted ADRs state the contracts. GitHub
-Issues track work. If a later plan disagrees with this file, change this file
-first.
+Issues and Powder jobs track work. If a later plan disagrees with this file,
+change this file first.
 
 ## Aim
 
-An operator marks one Issue `forest:ready`. The factory implements it, reviews
-the exact Revision, and either merges or returns a repair. The operator
-watches Git and the CLI. The factory does not need a console, a second ledger,
-or a vendor API.
+An operator marks one Issue `forest:ready` or files a takeable Powder job
+for the repository. The factory implements it, reviews the exact Revision,
+and either merges or returns a repair. The operator watches Git and the CLI.
+The factory does not need a console or a host-vendor API.
 
 ## Philosophy
 
@@ -32,9 +32,9 @@ Delete a requirement that does not change an observable Git outcome.
 | Kernel | The `forest` process. It polls, isolates a Run, starts the harness, and owns closed Git protocols. |
 | Declaration | One role: `agents/<name>/agent.md` and `task.md`. |
 | Run | One dispatch of one declaration. At most one live Run per declaration. |
-| Subject | One GitHub Issue that a Builder may select. |
+| Subject | One GitHub Issue or one Powder job that a Builder may select. |
 | Revision | One commit SHA. Every evidence ref binds to it. |
-| Tracker | GitHub Issues. Humans and agents file work there. |
+| Tracker | GitHub Issues and Powder jobs. Humans and agents file work there. |
 | Projection | A GitHub pull request. Humans read it. It is not authority. |
 | Gate | One valid request, passing Checks, an approve Verdict, and a fast-forward of `master` to that Revision. |
 | Auditor | `forest status` and `forest audit show` reading evidence refs. It does not merge. |
@@ -46,11 +46,10 @@ terms.
 ## Shape
 
 ```text
-forest:ready Issue
+forest:ready Issue or takeable Powder job
   → Builder implements and calls forest publish request
   → Verifier checks, judges, and calls forest publish verdict
   → Fixer repairs a rejected Revision
-```
 
 The shipped roster is Builder, Verifier, and Fixer
 ([ADR 0014](docs/adr/0014-agent-roster.md)). There is no fourth declaration.
@@ -60,7 +59,7 @@ Git holds durable facts: branches, commits, and create-only evidence refs:
 
 ```text
 refs/heads/master
-refs/heads/forest/<issue>-<slug>
+refs/heads/forest/<subject>/<slug>
 refs/forest/v1/request/<sha>
 refs/forest/v1/checks/<sha>
 refs/forest/v1/verdict/<sha>
@@ -89,10 +88,11 @@ runs `forest.yaml` Checks, then pushes those refs and `sha:refs/heads/master`
 in one atomic update. Agents write the files and decide to call. They do not
 push `master`.
 
-Agents own Issue selection, implementation, review judgment, and the decision
-to publish ([ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md)).
+Agents own Subject selection, implementation, review judgment, the Powder
+take/done lease, and the decision to publish
+([ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md)).
 
-The operator owns the host, credentials, and backlog labels.
+The operator owns the host, credentials, backlog labels, and Powder jobs.
 
 The Kernel does not know the host vendor. Isolation is exactly one live
 Kernel per repository, on an operator-chosen machine, not one sandbox per
@@ -124,17 +124,18 @@ note authors.
 
 ## Out of product
 
-Mint, Powder, Habitat, Olympus, Fly Sprites, a Tracker adapter interface, a
+Mint, Habitat, Olympus, Fly Sprites, a Tracker adapter interface, a
 Kernel substrate seam, and a central trace store are not Iron Forest.
 
-GitHub is the Tracker because that is where the work already lives. It is not
-an adapter layer waiting for a second ledger.
+Git remains the coordination authority. Powder is exclusive-work for jobs.
+The Kernel may list takeable or held jobs the same way it lists ready
+Issues. It does not take, release, or complete them.
 
 ## Never finished
 
 The factory is never finished. Each addition must still obey this file: closed
 loops in the Kernel, judgment in the agent, observable Git outcomes, no
-dashboard, no second work store, no vendor API in the Kernel.
+dashboard, no second coordination store, no host-vendor API in the Kernel.
 
 A later workflow protocol moves into the Kernel only when evals show a closed
 loop the model cannot execute. Operator CLI commands are not that gate.

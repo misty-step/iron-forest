@@ -1,5 +1,9 @@
 # Changelog
 
+- 2026-08-19: One Subject identity. Review-request is only v2
+  (`subject` + `forest/<id>/<slug>`). Builder Poll lists GitHub Issues
+  and Powder jobs. The Kernel does not take or complete them (ADR 0023).
+  Leftover hyphen tips are unread by Poll.
 - 2026-08-18: A second `forest run cancel` after the Runner records the
   Ledger row reports `already_finished` instead of not-found (#289).
 - 2026-08-18: Poll and Auditor drop leftover notes-era read machinery.

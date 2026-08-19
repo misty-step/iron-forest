@@ -27,6 +27,7 @@ Install these tools on the host:
 - `gh` for GitHub Issues and pull-request Projections;
 - `mise` and the managed repository's declared check tools;
 - `pi`; the shipped contract uses its built-in providers. It is the agent harness; see [ADR 0018](adr/0018-pi-harness.md).
+- `powder` when the factory should take Powder jobs.
 
 The user service resolves these tools through
 `%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`.
@@ -47,7 +48,7 @@ must create Checks and Verdict evidence and, on approve, fast-forward `master`.
 
 | Actor | Command | May create | May update |
 | --- | --- | --- | --- |
-| Builder / Fixer | `forest publish review-request` | `refs/heads/forest/<issue>-*`, `refs/forest/v1/request/<sha>`, `refs/notes/forest/review-request` | nothing else |
+| Builder / Fixer | `forest publish review-request` | `refs/heads/forest/<subject>/*`, `refs/forest/v1/request/<sha>`, `refs/notes/forest/review-request` | nothing else |
 | Verifier | `forest publish verdict` | `refs/forest/v1/checks/<sha>`, `refs/forest/v1/verdict/<sha>` | `refs/heads/master` on approve only, fast-forward |
 | Operator | forge ruleset | — | restrict who may update `master` |
 
@@ -88,7 +89,8 @@ gh label create forest:ready \
 ```
 
 Do not use a second scheduling label. The Builder Poll checks this label and
-checks that no matching remote `forest/<issue>-*` branch exists.
+checks that no matching remote `forest/<subject>/*` branch exists.
+A takeable Powder job for `forest.yaml` `repo` also wakes Builder when `POWDER_AGENT` is set.
 
 ## 2. Declare the repository
 
@@ -124,6 +126,20 @@ reasoning or model execution. The model is
 in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.
+
+To consume Powder jobs, put these in the instance environment file. Use one
+`POWDER_AGENT` per Kernel. Do not share it across repositories.
+
+```dotenv
+POWDER_URL=<origin>
+POWDER_API_KEY=<key>
+POWDER_AGENT=forest-<repo-slug>
+```
+
+The job must have a nonempty spec and `repo` equal to `forest.yaml` `repo`.
+Builder takes it and publishes `forest/<id>/<slug>` with review-request v2.
+Verifier calls `powder done` after a successful approve. Unset `POWDER_AGENT`
+keeps GitHub-only selection.
 
 ## 3. Add declarations
 
@@ -259,8 +275,9 @@ Poll exits 0. A healthy Poll skip exits 1 without an agent Run.
 
 ## 6. Observe the first Subject
 
-After an Issue receives `forest:ready`, the Builder selects it and creates a
-`forest/<issue>-<slug>` branch. It writes a review-request payload and calls
+After an Issue receives `forest:ready`, or a takeable Powder job exists for this
+repository, the Builder selects it and creates `forest/<subject>/<slug>`.
+It writes a review-request payload and calls
 `forest publish review-request`, which publishes the branch and note with one
 normal atomic push. A canonical note race permits at most three total atomic
 attempts; a branch race stops. The Builder may open a pull request as a human

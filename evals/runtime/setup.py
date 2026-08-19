@@ -173,7 +173,7 @@ def main() -> None:
     }
     candidate_files = scenario.get("candidate_files")
     if candidate_files is not None:
-        branch = "forest/100-candidate"
+        branch = "forest/100/candidate"
         git(workspace, "checkout", "-b", branch)
         write_files(workspace, candidate_files)
         git(workspace, "add", ".")
@@ -185,8 +185,8 @@ def main() -> None:
 
         request_actor = "fixer" if scenario["role"] == "fixer" and scenario.get("request_actor") == "fixer" else "builder"
         review_request = {
-            "schema": "forest.review-request.v1",
-            "issue": 100,
+            "schema": "forest.review-request.v2",
+            "subject": "100",
             "branch": branch,
             "revision": candidate,
             "time": TIME,
@@ -245,9 +245,9 @@ def main() -> None:
         remote_tip = ""
         temporary = "refs/notes/forest/race-prepared"
         race_payload = {
-            "schema": "forest.review-request.v1",
-            "issue": 999,
-            "branch": "forest/999-race",
+            "schema": "forest.review-request.v2",
+            "subject": "999",
+            "branch": "forest/999/race",
             "revision": base_sha,
             "time": TIME,
         }

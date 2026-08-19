@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -34,6 +35,10 @@ func (p *Poller) git(ctx context.Context, args ...string) ([]byte, error) {
 
 func (p *Poller) gh(ctx context.Context, args ...string) ([]byte, error) {
 	return p.run(ctx, "gh", args...)
+}
+
+func (p *Poller) powder(ctx context.Context, args ...string) ([]byte, error) {
+	return p.run(ctx, "powder", args...)
 }
 
 func (p *Poller) run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -89,7 +94,7 @@ func (p *Poller) readyIssues(ctx context.Context) ([]int, error) {
 	return issues, nil
 }
 
-// builder reports whether an Issue is ready for a Builder Run. A non-nil error
+// builder reports whether a Subject is ready for a Builder Run. A non-nil error
 // accompanies exitError so the caller can say why the Poll failed instead of
 // exiting silently.
 func (p *Poller) builder(ctx context.Context) (int, error) {
@@ -97,23 +102,116 @@ func (p *Poller) builder(ctx context.Context) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	readyIssue := false
 	for _, issue := range issues {
-		branches, err := p.git(ctx, "ls-remote", "--heads", "origin", fmt.Sprintf("refs/heads/forest/%d-*", issue))
+		claimed, err := p.subjectHasBranch(ctx, strconv.Itoa(issue))
 		if err != nil {
 			return exitError, err
 		}
-		matches, err := parseBranchOutput(branches, issue)
-		if err != nil {
-			return exitError, err
+		if !claimed {
+			readyIssue = true
+			break
 		}
-		if len(matches) == 0 {
-			return exitOK, nil
-		}
+	}
+	readyPowder, err := p.readyPowder(ctx)
+	if err != nil {
+		return exitError, err
+	}
+	if readyIssue || readyPowder {
+		return exitOK, nil
 	}
 	return exitNoWork, nil
 }
 
-func parseBranchOutput(output []byte, issue int) ([]branchTip, error) {
+func powderAgent() string {
+	return strings.TrimSpace(os.Getenv("POWDER_AGENT"))
+}
+
+func powderOriginSet() bool {
+	return strings.TrimSpace(os.Getenv("POWDER_URL")) != "" || strings.TrimSpace(os.Getenv("POWDER_API_BASE_URL")) != ""
+}
+
+type powderListJob struct {
+	ID string `json:"id"`
+}
+
+func (p *Poller) readyPowder(ctx context.Context) (bool, error) {
+	agent := powderAgent()
+	if agent == "" {
+		return false, nil
+	}
+	if !powderOriginSet() {
+		return false, fmt.Errorf("POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty")
+	}
+	if strings.TrimSpace(p.Repo) == "" {
+		return false, fmt.Errorf("repository is required")
+	}
+	takeable, err := p.listPowder(ctx, "--takeable", "--repo", p.Repo)
+	if err != nil {
+		return false, err
+	}
+	mine, err := p.listPowder(ctx, "--mine", agent, "--repo", p.Repo)
+	if err != nil {
+		return false, err
+	}
+	seen := make(map[string]struct{}, len(takeable)+len(mine))
+	ids := make([]string, 0, len(takeable)+len(mine))
+	for _, id := range append(takeable, mine...) {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if !validSubject(id) {
+			return false, fmt.Errorf("malformed powder job id %q", id)
+		}
+		claimed, err := p.subjectHasBranch(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		if !claimed {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (p *Poller) listPowder(ctx context.Context, args ...string) ([]string, error) {
+	output, err := p.powder(ctx, append([]string{"list"}, args...)...)
+	if err != nil {
+		return nil, err
+	}
+	var jobs []powderListJob
+	if err := json.Unmarshal(output, &jobs); err != nil {
+		return nil, fmt.Errorf("malformed powder list: %w", err)
+	}
+	ids := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		id := strings.TrimSpace(job.ID)
+		if id == "" {
+			return nil, fmt.Errorf("malformed powder job id")
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (p *Poller) subjectHasBranch(ctx context.Context, subject string) (bool, error) {
+	output, err := p.git(ctx, "ls-remote", "--heads", "origin", "refs/heads/forest/"+subject+"/*")
+	if err != nil {
+		return false, err
+	}
+	matches, err := parseBranchOutput(output, subject)
+	if err != nil {
+		return false, err
+	}
+	return len(matches) > 0, nil
+}
+
+func parseBranchOutput(output []byte, subject string) ([]branchTip, error) {
 	text := strings.TrimSpace(string(output))
 	if text == "" {
 		return nil, nil
@@ -129,22 +227,19 @@ func parseBranchOutput(output []byte, issue int) ([]branchTip, error) {
 			return nil, fmt.Errorf("malformed branch ref")
 		}
 		branch := strings.TrimPrefix(ref, "refs/heads/")
-		branchIssue := issue
-		if branchIssue <= 0 {
-			parts := strings.SplitN(strings.TrimPrefix(branch, "forest/"), "-", 2)
-			parsedIssue, err := strconv.Atoi(parts[0])
-			if err != nil || parsedIssue <= 0 {
-				return nil, fmt.Errorf("malformed branch ref")
+		if subject != "" {
+			if branchBelongsToSubject(branch, subject) {
+				branches = append(branches, branchTip{Name: branch, SHA: fields[0]})
+				continue
 			}
-			branchIssue = parsedIssue
-		}
-		if !validBranch(branch, branchIssue) {
-			if issue > 0 {
-				return nil, fmt.Errorf("branch does not match issue %d", issue)
+			if validForestBranch(branch) || !strings.HasPrefix(branch, "forest/"+subject+"/") {
+				continue
 			}
-			return nil, fmt.Errorf("malformed branch ref")
+			return nil, fmt.Errorf("branch does not match subject %s", subject)
 		}
-		branches = append(branches, branchTip{Name: branch, SHA: fields[0]})
+		if validForestBranch(branch) {
+			branches = append(branches, branchTip{Name: branch, SHA: fields[0]})
+		}
 	}
 	return branches, nil
 }
@@ -243,7 +338,7 @@ func (p *Poller) branchTips(ctx context.Context) ([]branchTip, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseBranchOutput(output, 0)
+	return parseBranchOutput(output, "")
 }
 
 const pollNotesNamespace = "refs/notes/forest-poll"

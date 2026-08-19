@@ -60,11 +60,23 @@ func addNote(t *testing.T, root, ref, sha, payload, name, email string) {
 }
 
 func pollReviewNote(sha string) string {
-	return pollReviewNoteBranch(sha, "forest/4-work")
+	return pollReviewNoteBranch(sha, "forest/4/work")
 }
 
 func pollReviewNoteBranch(sha, branch string) string {
-	return `{"schema":"forest.review-request.v1","issue":4,"branch":"` + branch + `","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
+	return `{"schema":"forest.review-request.v2","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
+}
+
+func reviewSubjectForTest(branch string) string {
+	rest, ok := strings.CutPrefix(branch, "forest/")
+	if !ok {
+		return "4"
+	}
+	subject, _, found := strings.Cut(rest, "/")
+	if found && subject != "" {
+		return subject
+	}
+	return "4"
 }
 
 func processHeartbeatFixture(t *testing.T) (string, string) {

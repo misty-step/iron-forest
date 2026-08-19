@@ -62,6 +62,10 @@ The Kernel validates the payloads, writes create-only `refs/forest/v1/checks/<sh
 
 The existing review-request remains durable Gate evidence and is not republished. `forest status` reports the audited `master` and the evidence refs that bind it.
 
+## Powder completion
+
+After `forest publish verdict` exits 0 with `"verdict":"approve"`, run `powder show <subject>` from the selected request. If that job exists, belongs to this `forest.yaml` `repo`, and is not terminal, run `powder done <subject> --proof <revision>`. A `not_found` show is a GitHub Subject; skip. Do not `done` after `changes`. Do not `take` or `release`.
+
 
 ## Stop conditions
 

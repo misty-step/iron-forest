@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -73,7 +72,7 @@ func isSHA(value string) bool {
 
 type reviewRequest struct {
 	Schema   string `json:"schema"`
-	Issue    int    `json:"issue"`
+	Subject  string `json:"subject"`
 	Branch   string `json:"branch"`
 	Revision string `json:"revision"`
 	Time     string `json:"time"`
@@ -216,24 +215,37 @@ func validNoteTime(value string) bool {
 
 func decodeReview(data []byte, sha string) (reviewRequest, error) {
 	var note reviewRequest
-	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "issue", "branch", "revision", "time")); err != nil {
+	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "subject", "branch", "revision", "time")); err != nil {
 		return note, err
 	}
-	if note.Schema != "forest.review-request.v1" || note.Revision != sha || note.Issue <= 0 || !validBranch(note.Branch, note.Issue) || !validNoteTime(note.Time) {
+	if note.Schema != "forest.review-request.v2" || note.Revision != sha || !branchBelongsToSubject(note.Branch, note.Subject) || !validNoteTime(note.Time) {
 		return note, fmt.Errorf("invalid review-request note")
 	}
 	return note, nil
 }
 
-func validBranch(branch string, issue int) bool {
-	if issue <= 0 || !strings.HasPrefix(branch, "forest/") {
+func validSubject(subject string) bool {
+	if n := len(subject); n < 1 || n > 128 {
 		return false
 	}
-	parts := strings.SplitN(strings.TrimPrefix(branch, "forest/"), "-", 2)
-	if len(parts) != 2 || parts[0] != strconv.Itoa(issue) || parts[1] == "" {
+	first := subject[0]
+	if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') || (first >= '0' && first <= '9')) {
 		return false
 	}
-	slug := parts[1]
+	for i := 1; i < len(subject); i++ {
+		c := subject[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validWorkSlug(slug string) bool {
+	if slug == "" {
+		return false
+	}
 	for index := range len(slug) {
 		character := slug[index]
 		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') {
@@ -244,6 +256,28 @@ func validBranch(branch string, issue int) bool {
 		}
 	}
 	return true
+}
+
+func parseForestBranch(branch string) (string, string, bool) {
+	rest, ok := strings.CutPrefix(branch, "forest/")
+	if !ok {
+		return "", "", false
+	}
+	subject, slug, found := strings.Cut(rest, "/")
+	if !found || strings.Contains(slug, "/") || !validSubject(subject) || !validWorkSlug(slug) {
+		return "", "", false
+	}
+	return subject, slug, true
+}
+
+func validForestBranch(branch string) bool {
+	_, _, ok := parseForestBranch(branch)
+	return ok
+}
+
+func branchBelongsToSubject(branch, subject string) bool {
+	parsed, _, ok := parseForestBranch(branch)
+	return ok && parsed == subject
 }
 
 func validatePollReviewRequestBranch(data []byte, sha, branch string) error {

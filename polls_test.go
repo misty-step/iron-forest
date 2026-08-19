@@ -22,16 +22,17 @@ func TestBuilderPollMatrix(t *testing.T) {
 		{name: "empty tracker", issues: `[]`, want: 1},
 		{name: "many unready", issues: `[[{"number":99,"pull_request":{}},{"number":100,"pull_request":{}}],[{"number":101,"pull_request":{}}]]`, want: 1},
 		{name: "ready", issues: `[[{"number":4}]]`, want: 0},
-		{name: "ready branch active", issues: `[[{"number":4}]]`, branch: sha + " refs/heads/forest/4-work\n", want: 1},
+		{name: "ready branch active", issues: `[[{"number":4}]]`, branch: sha + " refs/heads/forest/4/work\n", want: 1},
 		{name: "malformed issue output", issues: `not json`, want: 2},
 		{name: "malformed branch output", issues: `[[{"number":4}]]`, branch: "not a branch\n", want: 2},
-		{name: "nested issue branch", issues: `[[{"number":4}]]`, branch: sha + " refs/heads/forest/4-work/nested\n", want: 2},
+		{name: "nested issue branch", issues: `[[{"number":4}]]`, branch: sha + " refs/heads/forest/4/work/nested\n", want: 2},
 		{name: "forge outage", ghErr: errors.New("offline"), want: 2},
 		{name: "git outage", issues: `[[{"number":4}]]`, gitErr: errors.New("git offline"), want: 2},
 		{name: "timeout", ghErr: context.DeadlineExceeded, want: 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("POWDER_AGENT", "")
 			p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
 			p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
 				if name == "gh" {
@@ -49,6 +50,123 @@ func TestBuilderPollMatrix(t *testing.T) {
 				t.Fatalf("poll exit=%d want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBuilderPollIgnoresPowderWithoutAgent(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "")
+	t.Setenv("POWDER_URL", "https://powder.example")
+	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
+	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "powder" {
+			t.Fatalf("powder invoked without POWDER_AGENT: %v", args)
+		}
+		if name == "gh" {
+			return []byte(`[]`), nil
+		}
+		return nil, nil
+	}
+	if got, err := p.builder(context.Background()); got != 1 || err != nil {
+		t.Fatalf("poll exit=%d err=%v want 1", got, err)
+	}
+}
+
+func TestBuilderPollPowderRequiresOrigin(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "forest-owner-name")
+	t.Setenv("POWDER_URL", "")
+	t.Setenv("POWDER_API_BASE_URL", "")
+	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
+	p.Run = func(_ context.Context, name string, _ ...string) ([]byte, error) {
+		if name == "gh" {
+			return []byte(`[]`), nil
+		}
+		t.Fatalf("unexpected tool %s", name)
+		return nil, nil
+	}
+	got, err := p.builder(context.Background())
+	if got != 2 || err == nil {
+		t.Fatalf("poll exit=%d err=%v want 2", got, err)
+	}
+}
+
+func TestBuilderPollPowderMatrix(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "forest-owner-name")
+	t.Setenv("POWDER_URL", "https://powder.example")
+	ctx := context.Background()
+	sha := strings.Repeat("a", 40)
+	cases := []struct {
+		name      string
+		issues    string
+		takeable  string
+		mine      string
+		branch    string
+		powderErr error
+		want      int
+	}{
+		{name: "takeable", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, want: 0},
+		{name: "takeable claimed", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, branch: sha + " refs/heads/forest/iron-forest-ready/work\n", want: 1},
+		{name: "mine unclaimed", issues: `[]`, takeable: `[]`, mine: `[{"id":"iron-forest-held"}]`, want: 0},
+		{name: "github ready empty powder", issues: `[[{"number":4}]]`, takeable: `[]`, mine: `[]`, want: 0},
+		{name: "malformed powder", issues: `[]`, takeable: `not json`, mine: `[]`, want: 2},
+		{name: "bad powder id", issues: `[]`, takeable: `[{"id":"bad id"}]`, mine: `[]`, want: 2},
+		{name: "powder outage", issues: `[]`, takeable: `[]`, mine: `[]`, powderErr: errors.New("offline"), want: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
+			p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "gh" {
+					return []byte(tc.issues), nil
+				}
+				if name == "powder" {
+					if !slices.Contains(args, "list") || !slices.Contains(args, "--repo") || !slices.Contains(args, "owner/name") {
+						t.Fatalf("powder list repo args missing: %v", args)
+					}
+					if slices.Contains(args, "--takeable") {
+						return []byte(tc.takeable), tc.powderErr
+					}
+					if slices.Contains(args, "--mine") {
+						if !slices.Contains(args, "forest-owner-name") {
+							t.Fatalf("powder mine agent missing: %v", args)
+						}
+						return []byte(tc.mine), tc.powderErr
+					}
+					t.Fatalf("unexpected powder args: %v", args)
+				}
+				return []byte(tc.branch), nil
+			}
+			if got, _ := p.builder(ctx); got != tc.want {
+				t.Fatalf("poll exit=%d want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseBranchOutputSkipsLeftoverHyphenTips(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	output := []byte(sha + " refs/heads/forest/259-cancel-live-run-cli\n" + sha + " refs/heads/forest/4/work\n")
+	got, err := parseBranchOutput(output, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "forest/4/work" {
+		t.Fatalf("tips=%#v", got)
+	}
+}
+
+func TestVerifierPollSkipsLeftoverHyphenTips(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
+	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "git" && slices.Contains(args, "refs/heads/forest/*") {
+			return []byte(sha + " refs/heads/forest/259-cancel-live-run-cli\n" + sha + " refs/heads/forest/284-evidence-ref-selection\n"), nil
+		}
+		t.Fatalf("unexpected %s %v", name, args)
+		return nil, nil
+	}
+	code, err := p.verifier(context.Background())
+	if code != 1 || err != nil {
+		t.Fatalf("poll exit=%d err=%v want 1", code, err)
 	}
 }
 
@@ -105,7 +223,7 @@ func TestPollNoteDecodersRejectStrictJSON(t *testing.T) {
 		keys   []string
 		decode func([]byte) error
 	}{
-		{name: "review", data: validReview, keys: []string{"schema", "issue", "branch", "revision", "time"}, decode: decodeReviewNote},
+		{name: "review", data: validReview, keys: []string{"schema", "subject", "branch", "revision", "time"}, decode: decodeReviewNote},
 		{name: "checks", data: validChecks, keys: []string{"schema", "revision", "results", "time", "name", "ok", "exit"}, decode: decodeChecksNote},
 		{name: "verdict", data: validVerdict, keys: []string{"schema", "revision", "verdict", "summary", "time"}, decode: decodeVerdictNote},
 	}
@@ -121,7 +239,7 @@ func TestPollNoteDecodersRejectStrictJSON(t *testing.T) {
 		}
 	}
 
-	missingReview := `{"schema":"forest.review-request.v1","issue":4,"branch":"forest/4-work","revision":"` + sha + `"}`
+	missingReview := `{"schema":"forest.review-request.v2","subject":"4","branch":"forest/4/work","revision":"` + sha + `"}`
 	missingChecks := `{"schema":"forest.checks.v1","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
 	missingVerdict := `{"schema":"forest.verdict.v1","revision":"` + sha + `","verdict":"approve","time":"2026-08-10T00:00:00Z"}`
 	nullResults := strings.Replace(validChecks, `"results":[{"name":"test","ok":true,"exit":0}]`, `"results":null`, 1)
@@ -133,39 +251,39 @@ func TestPollNoteDecodersRejectStrictJSON(t *testing.T) {
 		{name: "review unknown member", data: strings.Replace(validReview, `,"time":`, `,"extra":true,"time":`, 1), decode: decodeReviewNote},
 		{name: "checks unknown nested member", data: pollChecksNote(sha, `{"name":"test","ok":true,"exit":0,"extra":true}`), decode: decodeChecksNote},
 		{name: "verdict unknown member", data: strings.Replace(validVerdict, `,"time":`, `,"extra":true,"time":`, 1), decode: decodeVerdictNote},
-		{name: "review duplicate member", data: `{"schema":"forest.review-request.v1","schema":"forest.review-request.v1","issue":4,"branch":"forest/4-work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`, decode: decodeReviewNote},
+		{name: "review duplicate member", data: `{"schema":"forest.review-request.v2","schema":"forest.review-request.v2","subject":"4","branch":"forest/4/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`, decode: decodeReviewNote},
 		{name: "checks duplicate nested member", data: pollChecksNote(sha, `{"name":"test","name":"test","ok":true,"exit":0}`), decode: decodeChecksNote},
 		{name: "verdict duplicate member", data: `{"schema":"forest.verdict.v1","revision":"` + sha + `","verdict":"approve","summary":"done","summary":"done","time":"2026-08-10T00:00:00Z"}`, decode: decodeVerdictNote},
-		{name: "review mixed-case duplicate", data: strings.Replace(validReview, `"schema":"forest.review-request.v1"`, `"schema":"bad","Schema":"forest.review-request.v1"`, 1), decode: decodeReviewNote},
+		{name: "review mixed-case duplicate", data: strings.Replace(validReview, `"schema":"forest.review-request.v2"`, `"schema":"bad","Schema":"forest.review-request.v2"`, 1), decode: decodeReviewNote},
 		{name: "check mixed-case duplicate", data: pollChecksNote(sha, `{"name":"bad","Name":"test","ok":true,"exit":0}`), decode: decodeChecksNote},
 		{name: "trailing JSON", data: validReview + ` {}`, decode: decodeReviewNote},
 		{name: "review malformed time", data: strings.Replace(validReview, "2026-08-10T00:00:00Z", "not-a-time", 1), decode: decodeReviewNote},
 		{name: "checks malformed time", data: strings.Replace(validChecks, "2026-08-10T00:00:00Z", "not-a-time", 1), decode: decodeChecksNote},
 		{name: "verdict malformed time", data: strings.Replace(validVerdict, "2026-08-10T00:00:00Z", "not-a-time", 1), decode: decodeVerdictNote},
 		{name: "verdict blank summary", data: strings.Replace(validVerdict, `"summary":"done"`, `"summary":"  "`, 1), decode: decodeVerdictNote},
-		{name: "review empty branch slug", data: pollReviewNoteBranch(sha, "forest/4-"), decode: decodeReviewNote},
-		{name: "review uppercase branch slug", data: pollReviewNoteBranch(sha, "forest/4-Bad"), decode: decodeReviewNote},
-		{name: "review underscored branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad_name"), decode: decodeReviewNote},
-		{name: "review leading branch separator", data: pollReviewNoteBranch(sha, "forest/4--bad"), decode: decodeReviewNote},
-		{name: "review repeated branch separator", data: pollReviewNoteBranch(sha, "forest/4-bad--name"), decode: decodeReviewNote},
-		{name: "review trailing branch separator", data: pollReviewNoteBranch(sha, "forest/4-bad-"), decode: decodeReviewNote},
-		{name: "review spaced branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad name"), decode: decodeReviewNote},
-		{name: "review dotted branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad.name"), decode: decodeReviewNote},
-		{name: "review leading dot branch", data: pollReviewNoteBranch(sha, "forest/4-.bad"), decode: decodeReviewNote},
-		{name: "review dot sequence branch", data: pollReviewNoteBranch(sha, "forest/4-bad..name"), decode: decodeReviewNote},
-		{name: "review nested branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad/name"), decode: decodeReviewNote},
-		{name: "review tilde branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad~name"), decode: decodeReviewNote},
-		{name: "review caret branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad^name"), decode: decodeReviewNote},
-		{name: "review colon branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad:name"), decode: decodeReviewNote},
-		{name: "review question branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad?name"), decode: decodeReviewNote},
-		{name: "review asterisk branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad*name"), decode: decodeReviewNote},
-		{name: "review bracket branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad[name"), decode: decodeReviewNote},
-		{name: "review single-at branch slug", data: pollReviewNoteBranch(sha, "forest/4-@"), decode: decodeReviewNote},
-		{name: "review backslash branch slug", data: strings.Replace(validReview, "forest/4-work", `forest/4-bad\\name`, 1), decode: decodeReviewNote},
-		{name: "review control branch slug", data: strings.Replace(validReview, "forest/4-work", `forest/4-bad\u0001name`, 1), decode: decodeReviewNote},
-		{name: "review at-brace branch slug", data: pollReviewNoteBranch(sha, "forest/4-bad@{name"), decode: decodeReviewNote},
-		{name: "review trailing dot branch", data: pollReviewNoteBranch(sha, "forest/4-bad."), decode: decodeReviewNote},
-		{name: "review lock suffix branch", data: pollReviewNoteBranch(sha, "forest/4-bad.lock"), decode: decodeReviewNote},
+		{name: "review empty branch slug", data: pollReviewNoteBranch(sha, "forest/4/"), decode: decodeReviewNote},
+		{name: "review uppercase branch slug", data: pollReviewNoteBranch(sha, "forest/4/Bad"), decode: decodeReviewNote},
+		{name: "review underscored branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad_name"), decode: decodeReviewNote},
+		{name: "review leading branch separator", data: pollReviewNoteBranch(sha, "forest/4/-bad"), decode: decodeReviewNote},
+		{name: "review repeated branch separator", data: pollReviewNoteBranch(sha, "forest/4/bad--name"), decode: decodeReviewNote},
+		{name: "review trailing branch separator", data: pollReviewNoteBranch(sha, "forest/4/bad-"), decode: decodeReviewNote},
+		{name: "review spaced branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad name"), decode: decodeReviewNote},
+		{name: "review dotted branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad.name"), decode: decodeReviewNote},
+		{name: "review leading dot branch", data: pollReviewNoteBranch(sha, "forest/4/.bad"), decode: decodeReviewNote},
+		{name: "review dot sequence branch", data: pollReviewNoteBranch(sha, "forest/4/bad..name"), decode: decodeReviewNote},
+		{name: "review nested branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad/name"), decode: decodeReviewNote},
+		{name: "review tilde branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad~name"), decode: decodeReviewNote},
+		{name: "review caret branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad^name"), decode: decodeReviewNote},
+		{name: "review colon branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad:name"), decode: decodeReviewNote},
+		{name: "review question branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad?name"), decode: decodeReviewNote},
+		{name: "review asterisk branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad*name"), decode: decodeReviewNote},
+		{name: "review bracket branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad[name"), decode: decodeReviewNote},
+		{name: "review single-at branch slug", data: pollReviewNoteBranch(sha, "forest/4/@"), decode: decodeReviewNote},
+		{name: "review backslash branch slug", data: strings.Replace(validReview, "forest/4/work", `forest/4/bad\\name`, 1), decode: decodeReviewNote},
+		{name: "review control branch slug", data: strings.Replace(validReview, "forest/4/work", "forest/4/bad\u0001name", 1), decode: decodeReviewNote},
+		{name: "review at-brace branch slug", data: pollReviewNoteBranch(sha, "forest/4/bad@{name"), decode: decodeReviewNote},
+		{name: "review trailing dot branch", data: pollReviewNoteBranch(sha, "forest/4/bad."), decode: decodeReviewNote},
+		{name: "review lock suffix branch", data: pollReviewNoteBranch(sha, "forest/4/bad.lock"), decode: decodeReviewNote},
 		{name: "missing review member", data: missingReview, decode: decodeReviewNote},
 		{name: "missing checks member", data: missingChecks, decode: decodeChecksNote},
 		{name: "missing verdict member", data: missingVerdict, decode: decodeVerdictNote},

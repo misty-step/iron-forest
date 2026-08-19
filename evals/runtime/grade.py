@@ -111,7 +111,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     require(master is not None, "master exists")
 
     if effect == "builder_publish":
-        matching = {ref: oid for ref, oid in branches.items() if ref.startswith(f"refs/heads/forest/{scenario['issue']['number']}-")}
+        matching = {ref: oid for ref, oid in branches.items() if ref.startswith(f"refs/heads/forest/{scenario['issue']['number']}/")}
         require(len(matching) == 1, "exactly one selected Issue branch is published")
         if len(matching) == 1:
             ref, revision = next(iter(matching.items()))
@@ -122,7 +122,8 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
             require(observed is not None, "Builder publishes a review-request note")
             if observed:
                 payload, actor = observed
-                require(payload.get("schema") == "forest.review-request.v1", "review request uses schema v1")
+                require(payload.get("schema") == "forest.review-request.v2", "review request uses schema v2")
+                require(payload.get("subject") == str(scenario["issue"]["number"]), "review request binds the Subject")
                 require(payload.get("revision") == revision, "review request binds the branch Revision")
                 require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
                 require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
@@ -180,7 +181,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
             require(observed is not None, "Fixer publishes a fresh review request")
             if observed:
                 payload, actor = observed
-                require(payload.get("revision") == revision and payload.get("branch") == branch, "Fixer review request binds the fresh Revision")
+                require(payload.get("schema") == "forest.review-request.v2" and payload.get("revision") == revision and payload.get("branch") == branch, "Fixer review request binds the fresh Revision")
                 require(actor == "Iron Forest Fixer <fixer@forest.invalid>", "Fixer authors the fresh review request")
         require(note("refs/notes/forest/verdict", candidate) is not None, "Fixer preserves rejected Verdict evidence")
     elif effect == "fixer_conflict":

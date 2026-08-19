@@ -21,7 +21,7 @@ publish.
 `forest publish review-request` owns the write-once review-request note and
 the paired branch push. It implements the ADR 0010 profile contract exactly:
 
-- one payload file, one exact Revision, one `forest/<issue>-<slug>` branch
+- one payload file, one exact Revision, one `forest/<subject>/<slug>` branch
 - private refs under `FOREST_RUN_ID`
 - `git notes add -F` only
 - flat and fanout note paths by enumeration, never by derived SHA
