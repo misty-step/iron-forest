@@ -56,12 +56,16 @@ func auditorEvidenceRef(snapshot auditSnapshot, ref string) string {
 }
 
 func advertiseEvidenceSnapshot(ctx context.Context, root string, deps auditDependencies) (auditSnapshot, error) {
-	output, err := deps.runGit(ctx, root, "ls-remote", "origin", "refs/heads/master",
+	primary, _, err := resolvedPrimaryRef(ctx, root)
+	if err != nil {
+		return auditSnapshot{}, err
+	}
+	output, err := deps.runGit(ctx, root, "ls-remote", "origin", primary,
 		evidenceRequestRefPrefix+"*", evidenceChecksRefPrefix+"*", evidenceVerdictRefPrefix+"*")
 	if err != nil {
 		return auditSnapshot{}, fmt.Errorf("read remote snapshot: %w", err)
 	}
-	snapshot := auditSnapshot{Evidence: map[string]string{}}
+	snapshot := auditSnapshot{Ref: primary, Evidence: map[string]string{}}
 	seen := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -72,7 +76,7 @@ func advertiseEvidenceSnapshot(ctx context.Context, root string, deps auditDepen
 			return auditSnapshot{}, fmt.Errorf("malformed remote snapshot")
 		}
 		ref := fields[1]
-		if ref == "refs/heads/master" {
+		if ref == primary {
 			snapshot.Master = fields[0]
 		} else if strings.HasPrefix(ref, "refs/forest/v1/") {
 			snapshot.Evidence[ref] = fields[0]
@@ -82,13 +86,13 @@ func advertiseEvidenceSnapshot(ctx context.Context, root string, deps auditDepen
 		seen[ref] = true
 	}
 	if snapshot.Master == "" {
-		return auditSnapshot{}, fmt.Errorf("origin/master is missing or malformed")
+		return auditSnapshot{}, fmt.Errorf("%s is missing or malformed", primary)
 	}
 	return snapshot, nil
 }
 
 func fetchEvidenceSnapshotRefs(ctx context.Context, root string, snapshot auditSnapshot, deps auditDependencies) error {
-	if err := fetchSnapshotRef(ctx, root, "refs/heads/master", auditorMasterRef(snapshot), snapshot.Master, deps); err != nil {
+	if err := fetchSnapshotRef(ctx, root, snapshot.Ref, auditorMasterRef(snapshot), snapshot.Master, deps); err != nil {
 		return err
 	}
 	for ref, oid := range snapshot.Evidence {

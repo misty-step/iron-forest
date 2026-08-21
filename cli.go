@@ -369,12 +369,24 @@ func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 	return positional, flags, nil
 }
 
+type configShowPayload struct {
+	Repo          string                 `json:"repo"`
+	Primary       string                 `json:"primary"`
+	PrimarySource string                 `json:"primary_source"`
+	Agents        map[string]AgentConfig `json:"agents"`
+	Checks        []Check                `json:"checks"`
+}
+
 func runConfigShow(_ []string, flags cliFlags) cliOutcome {
 	cfg, err := loadConfig(configPath(flags.root))
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	human := fmt.Sprintf("repo: %s", cfg.Repo)
+	primary, primarySource, err := resolvePrimary(context.Background(), flags.root, cfg)
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	human := fmt.Sprintf("repo: %s\nprimary: %s (%s)", cfg.Repo, primary, primarySource)
 	for _, name := range agentNames(cfg) {
 		agent := cfg.Agents[name]
 		human += fmt.Sprintf("\nagent %s: poll=%q interval=%ds", name, agent.Poll, agent.Interval)
@@ -382,7 +394,13 @@ func runConfigShow(_ []string, flags cliFlags) cliOutcome {
 	for _, check := range cfg.Checks {
 		human += fmt.Sprintf("\ncheck %s: run=%q", check.Name, check.Run)
 	}
-	return cliOutcome{Exit: exitOK, Data: cfg, Human: human}
+	return cliOutcome{Exit: exitOK, Data: configShowPayload{
+		Repo:          cfg.Repo,
+		Primary:       primary,
+		PrimarySource: primarySource,
+		Agents:        cfg.Agents,
+		Checks:        cfg.Checks,
+	}, Human: human}
 }
 
 type declarationListPayload struct {

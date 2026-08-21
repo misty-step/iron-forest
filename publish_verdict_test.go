@@ -142,6 +142,7 @@ func TestPublishVerdictApproveRejectsNonFastForward(t *testing.T) {
 func TestPublishVerdictApproveRunsChecks(t *testing.T) {
 	root, _ := testClone(t)
 	config := []byte(`repo: owner/name
+primary: refs/heads/master
 agents:
   builder: {poll: "true", interval: 1}
 checks:

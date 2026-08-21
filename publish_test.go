@@ -15,6 +15,7 @@ import (
 func writePassingChecks(t *testing.T, root string) {
 	t.Helper()
 	config := []byte(`repo: owner/name
+primary: refs/heads/master
 agents:
   builder: {poll: "true", interval: 1}
   fixer: {poll: "true", interval: 1}

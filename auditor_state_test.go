@@ -108,6 +108,7 @@ func TestAuditorFirstFailureDurablyAnchorsRetryAndDeduplicatesHistory(t *testing
 	runGitDir(t, root, "checkout", "--orphan", "rewritten")
 	runGitDir(t, root, "rm", "-rf", ".")
 	config := []byte(`repo: owner/name
+primary: refs/heads/master
 agents:
   builder: {poll: "forest poll builder", interval: 1}
 checks:

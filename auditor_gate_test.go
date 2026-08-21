@@ -121,9 +121,9 @@ func TestAuditorRejectsChecksSetMismatch(t *testing.T) {
 		want    string
 	}{
 		{name: "empty reported", config: "", results: `[]`, want: "invalid checks note"},
-		{name: "partial", config: "repo: owner/name\nagents:\n  builder: {poll: forest poll builder, interval: 1}\nchecks:\n  - {name: test, run: test}\n  - {name: vet, run: vet}\n", results: `[{"name":"test","ok":true,"exit":0}]`, want: "does not match configured checks"},
+		{name: "partial", config: "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder: {poll: forest poll builder, interval: 1}\nchecks:\n  - {name: test, run: test}\n  - {name: vet, run: vet}\n", results: `[{"name":"test","ok":true,"exit":0}]`, want: "does not match configured checks"},
 		{name: "extra", config: "", results: `[{"name":"test","ok":true,"exit":0},{"name":"vet","ok":true,"exit":0}]`, want: "does not match configured checks"},
-		{name: "order mismatch", config: "repo: owner/name\nagents:\n  builder: {poll: forest poll builder, interval: 1}\nchecks:\n  - {name: test, run: test}\n  - {name: vet, run: vet}\n", results: `[{"name":"vet","ok":true,"exit":0},{"name":"test","ok":true,"exit":0}]`, want: "does not match configured checks"},
+		{name: "order mismatch", config: "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder: {poll: forest poll builder, interval: 1}\nchecks:\n  - {name: test, run: test}\n  - {name: vet, run: vet}\n", results: `[{"name":"vet","ok":true,"exit":0},{"name":"test","ok":true,"exit":0}]`, want: "does not match configured checks"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

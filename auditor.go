@@ -28,6 +28,7 @@ type AuditState struct {
 
 type auditSnapshot struct {
 	Master   string
+	Ref      string
 	Evidence map[string]string
 	id       string
 }

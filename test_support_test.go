@@ -130,6 +130,7 @@ func testClone(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	config := []byte(`repo: owner/name
+primary: refs/heads/master
 agents:
   builder: {poll: "forest poll builder", interval: 1}
 checks:

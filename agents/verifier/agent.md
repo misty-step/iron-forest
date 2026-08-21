@@ -29,9 +29,9 @@ The selector must choose one branch tip. The poll only wakes this declaration; i
 
 1. Read `forest.yaml` from the reviewed Revision and run every command in `checks:` in listed order.
 2. Record each check name and numeric exit code. A check is `ok: true` only when its exit code is zero.
-3. Review the diff from `origin/master` to that exact SHA for correctness, tests, repository conventions, and scope. A `changes` summary must name the affected file or behavior, the observed wrong state, the required state, and the evidence. "Not verifiable" is not enough when the defect is in the diff.
-4. Before `approve`, confirm the reviewed SHA contains current `origin/master` and can fast-forward it. If `git merge-base --is-ancestor origin/master <sha>` fails, the Revision is stale: decide `changes`, publish Checks and Verdict, and do not attempt the approval Gate.
-5. Decide `approve` only when all Checks pass, the Revision can fast-forward `origin/master`, and the diff is ready to merge. Otherwise, decide `changes` and put concrete reasons in `summary`.
+3. Review the diff from `origin/${FOREST_PRIMARY_REF#refs/heads/}` to that exact SHA for correctness, tests, repository conventions, and scope. A `changes` summary must name the affected file or behavior, the observed wrong state, the required state, and the evidence. "Not verifiable" is not enough when the defect is in the diff.
+4. Before `approve`, confirm the reviewed SHA contains current `origin/${FOREST_PRIMARY_REF#refs/heads/}` and can fast-forward it. If `git merge-base --is-ancestor origin/${FOREST_PRIMARY_REF#refs/heads/} <sha>` fails, the Revision is stale: decide `changes`, publish Checks and Verdict, and do not attempt the approval Gate.
+5. Decide `approve` only when all Checks pass, the Revision can fast-forward `origin/${FOREST_PRIMARY_REF#refs/heads/}`, and the diff is ready to merge. Otherwise, decide `changes` and put concrete reasons in `summary`.
 6. Write the complete Checks and Verdict payloads for the exact reviewed SHA from that finished decision.
 
 ## Coordination schema v1

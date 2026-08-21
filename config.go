@@ -21,9 +21,10 @@ const workspaceName = ".forest"
 var repoNamePattern = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
 type Config struct {
-	Repo   string                 `yaml:"repo" json:"repo"`
-	Agents map[string]AgentConfig `yaml:"agents" json:"agents"`
-	Checks []Check                `yaml:"checks" json:"checks"`
+	Repo    string                 `yaml:"repo" json:"repo"`
+	Primary string                 `yaml:"primary" json:"primary,omitempty"`
+	Agents  map[string]AgentConfig `yaml:"agents" json:"agents"`
+	Checks  []Check                `yaml:"checks" json:"checks"`
 }
 
 type AgentConfig struct {
@@ -51,9 +52,10 @@ func (i *yamlInt) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type configYAML struct {
-	Repo   yamlString                      `yaml:"repo"`
-	Agents map[*yamlString]agentConfigYAML `yaml:"agents"`
-	Checks []checkYAML                     `yaml:"checks"`
+	Repo    yamlString                      `yaml:"repo"`
+	Primary yamlString                      `yaml:"primary"`
+	Agents  map[*yamlString]agentConfigYAML `yaml:"agents"`
+	Checks  []checkYAML                     `yaml:"checks"`
 }
 
 type agentConfigYAML struct {
@@ -162,7 +164,7 @@ func decodeConfig(data []byte, source string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("parse %s: multiple YAML documents", source)
 	}
-	cfg := Config{Repo: string(document.Repo)}
+	cfg := Config{Repo: string(document.Repo), Primary: strings.TrimSpace(string(document.Primary))}
 	if document.Agents != nil {
 		cfg.Agents = make(map[string]AgentConfig, len(document.Agents))
 		for name, agent := range document.Agents {
@@ -202,6 +204,11 @@ func durationFromSeconds(seconds int) (time.Duration, error) {
 func (c Config) Validate() error {
 	if !repoNamePattern.MatchString(c.Repo) {
 		return fmt.Errorf("repo must have owner/name shape: %q", c.Repo)
+	}
+	if c.Primary != "" {
+		if err := validatePrimaryRef(c.Primary); err != nil {
+			return err
+		}
 	}
 	if len(c.Agents) == 0 {
 		return errors.New("agents must not be empty")

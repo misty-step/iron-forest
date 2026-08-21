@@ -21,7 +21,7 @@ Work from evidence: read the Issue or Powder spec, local instructions, and affec
 4. A Powder candidate is eligible when its spec is nonempty, its `repo` matches this repository, and `git ls-remote origin 'refs/heads/forest/<id>/*'` is empty.
 5. If a Powder candidate is eligible, `powder take <id>` immediately. `already_holding` means finish, ask, or release the held job first. Do not start a GitHub Issue while holding a Powder lease.
 6. If the candidate already has a branch or PR, pick a different Subject. If none remain, stop cleanly with an exit summary. Do not create a branch, PR, Issue, review-request, or Powder job.
-7. Immediately before creating the branch, run `git fetch origin`, resolve `base_sha="$(git rev-parse refs/remotes/origin/master)"`, and record that full SHA in the run summary. Create `forest/<subject>/<slug>` from that exact `$base_sha` in the same step. The Subject is the Issue number or the Powder job id.
+7. Immediately before creating the branch, run `git fetch origin`, resolve `base_sha="$(git rev-parse "refs/remotes/origin/${FOREST_PRIMARY_REF#refs/heads/}")"`, and record that full SHA in the run summary. Create `forest/<subject>/<slug>` from that exact `$base_sha` in the same step. The Subject is the Issue number or the Powder job id.
 
 The selector must choose exactly one Subject. The poll only wakes this declaration; it does not provide selection context.
 

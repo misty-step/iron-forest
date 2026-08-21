@@ -121,7 +121,13 @@ func serve(root string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
 		}
-		scheduler := NewScheduler(root, cfg, NewRunner(root))
+		runner := NewRunner(root)
+		runner.PrimaryRef, _, err = resolvePrimary(context.Background(), root, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitError
+		}
+		scheduler := NewScheduler(root, cfg, runner)
 		if scheduler.startupErr != nil {
 			fmt.Fprintln(os.Stderr, scheduler.startupErr)
 			return exitError
@@ -154,7 +160,13 @@ func once(root, agent string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return exitError
 		}
-		scheduler := NewScheduler(root, cfg, NewRunner(root))
+		runner := NewRunner(root)
+		runner.PrimaryRef, _, err = resolvePrimary(context.Background(), root, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitError
+		}
+		scheduler := NewScheduler(root, cfg, runner)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		dispatched, err := scheduler.Once(ctx, agent)
@@ -342,9 +354,11 @@ type toolPath struct {
 }
 
 type selfcheckPayload struct {
-	Repo         string     `json:"repo"`
-	Declarations []string   `json:"declarations"`
-	Tools        []toolPath `json:"tools"`
+	Repo          string     `json:"repo"`
+	Primary       string     `json:"primary"`
+	PrimarySource string     `json:"primary_source"`
+	Declarations  []string   `json:"declarations"`
+	Tools         []toolPath `json:"tools"`
 	// Defaults reports the instance layer the declarations resolve against, and
 	// DefaultsSource names its file, so a host that supplies no defaults is
 	// visibly different from one that supplies empty ones.
@@ -357,6 +371,10 @@ type selfcheckPayload struct {
 // resolved, which is the fact the check establishes.
 func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 	cfg, err := loadConfig(configPath(flags.root))
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	primary, primarySource, err := resolvePrimary(context.Background(), flags.root, cfg)
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
@@ -387,8 +405,8 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		}
 		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
-	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\ndeclarations: %s\ntools: %s",
-		oneLine(cfg.Repo), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
+	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\nprimary: %s (%s)\ndeclarations: %s\ntools: %s",
+		oneLine(cfg.Repo), oneLine(primary), oneLine(primarySource), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
 	if defaultsSource != "" {
 		human += fmt.Sprintf("\ndefaults: %s (model=%s)", oneLine(defaultsSource), oneLine(defaults.Model))
 	}
@@ -396,6 +414,8 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		Exit: exitOK,
 		Data: selfcheckPayload{
 			Repo:           cfg.Repo,
+			Primary:        primary,
+			PrimarySource:  primarySource,
 			Declarations:   names,
 			Tools:          resolved,
 			Defaults:       defaults,

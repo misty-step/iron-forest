@@ -451,7 +451,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 
 func writeCLIConfig(t *testing.T, root, poll string) {
 	t.Helper()
-	config := "repo: owner/name\nagents:\n  builder:\n    poll: " + poll + "\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
+	config := "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder:\n    poll: " + poll + "\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
 	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}

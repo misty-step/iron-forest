@@ -1078,7 +1078,7 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
 	t.Setenv("GIT_CONFIG_VALUE_0", "ambient")
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'user.name'='ambient' 'user.email'='ambient@example.invalid'")
-	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi")
+	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1092,6 +1092,7 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 		"SERVICE_API_TOKEN":   "inherited-only",
 		"FOREST_RUN_ID":       "1-builder",
 		"FOREST_ROOT":         root,
+		"FOREST_PRIMARY_REF":  "refs/heads/master",
 		"GIT_CONFIG_COUNT":    "2",
 		"GIT_CONFIG_KEY_0":    "user.name",
 		"GIT_CONFIG_VALUE_0":  "Iron Forest Builder",

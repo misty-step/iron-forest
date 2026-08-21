@@ -19,9 +19,10 @@ import (
 )
 
 type Runner struct {
-	Root    string
-	GitPath string
-	PiPath  string
+	Root       string
+	GitPath    string
+	PiPath     string
+	PrimaryRef string
 }
 
 const (
@@ -139,7 +140,7 @@ func pathInside(root, path string) (bool, error) {
 }
 
 var overriddenChildEnvNames = []string{
-	"PATH", "FOREST_RUN_ID", "FOREST_ROOT", "PI_CODING_AGENT_DIR",
+	"PATH", "FOREST_RUN_ID", "FOREST_ROOT", "FOREST_PRIMARY_REF", "PI_CODING_AGENT_DIR",
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 	"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
 	"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
@@ -159,7 +160,7 @@ func childEnvironment() []string {
 
 // runEnvironment composes the child's inherited service values, trusted PATH,
 // scoped Run Git identity and marker, and fresh writable Pi directory.
-func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
+func runEnvironment(root, name, email, runID, piDir, primaryRef string) ([]string, error) {
 	path, err := trustedPath(root)
 	if err != nil {
 		return nil, err
@@ -178,6 +179,7 @@ func runEnvironment(root, name, email, runID, piDir string) ([]string, error) {
 		"GIT_CONFIG_VALUE_1="+email,
 		"FOREST_RUN_ID="+runID,
 		"FOREST_ROOT="+absoluteRoot,
+		"FOREST_PRIMARY_REF="+primaryRef,
 		"PI_CODING_AGENT_DIR="+piDir,
 	)
 	return environment, nil
@@ -386,7 +388,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 	}
 
 	worktree := forestPath(r.Root, "worktrees", runID)
-	worktreeMayExist, prepareErr := r.prepareWorktree(ctx, worktree)
+	primaryRef, worktreeMayExist, prepareErr := r.prepareWorktree(ctx, worktree)
 	if prepareErr != nil {
 		var cleanupErr error
 		if worktreeMayExist {
@@ -440,7 +442,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 	var invokeErr error
 	harnessStarted := false
 	if harnessRunnable {
-		invokeErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, &record)
+		invokeErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, primaryRef, &record)
 	}
 	if hasRunCancellationMarker(r.Root, runID) {
 		record.Error = runCancelledError
@@ -525,17 +527,37 @@ func newRunID(agent string, now time.Time) string {
 	return fmt.Sprintf("%d-%s", now.UnixNano(), agent)
 }
 
-func (r *Runner) prepareWorktree(ctx context.Context, path string) (bool, error) {
+func (r *Runner) primaryRef(ctx context.Context) (string, error) {
+	if r.PrimaryRef != "" {
+		return r.PrimaryRef, nil
+	}
+	cfg, err := loadConfig(configPath(r.Root))
+	if err != nil {
+		return "", err
+	}
+	ref, _, err := resolvePrimary(ctx, r.Root, cfg)
+	if err != nil {
+		return "", fmt.Errorf("resolve primary ref: %w", err)
+	}
+	return ref, nil
+}
+
+func (r *Runner) prepareWorktree(ctx context.Context, path string) (string, bool, error) {
+	primary, err := r.primaryRef(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	branch := strings.TrimPrefix(primary, primaryRefPrefix)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, err
+		return "", false, err
 	}
-	if _, err := r.git(ctx, r.Root, "fetch", "origin", "master"); err != nil {
-		return false, fmt.Errorf("fetch origin/master: %w", err)
+	if _, err := r.git(ctx, r.Root, "fetch", "origin", branch); err != nil {
+		return "", false, fmt.Errorf("fetch origin/%s: %w", branch, err)
 	}
-	if _, err := r.git(ctx, r.Root, "worktree", "add", "--detach", path, "origin/master"); err != nil {
-		return true, fmt.Errorf("add worktree: %w", err)
+	if _, err := r.git(ctx, r.Root, "worktree", "add", "--detach", path, "origin/"+branch); err != nil {
+		return "", true, fmt.Errorf("add worktree: %w", err)
 	}
-	return true, nil
+	return primary, true, nil
 }
 
 const (
@@ -837,7 +859,7 @@ func (t *agentOutcomeTracker) Err() error {
 	return nil
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, logFile io.Writer, record *RunRecord) (err error, started bool) {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, logFile io.Writer, primaryRef string, record *RunRecord) (err error, started bool) {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
 		return err, false
@@ -871,7 +893,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir)
+	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir, primaryRef)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
 		return err, false

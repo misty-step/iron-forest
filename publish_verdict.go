@@ -97,7 +97,16 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		return publishVerdictResult{}, conflictError("conflicting evidence ref for %s", revision)
 	}
 
+	var primaryRef string
 	if verdict.Verdict == "approve" {
+		cfg, loadErr := loadConfig(configPath(input.Root))
+		if loadErr != nil {
+			return publishVerdictResult{}, loadErr
+		}
+		primaryRef, _, err = resolvePrimary(ctx, input.Root, cfg)
+		if err != nil {
+			return publishVerdictResult{}, fmt.Errorf("resolve primary ref: %w", err)
+		}
 		if err := runConfiguredChecks(ctx, input.Root, revision); err != nil {
 			return publishVerdictResult{}, err
 		}
@@ -120,7 +129,7 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		verdictCommit + ":" + verdictRef,
 	}
 	if verdict.Verdict == "approve" {
-		args = append(args, revision+":refs/heads/master")
+		args = append(args, revision+":"+primaryRef)
 	}
 	if err := gitRun(ctx, input.Root, args...); err != nil {
 		return publishVerdictResult{}, classifyVerdictPush(err)
