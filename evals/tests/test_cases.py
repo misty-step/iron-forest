@@ -21,6 +21,14 @@ class CaseManifestTest(unittest.TestCase):
         ids = [case["id"] for case in self.cases]
         self.assertEqual(len(ids), len(set(ids)))
 
+    def test_critic_declaration_is_covered(self):
+        critic_cases = [case for case in self.cases if case["role"] == "critic"]
+        self.assertTrue(critic_cases, "the critic declaration has at least one deterministic eval case")
+        for case in critic_cases:
+            self.assertEqual(case["effect"], "critic_drafts")
+            self.assertIn("planted_files", case)
+            self.assertTrue(case["planted_files"])
+
     def test_generated_tasks_match_manifest(self):
         task_names = {path.name for path in (ROOT / "tasks").iterdir() if path.is_dir()}
         self.assertEqual(task_names, {case["id"] for case in self.cases})

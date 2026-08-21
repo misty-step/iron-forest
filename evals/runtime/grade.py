@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
-from hidden import CANDIDATE_MODEL, PR_CREATED, RACE_TRIGGERED, REFERENCE_RUN, STATE
+from hidden import CANDIDATE_MODEL, POWDER_OPS, PR_CREATED, RACE_TRIGGERED, REFERENCE_RUN, STATE
 
 
 from judge import evaluate
@@ -63,6 +64,19 @@ def note(ref: str, target: str) -> tuple[dict, str] | None:
 def file_at(revision: str, path: str) -> str | None:
     value = git("show", f"{revision}:{path}", check=False)
     return value + "\n" if value else None
+
+
+def powder_ops() -> list[dict]:
+    if not POWDER_OPS.exists():
+        return []
+    ops: list[dict] = []
+    for line in POWDER_OPS.read_text(errors="replace").splitlines():
+        if line.strip():
+            try:
+                ops.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return ops
 
 
 def trace_commands() -> tuple[list[str], str]:
@@ -200,6 +214,20 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         else:
             require(branches.get(f"refs/heads/{branch}") == candidate, "Fixer does not move the rejected branch")
             require(set(note_paths("refs/notes/forest/review-request")) == {candidate}, "Fixer publishes no new review request")
+    elif effect == "critic_drafts":
+        require(master == state["master_before"], "Critic does not move master")
+        require(not branches, "Critic publishes no branch")
+        require(not git("for-each-ref", "--format=%(refname)", "refs/forest/").strip(), "Critic publishes no evidence refs")
+        require(not PR_CREATED.exists(), "Critic creates no PR projection")
+        ops = powder_ops()
+        creates = [op for op in ops if op.get("op") == "create"]
+        notes = [op for op in ops if op.get("op") == "note"]
+        require(1 <= len(creates) <= 5, "Critic files between one and five draft jobs")
+        require(all(not op.get("spec") for op in creates), "Critic files only spec-less draft jobs")
+        require(len(notes) >= 1, "Critic attaches evidence notes")
+        file_line = re.compile(r"\S+:\d+")
+        require(all(file_line.search(str(note.get("text", ""))) for note in notes), "each note cites concrete file:line evidence")
+        require(any("hotspot.go" in str(note.get("text", "")) for note in notes), "Critic cites the planted hotspot")
     else:
         failures.append(f"grader has no rule for effect {effect}")
 
@@ -207,6 +235,9 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     forbidden = ("git hash-object", "git mktree", "git commit-tree")
     for command in commands:
         require(not any(token in command for token in forbidden), f"agent avoids forbidden Git plumbing: {command[:160]}")
+    if effect == "critic_drafts":
+        for command in commands:
+            require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Critic avoids promotion and edit commands: {command[:160]}")
     approve_pushes = [command for command in commands if "git push" in command and "--atomic" in command and "refs/heads/master" in command]
     reference_run = REFERENCE_RUN.is_file()
     if effect in {"verifier_approve", "verifier_approve_race"} and not reference_run:

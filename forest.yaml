@@ -3,6 +3,7 @@ agents:
   builder:  { poll: "./forest poll builder",  interval: 300 }
   verifier: { poll: "./forest poll verifier", interval: 120 }
   fixer:    { poll: "./forest poll fixer",    interval: 300 }
+  critic:   { poll: "true",                    interval: 86400 }
 checks:
   - name: build
     run: mise exec -- go build ./...

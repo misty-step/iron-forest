@@ -161,7 +161,7 @@ def main() -> None:
         git(WORKSPACE, "reset", "--hard", state["candidate"])
     elif effect == "fixer_branch_race":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", f"refs/heads/{state['branch']}", state["competitor"])
-    elif effect == "no_effect":
+    elif effect == "no_effect" or effect == "critic_drafts":
         pass
     else:
         raise RuntimeError(f"unknown reference effect: {effect}")

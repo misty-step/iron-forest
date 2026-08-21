@@ -147,6 +147,7 @@ def main() -> None:
         "value.txt": "old\n",
         "CONTRACT.md": "The requested final value is documented by the selected Issue or rejection evidence.\n",
     }
+    base_files.update(scenario.get("planted_files", {}))
     write_files(workspace, base_files)
     check = json.dumps(scenario.get("check", "true"))
     config = (
@@ -155,6 +156,7 @@ def main() -> None:
         "  builder: {poll: \"true\", interval: 1}\n"
         "  verifier: {poll: \"true\", interval: 1}\n"
         "  fixer: {poll: \"true\", interval: 1}\n"
+        "  critic: {poll: \"true\", interval: 1}\n"
         "checks:\n"
         f"  - name: scenario\n    run: {check}\n"
     )

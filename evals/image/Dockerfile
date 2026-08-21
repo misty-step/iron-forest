@@ -18,11 +18,12 @@ RUN useradd --create-home forest \
     && chmod 0700 /hidden /opt/iron-forest-eval \
     && chmod 0755 /workspace /run/forest-eval \
     && chown forest:forest /workspace \
-    && chmod 0755 /opt/iron-forest-eval/gh /opt/iron-forest-eval/race.py /opt/iron-forest-eval/setup.py /opt/iron-forest-eval/reference.py \
-    && printf '%s\n' 'forest ALL=(root) NOPASSWD: /usr/bin/python3 /opt/iron-forest-eval/setup.py /solution/scenario.json, /usr/bin/python3 /opt/iron-forest-eval/reference.py /solution/scenario.json, /opt/iron-forest-eval/gh, /opt/iron-forest-eval/race.py' > /etc/sudoers.d/forest-eval \
+    && chmod 0755 /opt/iron-forest-eval/gh /opt/iron-forest-eval/powder /opt/iron-forest-eval/race.py /opt/iron-forest-eval/setup.py /opt/iron-forest-eval/reference.py \
+    && printf '%s\n' 'forest ALL=(root) NOPASSWD: /usr/bin/python3 /opt/iron-forest-eval/setup.py /solution/scenario.json, /usr/bin/python3 /opt/iron-forest-eval/reference.py /solution/scenario.json, /opt/iron-forest-eval/gh, /opt/iron-forest-eval/powder, /opt/iron-forest-eval/race.py' > /etc/sudoers.d/forest-eval \
     && chmod 0440 /etc/sudoers.d/forest-eval \
     && cp /opt/iron-forest-eval/git /usr/local/bin/git \
     && cp /opt/iron-forest-eval/gh-proxy /usr/local/bin/gh \
-    && chmod 0755 /usr/local/bin/git /usr/local/bin/gh
+    && cp /opt/iron-forest-eval/powder-proxy /usr/local/bin/powder \
+    && chmod 0755 /usr/local/bin/git /usr/local/bin/gh /usr/local/bin/powder
 ENV HOME=/home/forest
 WORKDIR /workspace

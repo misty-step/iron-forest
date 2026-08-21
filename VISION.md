@@ -51,9 +51,11 @@ forest:ready Issue or takeable Powder job
   → Verifier checks, judges, and calls forest publish verdict
   → Fixer repairs a rejected Revision
 
-The shipped roster is Builder, Verifier, and Fixer
-([ADR 0014](docs/adr/0014-agent-roster.md)). There is no fourth
-declaration. A Sentinel role for post-merge live QA is not shipped.
+The shipped review roster is Builder, Verifier, and Fixer
+([ADR 0014](docs/adr/0014-agent-roster.md)). Critic is a shipped
+drafts-only declaration that sweeps the codebase and files Powder
+drafts; it never edits code, promotes work, or joins the review loop.
+A Sentinel role for post-merge live QA is not shipped.
 Each role is one event, one input, one isolated Run.
 
 Git holds durable facts: branches, commits, and create-only evidence refs:

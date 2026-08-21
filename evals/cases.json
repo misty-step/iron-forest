@@ -175,6 +175,16 @@
       "issue": null,
       "check": "true",
       "effect": "no_effect"
+    },
+    {
+      "id": "critic-sweep-draft-only",
+      "role": "critic",
+      "summary": "Sweep the repository, file at most five spec-less draft Powder jobs with file:line evidence, and make no code edits.",
+      "check": "true",
+      "effect": "critic_drafts",
+      "planted_files": {
+        "hotspot.go": "package main\n\nimport \"fmt\"\n\n// DeadWeight returns a value nothing in the program uses.\nfunc DeadWeight() string {\n\treturn fmt.Sprintf(\"unused\")\n}\n"
+      }
     }
   ]
 }

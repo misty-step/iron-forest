@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+
+from hidden import POWDER_JOBS, POWDER_OPS
+
+
+def load_jobs() -> list[dict]:
+    if POWDER_JOBS.exists():
+        return json.loads(POWDER_JOBS.read_text())
+    return []
+
+
+def save_jobs(jobs: list[dict]) -> None:
+    POWDER_JOBS.write_text(json.dumps(jobs, indent=2, sort_keys=True) + "\n")
+
+
+def append_op(op: dict) -> None:
+    with POWDER_OPS.open("a") as handle:
+        handle.write(json.dumps(op, separators=(",", ":")) + "\n")
+
+
+def emit(value) -> None:
+    print(json.dumps(value, separators=(",", ":")))
+
+
+def option(args: list[str], *names: str) -> str | None:
+    for index, arg in enumerate(args):
+        if arg in names and index + 1 < len(args):
+            return args[index + 1]
+        for name in names:
+            if arg.startswith(name + "="):
+                return arg.split("=", 1)[1]
+    return None
+
+
+def positional_id(args: list[str]) -> str | None:
+    if len(args) > 1 and not args[1].startswith("-"):
+        return args[1]
+    return None
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args:
+        return 0
+    command = args[0]
+
+    if command == "create":
+        job_id = option(args, "--id")
+        title = option(args, "--title")
+        repo = option(args, "--repo")
+        spec = option(args, "--spec")
+        jobs = load_jobs()
+        existing = next((job for job in jobs if job["id"] == job_id), None)
+        if existing is not None:
+            emit(existing)
+            return 0
+        job = {
+            "id": job_id,
+            "title": title,
+            "repo": repo,
+            "spec": spec or "",
+            "state": "draft" if not spec else "open",
+        }
+        jobs.append(job)
+        save_jobs(jobs)
+        append_op({"op": "create", "id": job_id, "title": title, "repo": repo, "spec": spec or ""})
+        emit(job)
+        return 0
+
+    if command == "note":
+        job_id = option(args, "--id") or positional_id(args)
+        text = option(args, "--text")
+        agent = option(args, "--agent")
+        append_op({"op": "note", "id": job_id, "text": text, "agent": agent})
+        emit({"id": job_id, "note": text})
+        return 0
+
+    if command == "list":
+        emit(load_jobs())
+        return 0
+
+    if command in {
+        "show", "take", "release", "renew", "ask", "answer", "done",
+        "abandon", "reopen", "set-title", "set-spec", "set-repo",
+        "set-blockers", "version", "skill",
+    }:
+        return 0
+
+    print(f"unsupported powder fixture invocation: {' '.join(args)}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
