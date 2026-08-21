@@ -106,6 +106,8 @@ func TestBuilderPollPowderMatrix(t *testing.T) {
 		{name: "takeable", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, want: 0},
 		{name: "takeable claimed", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, branch: sha + " refs/heads/forest/iron-forest-ready/work\n", want: 1},
 		{name: "mine unclaimed", issues: `[]`, takeable: `[]`, mine: `[{"id":"iron-forest-held"}]`, want: 0},
+		{name: "mine published blocks takeable", issues: `[]`, takeable: `[{"id":"other-ready"}]`, mine: `[{"id":"iron-forest-held"}]`, branch: sha + " refs/heads/forest/iron-forest-held/work\n", want: 1},
+		{name: "mine published only", issues: `[]`, takeable: `[]`, mine: `[{"id":"iron-forest-held"}]`, branch: sha + " refs/heads/forest/iron-forest-held/work\n", want: 1},
 		{name: "github ready empty powder", issues: `[[{"number":4}]]`, takeable: `[]`, mine: `[]`, want: 0},
 		{name: "malformed powder", issues: `[]`, takeable: `not json`, mine: `[]`, want: 2},
 		{name: "bad powder id", issues: `[]`, takeable: `[{"id":"bad id"}]`, mine: `[]`, want: 2},

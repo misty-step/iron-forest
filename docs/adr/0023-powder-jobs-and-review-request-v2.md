@@ -53,3 +53,12 @@ Fixer reuses the selected `subject` and branch.
 GitHub and Powder differ only at the list/claim programs. Publish, Poll,
 Auditor, and prompts share one note and one branch grammar. There is no
 adapter type.
+
+Powder's `done` requires the completing agent to hold the live lease. The
+Builder therefore keeps the lease from `take` until the Verifier's `done`, and
+must not release a published job to take different work. A held job that already
+has a `forest/<id>/*` branch has finished its Builder pass; the Builder Poll
+treats no other Powder job as ready until that lease is normalized. The Verifier
+re-takes the selected subject (idempotent for the same holder) and then runs
+`done`, failing closed on any nonzero exit rather than leaving the merged
+Subject non-terminal.
