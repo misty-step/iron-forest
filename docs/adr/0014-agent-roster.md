@@ -1,6 +1,9 @@
-# 0014 — Builder, Verifier, and Fixer roster
+# 0014 — Builder, Verifier, Fixer, and Sentinel roster
 
 Status: accepted, 2026-08-10
+
+Amended 2026-08-21: the roster gains Sentinel. "No fourth declaration"
+referred to a policy Manager, not to post-merge live QA.
 
 ## Context
 
@@ -10,7 +13,9 @@ Issue when it finds a problem.
 
 ## Decision
 
-The shipped roster is Builder, Verifier, and Fixer. There is no Manager agent.
+The shipped roster is Builder, Verifier, Fixer, and Sentinel. There is no
+Manager agent. Sentinel is post-merge live QA, distinct from Verifier's
+pre-merge review: different inputs, surfaces, skills, and failure semantics.
 Polls are disjoint.
 
 The Builder creates `forest/<subject>/<slug>` and does not return to that branch
@@ -25,7 +30,7 @@ requests and Verifier for Checks and Verdicts.
 
 Each branch has one active repair owner at a time. The new Revision receives
 fresh write-once evidence, so old Verdicts cannot authorize a changed branch.
-Humans retain backlog grooming without a fourth declaration.
+Humans retain backlog grooming without a policy Manager declaration.
 
 A stalled or ambiguous branch needs operator attention. No central agent hides
 that condition by changing labels or selecting work for another declaration.
