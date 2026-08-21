@@ -51,9 +51,9 @@ forest:ready Issue or takeable Powder job
   → Verifier checks, judges, and calls forest publish verdict
   → Fixer repairs a rejected Revision
 
-The shipped roster is Builder, Verifier, Fixer, and Sentinel
-([ADR 0014](docs/adr/0014-agent-roster.md)). There is no policy Manager.
-Sentinel is post-merge live QA, distinct from Verifier's pre-merge review.
+The shipped roster is Builder, Verifier, and Fixer
+([ADR 0014](docs/adr/0014-agent-roster.md)). There is no fourth
+declaration. A Sentinel role for post-merge live QA is not shipped.
 Each role is one event, one input, one isolated Run.
 
 Git holds durable facts: branches, commits, and create-only evidence refs:
