@@ -40,6 +40,10 @@ agents/_shared/skills/          # every declaration
 agents/<name>/skills/           # optional; this declaration only
 ```
 
+Operator-supervised (org) skills live under `org-skills/`. They are not factory
+skill sources; the Runner never auto-loads them, and an operator passes one to a
+supervised `pi` session explicitly.
+
 `agent.md` uses YAML frontmatter with optional `model`, `tools`, and `thinking`,
 followed by the system prompt. `task.md` is the standing user prompt. `model`
 and `thinking` resolve through the declaration, then `forest.defaults.yaml` (or
@@ -183,6 +187,20 @@ see evidence refs. Restrict `master` with a forge ruleset.
 Agents own Subject selection, implementation, and the decision to publish.
 The Kernel owns publication. See [managed-repository
 onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
+
+## Ready subjects
+
+A `forest:ready` Issue or takeable Powder job is a self-contained spec: problem,
+repro, scope bound, machine-checkable acceptance criteria, and a verification
+path. Grooming stays human-supervised, and the factory remains a dumb consumer
+of ready Subjects.
+
+- [`docs/forest-ready-contract.md`](docs/forest-ready-contract.md) — what ready
+  means and how it is enforced by convention.
+- [`docs/templates/powder-job-spec.md`](docs/templates/powder-job-spec.md) — the
+  template for a ready Powder job spec.
+- [`org-skills/grooming-checklist/SKILL.md`](org-skills/grooming-checklist/SKILL.md) —
+  the supervised grooming checklist skill (not a factory declaration).
 
 
 ## Poll protocol
