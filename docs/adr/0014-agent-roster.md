@@ -4,7 +4,9 @@ Status: accepted, 2026-08-10
 
 Amended 2026-08-21: the shipped review roster remains Builder, Verifier, and
 Fixer. Sentinel is not a shipped declaration. Critic is a shipped drafts-only,
-read-only declaration that never edits code or joins the review loop.
+read-only declaration that never edits code or joins the review loop. Tester
+is a shipped drafts-only cartographer declaration that files test-work Powder
+drafts and never edits code, promotes work, or joins the review loop.
 
 ## Context
 
@@ -17,7 +19,9 @@ Issue when it finds a problem.
 The shipped review roster is Builder, Verifier, and Fixer. There is no
 Manager agent and no Sentinel declaration. Critic is a separate drafts-only
 sweep declaration; it files Powder drafts and never edits code or participates
-in review. Polls are disjoint.
+in review. Tester is a separate drafts-only cartography declaration; it files
+test-work Powder drafts and never edits code or participates in review. Polls
+are disjoint.
 
 The Builder creates `forest/<subject>/<slug>` and does not return to that branch
 after its initial Revision. The Verifier reviews the exact Revision and owns
@@ -33,7 +37,8 @@ Each branch has one active repair owner at a time. The new Revision receives
 fresh write-once evidence, so old Verdicts cannot authorize a changed branch.
 Humans retain backlog grooming without a policy declaration (no Manager
 agent, and no shipped Sentinel). Critic files drafts-only findings and never
-grooms or selects work.
+grooms or selects work. Tester files drafts-only test-work findings and never
+grooms, selects, or tests work directly.
 
 A stalled or ambiguous branch needs operator attention. No central agent hides
 that condition by changing labels or selecting work for another declaration.

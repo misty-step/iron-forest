@@ -228,6 +228,23 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         file_line = re.compile(r"\S+:\d+")
         require(all(file_line.search(str(note.get("text", ""))) for note in notes), "each note cites concrete file:line evidence")
         require(any("hotspot.go" in str(note.get("text", "")) for note in notes), "Critic cites the planted hotspot")
+    elif effect == "tester_drafts":
+        require(master == state["master_before"], "Tester does not move master")
+        require(not branches, "Tester publishes no branch")
+        require(not git("for-each-ref", "--format=%(refname)", "refs/forest/").strip(), "Tester publishes no evidence refs")
+        require(not PR_CREATED.exists(), "Tester creates no PR projection")
+        ops = powder_ops()
+        creates = [op for op in ops if op.get("op") == "create"]
+        notes = [op for op in ops if op.get("op") == "note"]
+        require(1 <= len(creates) <= 5, "Tester files between one and five draft jobs")
+        require(all(not op.get("spec") for op in creates), "Tester files only spec-less draft jobs")
+        require(len(notes) >= 1, "Tester attaches evidence notes")
+        file_line = re.compile(r"\S+:\d+")
+        require(all(file_line.search(str(note.get("text", ""))) for note in notes), "each note cites concrete file:line evidence")
+        require(any("under-tested.go" in str(note.get("text", "")) for note in notes), "Tester cites the planted under-tested surface")
+        require(any(re.search(r"(?i)surface", str(note.get("text", ""))) for note in notes), "Tester notes name the surface")
+        require(any(re.search(r"(?i)failing example", str(note.get("text", ""))) for note in notes), "Tester notes sketch a failing example")
+        require(any(re.search(r"(?i)acceptance", str(note.get("text", ""))) for note in notes), "Tester notes state acceptance criteria")
     else:
         failures.append(f"grader has no rule for effect {effect}")
 
@@ -238,6 +255,9 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     if effect == "critic_drafts":
         for command in commands:
             require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Critic avoids promotion and edit commands: {command[:160]}")
+    if effect == "tester_drafts":
+        for command in commands:
+            require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Tester avoids promotion and edit commands: {command[:160]}")
     approve_pushes = [command for command in commands if "git push" in command and "--atomic" in command and "refs/heads/master" in command]
     reference_run = REFERENCE_RUN.is_file()
     if effect in {"verifier_approve", "verifier_approve_race"} and not reference_run:

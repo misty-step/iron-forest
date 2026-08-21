@@ -29,6 +29,14 @@ class CaseManifestTest(unittest.TestCase):
             self.assertIn("planted_files", case)
             self.assertTrue(case["planted_files"])
 
+    def test_tester_declaration_is_covered(self):
+        tester_cases = [case for case in self.cases if case["role"] == "tester"]
+        self.assertTrue(tester_cases, "the tester declaration has at least one deterministic eval case")
+        for case in tester_cases:
+            self.assertEqual(case["effect"], "tester_drafts")
+            self.assertIn("planted_files", case)
+            self.assertTrue(case["planted_files"])
+
     def test_generated_tasks_match_manifest(self):
         task_names = {path.name for path in (ROOT / "tasks").iterdir() if path.is_dir()}
         self.assertEqual(task_names, {case["id"] for case in self.cases})

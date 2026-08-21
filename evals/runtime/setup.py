@@ -157,6 +157,7 @@ def main() -> None:
         "  verifier: {poll: \"true\", interval: 1}\n"
         "  fixer: {poll: \"true\", interval: 1}\n"
         "  critic: {poll: \"true\", interval: 1}\n"
+        "  tester: {poll: \"true\", interval: 1}\n"
         "checks:\n"
         f"  - name: scenario\n    run: {check}\n"
     )

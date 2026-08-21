@@ -11,6 +11,9 @@ ready GitHub Issue or takeable Powder job into a branch. A Verifier checks and
 reviews the exact Revision. A Fixer repairs a rejected Revision and sends it back
 for review. Critic is a separate drafts-only declaration that sweeps the
 codebase and files Powder drafts; it never edits code or joins the review loop.
+Tester is a separate drafts-only declaration that maps under-tested observable
+behaviors into test-work Powder drafts; it never edits code or joins the review
+loop.
 
 
 ## Quick start

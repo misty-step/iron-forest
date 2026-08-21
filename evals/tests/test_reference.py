@@ -65,6 +65,37 @@ class ReferenceCriticDraftsTest(unittest.TestCase):
             )
             self.assertTrue(any("hotspot.go" in str(note.get("text", "")) for note in notes))
 
+    def test_tester_reference_creates_test_work_note_for_planted_surface(self):
+        with tempfile.TemporaryDirectory() as root:
+            hidden = Path(root) / "hidden"
+            hidden.mkdir()
+            scenario = {
+                "id": "tester-sweep-draft-only",
+                "role": "tester",
+                "summary": "Sweep the repository and file test-work drafts.",
+                "check": "true",
+                "effect": "tester_drafts",
+                "planted_files": {"under-tested.go": "package main\n"},
+            }
+            self.run_reference(hidden, scenario)
+
+            ops = [
+                json.loads(line)
+                for line in (hidden / "powder-ops.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            creates = [op for op in ops if op.get("op") == "create"]
+            notes = [op for op in ops if op.get("op") == "note"]
+            self.assertTrue(1 <= len(creates) <= 5)
+            self.assertTrue(all(not op.get("spec") for op in creates))
+            self.assertTrue(notes)
+            note_texts = [str(note.get("text", "")) for note in notes]
+            self.assertTrue(all(re.search(r"\S+:\d+", text) for text in note_texts))
+            self.assertTrue(any("under-tested.go" in text for text in note_texts))
+            self.assertTrue(any(re.search(r"(?i)surface", text) for text in note_texts))
+            self.assertTrue(any(re.search(r"(?i)failing example", text) for text in note_texts))
+            self.assertTrue(any(re.search(r"(?i)acceptance", text) for text in note_texts))
+
 
 if __name__ == "__main__":
     unittest.main()

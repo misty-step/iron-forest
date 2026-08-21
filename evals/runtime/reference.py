@@ -160,6 +160,41 @@ def publish_critic_drafts(scenario: dict) -> None:
     )
 
 
+def publish_tester_drafts(scenario: dict) -> None:
+    repo = "local/eval"
+    forest_yaml = WORKSPACE / "forest.yaml"
+    if forest_yaml.exists():
+        for line in forest_yaml.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("repo:"):
+                repo = stripped.split(":", 1)[1].strip()
+                break
+    planted_path = next(iter(scenario.get("planted_files", {}).keys()), "under-tested.go")
+    powder_script = Path(__file__).resolve().parent / "powder"
+    run("/usr/bin/python3", str(powder_script), "list", "--repo", repo)
+    run(
+        "/usr/bin/python3",
+        str(powder_script),
+        "create",
+        "--id",
+        "if-tester-under-tested-boundary",
+        "--title",
+        f"Under-tested boundary: {planted_path}",
+        "--repo",
+        repo,
+    )
+    run(
+        "/usr/bin/python3",
+        str(powder_script),
+        "note",
+        "if-tester-under-tested-boundary",
+        "--text",
+        f"Surface: {planted_path}:5 UnderTestedBoundary empty-input boundary. Behaviors: empty input returns 'empty'; non-empty input wraps the value. Failing example: UnderTestedBoundary(\"\") returns 'empty' with no regression test. Acceptance: add a Go test asserting the empty boundary and one non-empty case, both passing in the build. Observed: {planted_path}:5 has no test covering the empty-input branch. Required: cover the boundary with a failing-example first test. Proposed test-work: add tests for UnderTestedBoundary empty and non-empty inputs.",
+        "--agent",
+        "tester",
+    )
+
+
 def main() -> None:
     scenario_path = Path(sys.argv[1])
     scenario = json.loads(scenario_path.read_text())
@@ -200,6 +235,8 @@ def main() -> None:
         pass
     elif effect == "critic_drafts":
         publish_critic_drafts(scenario)
+    elif effect == "tester_drafts":
+        publish_tester_drafts(scenario)
     else:
         raise RuntimeError(f"unknown reference effect: {effect}")
 
