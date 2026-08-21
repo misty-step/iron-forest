@@ -307,6 +307,6 @@ func TestPollNoteDecodersRejectStrictJSON(t *testing.T) {
 
 func TestPollRealToolStopsDescendants(t *testing.T) {
 	testGitTransportStopsDescendants(t, "Poll", "poll-output", func(ctx context.Context, root string) ([]byte, error) {
-		return NewPoller(root, "owner/name").git(ctx, "--version")
+		return NewPoller(root, "owner/name", Scope{}).git(ctx, "--version")
 	})
 }

@@ -23,6 +23,7 @@ var repoNamePattern = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 type Config struct {
 	Repo    string                 `yaml:"repo" json:"repo"`
 	Primary string                 `yaml:"primary" json:"primary,omitempty"`
+	Scope   *Scope                 `yaml:"scope" json:"scope,omitempty"`
 	Agents  map[string]AgentConfig `yaml:"agents" json:"agents"`
 	Checks  []Check                `yaml:"checks" json:"checks"`
 }
@@ -54,6 +55,7 @@ func (i *yamlInt) UnmarshalYAML(value *yaml.Node) error {
 type configYAML struct {
 	Repo    yamlString                      `yaml:"repo"`
 	Primary yamlString                      `yaml:"primary"`
+	Scope   scopeYAML                       `yaml:"scope"`
 	Agents  map[*yamlString]agentConfigYAML `yaml:"agents"`
 	Checks  []checkYAML                     `yaml:"checks"`
 }
@@ -165,6 +167,11 @@ func decodeConfig(data []byte, source string) (Config, error) {
 		return Config{}, fmt.Errorf("parse %s: multiple YAML documents", source)
 	}
 	cfg := Config{Repo: string(document.Repo), Primary: strings.TrimSpace(string(document.Primary))}
+	scope, err := scopeFromYAML(document.Scope)
+	if err != nil {
+		return Config{}, fmt.Errorf("validate %s: %w", source, err)
+	}
+	cfg.Scope = scope
 	if document.Agents != nil {
 		cfg.Agents = make(map[string]AgentConfig, len(document.Agents))
 		for name, agent := range document.Agents {
@@ -207,6 +214,11 @@ func (c Config) Validate() error {
 	}
 	if c.Primary != "" {
 		if err := validatePrimaryRef(c.Primary); err != nil {
+			return err
+		}
+	}
+	if c.Scope != nil {
+		if err := c.Scope.Validate(); err != nil {
 			return err
 		}
 	}

@@ -31,7 +31,7 @@ func TestFixerPollIgnoresLegacyNotes(t *testing.T) {
 	addNote(t, root, verdictNoteRef, tip, pollVerdictNote(tip, "changes"), "phaedrus", "phraznikov@gmail.com")
 	runGitDir(t, root, "push", "origin", verdictNoteRef+":"+verdictNoteRef)
 
-	code, err := NewPoller(root, "owner/name").fixer(context.Background())
+	code, err := NewPoller(root, "owner/name", Scope{}).fixer(context.Background())
 	if code != exitNoWork || err != nil {
 		t.Fatalf("fixer poll code=%d err=%v, want no work despite leftover notes", code, err)
 	}
@@ -49,7 +49,7 @@ func TestVerifierPollDispatchesOnRequestRef(t *testing.T) {
 	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4/work")
 	pushEvidence(t, root, "request", tip, pollReviewNote(tip), "Iron Forest Builder", "builder@forest.invalid")
 
-	code, err := NewPoller(root, "owner/name").verifier(context.Background())
+	code, err := NewPoller(root, "owner/name", Scope{}).verifier(context.Background())
 	if code != exitOK || err != nil {
 		t.Fatalf("verifier poll code=%d err=%v", code, err)
 	}
@@ -68,7 +68,7 @@ func TestFixerPollDispatchesOnChangesRef(t *testing.T) {
 	pushEvidence(t, root, "request", tip, pollReviewNote(tip), "Iron Forest Builder", "builder@forest.invalid")
 	pushEvidence(t, root, "verdict", tip, pollVerdictNote(tip, "changes"), "Iron Forest Verifier", "verifier@forest.invalid")
 
-	code, err := NewPoller(root, "owner/name").fixer(context.Background())
+	code, err := NewPoller(root, "owner/name", Scope{}).fixer(context.Background())
 	if code != exitOK || err != nil {
 		t.Fatalf("fixer poll code=%d err=%v", code, err)
 	}

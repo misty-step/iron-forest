@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -17,12 +18,13 @@ type toolFunc func(context.Context, string, ...string) ([]byte, error)
 type Poller struct {
 	Root         string
 	Repo         string
+	Scope        Scope
 	Run          toolFunc
 	ResolveTools bool
 }
 
-func NewPoller(root, repo string) *Poller {
-	return &Poller{Root: root, Repo: repo, Run: realTool, ResolveTools: true}
+func NewPoller(root, repo string, scope Scope) *Poller {
+	return &Poller{Root: root, Repo: repo, Scope: scope, Run: realTool, ResolveTools: true}
 }
 
 func realTool(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -57,11 +59,13 @@ type trackerIssue struct {
 	PullRequest json.RawMessage `json:"pull_request"`
 }
 
-func (p *Poller) readyIssues(ctx context.Context) ([]int, error) {
+const defaultReadyLabel = "forest:ready"
+
+func (p *Poller) readyIssues(ctx context.Context, label string) ([]string, error) {
 	if strings.TrimSpace(p.Repo) == "" {
 		return nil, fmt.Errorf("repository is required")
 	}
-	endpoint := fmt.Sprintf("repos/%s/issues?state=open&labels=forest%%3Aready&per_page=100", p.Repo)
+	endpoint := fmt.Sprintf("repos/%s/issues?state=open&labels=%s&per_page=100", p.Repo, url.QueryEscape(label))
 	output, err := p.gh(ctx, "api", "--paginate", "--slurp", endpoint)
 	if err != nil {
 		return nil, err
@@ -73,7 +77,7 @@ func (p *Poller) readyIssues(ctx context.Context) ([]int, error) {
 	if pages == nil {
 		return nil, fmt.Errorf("malformed issue output")
 	}
-	issues := make([]int, 0)
+	issues := make([]string, 0)
 	for _, pageIssues := range pages {
 		for _, issue := range pageIssues {
 			if issue.Number == nil || *issue.Number <= 0 {
@@ -87,10 +91,10 @@ func (p *Poller) readyIssues(ctx context.Context) ([]int, error) {
 				}
 				continue
 			}
-			issues = append(issues, *issue.Number)
+			issues = append(issues, strconv.Itoa(*issue.Number))
 		}
 	}
-	sort.Ints(issues)
+	sort.Strings(issues)
 	return issues, nil
 }
 
@@ -98,29 +102,88 @@ func (p *Poller) readyIssues(ctx context.Context) ([]int, error) {
 // accompanies exitError so the caller can say why the Poll failed instead of
 // exiting silently.
 func (p *Poller) builder(ctx context.Context) (int, error) {
-	issues, err := p.readyIssues(ctx)
+	issues, err := p.issueSubjects(ctx)
 	if err != nil {
 		return exitError, err
 	}
-	readyIssue := false
-	for _, issue := range issues {
-		claimed, err := p.subjectHasBranch(ctx, strconv.Itoa(issue))
+	for _, subject := range issues {
+		claimed, err := p.subjectHasBranch(ctx, subject)
 		if err != nil {
 			return exitError, err
 		}
 		if !claimed {
-			readyIssue = true
-			break
+			return exitOK, nil
 		}
 	}
-	readyPowder, err := p.readyPowder(ctx)
+	powder, err := p.powderSubjects(ctx)
 	if err != nil {
 		return exitError, err
 	}
-	if readyIssue || readyPowder {
-		return exitOK, nil
+	for _, subject := range powder {
+		claimed, err := p.subjectHasBranch(ctx, subject)
+		if err != nil {
+			return exitError, err
+		}
+		if !claimed {
+			return exitOK, nil
+		}
 	}
 	return exitNoWork, nil
+}
+
+func (p *Poller) issueSubjects(ctx context.Context) ([]string, error) {
+	label := defaultReadyLabel
+	if p.Scope.Label != "" {
+		label = p.Scope.Label
+	}
+	issues, err := p.readyIssues(ctx, label)
+	if err != nil {
+		return nil, err
+	}
+	return p.filterScopeSubjects(issues), nil
+}
+
+func (p *Poller) powderSubjects(ctx context.Context) ([]string, error) {
+	// A label scope is a GitHub-only selection rule.
+	if p.Scope.Label != "" {
+		return nil, nil
+	}
+	powder, err := p.listPowderSubjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return p.filterScopeSubjects(powder), nil
+}
+
+func (p *Poller) filterScopeSubjects(subjects []string) []string {
+	switch {
+	case len(p.Scope.Subjects) > 0:
+		allowed := make(map[string]struct{}, len(p.Scope.Subjects))
+		for _, subject := range p.Scope.Subjects {
+			allowed[subject] = struct{}{}
+		}
+		return filterSubjects(subjects, func(subject string) bool {
+			_, ok := allowed[subject]
+			return ok
+		})
+	case p.Scope.BranchPrefix != "":
+		prefix := p.Scope.BranchPrefix
+		return filterSubjects(subjects, func(subject string) bool {
+			return strings.HasPrefix("forest/"+subject, prefix)
+		})
+	default:
+		return subjects
+	}
+}
+
+func filterSubjects(subjects []string, keep func(string) bool) []string {
+	result := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		if keep(subject) {
+			result = append(result, subject)
+		}
+	}
+	return result
 }
 
 func powderAgent() string {
@@ -135,24 +198,24 @@ type powderListJob struct {
 	ID string `json:"id"`
 }
 
-func (p *Poller) readyPowder(ctx context.Context) (bool, error) {
+func (p *Poller) listPowderSubjects(ctx context.Context) ([]string, error) {
 	agent := powderAgent()
 	if agent == "" {
-		return false, nil
+		return nil, nil
 	}
 	if !powderOriginSet() {
-		return false, fmt.Errorf("POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty")
+		return nil, fmt.Errorf("POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty")
 	}
 	if strings.TrimSpace(p.Repo) == "" {
-		return false, fmt.Errorf("repository is required")
+		return nil, fmt.Errorf("repository is required")
 	}
 	takeable, err := p.listPowder(ctx, "--takeable", "--repo", p.Repo)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	mine, err := p.listPowder(ctx, "--mine", agent, "--repo", p.Repo)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	seen := make(map[string]struct{}, len(takeable)+len(mine))
 	ids := make([]string, 0, len(takeable)+len(mine))
@@ -166,17 +229,10 @@ func (p *Poller) readyPowder(ctx context.Context) (bool, error) {
 	sort.Strings(ids)
 	for _, id := range ids {
 		if !validSubject(id) {
-			return false, fmt.Errorf("malformed powder job id %q", id)
-		}
-		claimed, err := p.subjectHasBranch(ctx, id)
-		if err != nil {
-			return false, err
-		}
-		if !claimed {
-			return true, nil
+			return nil, fmt.Errorf("malformed powder job id %q", id)
 		}
 	}
-	return false, nil
+	return ids, nil
 }
 
 func (p *Poller) listPowder(ctx context.Context, args ...string) ([]string, error) {

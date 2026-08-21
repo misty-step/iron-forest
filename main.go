@@ -32,14 +32,6 @@ func runCLI(args []string) int {
 }
 
 func runEngineCommand(command string, rest []string) int {
-	wantArgs := 0
-	if command != "serve" {
-		wantArgs = 1
-	}
-	if len(rest) != wantArgs {
-		printUsage()
-		return exitInvalidArg
-	}
 	root, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -47,12 +39,64 @@ func runEngineCommand(command string, rest []string) int {
 	}
 	switch command {
 	case "serve":
+		if len(rest) != 0 {
+			printUsage()
+			return exitInvalidArg
+		}
 		return serve(root)
 	case "once":
+		if len(rest) != 1 {
+			printUsage()
+			return exitInvalidArg
+		}
 		return once(root, rest[0])
 	default:
-		return poll(root, rest[0])
+		return runPollCLI(root, rest)
 	}
+}
+
+func runPollCLI(root string, rest []string) int {
+	var agent string
+	var scope *Scope
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
+		switch {
+		case arg == "--scope":
+			if i+1 >= len(rest) {
+				printUsage()
+				return exitInvalidArg
+			}
+			parsed, err := parseScopeOverride(rest[i+1])
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return exitInvalidArg
+			}
+			scope = &parsed
+			i++
+		case strings.HasPrefix(arg, "--scope="):
+			parsed, err := parseScopeOverride(strings.TrimPrefix(arg, "--scope="))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return exitInvalidArg
+			}
+			scope = &parsed
+		case strings.HasPrefix(arg, "-"):
+			fmt.Fprintf(os.Stderr, "unknown flag %q\n", arg)
+			printUsage()
+			return exitInvalidArg
+		default:
+			if agent != "" {
+				printUsage()
+				return exitInvalidArg
+			}
+			agent = arg
+		}
+	}
+	if agent == "" {
+		printUsage()
+		return exitInvalidArg
+	}
+	return poll(root, agent, scope)
 }
 
 func printUsage() {
@@ -62,7 +106,8 @@ func printUsage() {
 engine:
   forest serve                  run the scheduler until interrupted
   forest once <agent>           poll once, dispatch on exit 0
-  forest poll <agent>           evaluate the built-in trigger for builder,
+  forest poll <agent> [--scope <selector>]
+                                evaluate the built-in trigger for builder,
                                 verifier, or fixer
 
 inspect:`)
@@ -181,13 +226,19 @@ func once(root, agent string) int {
 	})
 }
 
-func poll(root, agent string) int {
+func poll(root, agent string, scopeOverride *Scope) int {
 	cfg, err := loadConfig(configPath(root))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return exitError
 	}
-	poller := NewPoller(root, cfg.Repo)
+	scope := Scope{}
+	if scopeOverride != nil {
+		scope = *scopeOverride
+	} else if cfg.Scope != nil {
+		scope = *cfg.Scope
+	}
+	poller := NewPoller(root, cfg.Repo, scope)
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(signalCtx, directPollTimeout)
@@ -357,6 +408,7 @@ type selfcheckPayload struct {
 	Repo          string     `json:"repo"`
 	Primary       string     `json:"primary"`
 	PrimarySource string     `json:"primary_source"`
+	Scope         *Scope     `json:"scope,omitempty"`
 	Declarations  []string   `json:"declarations"`
 	Tools         []toolPath `json:"tools"`
 	// Defaults reports the instance layer the declarations resolve against, and
@@ -405,8 +457,8 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		}
 		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
 	}
-	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\nprimary: %s (%s)\ndeclarations: %s\ntools: %s",
-		oneLine(cfg.Repo), oneLine(primary), oneLine(primarySource), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
+	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\nprimary: %s (%s)\n%s\ndeclarations: %s\ntools: %s",
+		oneLine(cfg.Repo), oneLine(primary), oneLine(primarySource), scopeHuman(cfg.Scope), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))
 	if defaultsSource != "" {
 		human += fmt.Sprintf("\ndefaults: %s (model=%s)", oneLine(defaultsSource), oneLine(defaults.Model))
 	}
@@ -416,6 +468,7 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 			Repo:           cfg.Repo,
 			Primary:        primary,
 			PrimarySource:  primarySource,
+			Scope:          cfg.Scope,
 			Declarations:   names,
 			Tools:          resolved,
 			Defaults:       defaults,

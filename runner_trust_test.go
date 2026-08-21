@@ -122,7 +122,7 @@ func TestToolEntrypointsRejectRepositoryExecutablesThroughSymlinkedPath(t *testi
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", pathEntry)
 	runner := NewRunner(root)
-	poller := NewPoller(root, "owner/name")
+	poller := NewPoller(root, "owner/name", Scope{})
 	tests := []struct {
 		name string
 		run  func() error
