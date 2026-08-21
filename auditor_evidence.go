@@ -182,7 +182,7 @@ func parseEvidenceRef(ref string) (kind, sha string, ok bool) {
 func validateEvidenceEntry(entry noteEntry, kind string) error {
 	switch kind {
 	case "request":
-		if _, err := decodeReview(entry.Payload, entry.Revision); err != nil {
+		if err := decodeRequestEvidence(entry.Payload, entry.Revision); err != nil {
 			return fmt.Errorf("invalid evidence %s: %v", entry.Ref, err)
 		}
 		if !validIdentity(entry, "builder", "fixer") {

@@ -224,6 +224,45 @@ func decodeReview(data []byte, sha string) (reviewRequest, error) {
 	return note, nil
 }
 
+type legacyReviewRequest struct {
+	Schema   string `json:"schema"`
+	Issue    int    `json:"issue"`
+	Branch   string `json:"branch"`
+	Revision string `json:"revision"`
+	Time     string `json:"time"`
+}
+
+// decodeLegacyReview accepts the notes-era review-request shape that predates
+// the v2 cutover. It is used only as read-only evidence compatibility: the old
+// ref stays in the immutable refs/forest/v1/* namespace and is never rewritten.
+func decodeLegacyReview(data []byte, sha string) (legacyReviewRequest, error) {
+	var note legacyReviewRequest
+	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "issue", "branch", "revision", "time")); err != nil {
+		return note, err
+	}
+	if note.Schema != "forest.review-request.v1" || note.Issue <= 0 || strings.TrimSpace(note.Branch) == "" || note.Revision != sha || !validNoteTime(note.Time) {
+		return note, fmt.Errorf("invalid legacy review-request note")
+	}
+	return note, nil
+}
+
+// decodeRequestEvidence decodes review-request evidence for the Auditor
+// read-only sweep. The v2 shape keeps its strict decoder as the authority;
+// the legacy v1 shape is tolerated so immutable pre-cutover refs do not
+// produce a permanent violation.
+func decodeRequestEvidence(data []byte, sha string) error {
+	var probe struct {
+		Schema string `json:"schema"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	if probe.Schema == "forest.review-request.v1" {
+		_, err := decodeLegacyReview(data, sha)
+		return err
+	}
+	_, err := decodeReview(data, sha)
+	return err
+}
+
 func validSubject(subject string) bool {
 	if n := len(subject); n < 1 || n > 128 {
 		return false
