@@ -36,10 +36,10 @@ preference as a defect.
 
 ## 3. Deduplicate
 
-List current jobs once:
+List current jobs once, using the top-level `repo:` value from `forest.yaml` as the repository:
 
 ```sh
-powder list --repo misty-step/iron-forest
+powder list --repo <forest.yaml repo>
 ```
 
 Skip a finding whose evidence or proposed direction is already covered by an
@@ -51,9 +51,11 @@ File at most five findings per sweep. For each, create a job with no spec so
 it is never takeable, then attach the evidence note:
 
 ```sh
-powder create --id <slug> --title '<short title>' --repo misty-step/iron-forest
+powder create --id <slug> --title '<short title>' --repo <forest.yaml repo>
 powder note <slug> --text 'Observed: <file:line> ... Required: ... Proposed spec direction: ...' --agent "${POWDER_AGENT:-critic}"
 ```
+
+- `<forest.yaml repo>` is the top-level `repo:` value in `forest.yaml`; never hardcode the repository name.
 
 - `<slug>` is a short unique id, for example `if-critic-<topic>`.
 - The note must carry the concrete `file:line` evidence. No evidence, no file.

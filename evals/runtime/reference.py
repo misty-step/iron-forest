@@ -125,6 +125,41 @@ def publish_conflicting_note(canonical: str, target: str, payload: dict) -> None
     git(WORKSPACE, "push", "origin", f"{private}:{canonical}")
 
 
+def publish_critic_drafts(scenario: dict) -> None:
+    repo = "local/eval"
+    forest_yaml = WORKSPACE / "forest.yaml"
+    if forest_yaml.exists():
+        for line in forest_yaml.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("repo:"):
+                repo = stripped.split(":", 1)[1].strip()
+                break
+    planted_path = next(iter(scenario.get("planted_files", {}).keys()), "hotspot.go")
+    powder_script = Path(__file__).resolve().parent / "powder"
+    run("/usr/bin/python3", str(powder_script), "list", "--repo", repo)
+    run(
+        "/usr/bin/python3",
+        str(powder_script),
+        "create",
+        "--id",
+        "if-critic-hotspot",
+        "--title",
+        f"Dead weight: unused {planted_path} helper",
+        "--repo",
+        repo,
+    )
+    run(
+        "/usr/bin/python3",
+        str(powder_script),
+        "note",
+        "if-critic-hotspot",
+        "--text",
+        f"Observed: {planted_path}:5 DeadWeight is unused exported surface. Required: remove it or add a test/use. Proposed spec direction: delete DeadWeight or cover it.",
+        "--agent",
+        "critic",
+    )
+
+
 def main() -> None:
     scenario_path = Path(sys.argv[1])
     scenario = json.loads(scenario_path.read_text())
@@ -161,8 +196,10 @@ def main() -> None:
         git(WORKSPACE, "reset", "--hard", state["candidate"])
     elif effect == "fixer_branch_race":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", f"refs/heads/{state['branch']}", state["competitor"])
-    elif effect == "no_effect" or effect == "critic_drafts":
+    elif effect == "no_effect":
         pass
+    elif effect == "critic_drafts":
+        publish_critic_drafts(scenario)
     else:
         raise RuntimeError(f"unknown reference effect: {effect}")
 
