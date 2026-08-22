@@ -43,7 +43,10 @@ Out of scope:
 
 ## Evidence
 
-<Optional links, logs, related Issues or jobs.>
+<Required when Problem describes a defect: cite the primary record you
+observed — the evidence-ref payload, Ledger row, Run id with its log
+line, or command output. Commit titles, timestamps, and recollection are
+leads, not evidence. Optional for non-defect work: related jobs or links.>
 ```
 
 ## Condensed example
