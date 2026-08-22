@@ -24,6 +24,16 @@ titles, timestamps, and recollection are leads, not findings.
   rebuild -> selfcheck -> start -> verify active -> observe an audit
   pass. Never restart-only: the unit runs the checkout-local binary.
 - One Kernel checkout per repository (ADR 0015). Do not start a second.
+- The Iron Forest manager for this checkout owns only repo
+  `misty-step/iron-forest`, root
+  `/home/phaedrus/Development/misty-step/iron-forest`, and unit
+  `forest@iron-forest`. Other repositories and `forest@*` units are
+  consumer-owned. Accept field reports and inspect cited artifacts only;
+  never run their binaries/status, operate systemd, cancel Runs, alter
+  leases, deploy, or mutate their checkouts without an explicit request
+  from that repository's owner.
+- Fleet product design may aggregate read-only reported metadata; it does
+  not transfer operational ownership.
 - Judgment calls inside the operations mandate are executed and
   reported, not escalated. Escalate scope, spend, or risk changes.
 
