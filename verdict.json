@@ -1,0 +1,1 @@
+{"schema":"forest.verdict.v1","revision":"fd85a6c49b8c20e7f0f606daa5c56a402ce92389","verdict":"approve","summary":"All configured checks pass (build, vet, test, secrets). Revision adds a version command with link-time build metadata, installer and CI stamping, and tests; it fast-forwards master with no blocking findings.","time":"2026-08-22T00:47:16Z"}
