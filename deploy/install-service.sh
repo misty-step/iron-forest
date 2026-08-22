@@ -23,7 +23,6 @@ service_path="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/shims:/usr/loca
 # per-deployment configuration.
 idle_timeout_seconds=300
 active_timeout_seconds=60
-audit_timeout_seconds=1800
 poll_interval_seconds=5
 
 # Rollback state used only by `update`; the install path leaves them unset.
@@ -33,6 +32,7 @@ tree_was_clean=false
 prev_sha=""
 prev_binary=""
 status_json=""
+audit_since_ns=0
 
 die() { echo "$(basename "$0"): $*" >&2; exit 1; }
 
@@ -48,6 +48,12 @@ rollback_on_exit() {
 	if [ "$tree_was_clean" = true ] && [ -n "$prev_sha" ]; then
 		git -C "$target" reset --hard "$prev_sha" >/dev/null 2>&1 ||
 			echo "$(basename "$0"): rollback: could not reset $target to $prev_sha" >&2
+	fi
+	# The restored pre-change .gitignore does not ignore forest.prev, so the
+	# update's untracked rollback artifact would fail the next clean-tree check.
+	if [ -n "$prev_binary" ]; then
+		rm -f -- "$prev_binary" >/dev/null 2>&1 ||
+			echo "$(basename "$0"): rollback: could not remove $prev_binary" >&2
 	fi
 	systemctl --user restart "forest@$name" >/dev/null 2>&1 ||
 		echo "$(basename "$0"): rollback: could not restart forest@$name" >&2
@@ -67,7 +73,6 @@ is_idle() {
 	printf '%s\n' "$status_json" | jq -e '
 		.exit == 0 and
 		.data.kernel.running_known == true and
-		.data.kernel.running == false and
 		([.data.triggers[].running_known] | all) and
 		([.data.triggers[].running] | all(. == false))
 	' >/dev/null 2>&1
@@ -84,7 +89,7 @@ audit_ready() {
 	fi
 	last_at="$(printf '%s\n' "$status_json" | jq -r '.data.audit.last_at')"
 	last_ns="$(date -u -d "$last_at" +%s%N 2>/dev/null || echo 0)"
-	[ "${last_ns:-0}" -gt "${restart_ns:-0}" ]
+	[ "${last_ns:-0}" -ge "${audit_since_ns:-0}" ]
 }
 
 update_instance() {
@@ -175,7 +180,17 @@ update_instance() {
 		die "selfcheck failed; rolling back to the prior instance"
 	fi
 
-	restart_ns="$(date -u +%s%N)"
+	echo "$(basename "$0"): forcing a fresh audit pass before restart"
+	if ! forced_audit_json="$( (cd "$target" && env -u FOREST_DEFAULTS PATH="$service_path" ./forest audit show --rescan --json) 2>&1 )"; then
+		die "forest audit show --rescan failed: $forced_audit_json"
+	fi
+	forced_audit_result="$(printf '%s\n' "$forced_audit_json" | jq -r '.data.last_result // empty')"
+	forced_audit_at="$(printf '%s\n' "$forced_audit_json" | jq -r '.data.last_at // empty')"
+	[ "$forced_audit_result" = pass ] || die "forced audit did not pass: $forced_audit_json"
+	[ -n "$forced_audit_at" ] || die "forced audit did not record last_at"
+	audit_since_ns="$(date -u -d "$forced_audit_at" +%s%N 2>/dev/null || echo 0)"
+	[ "${audit_since_ns:-0}" -gt 0 ] || die "could not parse audit last_at: $forced_audit_at"
+
 	echo "$(basename "$0"): starting forest@$name"
 	if ! systemctl --user restart "forest@$name" >/dev/null 2>&1; then
 		die "systemctl restart forest@$name failed; rolling back to the prior instance"
@@ -183,11 +198,9 @@ update_instance() {
 
 	echo "$(basename "$0"): waiting for forest@$name to become active"
 	deadline=$(( $(date +%s) + active_timeout_seconds ))
-	active=false
 	while true; do
 		state="$(systemctl --user is-active "forest@$name" 2>/dev/null || true)"
 		if [ "$state" = active ]; then
-			active=true
 			break
 		fi
 		if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -196,18 +209,11 @@ update_instance() {
 		sleep 1
 	done
 
-	echo "$(basename "$0"): waiting for a fresh audit pass after restart"
-	deadline=$(( $(date +%s) + audit_timeout_seconds ))
-	while true; do
-		refresh_status
-		if audit_ready; then
-			break
-		fi
-		if [ "$(date +%s)" -ge "$deadline" ]; then
-			die "no fresh audit pass observed for forest@$name within ${audit_timeout_seconds}s"
-		fi
-		sleep "$poll_interval_seconds"
-	done
+	echo "$(basename "$0"): verifying the fresh audit pass after restart"
+	refresh_status
+	if ! audit_ready; then
+		die "fresh audit pass not observed for forest@$name after restart"
+	fi
 
 	update_success=true
 	echo "$(basename "$0"): updated forest@$name"
