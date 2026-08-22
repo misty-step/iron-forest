@@ -93,3 +93,11 @@ grooming checklist skill and the Powder spec template:
 
 A future read-only readiness lint is out of scope for this contract. It may only
 aid the same supervised session; it must not become a factory gate.
+
+## Poll scope is not selection permission
+
+A scoped Poll wakes a declaration only for in-scope Subjects; it never widens
+the declaration's own selection rules. When `forest.yaml` sets
+`scope.subjects`, that list is the complete Builder allowlist, and a Run must
+not claim or work any other Subject even if that Subject is otherwise eligible.
+The declaration prompt is the enforcement point inside the Run, not the Poll.
