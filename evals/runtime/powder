@@ -94,7 +94,8 @@ def main() -> int:
         "abandon", "reopen", "set-title", "set-spec", "set-repo",
         "set-blockers", "version", "skill",
     }:
-        return 0
+        print(f"powder fixture rejects forbidden command: {' '.join(args)}", file=sys.stderr)
+        return 2
 
     print(f"unsupported powder fixture invocation: {' '.join(args)}", file=sys.stderr)
     return 2

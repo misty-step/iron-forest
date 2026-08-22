@@ -107,6 +107,20 @@ def trace_commands() -> tuple[list[str], str]:
     return commands, "\n".join(text_parts)
 
 
+FORBIDDEN_POWDER_COMMANDS = {
+    "show", "take", "release", "renew", "ask", "answer", "done",
+    "abandon", "reopen", "set-title", "set-spec", "set-repo",
+    "set-blockers", "version", "skill",
+}
+
+
+def powder_subcommand(command: str) -> str | None:
+    tokens = command.strip().split()
+    if len(tokens) >= 2 and tokens[0] == "powder":
+        return tokens[1]
+    return None
+
+
 def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     failures: list[str] = []
     checks: list[str] = []
@@ -255,9 +269,11 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     if effect == "critic_drafts":
         for command in commands:
             require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Critic avoids promotion and edit commands: {command[:160]}")
+            require(powder_subcommand(command) not in FORBIDDEN_POWDER_COMMANDS, f"Critic avoids Powder promotion commands: {command[:160]}")
     if effect == "tester_drafts":
         for command in commands:
             require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Tester avoids promotion and edit commands: {command[:160]}")
+            require(powder_subcommand(command) not in FORBIDDEN_POWDER_COMMANDS, f"Tester avoids Powder promotion commands: {command[:160]}")
     approve_pushes = [command for command in commands if "git push" in command and "--atomic" in command and "refs/heads/master" in command]
     reference_run = REFERENCE_RUN.is_file()
     if effect in {"verifier_approve", "verifier_approve_race"} and not reference_run:
