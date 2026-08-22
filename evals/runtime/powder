@@ -80,7 +80,13 @@ def main() -> int:
         return 0
 
     if command == "list":
-        emit(load_jobs())
+        jobs = load_jobs()
+        repo = option(args, "--repo")
+        if repo is not None:
+            jobs = [job for job in jobs if job.get("repo") == repo]
+        if "--takeable" in args:
+            jobs = [job for job in jobs if str(job.get("spec") or "").strip()]
+        emit(jobs)
         return 0
 
     if command in {

@@ -6,6 +6,27 @@ rather than leaving placeholders in the filed job. Read the
 [`forest:ready` contract](../forest-ready-contract.md) for the meaning of each
 section.
 
+## External draft note
+
+A second-party report (Critic, Tester, or another adopter agent) is not a
+ready Subject. File it as a SPEC-LESS draft: `powder create` with no `--spec`,
+then put the provenance and evidence in the first note. A job with no spec is
+not listed by `powder list --takeable`, so an external report can never be
+selected for implementation until a supervised grooming session promotes it.
+
+```text
+filed-by: <agent-identity> @ <repo-slug>
+deployment: <instance> <observed-binary-revision>
+<evidence: repro steps against a pinned revision, logs, refs, or file:line>
+<observed vs required, or proposed spec direction / test-work>
+```
+
+- `filed-by:` and `deployment:` are required in the first note.
+- The evidence line cites the primary record: an evidence-ref payload, Ledger
+  row, Run id with its log line, or command output actually read.
+- Never pass `--spec` to `powder create` for an external report. Promotion to
+  a ready Subject is a separate operator-supervised grooming step.
+
 ## Blank template
 
 ```text

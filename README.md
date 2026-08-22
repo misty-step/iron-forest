@@ -86,6 +86,31 @@ managed repository. For a separate sibling managed checkout, use the
 [onboarding guide](docs/onboarding-managed-repo.md); its installer builds the
 Kernel from the factory source into that sibling.
 
+### Second-party deployment checklist
+
+To adopt an existing repository as a second-party deployment, follow the
+[onboarding guide](docs/onboarding-managed-repo.md) and finish these checks
+before handoff:
+
+1. Add `forest.yaml`, `agents/`, and `checks:` to the new repository; mirror
+   `checks:` in the new repository's CI.
+2. Build and validate locally:
+   `mise exec -- go build -o forest . && ./forest selfcheck`.
+3. Install the service with `deploy/install-service.sh <sibling-directory-name>`
+   (no argument in self-host mode).
+4. Start exactly one Kernel: `./forest serve`.
+5. Record the deployment using the registry fields in the
+   [ready contract](docs/forest-ready-contract.md#deployment-registry):
+   `identity`, `host`, `repo`, and the running revision from `./forest version`.
+6. File every external finding with the
+   [draft-note provenance convention](docs/templates/powder-job-spec.md#external-draft-note):
+   report `filed-by`, `deployment`, and evidence, and never pass `--spec` at
+   filing.
+7. Confirm observability before rollout:
+   `./forest status` and `./forest audit show --rescan`.
+8. When the planned `forest doctor` surface lands (if-293), run it and resolve
+   every finding before declaring the deployment complete.
+
 Build with the pinned toolchain and validate local configuration:
 
 ```sh

@@ -77,6 +77,45 @@ A ready Subject is self-contained. After selection, the Builder does not need
 comments, chat, telemetry dashboards, or host access to understand the work.
 Every required command, file path, and acceptance bound is in the item.
 
+## External intake boundary
+
+A second-party report is not a ready Subject. Critic, Tester, and other
+adopter agents file reports as SPEC-LESS Powder drafts: `powder create` runs
+with no `--spec`, and the first note carries the provenance and evidence from
+the [Powder spec template](templates/powder-job-spec.md#external-draft-note).
+
+- `filed-by: <agent-identity> @ <repo-slug>` — the filing agent and source
+  repository.
+- `deployment: <instance> <observed-binary-revision>` — the deployment and the
+  revision the report observed.
+- Evidence — repro steps against a pinned revision, logs, refs, or the
+  `file:line`/surface the finding cites.
+
+Because the job has an empty spec, `powder list --takeable --repo
+misty-step/iron-forest` never lists it. External agents are reporters, not
+backlog approvers: they must not pass `--spec` to `powder create`. The factory
+manager triages each draft during a supervised grooming session — sets the
+spec from archived evidence to promote it, or demotes or closes it with a
+note. A weekly provenance audit confirms drafts still under consideration carry
+`filed-by` and `deployment` and have not been silently promoted.
+
+## Deployment registry
+
+Each second-party deployment that reports into, or is observed by, Iron Forest
+registers four fields:
+
+| Field | Meaning |
+| --- | --- |
+| `identity` | Stable deployment name (for example the service instance name). |
+| `host` | Host that runs the deployment. |
+| `repo` | Managed repository slug the deployment serves. |
+| `revision` | Running binary revision reported by `forest version`. |
+
+No fleet-wide rollout statement is valid while any registered deployment runs
+an unverified revision. The registry feeds `forest version` and the planned
+`forest doctor` surface (if-293); until those commands consume it, it is
+operator-maintained documentation, not a new Kernel surface.
+
 ## Enforcement
 
 Grooming is human-supervised, not a fourth declaration
