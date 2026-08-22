@@ -162,6 +162,17 @@ agents/
     task.md
 ```
 
+Critic and Tester are EXPERIMENTAL and local-canary-only. They are enabled
+only in the self-host Iron Forest checkout for canary observation. Do not copy
+`agents/critic/` or `agents/tester/` into a managed deployment, and do not
+enable their agents in a second-party `forest.yaml`. Their rollout exit gate
+closes only when the blocking repair jobs are merged
+(`if-investigator-provenance-contract`, `if-eval-powder-mutations`,
+`if-tester-eval-observable-surface`, `if-eval-draft-note-binding`, and
+`if-investigator-powder-availability`), the corrected deterministic evals
+pass, and one post-fix live sweep per role produces attributable spec-less
+drafts.
+
 `agent.md` starts with YAML frontmatter containing optional `model`, `tools`,
 and `thinking`, then the system prompt. `task.md` is the standing user prompt.
 `model` and `thinking` fall through declaration frontmatter to instance

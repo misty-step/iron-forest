@@ -1,5 +1,11 @@
 # Changelog
 
+- 2026-08-22: Critic and Tester are EXPERIMENTAL and local-canary-only.
+  They stay enabled only in the self-host Iron Forest checkout for canary
+  observation; external operators must not copy or enable them until the
+  rollout exit gate closes (blockers merged, corrected deterministic evals
+  pass, one post-fix live sweep per role produces attributable spec-less
+  drafts).
 - 2026-08-19: One Subject identity. Review-request is only v2
   (`subject` + `forest/<id>/<slug>`). Builder Poll lists GitHub Issues
   and Powder jobs. The Kernel does not take or complete them (ADR 0023).

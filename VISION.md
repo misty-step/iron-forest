@@ -52,13 +52,23 @@ forest:ready Issue or takeable Powder job
   → Fixer repairs a rejected Revision
 
 The shipped review roster is Builder, Verifier, and Fixer
-([ADR 0014](docs/adr/0014-agent-roster.md)). Critic is a shipped
-drafts-only declaration that sweeps the codebase and files Powder
-drafts; it never edits code, promotes work, or joins the review loop.
-Tester is a shipped drafts-only declaration that maps under-tested observable
-behaviors into test-work Powder drafts; it never edits code, promotes work,
-or joins the review loop. A Sentinel role for post-merge live QA is not
-shipped.
+([ADR 0014](docs/adr/0014-agent-roster.md)). Critic is an EXPERIMENTAL,
+local-canary-only drafts-only declaration that sweeps the codebase and files
+Powder drafts; it never edits code, promotes work, or joins the review loop.
+Tester is an EXPERIMENTAL, local-canary-only drafts-only declaration that maps
+under-tested observable behaviors into test-work Powder drafts; it never edits
+code, promotes work, or joins the review loop. A Sentinel role for post-merge
+live QA is not shipped.
+
+Critic and Tester stay enabled only in the self-host Iron Forest checkout for
+canary observation; external operators must not copy or enable them. Their
+rollout exit gate is: the blocking repair jobs
+`if-investigator-provenance-contract`, `if-eval-powder-mutations`,
+`if-tester-eval-observable-surface`, `if-eval-draft-note-binding`, and
+`if-investigator-powder-availability` are merged, the corrected deterministic
+evals pass, and one post-fix live sweep per role produces attributable
+spec-less drafts.
+
 Each role is one event, one input, one isolated Run.
 
 Git holds durable facts: branches, commits, and create-only evidence refs:

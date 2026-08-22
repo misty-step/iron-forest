@@ -9,11 +9,28 @@ mechanics. Declarations state what agents think and do. See
 The shipped review roster has Builder, Verifier, and Fixer. A Builder turns a
 ready GitHub Issue or takeable Powder job into a branch. A Verifier checks and
 reviews the exact Revision. A Fixer repairs a rejected Revision and sends it back
-for review. Critic is a separate drafts-only declaration that sweeps the
-codebase and files Powder drafts; it never edits code or joins the review loop.
-Tester is a separate drafts-only declaration that maps under-tested observable
-behaviors into test-work Powder drafts; it never edits code or joins the review
-loop.
+for review. Critic sweeps the codebase and files Powder drafts; it never edits
+code or joins the review loop. Tester maps under-tested observable behaviors
+into test-work Powder drafts; it never edits code or joins the review loop.
+Critic and Tester are EXPERIMENTAL and local-canary-only; see the rollout hold
+below.
+
+
+## Critic and Tester rollout hold
+
+Critic and Tester are EXPERIMENTAL and local-canary-only. Iron Forest keeps
+them enabled in this self-host checkout only for canary observation. External
+operators must not copy or enable them until the rollout exit gate below
+closes.
+
+Rollout exit gate:
+
+- the blocking repair jobs are merged:
+  `if-investigator-provenance-contract`, `if-eval-powder-mutations`,
+  `if-tester-eval-observable-surface`, `if-eval-draft-note-binding`, and
+  `if-investigator-powder-availability`;
+- the corrected deterministic evals pass; and
+- one post-fix live sweep per role produces attributable spec-less drafts.
 
 
 ## Quick start
