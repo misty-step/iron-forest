@@ -101,6 +101,7 @@ func cliCommands() []cliCommand {
 	return []cliCommand{
 		{phrase: "status", run: runStatus},
 		{phrase: "selfcheck", run: runSelfcheck},
+		{phrase: "version", run: runVersion},
 		{phrase: "config show", run: runConfigShow},
 		{phrase: "declaration list", run: runDeclarationList},
 		{phrase: "declaration show", args: 1, operands: "<name>", run: runDeclarationShow},

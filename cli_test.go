@@ -278,6 +278,57 @@ func TestCLIUsageListsEveryCommand(t *testing.T) {
 	}
 }
 
+func TestCLIVersionReportsBuildInfo(t *testing.T) {
+	restore := overrideVersionGlobals(t, "abc123", "2026-08-21T20:00:00Z", "true")
+	defer restore()
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"version", "--root", root})
+	})
+	if code != exitOK {
+		t.Fatalf("version code=%d stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("version stderr=%q, want empty", stderr)
+	}
+	want := "build_sha: abc123\ncommit_time: 2026-08-21T20:00:00Z\ndirty: true\n"
+	if stdout != want {
+		t.Fatalf("version stdout=%q, want %q", stdout, want)
+	}
+}
+
+func TestCLIVersionEnvelopeUsesSnakeCaseKeys(t *testing.T) {
+	restore := overrideVersionGlobals(t, "def456", "2026-08-22T00:00:00Z", "false")
+	defer restore()
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+
+	code, envelope, stderr := decodeEnvelope(t, "version", "--json", "--root", root)
+	if code != exitOK || stderr != "" {
+		t.Fatalf("version code=%d stderr=%q", code, stderr)
+	}
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload versionPayload
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("data does not match versionPayload: %v (%s)", err, encoded)
+	}
+	if payload.BuildSHA != "def456" || payload.CommitTime != "2026-08-22T00:00:00Z" || payload.Dirty {
+		t.Fatalf("version payload=%+v, want injected values", payload)
+	}
+}
+
+func overrideVersionGlobals(t *testing.T, sha, commitTime, dirty string) func() {
+	t.Helper()
+	oldSHA, oldTime, oldDirty := buildSHA, buildTime, buildDirty
+	buildSHA, buildTime, buildDirty = sha, commitTime, dirty
+	return func() { buildSHA, buildTime, buildDirty = oldSHA, oldTime, oldDirty }
+}
+
 // A boolean flag with a value is rejected, so the pre-parse --json detection and
 // the parser can never disagree about the output contract.
 func TestCLIBooleanFlagsRejectValues(t *testing.T) {

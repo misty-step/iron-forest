@@ -86,9 +86,18 @@ mkdir -p "$(dirname "$unit")"
 sed -e "s|@FOREST_ROOT@|$root|g" \
 	"$here/forest@.service" > "$unit"
 
-# Build the Kernel from the factory source into the selected target.
+# Build the Kernel from the factory source into the selected target. Build
+# metadata is stamped at link time so `forest version` reports the exact
+# revision, commit time, and whether the source tree was modified.
 stamp="$(git -C "$factory" rev-parse --short HEAD)"
-(cd "$factory" && mise exec -- go build -o "$target/forest" .)
+sha="$(git -C "$factory" rev-parse HEAD)"
+commit_time="$(git -C "$factory" show -s --format=%cI HEAD)"
+dirty="false"
+if [ -n "$(git -C "$factory" status --porcelain)" ]; then
+	dirty="true"
+fi
+ldflags="-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty=$dirty"
+(cd "$factory" && mise exec -- go build -ldflags "$ldflags" -o "$target/forest" .)
 
 # Validate with the same trusted PATH that the service receives. Credentials
 # remain outside the installer and arrive through the service environment file.

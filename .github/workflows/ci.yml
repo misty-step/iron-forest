@@ -30,6 +30,15 @@ jobs:
         run: mise exec -- go vet ./...
       - name: test
         run: mise exec -- go test ./...
+      - name: version reports the built SHA
+        run: |
+          sha="$(git rev-parse HEAD)"
+          commit_time="$(git show -s --format=%cI HEAD)"
+          dirty="false"
+          if [ -n "$(git status --porcelain)" ]; then dirty="true"; fi
+          bin="$(mktemp -d)/forest"
+          mise exec -- go build -ldflags "-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty=$dirty" -o "$bin" .
+          "$bin" version | grep -Fx "build_sha: $sha"
       # Mirrors the `secrets` check in forest.yaml. A merged branch must never
       # carry credential material; CI provisions the same generic scanner the
       # local check uses and scans the whole worktree (untracked files
