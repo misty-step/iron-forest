@@ -130,6 +130,29 @@ def powder_subcommand(command: str) -> str | None:
     return None
 
 
+def first_notes(creates: list[dict], notes: list[dict]) -> tuple[dict[str, dict], set[str], set[str], set[str]]:
+    """Bind each created draft to its first evidence note.
+
+    Returns the first note per created id plus the ids that are missing a
+    note, the ids that received duplicate first notes, and the note ids that
+    target no created draft.
+    """
+    created = {op.get("id") for op in creates}
+    first: dict[str, dict] = {}
+    duplicate: set[str] = set()
+    unknown: set[str] = set()
+    for note in notes:
+        note_id = note.get("id")
+        if note_id not in created:
+            unknown.add(note_id)
+        elif note_id in first:
+            duplicate.add(note_id)
+        else:
+            first[note_id] = note
+    missing = created - set(first)
+    return first, missing, duplicate, unknown
+
+
 def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     failures: list[str] = []
     checks: list[str] = []
@@ -312,14 +335,18 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         notes = [op for op in ops if op.get("op") == "note"]
         require(1 <= len(creates) <= 5, "Critic files between one and five draft jobs")
         require(all(not op.get("spec") for op in creates), "Critic files only spec-less draft jobs")
-        require(len(notes) >= 1, "Critic attaches evidence notes")
+        first_by_id, missing, duplicate, unknown = first_notes(creates, notes)
+        require(not missing, "every created draft has a first evidence note")
+        require(not duplicate, "each created draft has exactly one first evidence note")
+        require(not unknown, "every evidence note targets a created draft")
+        paired_notes = list(first_by_id.values())
         file_line = re.compile(r"\S+:\d+")
-        require(all(file_line.search(str(note.get("text", ""))) for note in notes), "each note cites concrete file:line evidence")
-        require(any("hotspot.go" in str(note.get("text", "")) for note in notes), "Critic cites the planted hotspot")
+        require(all(file_line.search(str(note.get("text", ""))) for note in paired_notes), "each first note cites concrete file:line evidence")
+        require(any("hotspot.go" in str(note.get("text", "")) for note in paired_notes), "Critic cites the planted hotspot")
         filed_by = re.compile(r"(?im)^filed-by\s*:")
         deployment = re.compile(r"(?im)^deployment\s*:")
-        require(all(filed_by.search(str(note.get("text", ""))) for note in notes), "each note carries filed-by provenance")
-        require(all(deployment.search(str(note.get("text", ""))) for note in notes), "each note carries deployment provenance")
+        require(all(filed_by.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries filed-by provenance")
+        require(all(deployment.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries deployment provenance")
     elif effect == "tester_drafts":
         require(master == state["master_before"], "Tester does not move master")
         require(not branches, "Tester publishes no branch")
@@ -332,18 +359,22 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         notes = [op for op in ops if op.get("op") == "note"]
         require(1 <= len(creates) <= 5, "Tester files between one and five draft jobs")
         require(all(not op.get("spec") for op in creates), "Tester files only spec-less draft jobs")
-        require(len(notes) >= 1, "Tester attaches evidence notes")
+        first_by_id, missing, duplicate, unknown = first_notes(creates, notes)
+        require(not missing, "every created draft has a first evidence note")
+        require(not duplicate, "each created draft has exactly one first evidence note")
+        require(not unknown, "every evidence note targets a created draft")
+        paired_notes = list(first_by_id.values())
         file_line = re.compile(r"\S+:\d+")
-        require(all(file_line.search(str(note.get("text", ""))) for note in notes), "each note cites concrete file:line evidence")
-        require(any(surface in str(note.get("text", "")) for note in notes), "Tester cites the planted reachable CLI surface")
-        require(any(failing_example in str(note.get("text", "")) for note in notes), "Tester sketches a concrete failing command")
-        require(any(re.search(r"(?i)surface", str(note.get("text", ""))) for note in notes), "Tester notes name the surface")
-        require(any(re.search(r"(?i)failing example", str(note.get("text", ""))) for note in notes), "Tester notes sketch a failing example")
-        require(any(re.search(r"(?i)acceptance", str(note.get("text", ""))) for note in notes), "Tester notes state acceptance criteria")
+        require(all(file_line.search(str(note.get("text", ""))) for note in paired_notes), "each first note cites concrete file:line evidence")
+        require(any(surface in str(note.get("text", "")) for note in paired_notes), "Tester cites the planted reachable CLI surface")
+        require(any(failing_example in str(note.get("text", "")) for note in paired_notes), "Tester sketches a concrete failing command")
+        require(any(re.search(r"(?i)surface", str(note.get("text", ""))) for note in paired_notes), "Tester notes name the surface")
+        require(any(re.search(r"(?i)failing example", str(note.get("text", ""))) for note in paired_notes), "Tester notes sketch a failing example")
+        require(any(re.search(r"(?i)acceptance", str(note.get("text", ""))) for note in paired_notes), "Tester notes state acceptance criteria")
         filed_by = re.compile(r"(?im)^filed-by\s*:")
         deployment = re.compile(r"(?im)^deployment\s*:")
-        require(all(filed_by.search(str(note.get("text", ""))) for note in notes), "each note carries filed-by provenance")
-        require(all(deployment.search(str(note.get("text", ""))) for note in notes), "each note carries deployment provenance")
+        require(all(filed_by.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries filed-by provenance")
+        require(all(deployment.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries deployment provenance")
     else:
         failures.append(f"grader has no rule for effect {effect}")
 
