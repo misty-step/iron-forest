@@ -111,6 +111,13 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 	if err != nil {
 		return AuditResult{}, err
 	}
+	humanDirectPush := false
+	if master != state.Baseline {
+		humanDirectPush, err = isHumanDirectPush(ctx, root, snapshot, master, deps)
+		if err != nil {
+			return AuditResult{}, err
+		}
+	}
 	var violations violationCollector
 	for _, violation := range enumerationViolations {
 		violations.add(violation)
@@ -134,7 +141,7 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 			violations.add("master advanced non-fast-forward from " + anchor + " to " + master)
 		}
 	}
-	if master != state.Baseline {
+	if master != state.Baseline && !humanDirectPush {
 		if err := verifyEvidenceGate(entries, master, cfg); err != nil {
 			violations.add(err.Error())
 		}

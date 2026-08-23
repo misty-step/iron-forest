@@ -179,6 +179,47 @@ func parseEvidenceRef(ref string) (kind, sha string, ok bool) {
 	return kind, sha, true
 }
 
+func evidenceTargetsRevision(evidence map[string]string, revision string) bool {
+	for ref := range evidence {
+		_, sha, ok := parseEvidenceRef(ref)
+		if ok && sha == revision {
+			return true
+		}
+	}
+	return false
+}
+
+func readCommitAuthor(ctx context.Context, root, ref string, deps auditDependencies) (string, string, error) {
+	output, err := deps.runGit(ctx, root, "log", "-1", "--format=%an%x00%ae", ref)
+	if err != nil {
+		return "", "", err
+	}
+	line, err := exactGitLine(output)
+	if err != nil {
+		return "", "", fmt.Errorf("malformed master commit identity: %w", err)
+	}
+	parts := strings.SplitN(line, "\x00", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("malformed master commit identity")
+	}
+	return parts[0], parts[1], nil
+}
+
+// isHumanDirectPush reports whether master is an operator direct push rather
+// than a factory-authored Revision. The classification is deliberately
+// fail-closed: any evidence ref that targets the tip, or an agent-authored
+// commit, keeps the full Gate check in force.
+func isHumanDirectPush(ctx context.Context, root string, snapshot auditSnapshot, master string, deps auditDependencies) (bool, error) {
+	if evidenceTargetsRevision(snapshot.Evidence, master) {
+		return false, nil
+	}
+	name, email, err := readCommitAuthor(ctx, root, auditorMasterRef(snapshot), deps)
+	if err != nil {
+		return false, err
+	}
+	return !isAgentAuthor(name, email), nil
+}
+
 func validateEvidenceEntry(entry noteEntry, kind string) error {
 	switch kind {
 	case "request":

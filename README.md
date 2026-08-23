@@ -307,6 +307,12 @@ a trusted baseline and is not Gate-checked. Each snapshot fetches
 final remote `master`. Leftover notes are unread. The Auditor cannot prove
 check execution, atomic push ordering, or force absence.
 
+An operator direct push whose tip has no factory evidence and whose commit
+author is not a shipped declaration identity is acknowledged and is not a Gate
+violation. Any tip that carries factory evidence, or whose author is a
+declaration identity, still requires the full Gate. See
+[ADR 0026](docs/adr/0026-human-direct-push-audit-policy.md).
+
 The Auditor runs after a completed dispatch. It stores current violations in
 `audit.json` and marks the last Audit as `violations` in `forest status`. It
 appends violations to `audit.log` only when the current set differs from the

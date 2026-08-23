@@ -44,6 +44,14 @@ func validIdentity(entry noteEntry, roles ...string) bool {
 	return false
 }
 
+// isAgentAuthor reports whether a commit author name and email match one of
+// the shipped declaration identities. The Auditor uses it to distinguish an
+// operator direct push from a factory-authored Revision that must carry Gate
+// evidence.
+func isAgentAuthor(name, email string) bool {
+	return validIdentity(noteEntry{Author: name, Email: email}, "builder", "fixer", "verifier")
+}
+
 func exactGitLine(output []byte) (string, error) {
 	if len(output) == 0 || output[len(output)-1] != '\n' {
 		return "", errors.New("git output is not one terminated line")
