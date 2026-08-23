@@ -31,6 +31,7 @@ class IronForestAgent(BaseAgent):
     def __init__(self, logs_dir: Path, model_name: str | None = None, **kwargs):
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
         self._scenario_id = ""
+        self._scenario: dict = {}
 
     @staticmethod
     @override
@@ -45,6 +46,7 @@ class IronForestAgent(BaseAgent):
     async def setup(self, environment: BaseEnvironment) -> None:
         case = scenario_for(case_id_from_logs(self.logs_dir))
         self._scenario_id = case["id"]
+        self._scenario = case
         created = await environment.exec(command="mkdir -p /hidden", user="root", timeout_sec=None)
         if created.return_code != 0:
             raise RuntimeError(created.stderr or created.stdout or "could not create /hidden")
@@ -75,6 +77,7 @@ class IronForestAgent(BaseAgent):
     ) -> None:
         result = await environment.exec(
             command='forest once "$(cat /run/forest-eval/role)"',
+            env=self._scenario.get("agent_env") or None,
             timeout_sec=None,
         )
         (self.logs_dir / "forest-stdout.txt").write_text(result.stdout or "")

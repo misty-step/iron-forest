@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from hidden import POWDER_JOBS, POWDER_OPS
+
+# The eval Builder runs under one fixed POWDER_AGENT. `powder take` has no
+# --agent operand in the production prompt, so the fixture falls back to this
+# identity when sudo drops POWDER_AGENT from the fixture's environment.
+EVAL_AGENT = "forest-iron-forest"
 
 
 def load_jobs() -> list[dict]:
@@ -42,6 +48,20 @@ def positional_id(args: list[str]) -> str | None:
     return None
 
 
+def find_job(jobs: list[dict], job_id: str | None) -> dict | None:
+    if job_id is None:
+        return None
+    return next((job for job in jobs if job["id"] == job_id), None)
+
+
+def current_agent(args: list[str]) -> str:
+    return option(args, "--agent") or os.environ.get("POWDER_AGENT") or EVAL_AGENT
+
+
+def missing(job_id: str | None) -> None:
+    print(f"powder fixture: job {job_id!r} not found", file=sys.stderr)
+
+
 def main() -> int:
     args = sys.argv[1:]
     if not args:
@@ -64,6 +84,7 @@ def main() -> int:
             "repo": repo,
             "spec": spec or "",
             "state": "draft" if not spec else "open",
+            "lease": None,
         }
         jobs.append(job)
         save_jobs(jobs)
@@ -84,15 +105,79 @@ def main() -> int:
         repo = option(args, "--repo")
         if repo is not None:
             jobs = [job for job in jobs if job.get("repo") == repo]
+        mine = option(args, "--mine")
+        if mine is not None:
+            jobs = [
+                job
+                for job in jobs
+                if job.get("lease") is not None and job["lease"].get("agent") == mine
+            ]
         if "--takeable" in args:
-            jobs = [job for job in jobs if str(job.get("spec") or "").strip()]
+            jobs = [
+                job
+                for job in jobs
+                if str(job.get("spec") or "").strip() and job.get("lease") is None
+            ]
         emit(jobs)
         return 0
 
+    if command == "show":
+        jobs = load_jobs()
+        job_id = option(args, "--id") or positional_id(args)
+        job = find_job(jobs, job_id)
+        if job is None:
+            missing(job_id)
+            return 1
+        append_op({"op": "show", "id": job_id})
+        emit(job)
+        return 0
+
+    if command == "take":
+        jobs = load_jobs()
+        job_id = option(args, "--id") or positional_id(args)
+        job = find_job(jobs, job_id)
+        if job is None:
+            missing(job_id)
+            return 1
+        if job.get("lease") is not None:
+            print(f"powder fixture: job {job_id!r} is already held", file=sys.stderr)
+            return 1
+        agent = current_agent(args)
+        job["lease"] = {"agent": agent}
+        save_jobs(jobs)
+        append_op({"op": "take", "id": job_id, "agent": agent})
+        emit(job)
+        return 0
+
+    if command == "release":
+        jobs = load_jobs()
+        job_id = option(args, "--id") or positional_id(args)
+        job = find_job(jobs, job_id)
+        if job is None:
+            missing(job_id)
+            return 1
+        job["lease"] = None
+        save_jobs(jobs)
+        append_op({"op": "release", "id": job_id})
+        emit(job)
+        return 0
+
+    if command == "ask":
+        jobs = load_jobs()
+        job_id = option(args, "--id") or positional_id(args)
+        job = find_job(jobs, job_id)
+        if job is None:
+            missing(job_id)
+            return 1
+        question = option(args, "--question")
+        append_op({"op": "ask", "id": job_id, "question": question or ""})
+        emit(job)
+        return 0
+
     if command in {
-        "show", "take", "release", "renew", "ask", "answer", "done",
-        "abandon", "reopen", "set-title", "set-spec", "set-repo",
-        "set-blockers", "version", "skill",
+        "renew", "answer", "done", "abandon", "reopen",
+        "set-title", "set-spec", "set-repo", "set-blockers",
+        "version", "skill",
     }:
         print(f"powder fixture rejects forbidden command: {' '.join(args)}", file=sys.stderr)
         return 2

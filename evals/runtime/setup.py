@@ -11,8 +11,7 @@ from pathlib import Path
 
 import pwd
 
-from hidden import CANDIDATE_MODEL, RACE, ROLE, SCENARIO, STATE, ensure
-
+from hidden import CANDIDATE_MODEL, POWDER_JOBS, RACE, ROLE, SCENARIO, STATE, ensure
 
 
 GIT = "/usr/bin/git"
@@ -50,6 +49,20 @@ def write_files(root: Path, files: dict[str, str]) -> None:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
+
+
+def scope_config(scope: dict | None) -> str:
+    if not scope:
+        return ""
+    lines = ["scope:"]
+    for key, value in scope.items():
+        if isinstance(value, list):
+            lines.append(f"  {key}:")
+            for item in value:
+                lines.append(f"    - {item}")
+        else:
+            lines.append(f"  {key}: {value}")
+    return "\n".join(lines) + "\n"
 
 
 def note_add(workspace: Path, ref: str, target: str, payload: dict, actor: str, layout: str = "flat") -> None:
@@ -126,9 +139,15 @@ def main() -> None:
     hidden = ensure()
     shutil.rmtree(workspace, ignore_errors=True)
     shutil.rmtree(origin, ignore_errors=True)
-    for stale in ("state.json", "race.json", "race-triggered", "forest-exit", "candidate-model", "reference-run", "scenario.json", "role", "pr-created.json", "issue-created.json"):
+    for stale in ("state.json", "race.json", "race-triggered", "forest-exit", "candidate-model", "reference-run", "scenario.json", "role", "pr-created.json", "issue-created.json", "powder-jobs.json", "powder-ops.jsonl"):
         (hidden / stale).unlink(missing_ok=True)
     SCENARIO.write_text(json.dumps(scenario, indent=2, sort_keys=True) + "\n")
+    powder_jobs = scenario.get("powder_jobs", [])
+    for job in powder_jobs:
+        job.setdefault("repo", "local/eval")
+        job.setdefault("lease", None)
+    if powder_jobs:
+        POWDER_JOBS.write_text(json.dumps(powder_jobs, indent=2, sort_keys=True) + "\n")
     run(GIT, "init", "--bare", "--initial-branch=master", str(origin))
     run(GIT, "init", "--initial-branch=master", str(workspace))
     git(workspace, "remote", "add", "origin", str(origin))
@@ -152,7 +171,8 @@ def main() -> None:
     check = json.dumps(scenario.get("check", "true"))
     config = (
         "repo: local/eval\n"
-        "agents:\n"
+        + scope_config(scenario.get("scope"))
+        + "agents:\n"
         "  builder: {poll: \"true\", interval: 1}\n"
         "  verifier: {poll: \"true\", interval: 1}\n"
         "  fixer: {poll: \"true\", interval: 1}\n"

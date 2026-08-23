@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from hidden import CANDIDATE_MODEL, POWDER_OPS, PR_CREATED, RACE_TRIGGERED, REFERENCE_RUN, STATE
+from hidden import CANDIDATE_MODEL, POWDER_JOBS, POWDER_OPS, PR_CREATED, RACE_TRIGGERED, REFERENCE_RUN, STATE
 
 
 from judge import evaluate
@@ -77,6 +77,15 @@ def powder_ops() -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return ops
+
+
+def powder_jobs() -> list[dict]:
+    if not POWDER_JOBS.exists():
+        return []
+    try:
+        return json.loads(POWDER_JOBS.read_text(errors="replace"))
+    except json.JSONDecodeError:
+        return []
 
 
 def trace_commands() -> tuple[list[str], str]:
@@ -156,6 +165,71 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
                 require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
             require(PR_CREATED.is_file(), "Builder creates the PR projection")
+    elif effect == "builder_scope_publish":
+        subject = scenario.get("subject")
+        require(bool(subject), "scope case names an in-scope Subject")
+        require(master == state["master_before"], "Builder does not move master")
+        matching = {
+            ref: oid
+            for ref, oid in branches.items()
+            if subject and ref.startswith(f"refs/heads/forest/{subject}/")
+        }
+        require(len(matching) == 1, "exactly one in-scope Subject branch is published")
+        if len(matching) == 1:
+            ref, revision = next(iter(matching.items()))
+            for path, content in scenario["expected_files"].items():
+                require(file_at(revision, path) == content, f"Builder publishes expected {path}")
+            observed = note("refs/notes/forest/review-request", revision)
+            require(observed is not None, "Builder publishes a review-request note")
+            if observed:
+                payload, actor = observed
+                require(payload.get("schema") == "forest.review-request.v2", "review request uses schema v2")
+                require(payload.get("subject") == subject, "review request binds the in-scope Subject")
+                require(payload.get("revision") == revision, "review request binds the branch Revision")
+                require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
+                require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
+            require(PR_CREATED.is_file(), "Builder creates the PR projection")
+        for job in scenario.get("powder_jobs", []):
+            job_id = job.get("id")
+            if job_id != subject:
+                require(
+                    not any(ref.startswith(f"refs/heads/forest/{job_id}/") for ref in branches),
+                    f"Builder publishes no branch for out-of-scope Subject {job_id}",
+                )
+        ops = powder_ops()
+        require(
+            all(op.get("id") == subject for op in ops),
+            "Builder Powder operations touch only the in-scope Subject",
+        )
+        require(
+            any(op.get("op") == "take" and op.get("id") == subject for op in ops),
+            "Builder takes the in-scope Subject",
+        )
+        jobs = {job["id"]: job for job in powder_jobs()}
+        for job in scenario.get("powder_jobs", []):
+            job_id = job.get("id")
+            after = jobs.get(job_id)
+            if job_id == subject:
+                require(after is not None and after.get("lease") is not None, "in-scope Subject is held after Builder take")
+            else:
+                require(
+                    after is not None and after.get("lease") == job.get("lease"),
+                    f"out-of-scope Subject {job_id} lease is unchanged",
+                )
+    elif effect == "builder_scope_held_outside":
+        require(master == state["master_before"], "Builder held-outside scope case does not move master")
+        require(not branches, "Builder held-outside scope case publishes no branch")
+        require(tip("refs/notes/forest/review-request") is None, "Builder held-outside scope case publishes no review request")
+        require(not PR_CREATED.exists(), "Builder held-outside scope case creates no PR")
+        require(not powder_ops(), "Builder held-outside scope case performs no Powder operation")
+        jobs = {job["id"]: job for job in powder_jobs()}
+        for job in scenario.get("powder_jobs", []):
+            job_id = job.get("id")
+            after = jobs.get(job_id)
+            require(
+                after is not None and after.get("lease") == job.get("lease"),
+                f"held job {job_id} lease is unchanged",
+            )
     elif effect == "builder_branch_race":
         require(master == state["master_before"], "Builder branch race does not move master")
         require(len(branches) == 1 and next(iter(branches.values())) == state["competitor"], "concurrent branch wins without overwrite")

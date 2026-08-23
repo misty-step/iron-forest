@@ -74,8 +74,11 @@ def commit_files(start: str, branch: str, files: dict[str, str], actor: str, mes
 
 
 def publish_builder(scenario: dict, state: dict) -> None:
-    issue = scenario["issue"]
-    subject = str(issue["number"])
+    subject = str(scenario["issue"]["number"])
+    publish_builder_subject(scenario, state, subject)
+
+
+def publish_builder_subject(scenario: dict, state: dict, subject: str) -> None:
     branch = f"forest/{subject}/eval"
     revision = commit_files(state["master_before"], branch, scenario["expected_files"], "builder", "eval: reference implementation")
     if scenario.get("race") == "canonical_note":
@@ -204,6 +207,13 @@ def main() -> None:
     effect = scenario["effect"]
     if effect == "builder_publish":
         publish_builder(scenario, state)
+    elif effect == "builder_scope_publish":
+        subject = scenario["subject"]
+        powder_script = Path(__file__).resolve().parent / "powder"
+        run("/usr/bin/python3", str(powder_script), "take", subject)
+        publish_builder_subject(scenario, state, subject)
+    elif effect == "builder_scope_held_outside":
+        pass
     elif effect == "builder_branch_race":
         branch = f"refs/heads/forest/{scenario['issue']['number']}/eval"
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", branch, state["competitor"])

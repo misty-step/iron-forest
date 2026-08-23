@@ -58,9 +58,9 @@ class PowderIntakeTest(unittest.TestCase):
             hidden = Path(root) / "hidden"
             hidden.mkdir()
             forbidden = (
-                "show", "take", "release", "renew", "ask", "answer", "done",
-                "abandon", "reopen", "set-title", "set-spec", "set-repo",
-                "set-blockers", "version", "skill",
+                "renew", "answer", "done", "abandon", "reopen",
+                "set-title", "set-spec", "set-repo", "set-blockers",
+                "version", "skill",
             )
             for command in forbidden:
                 result = self.run_powder(hidden, command, "if-any")
@@ -92,6 +92,64 @@ class PowderIntakeTest(unittest.TestCase):
             self.assertEqual(all_.returncode, 0, msg=all_.stderr)
             self.assertEqual(
                 [job["id"] for job in json.loads(all_.stdout)], ["if-draft"]
+            )
+
+    def test_lease_commands_are_deterministic(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            hidden = Path(root) / "hidden"
+            hidden.mkdir()
+            repo = "misty-step/iron-forest"
+            agent = "forest-iron-forest"
+
+            ready = self.run_powder(
+                hidden, "create", "--id", "if-ready", "--title", "Ready",
+                "--repo", repo, "--spec", "## Problem\nConcrete need.\n",
+            )
+            self.assertEqual(ready.returncode, 0, msg=ready.stderr)
+            held = self.run_powder(
+                hidden, "create", "--id", "if-held", "--title", "Held",
+                "--repo", repo, "--spec", "## Problem\nConcrete need.\n",
+            )
+            self.assertEqual(held.returncode, 0, msg=held.stderr)
+
+            taken = self.run_powder(hidden, "take", "if-held")
+            self.assertEqual(taken.returncode, 0, msg=taken.stderr)
+            self.assertEqual(json.loads(taken.stdout)["lease"]["agent"], agent)
+
+            mine = self.run_powder(hidden, "list", "--mine", agent, "--repo", repo)
+            self.assertEqual(
+                [job["id"] for job in json.loads(mine.stdout)], ["if-held"]
+            )
+            takeable = self.run_powder(hidden, "list", "--takeable", "--repo", repo)
+            self.assertEqual(
+                [job["id"] for job in json.loads(takeable.stdout)], ["if-ready"]
+            )
+
+            already = self.run_powder(hidden, "take", "if-held")
+            self.assertNotEqual(already.returncode, 0, msg=already.stderr)
+
+            released = self.run_powder(hidden, "release", "if-held")
+            self.assertEqual(released.returncode, 0, msg=released.stderr)
+            self.assertIsNone(json.loads(released.stdout)["lease"])
+            mine_after = self.run_powder(hidden, "list", "--mine", agent, "--repo", repo)
+            self.assertEqual(json.loads(mine_after.stdout), [])
+
+            asked = self.run_powder(
+                hidden, "ask", "if-held", "--question", "is this released?"
+            )
+            self.assertEqual(asked.returncode, 0, msg=asked.stderr)
+            shown = self.run_powder(hidden, "show", "if-held")
+            self.assertEqual(shown.returncode, 0, msg=shown.stderr)
+            self.assertEqual(json.loads(shown.stdout)["id"], "if-held")
+
+            ops = [
+                json.loads(line)
+                for line in (hidden / "powder-ops.jsonl").read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                [op["op"] for op in ops if op["id"] == "if-held"],
+                ["create", "take", "release", "ask", "show"],
             )
 
 

@@ -13,9 +13,9 @@ class CaseManifestTest(unittest.TestCase):
         cls.manifest = json.loads((ROOT / "cases.json").read_text())
         cls.cases = cls.manifest["cases"]
 
-    def test_manifest_has_six_cases_per_role(self):
+    def test_manifest_has_eight_cases_per_role(self):
         counts = {role: sum(case["role"] == role for case in self.cases) for role in ("builder", "verifier", "fixer")}
-        self.assertEqual(counts, {"builder": 6, "verifier": 6, "fixer": 6})
+        self.assertEqual(counts, {"builder": 8, "verifier": 6, "fixer": 6})
 
     def test_case_ids_are_unique(self):
         ids = [case["id"] for case in self.cases]
