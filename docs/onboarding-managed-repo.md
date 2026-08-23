@@ -112,8 +112,10 @@ checks:
 ```
 
 `repo` is the forge identity. `agents` maps each declaration to a Poll command
-and interval. Agent Runs have no wall-clock deadline. They finish when Pi
-finishes or an operator explicitly cancels a foreground `forest once`; service
+and interval. Agent Runs have no wall-clock deadline by default. A declaration
+may opt into an optional `max_duration` key (seconds); zero or an omitted key
+keeps the Run unbounded. They finish when Pi finishes or an operator explicitly
+cancels a foreground `forest once`; service
 shutdown stops new dispatches and drains active Runs without a systemd
 deadline. Direct `forest poll` execution has a fixed 60-second deadline. The
 Scheduler gives its configured Poll command a separate 65-second bound. The

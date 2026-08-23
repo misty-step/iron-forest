@@ -81,6 +81,9 @@ type Declaration struct {
 	// then task.md) as loaded. The Runner recomputes it immediately before exec
 	// so a run executes only the declaration bytes the Kernel loaded (see #144).
 	DefinitionSHA string `json:"definition_sha,omitempty"`
+	// MaxDuration is the optional per-declaration watchdog bound in seconds,
+	// copied from the agent's forest.yaml configuration. Zero means unbounded.
+	MaxDuration int `json:"max_duration,omitempty"`
 }
 
 type declarationFrontmatter struct {

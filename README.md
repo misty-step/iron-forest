@@ -57,6 +57,20 @@ checks:
     run: mise exec -- go test ./...
 ```
 
+Agent Runs have no wall-clock deadline by default. To bound a declaration that
+has wedged before, set the optional `max_duration` key (seconds) under that
+agent; `0` or an omitted key leaves the Run unbounded:
+
+```yaml
+agents:
+  fixer: { poll: "./forest poll fixer", interval: 300, max_duration: 3600 }
+```
+
+When `max_duration` is set, the Kernel's progress watchdog cancels a Run that
+exceeds the bound using the same supported cancel path as `forest run cancel`,
+records the cancellation in the Ledger, and returns the trigger to a clean
+not-running state.
+
 Declare each agent with two prompt files. Skills live only in the shared
 directory and, when a role needs private skills, its own directory:
 

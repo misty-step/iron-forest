@@ -449,10 +449,14 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 		}
 	}
 	harnessRunnable := skillErr == nil && piErr == nil
+	var runDeadline time.Time
+	if declaration.MaxDuration > 0 {
+		runDeadline = started.Add(time.Duration(declaration.MaxDuration) * time.Second)
+	}
 	var invokeErr error
 	harnessStarted := false
 	if harnessRunnable {
-		invokeErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, primaryRef, &record)
+		invokeErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, primaryRef, &record, runDeadline)
 	}
 	if hasRunCancellationMarker(r.Root, runID) {
 		record.Error = runCancelledError
@@ -863,7 +867,7 @@ func (t *agentOutcomeTracker) Err() error {
 	return nil
 }
 
-func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, logFile io.Writer, primaryRef string, record *RunRecord) (err error, started bool) {
+func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, logFile io.Writer, primaryRef string, record *RunRecord, deadline time.Time) (err error, started bool) {
 	if err := ctx.Err(); err != nil {
 		record.Exit = contextExit(err)
 		return err, false
@@ -927,6 +931,17 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	}()
 	wait := make(chan error, 1)
 	go func() { wait <- command.Wait() }()
+	var watchdogTimer *time.Timer
+	var watchdog <-chan time.Time
+	if !deadline.IsZero() {
+		remaining := time.Until(deadline)
+		if remaining < 0 {
+			remaining = 0
+		}
+		watchdogTimer = time.NewTimer(remaining)
+		watchdog = watchdogTimer.C
+		defer watchdogTimer.Stop()
+	}
 	var runErr, cleanupErr error
 	select {
 	case waitErr := <-wait:
@@ -939,6 +954,13 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
 		record.Exit = contextExit(ctx.Err())
 		runErr = ctx.Err()
+	case <-watchdog:
+		if markerErr := writeRunCancellationMarker(r.Root, record.RunID); markerErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("write run cancellation marker: %w", markerErr))
+		}
+		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
+		record.Exit = runCancelledExit
+		record.Error = runCancelledError
 	}
 	var readerCloseErr error
 	if cleanupErr != nil {

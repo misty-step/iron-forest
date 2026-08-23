@@ -224,6 +224,7 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 	if err != nil {
 		return Declaration{}, nil, false, err
 	}
+	declaration.MaxDuration = cfg.MaxDuration
 
 	s.mu.Lock()
 	if err := ctx.Err(); err != nil {

@@ -392,6 +392,9 @@ func runConfigShow(_ []string, flags cliFlags) cliOutcome {
 	for _, name := range agentNames(cfg) {
 		agent := cfg.Agents[name]
 		human += fmt.Sprintf("\nagent %s: poll=%q interval=%ds", name, agent.Poll, agent.Interval)
+		if agent.MaxDuration > 0 {
+			human += fmt.Sprintf(" max_duration=%ds", agent.MaxDuration)
+		}
 	}
 	for _, check := range cfg.Checks {
 		human += fmt.Sprintf("\ncheck %s: run=%q", check.Name, check.Run)

@@ -579,6 +579,42 @@ func TestRunnerTerminatesProcessTreeOnCallerDeadline(t *testing.T) {
 	}
 }
 
+func TestRunnerWatchdogCancelsWedgedRun(t *testing.T) {
+	root, _ := testClone(t)
+	omp := filepath.Join(t.TempDir(), "omp")
+	_, heartbeat := processHeartbeatFixture(t)
+	script := `#!/bin/sh
+set -eu
+printf '%s\n' "$$" > "$CHILD_PID"
+trap '' TERM
+while :; do
+	printf x >> "$HEARTBEAT"
+	sleep 0.02
+done
+`
+	if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.PiPath = omp
+	started := time.Now()
+	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x", MaxDuration: 1})
+	if err == nil || !errors.Is(err, errRunCancelled) {
+		t.Fatalf("watchdog record=%#v err=%v, want cancellation", record, err)
+	}
+	if record.Exit != runCancelledExit || record.Error != runCancelledError {
+		t.Fatalf("watchdog record=%#v, want exit %d error %q", record, runCancelledExit, runCancelledError)
+	}
+	if time.Since(started) > 15*time.Second {
+		t.Fatalf("watchdog took %v", time.Since(started))
+	}
+	rows, ledgerErr := ReadLedger(root)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != runCancelledExit || rows[0].Error != runCancelledError {
+		t.Fatalf("watchdog ledger=%v err=%v, want one cancelled row", rows, ledgerErr)
+	}
+	assertProcessQuiescent(t, heartbeat, "wedged run", "watchdog")
+}
+
 func TestRunnerKillsGroupChildAfterLeaderExitsOnTERM(t *testing.T) {
 	root, _ := testClone(t)
 	omp := filepath.Join(t.TempDir(), "omp")

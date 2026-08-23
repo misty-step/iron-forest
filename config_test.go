@@ -216,18 +216,94 @@ func TestDurationFromSecondsBoundaries(t *testing.T) {
 	}
 }
 
+func TestConfigMaxDuration(t *testing.T) {
+	const config = `repo: owner/name
+agents:
+  builder: {poll: "forest poll builder", interval: 5, max_duration: 90}
+checks:
+  - {name: test, run: "go test ./..."}
+`
+	cfg, err := decodeConfig([]byte(config), "forest.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Agents["builder"].MaxDuration; got != 90 {
+		t.Fatalf("max_duration=%d, want 90", got)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid max_duration rejected: %v", err)
+	}
+
+	off, err := decodeConfig([]byte(`repo: owner/name
+agents:
+  builder: {poll: x, interval: 1}
+checks:
+  - {name: test, run: "true"}
+`), "forest.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Agents["builder"].MaxDuration != 0 {
+		t.Fatalf("omitted max_duration=%d, want 0", off.Agents["builder"].MaxDuration)
+	}
+
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{name: "negative", data: `repo: owner/name
+agents:
+  builder: {poll: x, interval: 1, max_duration: -1}
+checks:
+  - {name: test, run: "true"}
+`, want: "max_duration must not be negative"},
+		{name: "fractional", data: `repo: owner/name
+agents:
+  builder: {poll: x, interval: 1, max_duration: 1.5}
+checks:
+  - {name: test, run: "true"}
+`, want: "must be a YAML integer scalar"},
+		{name: "string", data: `repo: owner/name
+agents:
+  builder: {poll: x, interval: 1, max_duration: "90"}
+checks:
+  - {name: test, run: "true"}
+`, want: "must be a YAML integer scalar"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeConfig([]byte(test.data), "forest.yaml")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("decodeConfig() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestConfigRejectsDurationOverflow(t *testing.T) {
 	overflow := int(^uint(0) >> 1)
 	if int64(overflow) <= maxDurationSeconds {
 		t.Skip("int range cannot overflow time.Duration seconds")
 	}
-	cfg := Config{
-		Repo:   "owner/name",
-		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: overflow}},
-		Checks: []Check{{Name: "test", Run: "true"}},
+	tests := []struct {
+		name  string
+		agent AgentConfig
+	}{
+		{name: "interval", agent: AgentConfig{Poll: "poll", Interval: overflow}},
+		{name: "max_duration", agent: AgentConfig{Poll: "poll", Interval: 1, MaxDuration: overflow}},
 	}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
-		t.Fatalf("interval overflow error=%v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Config{
+				Repo:   "owner/name",
+				Agents: map[string]AgentConfig{"builder": test.agent},
+				Checks: []Check{{Name: "test", Run: "true"}},
+			}
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "overflow") {
+				t.Fatalf("%s overflow error=%v", test.name, err)
+			}
+		})
 	}
 }
 func writeAgentFiles(t *testing.T, root, name, frontmatter, body, task string) {

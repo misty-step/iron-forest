@@ -31,6 +31,9 @@ type Config struct {
 type AgentConfig struct {
 	Poll     string `yaml:"poll" json:"poll"`
 	Interval int    `yaml:"interval" json:"interval"`
+	// MaxDuration is the optional per-declaration watchdog bound in seconds.
+	// Zero means off, preserving ADR 0020's no-implicit-deadline default.
+	MaxDuration int `yaml:"max_duration" json:"max_duration,omitempty"`
 }
 
 type Check struct {
@@ -61,8 +64,9 @@ type configYAML struct {
 }
 
 type agentConfigYAML struct {
-	Poll     yamlString `yaml:"poll"`
-	Interval yamlInt    `yaml:"interval"`
+	Poll        yamlString `yaml:"poll"`
+	Interval    yamlInt    `yaml:"interval"`
+	MaxDuration yamlInt    `yaml:"max_duration"`
 }
 
 type checkYAML struct {
@@ -179,8 +183,9 @@ func decodeConfig(data []byte, source string) (Config, error) {
 				return Config{}, fmt.Errorf("parse %s: agent name must be a YAML string scalar, got !!null", source)
 			}
 			cfg.Agents[string(*name)] = AgentConfig{
-				Poll:     string(agent.Poll),
-				Interval: int(agent.Interval),
+				Poll:        string(agent.Poll),
+				Interval:    int(agent.Interval),
+				MaxDuration: int(agent.MaxDuration),
 			}
 		}
 	}
@@ -238,7 +243,14 @@ func (c Config) Validate() error {
 		if _, err := durationFromSeconds(agent.Interval); err != nil {
 			return fmt.Errorf("agent %q interval: %w", name, err)
 		}
-
+		if agent.MaxDuration < 0 {
+			return fmt.Errorf("agent %q max_duration must not be negative", name)
+		}
+		if agent.MaxDuration > 0 {
+			if _, err := durationFromSeconds(agent.MaxDuration); err != nil {
+				return fmt.Errorf("agent %q max_duration: %w", name, err)
+			}
+		}
 	}
 	if len(c.Checks) == 0 {
 		return errors.New("checks must not be empty")

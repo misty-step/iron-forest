@@ -26,11 +26,12 @@ evals, not inferred from elapsed time.
 
 Agent Runs have no configured or implicit wall-clock deadline.
 
-`forest.yaml` agents declare only their Poll command and Poll interval. The
+`forest.yaml` agents declare their Poll command and Poll interval. The
 removed `timeout` key is rejected as unknown configuration rather than retained
-as a compatibility alias. The Runner does not create a deadline around
-worktree preparation or Pi execution and does not pass a duration to the
-harness.
+as a compatibility alias. An optional per-declaration `max_duration` watchdog
+bound may be set; it defaults off and is documented in the amendment below. The
+Runner does not create a deadline around worktree preparation or Pi execution
+and does not pass a duration to the harness.
 
 A Run ends when Pi finishes or an operator explicitly cancels the foreground
 `forest once` process. The Runner still responds to caller cancellation by
@@ -61,3 +62,17 @@ agent reasoning or model execution.
   and regression evals. A larger timeout is not an accepted repair.
 - Worktree separation and explicit runtime inputs remain operational isolation;
   they are not a security sandbox.
+
+## Amendment: optional progress watchdog (2026-08-23)
+
+The no-deadline decision remains the default. A repository may opt one
+declaration back into a wall-clock bound for liveness by setting the optional
+`max_duration` key (seconds) under that agent in `forest.yaml`. Zero or an
+omitted key leaves the Run unbounded.
+
+When set, the Kernel's progress watchdog cancels a Run that exceeds the bound.
+It writes the durable cancellation marker and stops the Run process group
+through the same supported cancel path as `forest run cancel`. The Runner then
+records the cancellation in the Ledger with the same cause, and the Scheduler
+returns the trigger to its not-running state so the Subject can be claimed
+again. This is a liveness guard against wedged Runs, not a reasoning budget.
