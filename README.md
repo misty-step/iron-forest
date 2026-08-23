@@ -115,7 +115,9 @@ before handoff:
    `mise exec -- go build -o forest . && ./forest selfcheck`.
 3. Install the service with `deploy/install-service.sh <sibling-directory-name>`
    (no argument in self-host mode).
-4. Start exactly one Kernel: `./forest serve`.
+4. Verify the installed service is active without starting a second Kernel:
+   `systemctl --user is-active forest@<sibling-directory-name>` (expect
+   `active`) and, from the managed checkout, `./forest status`.
 5. Record the deployment using the registry fields in the
    [ready contract](docs/forest-ready-contract.md#deployment-registry):
    `identity`, `host`, `repo`, and the running revision from `./forest version`.
@@ -123,8 +125,12 @@ before handoff:
    [draft-note provenance convention](docs/templates/powder-job-spec.md#external-draft-note):
    report `filed-by`, `deployment`, and evidence, and never pass `--spec` at
    filing.
-7. Confirm observability before rollout:
-   `./forest status` and `./forest audit show --rescan`.
+7. Confirm observability before rollout with the read surface. After the first
+   completed dispatch, run `./forest status` and `./forest audit show`. To force
+   a rescan, confirm the service is inactive first:
+   `systemctl --user stop forest@<sibling-directory-name>`, then
+   `./forest audit show --rescan`, then
+   `systemctl --user start forest@<sibling-directory-name>`.
 8. When the planned `forest doctor` surface lands (if-293), run it and resolve
    every finding before declaring the deployment complete.
 
