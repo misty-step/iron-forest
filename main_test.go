@@ -337,10 +337,14 @@ func TestStatusReportsKernelLockTruth(t *testing.T) {
 		wantStderr string
 	}{
 		{
-			name:   "held lock",
-			lock:   "held",
-			want:   []string{"builder errors=0 code=0 running=true", "live runs:\n  agent=builder running=true"},
-			forbid: []string{"stale=true", "running=unknown", "live runs: none"},
+			name: "held lock",
+			lock: "held",
+			want: []string{
+				"builder errors=0 code=0 running=true",
+				"live runs:\n  run_id=1787410241954942809-builder agent=builder started_at=2026-08-22T14:50:41Z elapsed=",
+				`cancel="forest run cancel 1787410241954942809-builder"`,
+			},
+			forbid: []string{"stale=true", "running=unknown", "live runs: none", "agent=builder running=true"},
 		},
 		{
 			name:   "free lock",
@@ -366,6 +370,12 @@ func TestStatusReportsKernelLockTruth(t *testing.T) {
 			triggers := []byte(`{"builder":{"agent":"builder","running":true}}`)
 			if err := os.WriteFile(forestPath(root, "triggers.json"), triggers, 0o644); err != nil {
 				t.Fatal(err)
+			}
+			if tc.lock == "held" {
+				record := liveRunRecord{RunID: "1787410241954942809-builder", Agent: "builder", StartedAt: "2026-08-22T14:50:41Z"}
+				if err := writeLiveRun(liveRunPath(root, "builder"), record); err != nil {
+					t.Fatal(err)
+				}
 			}
 			lockPath := forestPath(root, "lock")
 			if tc.lock == "error" {
@@ -408,6 +418,49 @@ func TestStatusReportsKernelLockTruth(t *testing.T) {
 				t.Fatalf("status stderr=%q, want substring %q", stderr, tc.wantStderr)
 			}
 		})
+	}
+}
+
+func TestStatusPublishesLiveRunDetailsInJSON(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "poll")
+	writeTriggerState(t, root, `{"builder":{"agent":"builder","running":true}}`)
+	record := liveRunRecord{RunID: "run-live-builder", Agent: "builder", StartedAt: "2026-08-22T14:50:41Z"}
+	if err := writeLiveRun(liveRunPath(root, "builder"), record); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, stderr := decodeEnvelope(t, "status", "--json", "--root", root)
+	if stderr != "" {
+		t.Fatalf("stderr=%q, want silence", stderr)
+	}
+	keys := payloadKeys(t, envelope)
+	liveRuns, ok := keys["live_runs"].([]any)
+	if !ok || len(liveRuns) != 1 {
+		t.Fatalf("live_runs=%v, want one live Run", keys["live_runs"])
+	}
+	run := liveRuns[0].(map[string]any)
+	if run["run_id"] != "run-live-builder" || run["agent"] != "builder" || run["started_at"] != "2026-08-22T14:50:41Z" {
+		t.Fatalf("live run=%v, want exact recorded identity and start", run)
+	}
+	if run["elapsed"] == "" || run["elapsed"] == nil {
+		t.Fatalf("live run elapsed=%v, want a derived value", run["elapsed"])
+	}
+	if run["cancel"] != "forest run cancel run-live-builder" {
+		t.Fatalf("live run cancel=%v, want the published cancellation command", run["cancel"])
+	}
+}
+
+func TestLiveRunElapsedDerivesFromRecordedStart(t *testing.T) {
+	record := liveRunRecord{RunID: "run-live-builder", Agent: "builder", StartedAt: "2026-08-22T14:50:41Z"}
+	now := time.Date(2026, 8, 22, 14, 51, 5, 0, time.UTC)
+	if view := liveRunView(record, now); view.Elapsed != "24s" {
+		t.Fatalf("elapsed=%q, want 24s from recorded start", view.Elapsed)
+	}
+	// A clock behind the recorded start is clamped, never a negative age.
+	before := time.Date(2026, 8, 22, 14, 50, 40, 0, time.UTC)
+	if view := liveRunView(record, before); view.Elapsed != "0s" {
+		t.Fatalf("elapsed=%q, want 0s clamp for a clock behind the start", view.Elapsed)
 	}
 }
 

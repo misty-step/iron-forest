@@ -387,6 +387,16 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 		return record, err
 	}
 
+	// Publish the live Run record before any preparation work so `forest
+	// status` can report age while the Run is still in flight. The record is
+	// removed on every return path below.
+	livePath := liveRunPath(r.Root, declaration.Name)
+	if err := writeLiveRun(livePath, liveRunRecord{RunID: runID, Agent: declaration.Name, StartedAt: record.Started}); err != nil {
+		_, _ = fmt.Fprintf(logFile, "publish live run: %v\n", err)
+	} else {
+		defer func() { _ = os.Remove(livePath) }()
+	}
+
 	worktree := forestPath(r.Root, "worktrees", runID)
 	primaryRef, worktreeMayExist, prepareErr := r.prepareWorktree(ctx, worktree)
 	if prepareErr != nil {
@@ -518,13 +528,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 }
 
 func newRunID(agent string, now time.Time) string {
-	agent = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		return '-'
-	}, agent)
-	return fmt.Sprintf("%d-%s", now.UnixNano(), agent)
+	return fmt.Sprintf("%d-%s", now.UnixNano(), agentSlug(agent))
 }
 
 func (r *Runner) primaryRef(ctx context.Context) (string, error) {

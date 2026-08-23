@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() { os.Exit(runCLI(os.Args[1:])) }
@@ -277,9 +278,10 @@ type statusPayload struct {
 	Triggers []TriggerView `json:"triggers"`
 	// TriggerStateError reports why trigger state is unknown, so a machine
 	// reader learns the reason its sibling lock_error already publishes.
-	TriggerStateError string      `json:"trigger_state_error,omitempty"`
-	Audit             AuditState  `json:"audit"`
-	Recent            []RunRecord `json:"recent"`
+	TriggerStateError string        `json:"trigger_state_error,omitempty"`
+	Audit             AuditState    `json:"audit"`
+	Recent            []RunRecord   `json:"recent"`
+	LiveRuns          []LiveRunView `json:"live_runs"`
 }
 
 type kernelView struct {
@@ -324,16 +326,25 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
+	liveRecords, liveErr := readLiveRuns(flags.root)
+	liveRuns := make([]LiveRunView, 0, len(liveRecords))
+	now := time.Now().UTC()
+	for _, record := range liveRecords {
+		liveRuns = append(liveRuns, liveRunView(record, now))
+	}
 	// An unreadable lock or state is a warning, not a failure: the snapshot still
 	// reports every other fact, and the payload marks what is unknown. Under
 	// --json the envelope carries both reasons, so warning again would publish
 	// the same fact twice.
-	warnings := make([]string, 0, 2)
+	warnings := make([]string, 0, 3)
 	if state.LockErr != nil {
 		warnings = append(warnings, fmt.Sprintf("kernel lock state unknown: %v", state.LockErr))
 	}
 	if reason := stateWarning(state); reason != "" {
 		warnings = append(warnings, reason)
+	}
+	if liveErr != nil {
+		warnings = append(warnings, fmt.Sprintf("live run state unknown: %v", liveErr))
 	}
 	// The repository and the ordering are stated, so a pasted status can be
 	// attributed to a factory and its newest Run cannot be mistaken for its
@@ -343,7 +354,7 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 		"repo: " + oneLine(cfg.Repo),
 		"kernel: " + kernelHuman(kernel),
 		triggerViewsHuman(state.Views),
-		liveRunsHuman(state),
+		liveRunsHuman(state, liveRuns),
 		auditStateHuman(audit, statusViolations),
 		recent,
 	}
@@ -356,6 +367,7 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 		Triggers: state.Views,
 		Audit:    audit,
 		Recent:   records,
+		LiveRuns: liveRuns,
 	}
 	if state.StateErr != nil {
 		payload.TriggerStateError = state.StateErr.Error()

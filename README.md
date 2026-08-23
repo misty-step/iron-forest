@@ -388,6 +388,14 @@ empty cannot carry a cursor, so paging fails instead of looping.
 Ledger order, oldest first, because it is a snapshot of the tail rather than a
 pager; its human output labels the order.
 
+`status` also publishes `live_runs`: for every in-flight Run it reports
+`run_id`, `agent`, `started_at`, `elapsed`, and `cancel`. The `started_at`
+value is the UTC/RFC3339 timestamp the Runner recorded when it dispatched the
+Run; `elapsed` is derived from that recorded timestamp. Cancel a live Run with
+the published `cancel` command (`forest run cancel <run-id>`), which targets the
+Run's primary process state. Do not judge a live Run from log file size or
+mtime: the Runner owns the log and bounds its retained tail.
+
 Exit codes are stable: `0` success, `1` no work, `2` error, `4` not found,
 `5` conflict, `6` invalid argument. One command leaves that space deliberately:
 `run logs --follow` exits with the followed Run's own exit code, so its exit does

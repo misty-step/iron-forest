@@ -215,10 +215,10 @@ func triggerViewsHuman(views []TriggerView) string {
 	return human.String()
 }
 
-// liveRunsHuman reports which agents hold a live Run right now. Liveness is
-// unknown only when the lock or the state file cannot be read; an agent with no
-// recorded row simply holds no Run.
-func liveRunsHuman(state triggerState) string {
+// liveRunsHuman reports the live Runs read from their owner records. Liveness
+// is unknown only when the lock or the state file cannot be read; no records
+// means no Run is live.
+func liveRunsHuman(state triggerState, liveRuns []LiveRunView) string {
 	if state.StateErr != nil {
 		return "live runs: unknown"
 	}
@@ -227,14 +227,14 @@ func liveRunsHuman(state triggerState) string {
 			return "live runs: unknown"
 		}
 	}
-	var live strings.Builder
-	for _, view := range state.Views {
-		if view.Running {
-			fmt.Fprintf(&live, "\n  agent=%s running=true", view.Name)
-		}
-	}
-	if live.Len() == 0 {
+	if len(liveRuns) == 0 {
 		return "live runs: none"
 	}
-	return "live runs:" + live.String()
+	var human strings.Builder
+	human.WriteString("live runs:")
+	for _, run := range liveRuns {
+		fmt.Fprintf(&human, "\n  run_id=%s agent=%s started_at=%s elapsed=%s cancel=%q",
+			run.RunID, run.Agent, run.StartedAt, run.Elapsed, run.Cancel)
+	}
+	return human.String()
 }
