@@ -1,0 +1,7 @@
+{
+  "schema": "forest.verdict.v1",
+  "revision": "073474a56b24255c1d98334e58c0b1de2ebc8746",
+  "verdict": "approve",
+  "summary": "All four configured checks pass (build, vet, test, secrets). Single-commit Revision fast-forwards origin/master. Reviewed diff adds a fail-closed Auditor classification exempting operator direct pushes (no evidence targeting the tip and non-agent commit author) from the evidence Gate, while any evidence-targeting or agent-authored tip keeps the full Gate. Changed files: README.md, auditor.go, auditor_evidence.go, auditor_human_push_test.go, coordination.go, docs/adr/0026-human-direct-push-audit-policy.md. No blocking findings.",
+  "time": "2026-08-23T06:30:59Z"
+}
