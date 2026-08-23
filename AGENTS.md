@@ -19,10 +19,11 @@ titles, timestamps, and recollection are leads, not findings.
 
 ## Operations
 
-- Adopt merged revisions through the fence procedure: idle window ->
-  stop service -> confirm inactive -> clean-tree check -> pull ->
-  rebuild -> selfcheck -> start -> verify active -> observe an audit
-  pass. Never restart-only: the unit runs the checkout-local binary.
+- Adopt merged revisions through the fence procedure: clean-tree check ->
+  stop service (stops new dispatches and drains live Runs) -> confirm
+  inactive -> pull -> rebuild -> selfcheck -> start -> verify active ->
+  observe an audit pass. Never restart-only: the unit runs the
+  checkout-local binary.
 - One Kernel checkout per repository (ADR 0015). Do not start a second.
 - The Iron Forest manager for this checkout owns only repo
   `misty-step/iron-forest`, root

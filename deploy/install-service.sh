@@ -19,15 +19,14 @@ root="$(dirname "$factory")"
 unit="$HOME/.config/systemd/user/forest@.service"
 service_path="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin"
 
-# Bounded waits used only by `update`. These are fixed fence bounds, not
-# per-deployment configuration.
-idle_timeout_seconds=300
+# Bounded waits used only by `update`. The drain itself has no wall-clock
+# deadline (ADR 0020); the active wait is a post-restart liveness bound.
 active_timeout_seconds=60
-poll_interval_seconds=5
 
 # Rollback state used only by `update`; the install path leaves them unset.
 service_stopped=false
 update_success=false
+cancelled=false
 tree_was_clean=false
 prev_sha=""
 prev_binary=""
@@ -36,11 +35,21 @@ audit_since_ns=0
 
 die() { echo "$(basename "$0"): $*" >&2; exit 1; }
 
+on_signal() {
+	cancelled=true
+	exit 130
+}
+trap on_signal INT TERM
+
 rollback_on_exit() {
 	if [ "$update_success" = true ] || [ "$service_stopped" != true ]; then
 		return 0
 	fi
-	echo "$(basename "$0"): rolling back to prior instance forest@$name" >&2
+	if [ "$cancelled" = true ]; then
+		echo "$(basename "$0"): update cancelled; restoring prior instance forest@$name" >&2
+	else
+		echo "$(basename "$0"): rolling back to prior instance forest@$name" >&2
+	fi
 	if [ -n "$prev_binary" ] && [ -f "$prev_binary" ]; then
 		cp -p "$prev_binary" "$target/forest" >/dev/null 2>&1 ||
 			echo "$(basename "$0"): rollback: could not restore $target/forest" >&2
@@ -67,15 +76,6 @@ refresh_status() {
 		status_exit=$?
 		die "forest status failed (exit $status_exit): $status_json"
 	fi
-}
-
-is_idle() {
-	printf '%s\n' "$status_json" | jq -e '
-		.exit == 0 and
-		.data.kernel.running_known == true and
-		([.data.triggers[].running_known] | all) and
-		([.data.triggers[].running] | all(. == false))
-	' >/dev/null 2>&1
 }
 
 audit_ready() {
@@ -117,23 +117,10 @@ update_instance() {
 	prev_binary="$target/forest.prev"
 	[ -f "$target/forest" ] || die "no forest binary at $target/forest; run install-service.sh first"
 
-	echo "$(basename "$0"): waiting for an idle window (no live Runs)"
-	deadline=$(( $(date +%s) + idle_timeout_seconds ))
-	while true; do
-		refresh_status
-		if is_idle; then
-			break
-		fi
-		if [ "$(date +%s)" -ge "$deadline" ]; then
-			die "forest@$name did not reach an idle window within ${idle_timeout_seconds}s"
-		fi
-		sleep "$poll_interval_seconds"
-	done
-
-	echo "$(basename "$0"): stopping forest@$name"
+	echo "$(basename "$0"): stopping forest@$name (stops new dispatches and drains live Runs)"
+	service_stopped=true
 	stop_status=0
 	systemctl --user stop "forest@$name" >/dev/null 2>&1 || stop_status=$?
-	service_stopped=true
 	instance_status=0
 	instance_state="$(systemctl --user is-active "forest@$name" 2>/dev/null)" || instance_status=$?
 	case "$instance_state" in
