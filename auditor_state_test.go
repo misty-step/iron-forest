@@ -76,6 +76,39 @@ func TestAuditorBaselineAndLastGoodRevision(t *testing.T) {
 	}
 }
 
+func TestSuccessfulAuditClearsPersistedAuditError(t *testing.T) {
+	root, _ := testClone(t)
+	health := map[string]TriggerHealth{
+		"builder": {Agent: "builder", AuditError: "git ls-remote --symref origin HEAD: context deadline exceeded"},
+	}
+	if err := writeTriggerHealth(root, health); err != nil {
+		t.Fatal(err)
+	}
+	history := []byte("prior audit history\n")
+	if err := os.WriteFile(auditLogPath(root), history, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := audit(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, present, err := readTriggerHealth(root)
+	if err != nil || !present {
+		t.Fatalf("trigger health after audit present=%v err=%v", present, err)
+	}
+	if got := persisted["builder"].AuditError; got != "" {
+		t.Fatalf("persisted audit_error=%q, want cleared", got)
+	}
+	after, err := os.ReadFile(auditLogPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(history) {
+		t.Fatalf("audit.log history changed\nbefore=%q\nafter=%q", history, after)
+	}
+}
+
 func TestAuditorFirstFailureDurablyAnchorsRetryAndDeduplicatesHistory(t *testing.T) {
 	root, _ := testClone(t)
 	baseline := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))

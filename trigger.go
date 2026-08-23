@@ -80,6 +80,30 @@ func writeTriggerHealth(root string, health map[string]TriggerHealth) error {
 	return os.Rename(tmpName, path)
 }
 
+// clearPersistedAuditErrors clears every agent's persisted audit_error after a
+// successful Audit. Trigger rows summarize current dispatch health, so a
+// transport failure recorded by an earlier Run must not outlive a later Audit
+// that completed. Audit history stays in audit.log and Run evidence.
+func clearPersistedAuditErrors(root string) error {
+	health, present, err := readTriggerHealth(root)
+	if err != nil || !present {
+		return err
+	}
+	changed := false
+	for agent, value := range health {
+		if value.AuditError == "" {
+			continue
+		}
+		value.AuditError = ""
+		health[agent] = value
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return writeTriggerHealth(root, health)
+}
+
 // TriggerView is one agent's trigger state resolved against Kernel liveness. It
 // is the published shape for both `trigger` commands and `status`.
 type TriggerView struct {

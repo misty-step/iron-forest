@@ -162,6 +162,9 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 	if err := writeAuditState(root, state, deps); err != nil {
 		return result, err
 	}
+	if err := clearPersistedAuditErrors(root); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
