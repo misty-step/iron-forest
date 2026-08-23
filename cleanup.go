@@ -34,7 +34,7 @@ func cleanupReservedResidueWith(ctx context.Context, root string, runner *Runner
 	if refErr == nil {
 		worktreeErr = cleanupReservedWorktrees(ctx, root, runner)
 	}
-	return errors.Join(refErr, worktreeErr, cleanupReservedTemps(ctx, root, remove))
+	return errors.Join(refErr, worktreeErr, cleanupReservedTemps(ctx, root, remove), cleanupLiveRunRecords(ctx, root, remove))
 }
 
 func cleanupReservedWorktrees(ctx context.Context, root string, runner *Runner) error {
@@ -165,4 +165,36 @@ func isReservedTemp(name string) bool {
 	return strings.HasPrefix(name, ".audit.json-") ||
 		strings.HasPrefix(name, ".audit.log-") ||
 		(strings.HasPrefix(name, "triggers.json.") && strings.HasSuffix(name, ".tmp"))
+}
+
+// cleanupLiveRunRecords removes stale per-agent live Run owner records. At
+// startup no Run is in flight, so any record left behind is residue from an
+// unclean termination and would otherwise be published forever as a live Run.
+func cleanupLiveRunRecords(ctx context.Context, root string, remove func(string) error) error {
+	dir := forestPath(root, "runs")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enumerate live run records: %w", err)
+	}
+
+	var cleanupErr error
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !isLiveRunRecord(entry.Name()) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(cleanupErr, err)
+		}
+		if err := remove(filepath.Join(dir, entry.Name())); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove live run record %s: %w", entry.Name(), err))
+		}
+	}
+	return cleanupErr
+}
+
+func isLiveRunRecord(name string) bool {
+	return strings.HasPrefix(name, "live-") && strings.HasSuffix(name, ".json")
 }

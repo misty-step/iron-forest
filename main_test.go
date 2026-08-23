@@ -464,6 +464,31 @@ func TestLiveRunElapsedDerivesFromRecordedStart(t *testing.T) {
 	}
 }
 
+func TestStatusPublishesLiveRunErrorInJSON(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "poll")
+	writeTriggerState(t, root, `{"builder":{"agent":"builder","running":true}}`)
+	// A regular file where the live-run directory belongs makes the read fail,
+	// so the payload must carry the reason instead of a silently empty list.
+	if err := os.WriteFile(forestPath(root, "runs"), []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, stderr := decodeEnvelope(t, "status", "--json", "--root", root)
+	if stderr != "" {
+		t.Fatalf("stderr=%q, want JSON warnings carried in the payload", stderr)
+	}
+	keys := payloadKeys(t, envelope)
+	liveRuns, ok := keys["live_runs"].([]any)
+	if !ok || len(liveRuns) != 0 {
+		t.Fatalf("live_runs=%v, want empty list when the live-run read fails", keys["live_runs"])
+	}
+	liveRunError, ok := keys["live_run_error"].(string)
+	if !ok || liveRunError == "" {
+		t.Fatalf("live_run_error=%v, want a non-empty machine-readable reason", keys["live_run_error"])
+	}
+}
+
 func TestRunCLISelfcheckRejectsWhitespaceSystemPrompt(t *testing.T) {
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")

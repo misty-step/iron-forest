@@ -394,7 +394,10 @@ value is the UTC/RFC3339 timestamp the Runner recorded when it dispatched the
 Run; `elapsed` is derived from that recorded timestamp. Cancel a live Run with
 the published `cancel` command (`forest run cancel <run-id>`), which targets the
 Run's primary process state. Do not judge a live Run from log file size or
-mtime: the Runner owns the log and bounds its retained tail.
+mtime: the Runner owns the log and bounds its retained tail. When the live-run
+records cannot be read, `status` publishes `live_run_error` next to an empty
+`live_runs` list, so a machine reader learns the list is unknown rather than
+truly empty.
 
 Exit codes are stable: `0` success, `1` no work, `2` error, `4` not found,
 `5` conflict, `6` invalid argument. One command leaves that space deliberately:

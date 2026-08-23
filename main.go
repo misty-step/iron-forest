@@ -279,6 +279,7 @@ type statusPayload struct {
 	// TriggerStateError reports why trigger state is unknown, so a machine
 	// reader learns the reason its sibling lock_error already publishes.
 	TriggerStateError string        `json:"trigger_state_error,omitempty"`
+	LiveRunError      string        `json:"live_run_error,omitempty"`
 	Audit             AuditState    `json:"audit"`
 	Recent            []RunRecord   `json:"recent"`
 	LiveRuns          []LiveRunView `json:"live_runs"`
@@ -332,10 +333,10 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	for _, record := range liveRecords {
 		liveRuns = append(liveRuns, liveRunView(record, now))
 	}
-	// An unreadable lock or state is a warning, not a failure: the snapshot still
-	// reports every other fact, and the payload marks what is unknown. Under
-	// --json the envelope carries both reasons, so warning again would publish
-	// the same fact twice.
+	// An unreadable lock, state, or live-run record is a warning, not a failure:
+	// the snapshot still reports every other fact, and the payload marks what is
+	// unknown. Under --json the envelope carries each reason, so warning again
+	// would publish the same fact twice.
 	warnings := make([]string, 0, 3)
 	if state.LockErr != nil {
 		warnings = append(warnings, fmt.Sprintf("kernel lock state unknown: %v", state.LockErr))
@@ -371,6 +372,9 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	}
 	if state.StateErr != nil {
 		payload.TriggerStateError = state.StateErr.Error()
+	}
+	if liveErr != nil {
+		payload.LiveRunError = liveErr.Error()
 	}
 	return cliOutcome{
 		Exit:    exitOK,

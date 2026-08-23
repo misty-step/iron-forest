@@ -255,3 +255,29 @@ func TestReservedGarbageCollectionNoResidueFastPath(t *testing.T) {
 		t.Fatalf("empty reserved garbage collection failed: %v", err)
 	}
 }
+
+func TestReservedGarbageCollectionRemovesStaleLiveRunRecords(t *testing.T) {
+	root, _ := testClone(t)
+	runLog := forestPath(root, "runs", "1787410241954942809-builder.log")
+	if err := os.MkdirAll(filepath.Dir(runLog), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runLog, []byte("preserve run evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := liveRunRecord{RunID: "1787410241954942809-builder", Agent: "builder", StartedAt: "2026-08-22T14:50:41Z"}
+	if err := writeLiveRun(liveRunPath(root, "builder"), record); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(liveRunPath(root, "builder")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale live run record survived: %v", err)
+	}
+	if data, err := os.ReadFile(runLog); err != nil || string(data) != "preserve run evidence\n" {
+		t.Fatalf("Run log changed: data=%q err=%v", data, err)
+	}
+}
