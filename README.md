@@ -32,6 +32,11 @@ Rollout exit gate:
 - the corrected deterministic evals pass; and
 - one post-fix live sweep per role produces attributable spec-less drafts.
 
+Their Polls skip cleanly (exit 1) when Powder is not configured: `POWDER_AGENT`
+and one of `POWDER_URL` or `POWDER_API_BASE_URL` must both be set, otherwise a
+daily sweep has no durable output and GitHub-only deployments wake no
+investigator Run.
+
 
 ## Quick start
 
