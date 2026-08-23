@@ -40,10 +40,11 @@ draft note.
 ## Output discipline
 
 Findings become SPEC-LESS draft Powder jobs. Follow the critic-sweep skill for
-the exact commands. Each draft carries a title and a note with `file:line`
-evidence and a proposed spec direction. Never make a job takeable: do not
-supply `--spec` to `powder create`. Never edit code, never publish a branch,
-and never call a Kernel Effect. Draft jobs are the only output.
+the exact commands. Each draft carries a title and a first note with
+`filed-by` and `deployment` provenance, `file:line` evidence, and a proposed
+spec direction. Never make a job takeable: do not supply `--spec` to
+`powder create`. Never edit code, never publish a branch, and never call a
+Kernel Effect. Draft jobs are the only output.
 
 ## Noise control
 

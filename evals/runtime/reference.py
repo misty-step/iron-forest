@@ -154,7 +154,7 @@ def publish_critic_drafts(scenario: dict) -> None:
         "note",
         "if-critic-hotspot",
         "--text",
-        f"Observed: {planted_path}:5 DeadWeight is unused exported surface. Required: remove it or add a test/use. Proposed spec direction: delete DeadWeight or cover it.",
+        f"filed-by: critic @ {repo}\ndeployment: eval unknown\nObserved: {planted_path}:5 DeadWeight is unused exported surface. Required: remove it or add a test/use. Proposed spec direction: delete DeadWeight or cover it.",
         "--agent",
         "critic",
     )
@@ -189,7 +189,7 @@ def publish_tester_drafts(scenario: dict) -> None:
         "note",
         "if-tester-under-tested-boundary",
         "--text",
-        f"Surface: {planted_path}:5 UnderTestedBoundary empty-input boundary. Behaviors: empty input returns 'empty'; non-empty input wraps the value. Failing example: UnderTestedBoundary(\"\") returns 'empty' with no regression test. Acceptance: add a Go test asserting the empty boundary and one non-empty case, both passing in the build. Observed: {planted_path}:5 has no test covering the empty-input branch. Required: cover the boundary with a failing-example first test. Proposed test-work: add tests for UnderTestedBoundary empty and non-empty inputs.",
+        f"filed-by: tester @ {repo}\ndeployment: eval unknown\nSurface: {planted_path}:5 UnderTestedBoundary empty-input boundary. Behaviors: empty input returns 'empty'; non-empty input wraps the value. Failing example: UnderTestedBoundary(\"\") returns 'empty' with no regression test. Acceptance: add a Go test asserting the empty boundary and one non-empty case, both passing in the build. Observed: {planted_path}:5 has no test covering the empty-input branch. Required: cover the boundary with a failing-example first test. Proposed test-work: add tests for UnderTestedBoundary empty and non-empty inputs.",
         "--agent",
         "tester",
     )

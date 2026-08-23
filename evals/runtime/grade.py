@@ -242,6 +242,10 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         file_line = re.compile(r"\S+:\d+")
         require(all(file_line.search(str(note.get("text", ""))) for note in notes), "each note cites concrete file:line evidence")
         require(any("hotspot.go" in str(note.get("text", "")) for note in notes), "Critic cites the planted hotspot")
+        filed_by = re.compile(r"(?im)^filed-by\s*:")
+        deployment = re.compile(r"(?im)^deployment\s*:")
+        require(all(filed_by.search(str(note.get("text", ""))) for note in notes), "each note carries filed-by provenance")
+        require(all(deployment.search(str(note.get("text", ""))) for note in notes), "each note carries deployment provenance")
     elif effect == "tester_drafts":
         require(master == state["master_before"], "Tester does not move master")
         require(not branches, "Tester publishes no branch")
@@ -259,6 +263,10 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         require(any(re.search(r"(?i)surface", str(note.get("text", ""))) for note in notes), "Tester notes name the surface")
         require(any(re.search(r"(?i)failing example", str(note.get("text", ""))) for note in notes), "Tester notes sketch a failing example")
         require(any(re.search(r"(?i)acceptance", str(note.get("text", ""))) for note in notes), "Tester notes state acceptance criteria")
+        filed_by = re.compile(r"(?im)^filed-by\s*:")
+        deployment = re.compile(r"(?im)^deployment\s*:")
+        require(all(filed_by.search(str(note.get("text", ""))) for note in notes), "each note carries filed-by provenance")
+        require(all(deployment.search(str(note.get("text", ""))) for note in notes), "each note carries deployment provenance")
     else:
         failures.append(f"grader has no rule for effect {effect}")
 

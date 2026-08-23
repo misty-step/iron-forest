@@ -48,15 +48,20 @@ existing open or draft job.
 ## 4. File drafts
 
 File at most five findings per sweep. For each, create a job with no spec so
-it is never takeable, then attach the evidence note:
+it is never takeable, then attach the evidence note. The first note is an
+external draft note: it must carry `filed-by` and `deployment` provenance
+before the finding evidence.
 
 ```sh
 powder create --id <slug> --title '<short title>' --repo <forest.yaml repo>
-powder note <slug> --text 'Observed: <file:line> ... Required: ... Proposed spec direction: ...' --agent "${POWDER_AGENT:-critic}"
+powder note <slug> --text 'filed-by: <agent-identity> @ <forest.yaml repo>
+deployment: <instance> <observed-binary-revision>
+Observed: <file:line> ... Required: ... Proposed spec direction: ...' --agent "${POWDER_AGENT:-critic}"
 ```
 
 - `<forest.yaml repo>` is the top-level `repo:` value in `forest.yaml`; never hardcode the repository name.
-
+- `<agent-identity>` is the filing agent (`${POWDER_AGENT:-critic}`).
+- `<instance>` is the observed deployment identity and `<observed-binary-revision>` is the running revision reported by `forest version`; use `unknown` only when no binary is present.
 - `<slug>` is a short unique id, for example `if-critic-<topic>`.
 - The note must carry the concrete `file:line` evidence. No evidence, no file.
 - Never pass `--spec` to `powder create`; a spec would make the job takeable.

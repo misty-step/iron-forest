@@ -50,14 +50,19 @@ open or draft job.
 
 File at most five findings per sweep. For each, create a job with no spec so
 it is never takeable, then attach a note that a Builder can implement
-verbatim:
+verbatim. The first note is an external draft note: it must carry `filed-by`
+and `deployment` provenance before the test-work finding.
 
 ```sh
 powder create --id <slug> --title '<short title>' --repo <forest.yaml repo>
-powder note <slug> --text 'Surface: <file:line or command path>. Behaviors: <observable behaviors to test>. Failing example: <concrete input or step that shows the gap>. Acceptance: <criteria a Builder can verify>. Observed: <file:line evidence>. Required: <test required>. Proposed test-work: <one sentence for a Builder>.' --agent "${POWDER_AGENT:-tester}"
+powder note <slug> --text 'filed-by: <agent-identity> @ <forest.yaml repo>
+deployment: <instance> <observed-binary-revision>
+Surface: <file:line or command path>. Behaviors: <observable behaviors to test>. Failing example: <concrete input or step that shows the gap>. Acceptance: <criteria a Builder can verify>. Observed: <file:line evidence>. Required: <test required>. Proposed test-work: <one sentence for a Builder>.' --agent "${POWDER_AGENT:-tester}"
 ```
 
 - `<forest.yaml repo>` is the top-level `repo:` value in `forest.yaml`; never hardcode the repository name.
+- `<agent-identity>` is the filing agent (`${POWDER_AGENT:-tester}`).
+- `<instance>` is the observed deployment identity and `<observed-binary-revision>` is the running revision reported by `forest version`; use `unknown` only when no binary is present.
 - `<slug>` is a short unique id, for example `if-tester-<topic>`.
 - The note must name the surface, the behaviors to test, a failing-example
   sketch, and acceptance criteria.

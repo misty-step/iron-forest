@@ -64,6 +64,9 @@ class ReferenceCriticDraftsTest(unittest.TestCase):
                 all(re.search(r"\S+:\d+", str(note.get("text", ""))) for note in notes)
             )
             self.assertTrue(any("hotspot.go" in str(note.get("text", "")) for note in notes))
+            note_texts = [str(note.get("text", "")) for note in notes]
+            self.assertTrue(all(re.search(r"(?im)^filed-by\s*:", text) for text in note_texts))
+            self.assertTrue(all(re.search(r"(?im)^deployment\s*:", text) for text in note_texts))
 
     def test_tester_reference_creates_test_work_note_for_planted_surface(self):
         with tempfile.TemporaryDirectory() as root:
@@ -95,6 +98,8 @@ class ReferenceCriticDraftsTest(unittest.TestCase):
             self.assertTrue(any(re.search(r"(?i)surface", text) for text in note_texts))
             self.assertTrue(any(re.search(r"(?i)failing example", text) for text in note_texts))
             self.assertTrue(any(re.search(r"(?i)acceptance", text) for text in note_texts))
+            self.assertTrue(all(re.search(r"(?im)^filed-by\s*:", text) for text in note_texts))
+            self.assertTrue(all(re.search(r"(?im)^deployment\s*:", text) for text in note_texts))
 
 
 if __name__ == "__main__":

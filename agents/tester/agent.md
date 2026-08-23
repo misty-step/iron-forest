@@ -31,8 +31,9 @@ propose the code fix; state the test-work a Builder can implement.
 ## Output discipline
 
 Findings become SPEC-LESS draft Powder jobs. Follow the tester-sweep skill for
-the exact commands. Each draft's note names the surface, the behaviors to
-test, a failing-example sketch, and acceptance criteria a Builder can implement
+the exact commands. Each draft's first note carries `filed-by` and
+`deployment` provenance, names the surface, the behaviors to test, a
+failing-example sketch, and acceptance criteria a Builder can implement
 through the normal review Gate. Never make a job takeable: do not supply
 `--spec` to `powder create`. Never edit code, never publish a branch, and
 never call a Kernel Effect. Draft jobs are the only output.
