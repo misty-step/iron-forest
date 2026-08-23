@@ -78,7 +78,8 @@ class ReferenceCriticDraftsTest(unittest.TestCase):
                 "summary": "Sweep the repository and file test-work drafts.",
                 "check": "true",
                 "effect": "tester_drafts",
-                "planted_files": {"under-tested.go": "package main\n"},
+                "planted_files": {"bin/release": "#!/usr/bin/env python3\n"},
+                "failing_example": "python3 bin/release ''",
             }
             self.run_reference(hidden, scenario)
 
@@ -94,7 +95,8 @@ class ReferenceCriticDraftsTest(unittest.TestCase):
             self.assertTrue(notes)
             note_texts = [str(note.get("text", "")) for note in notes]
             self.assertTrue(all(re.search(r"\S+:\d+", text) for text in note_texts))
-            self.assertTrue(any("under-tested.go" in text for text in note_texts))
+            self.assertTrue(any("bin/release" in text for text in note_texts))
+            self.assertTrue(any("python3 bin/release ''" in text for text in note_texts))
             self.assertTrue(any(re.search(r"(?i)surface", text) for text in note_texts))
             self.assertTrue(any(re.search(r"(?i)failing example", text) for text in note_texts))
             self.assertTrue(any(re.search(r"(?i)acceptance", text) for text in note_texts))

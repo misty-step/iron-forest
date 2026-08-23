@@ -251,6 +251,8 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         require(not branches, "Tester publishes no branch")
         require(not git("for-each-ref", "--format=%(refname)", "refs/forest/").strip(), "Tester publishes no evidence refs")
         require(not PR_CREATED.exists(), "Tester creates no PR projection")
+        surface = next(iter(scenario.get("planted_files", {}).keys()), "bin/release")
+        failing_example = scenario.get("failing_example", f"python3 {surface} ''")
         ops = powder_ops()
         creates = [op for op in ops if op.get("op") == "create"]
         notes = [op for op in ops if op.get("op") == "note"]
@@ -259,7 +261,8 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         require(len(notes) >= 1, "Tester attaches evidence notes")
         file_line = re.compile(r"\S+:\d+")
         require(all(file_line.search(str(note.get("text", ""))) for note in notes), "each note cites concrete file:line evidence")
-        require(any("under-tested.go" in str(note.get("text", "")) for note in notes), "Tester cites the planted under-tested surface")
+        require(any(surface in str(note.get("text", "")) for note in notes), "Tester cites the planted reachable CLI surface")
+        require(any(failing_example in str(note.get("text", "")) for note in notes), "Tester sketches a concrete failing command")
         require(any(re.search(r"(?i)surface", str(note.get("text", ""))) for note in notes), "Tester notes name the surface")
         require(any(re.search(r"(?i)failing example", str(note.get("text", ""))) for note in notes), "Tester notes sketch a failing example")
         require(any(re.search(r"(?i)acceptance", str(note.get("text", ""))) for note in notes), "Tester notes state acceptance criteria")

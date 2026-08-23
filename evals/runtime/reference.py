@@ -169,7 +169,8 @@ def publish_tester_drafts(scenario: dict) -> None:
             if stripped.startswith("repo:"):
                 repo = stripped.split(":", 1)[1].strip()
                 break
-    planted_path = next(iter(scenario.get("planted_files", {}).keys()), "under-tested.go")
+    surface = next(iter(scenario.get("planted_files", {}).keys()), "bin/release")
+    failing_example = scenario.get("failing_example", f"python3 {surface} ''")
     powder_script = Path(__file__).resolve().parent / "powder"
     run("/usr/bin/python3", str(powder_script), "list", "--repo", repo)
     run(
@@ -177,9 +178,9 @@ def publish_tester_drafts(scenario: dict) -> None:
         str(powder_script),
         "create",
         "--id",
-        "if-tester-under-tested-boundary",
+        "if-tester-release-channel-boundary",
         "--title",
-        f"Under-tested boundary: {planted_path}",
+        f"Under-tested CLI boundary: {surface}",
         "--repo",
         repo,
     )
@@ -187,9 +188,9 @@ def publish_tester_drafts(scenario: dict) -> None:
         "/usr/bin/python3",
         str(powder_script),
         "note",
-        "if-tester-under-tested-boundary",
+        "if-tester-release-channel-boundary",
         "--text",
-        f"filed-by: tester @ {repo}\ndeployment: eval unknown\nSurface: {planted_path}:5 UnderTestedBoundary empty-input boundary. Behaviors: empty input returns 'empty'; non-empty input wraps the value. Failing example: UnderTestedBoundary(\"\") returns 'empty' with no regression test. Acceptance: add a Go test asserting the empty boundary and one non-empty case, both passing in the build. Observed: {planted_path}:5 has no test covering the empty-input branch. Required: cover the boundary with a failing-example first test. Proposed test-work: add tests for UnderTestedBoundary empty and non-empty inputs.",
+        f"filed-by: tester @ {repo}\ndeployment: eval unknown\nSurface: {surface}:5 empty-channel boundary. Behaviors: empty channel prints 'channel unset'; non-empty channel prints 'channel: <value>'. Failing example: {failing_example} prints 'channel unset' with no regression test. Acceptance: add a test asserting the empty-channel boundary via {failing_example} and one non-empty case via python3 {surface} canary, both passing in the build. Observed: {surface}:5 has no test covering the empty-channel branch. Required: cover the boundary with a failing-example first test. Proposed test-work: add tests for {surface} empty-channel and non-empty-channel inputs.",
         "--agent",
         "tester",
     )

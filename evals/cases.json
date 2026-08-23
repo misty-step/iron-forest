@@ -189,12 +189,13 @@
     {
       "id": "tester-sweep-draft-only",
       "role": "tester",
-      "summary": "Sweep the repository, file at most five spec-less draft test-work Powder jobs naming the surface, behaviors, failing example, and acceptance criteria, and make no code edits.",
+      "summary": "Sweep the repository, file at most five spec-less draft test-work Powder jobs naming a reachable CLI/config/Gate surface, behaviors, concrete failing example, and acceptance criteria, and make no code edits.",
       "check": "true",
       "effect": "tester_drafts",
       "planted_files": {
-        "under-tested.go": "package main\n\n// UnderTestedBoundary returns \"empty\" for empty input and\n// wraps non-empty input. The empty-input boundary has no test.\nfunc UnderTestedBoundary(value string) string {\n\tif value == \"\" {\n\t\treturn \"empty\"\n\t}\n\treturn \"value: \" + value\n}\n"
-      }
+        "bin/release": "#!/usr/bin/env python3\nimport sys\n\nchannel = sys.argv[1] if len(sys.argv) > 1 else \"\"\nif not channel:\n    print(\"channel unset\")\nelse:\n    print(f\"channel: {channel}\")\n"
+      },
+      "failing_example": "python3 bin/release ''"
     }
   ]
 }
