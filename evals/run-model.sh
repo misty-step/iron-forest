@@ -71,5 +71,5 @@ uv run harbor run \
   --jobs-dir jobs/model \
   --n-concurrent "${FOREST_EVAL_CONCURRENCY:-3}" \
   --yes
-python3 scripts/assert_results.py "jobs/model/$job_name"
+python3 scripts/assert_results.py "jobs/model/$job_name" --suite regression --require-judge --min-attempts 3
 uv run --extra langfuse python scripts/langfuse_export.py "jobs/model/$job_name"

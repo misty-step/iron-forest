@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import assert_results as reporter  # noqa: E402
+
+
+def sha(prefix: str) -> str:
+    return f"sha256:{prefix}{'0' * (64 - len(prefix))}"
+
+
+def result(
+    case: str,
+    attempt: int,
+    *,
+    deterministic: float = 1.0,
+    judge: float | None = None,
+    exception: dict | None = None,
+    regrade: bool = False,
+) -> dict:
+    rewards = {"deterministic": deterministic}
+    if judge is not None:
+        rewards["judge"] = judge
+    value = {
+        "id": f"{case}-{attempt}",
+        "task_name": f"iron-forest/{case}",
+        "trial_name": f"{case}__{attempt}-abc",
+        "started_at": f"2026-08-24T00:0{attempt}:00Z",
+        "finished_at": f"2026-08-24T00:0{attempt}:10Z",
+        "agent_info": {
+            "name": "iron-forest",
+            "version": "1",
+            "model_info": {"name": "openrouter/test/candidate", "provider": "openrouter"},
+        },
+        "verifier_result": {"rewards": rewards},
+        "exception_info": exception,
+        "agent_result": {"n_input_tokens": 100, "n_cache_tokens": 10, "n_output_tokens": 40, "cost_usd": 0.02},
+        "config": {"source_trial": {"action": "regrade"}} if regrade else {},
+    }
+    return value
+
+
+def lock(regrade: bool = False) -> dict:
+    value = {
+        "task": {"name": "builder-ready-issue", "type": "local", "digest": sha("a")},
+        "skills": [
+            {"name": "builder", "source": "/skills/builder", "digest": sha("b")},
+        ],
+        "environment": {
+            "cpu_enforcement_policy": "limit",
+            "memory_enforcement_policy": "limit",
+            "override_cpus": 2,
+            "override_memory_mb": 4096,
+            "override_storage_mb": 10240,
+        },
+    }
+    if regrade:
+        value["source_trial"] = {"action": "regrade"}
+    return value
+
+
+def write_trial(
+    job_dir: Path,
+    case: str,
+    attempt: int,
+    *,
+    deterministic: float = 1.0,
+    judge: float | None = None,
+    exception: dict | None = None,
+    regrade: bool = False,
+) -> Path:
+    trial_dir = job_dir / f"{case}__{attempt}"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(result(case, attempt, deterministic=deterministic, judge=judge, exception=exception, regrade=regrade))
+    )
+    (trial_dir / "lock.json").write_text(json.dumps(lock(regrade=regrade)))
+    return trial_dir
+
+
+def write_job(root: Path, name: str = "model-job") -> Path:
+    job_dir = root / name
+    job_dir.mkdir()
+    (job_dir / "lock.json").write_text(json.dumps({"n_concurrent_trials": 3}))
+    return job_dir
+
+
+def minimal_report(pass_rate: float, wilson: list[float], concurrency: int = 3) -> dict:
+    return {
+        "job": "job",
+        "totals": {
+            "pass_at_1_rate": pass_rate,
+            "pass_at_1_wilson": wilson,
+            "environment": {
+                "concurrency": concurrency,
+                "resources": {
+                    "cpu": {"ceiling": 2},
+                    "memory_mb": {"ceiling": 4096},
+                    "storage_mb": {"ceiling": 10240},
+                },
+            },
+        },
+    }
+
+
+class AssertResultsTest(unittest.TestCase):
+    def test_regression_all_pass_builds_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            for attempt in range(3):
+                write_trial(job_dir, "builder-ready-issue", attempt)
+
+            report = reporter.build_report(job_dir, suite="regression")
+            self.assertEqual(report["totals"]["cases"], 1)
+            self.assertEqual(report["totals"]["trials"], 3)
+            self.assertEqual(report["totals"]["passed_trials"], 3)
+            self.assertEqual(report["totals"]["exception_trials"], 0)
+            self.assertTrue(report["cases"]["builder-ready-issue"]["pass_cubed"])
+            self.assertTrue(report["cases"]["builder-ready-issue"]["saturated"])
+            self.assertEqual(reporter.evaluate_gate(report), [])
+
+    def test_regression_exception_is_classified_infra(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(
+                job_dir,
+                "builder-ready-issue",
+                0,
+                exception={"exception_type": "TimeoutError", "exception_message": "connection timed out"},
+            )
+
+            report = reporter.build_report(job_dir, suite="regression")
+            attempt = report["cases"]["builder-ready-issue"]["attempts"][0]
+            self.assertEqual(attempt["outcome"], "exception")
+            self.assertEqual(attempt["exception_class"], "infra")
+            self.assertEqual(report["totals"]["infra_exceptions"], 1)
+            failures = reporter.evaluate_gate(report)
+            self.assertTrue(any("infra" in failure for failure in failures))
+
+    def test_judge_required_fails_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0, deterministic=1.0)
+
+            report = reporter.build_report(job_dir, suite="regression", require_judge=True)
+            attempt = report["cases"]["builder-ready-issue"]["attempts"][0]
+            self.assertEqual(attempt["outcome"], "judge-missing")
+            self.assertTrue(any("judge-missing" in failure for failure in reporter.evaluate_gate(report)))
+
+    def test_min_attempts_floor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            for attempt in range(2):
+                write_trial(job_dir, "builder-ready-issue", attempt)
+
+            report = reporter.build_report(job_dir, suite="regression")
+            self.assertFalse(report["cases"]["builder-ready-issue"]["pass_cubed"])
+            failures = reporter.evaluate_gate(report, min_attempts=3)
+            self.assertTrue(any("fewer than required 3" in failure for failure in failures))
+
+    def test_wilson_interval_never_pretends_certainty(self):
+        lower, upper = reporter.wilson_interval(20, 20)
+        self.assertLess(lower, 1.0)
+        self.assertEqual(upper, 1.0)
+        self.assertEqual(reporter.wilson_interval(0, 0), [0.0, 0.0])
+
+    def test_under_three_point_model_delta_is_not_a_win(self):
+        current = minimal_report(0.80, [0.71, 0.87])
+        baseline = minimal_report(0.79, [0.70, 0.86])
+        comparison = reporter.compare_reports(current, baseline)
+        self.assertNotEqual(comparison["verdict"], "win")
+
+    def test_overlapping_intervals_block_model_win(self):
+        current = minimal_report(0.95, [0.85, 0.99])
+        baseline = minimal_report(0.90, [0.80, 0.96])
+        comparison = reporter.compare_reports(current, baseline)
+        self.assertNotEqual(comparison["verdict"], "win")
+
+    def test_model_win_requires_delta_evidence_and_matched_infra(self):
+        current = minimal_report(0.95, [0.90, 0.98])
+        baseline = minimal_report(0.80, [0.70, 0.88])
+        comparison = reporter.compare_reports(current, baseline)
+        self.assertEqual(comparison["verdict"], "win")
+
+    def test_grader_change_requires_regrade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0)
+            report = reporter.build_report(job_dir, suite="regression", require_judge=True)
+            failures = reporter.evaluate_gate(report, change_class="grader")
+            self.assertTrue(any("regrade" in failure for failure in failures))
+
+    def test_kernel_change_requires_adr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0)
+            report = reporter.build_report(job_dir, suite="regression", require_judge=True)
+            self.assertTrue(
+                any("ADR" in failure for failure in reporter.evaluate_gate(report, change_class="kernel"))
+            )
+            self.assertFalse(
+                any("ADR" in failure for failure in reporter.evaluate_gate(report, change_class="kernel", adr="ADR 0027"))
+            )
+
+    def test_report_never_copies_exception_messages(self):
+        secret = "sk-this-must-not-leave-the-repository"
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(
+                job_dir,
+                "builder-ready-issue",
+                0,
+                exception={"exception_type": "ValueError", "exception_message": secret, "exception_traceback": secret},
+            )
+            report = reporter.build_report(job_dir, suite="regression")
+            serialized = json.dumps(report, sort_keys=True)
+            self.assertNotIn(secret, serialized)
+
+    def test_markdown_exposes_saturated_and_infra(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0)
+            report = reporter.build_report(job_dir, suite="regression")
+            markdown = reporter.render_markdown(report)
+            self.assertIn("saturated cases", markdown)
+            self.assertIn("infra", markdown)
+
+
+if __name__ == "__main__":
+    unittest.main()
