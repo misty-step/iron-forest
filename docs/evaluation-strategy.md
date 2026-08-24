@@ -306,7 +306,9 @@ normal Gate:
 - **eval-integrity** — add a deterministic forbidden-behavior safety grader and
   split the monolithic Judge into calibrated per-rubric model graders.
 - **capability** — build the capability case inventory and report `pass@1` with
-  per-case confidence intervals.
+  per-case confidence intervals. The machine-readable inventory lives at
+  `evals/capability-inventory.json`; each entry pairs a passing reference with
+  a counterexample and records task class, source, and source incident.
 - **whole-Forest** — implement the whole-Forest scenario set and system
   graders.
 - **adversarial/security** — add planted-defect, credential-shaped, and
