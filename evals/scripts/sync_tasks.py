@@ -7,9 +7,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = ROOT / "tasks"
+PRODUCTION_MANIFEST = ROOT / "production-cases.json"
+PRODUCTION_TASKS = ROOT / "tasks-production"
 
 
-def task_toml(case: dict) -> str:
+def task_toml(case: dict, suite: str) -> str:
     description = json.dumps(case["summary"])
     return f'''schema_version = "1.4"
 
@@ -20,7 +22,7 @@ name = "iron-forest/{case["id"]}"
 version = "0.1.0"
 description = {description}
 authors = [{{ name = "Iron Forest", email = "forest@invalid" }}]
-keywords = ["iron-forest", "{case["role"]}", "regression"]
+keywords = ["iron-forest", "{case["role"]}", "{suite}"]
 
 [metadata]
 role = "{case["role"]}"
@@ -55,13 +57,10 @@ env = {{ OPENROUTER_API_KEY = "${{OPENROUTER_API_KEY:-}}" }}
 '''
 
 
-def main() -> None:
-    manifest = json.loads((ROOT / "cases.json").read_text())
-    if manifest.get("schema") != "forest.evals.v1":
-        raise RuntimeError("unsupported case manifest schema")
-    shutil.rmtree(TASKS, ignore_errors=True)
+def generate_tasks(manifest: dict, tasks_dir: Path, suite: str) -> None:
+    shutil.rmtree(tasks_dir, ignore_errors=True)
     for case in manifest["cases"]:
-        task = TASKS / case["id"]
+        task = tasks_dir / case["id"]
         (task / "tests").mkdir(parents=True)
         (task / "solution").mkdir(parents=True)
         (task / "environment").mkdir(parents=True)
@@ -72,7 +71,7 @@ def main() -> None:
             f"Run the production Iron Forest {case['role']} declaration once.\n"
             "Use only the repository, Git remotes, and the normal gh interface.\n"
         )
-        (task / "task.toml").write_text(task_toml(case))
+        (task / "task.toml").write_text(task_toml(case, suite))
         test = task / "tests" / "test.sh"
         test.write_text(
             "#!/bin/sh\n"
@@ -89,6 +88,21 @@ def main() -> None:
             "sudo -n /usr/bin/python3 /opt/iron-forest-eval/reference.py /solution/scenario.json\n"
         )
         solve.chmod(0o755)
+
+
+def load_manifest(path: Path, schema: str) -> dict:
+    manifest = json.loads(path.read_text())
+    if manifest.get("schema") != schema:
+        raise RuntimeError(f"unsupported case manifest schema in {path}")
+    return manifest
+
+
+def main() -> None:
+    generate_tasks(load_manifest(ROOT / "cases.json", "forest.evals.v1"), TASKS, "regression")
+    if PRODUCTION_MANIFEST.exists():
+        generate_tasks(load_manifest(PRODUCTION_MANIFEST, "forest.production-cases.v1"), PRODUCTION_TASKS, "production-replay")
+    else:
+        shutil.rmtree(PRODUCTION_TASKS, ignore_errors=True)
 
 
 if __name__ == "__main__":

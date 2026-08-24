@@ -12,6 +12,9 @@
 /evals/.venv/
 /evals/jobs/
 /evals/tasks/
+/evals/tasks-production/
+/production-flywheel-outbox/
+/evals/production-flywheel-outbox/
 __pycache__/
 *.py[cod]
 

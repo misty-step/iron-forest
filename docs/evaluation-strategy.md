@@ -213,7 +213,10 @@ invokes it after Harbor completes without changing the Harbor job exit. The
 export depends on the optional `langfuse` dependency group and reads
 `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` from the
 evaluation credential environment. Panel definitions live in
-[`langfuse-dashboards.md`](langfuse-dashboards.md).
+[`langfuse-dashboards.md`](langfuse-dashboards.md). Production-trace intake,
+promotion, and the weekly report are separate, equally fail-open steps in
+`evals/scripts/production_flywheel.py`; see
+[`production-flywheel.md`](production-flywheel.md).
 
 ## Suites
 
@@ -314,8 +317,11 @@ normal Gate:
 - **adversarial/security** — add planted-defect, credential-shaped, and
   prompt-injection counterexamples.
 - **production replay** — the post-run Langfuse exporter is implemented
-  (`evals/scripts/langfuse_export.py`); the remaining work is the production
-  replay pipeline that feeds production-derived traces back through Harbor.
+  (`evals/scripts/langfuse_export.py`); the production trace intake, promotion,
+  and weekly report are implemented in `evals/scripts/production_flywheel.py`
+  and documented in [`production-flywheel.md`](production-flywheel.md). The
+  remaining work is operating the loop and adding production-derived cases as
+  they pass human verification.
 
 ## Harness designs to compare
 
