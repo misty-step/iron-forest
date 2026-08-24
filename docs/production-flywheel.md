@@ -32,7 +32,10 @@ score.
 `evals/scripts/production_flywheel.py ingest` reads the retained Run logs in
 `.forest/runs`, extracts each Run's `forest.run` identity line, locates the
 OpenRouter Broadcast trace by `session_id = Forest Run id`, and creates a draft
-dataset item in `iron-forest-production`.
+dataset item in `iron-forest-production`. Before writing draft items, ingest
+ensures the `iron-forest-production` dataset exists, mirroring the exporter's
+`ensure_dataset` create-on-write behavior; a fresh Langfuse project does not
+need manual dataset creation.
 
 ```sh
 cd evals

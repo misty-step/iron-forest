@@ -23,11 +23,18 @@ class FakeLangfuseClient(flywheel.LangfuseClient):
     def __init__(self, located_trace_ids: dict[str, list[str]] | None = None):
         self.items: dict[str, FakeItem] = {}
         self.located_trace_ids = located_trace_ids or {}
+        self.ensure_calls: list[str] = []
+        self.calls: list[str] = []
+
+    def ensure_dataset(self, name: str) -> None:
+        self.ensure_calls.append(name)
+        self.calls.append("ensure_dataset")
 
     def get_dataset_item(self, dataset_name: str, id: str):
         return self.items.get(id)
 
     def create_dataset_item(self, *, dataset_name, id, input, expected_output, metadata, source_trace_id=None) -> None:
+        self.calls.append("create_dataset_item")
         self.items[id] = FakeItem(id, metadata, source_trace_id)
 
     def list_dataset_items(self, dataset_name: str) -> list[FakeItem]:
@@ -79,6 +86,23 @@ class ProductionFlywheelTest(unittest.TestCase):
             result = flywheel.ingest_runs(runs_dir, client)
             self.assertEqual(result["created"], 0)
             self.assertEqual(client.items, {})
+
+    def test_ingest_ensures_dataset_before_creating_items(self):
+        with tempfile.TemporaryDirectory() as root:
+            runs_dir = Path(root) / "runs"
+            write_run_log(runs_dir, "1787529620484390170-builder", "builder")
+            client = FakeLangfuseClient()
+
+            result = flywheel.ingest_runs(runs_dir, client)
+
+            self.assertEqual(result["created"], 1)
+            self.assertEqual(client.ensure_calls, [flywheel.PRODUCTION_DATASET])
+            self.assertEqual(client.calls[0], "ensure_dataset")
+            self.assertIn("create_dataset_item", client.calls)
+            self.assertLess(
+                client.calls.index("ensure_dataset"),
+                client.calls.index("create_dataset_item"),
+            )
 
     def test_promote_requires_provenance_and_scenario(self):
         with tempfile.TemporaryDirectory() as root:

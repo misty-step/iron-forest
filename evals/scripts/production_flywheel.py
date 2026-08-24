@@ -86,6 +86,9 @@ class LangfuseClient:
     lazily.
     """
 
+    def ensure_dataset(self, name: str) -> None:
+        raise NotImplementedError
+
     def get_dataset_item(self, dataset_name: str, id: str) -> Any | None:
         raise NotImplementedError
 
@@ -111,6 +114,15 @@ class LangfuseClient:
 class LangfuseSDKClient(LangfuseClient):
     def __init__(self, client: Any):
         self._client = client
+
+    def ensure_dataset(self, name: str) -> None:
+        try:
+            self._client.create_dataset(name=name)
+        except Exception:
+            # A dataset is immutable metadata in this flywheel. If it already
+            # exists the create call fails; treat that as success and let item
+            # upsert surface any real transport failure.
+            return
 
     def get_dataset_item(self, dataset_name: str, id: str) -> Any | None:
         try:
@@ -184,6 +196,7 @@ def item_id(run_id: str) -> str:
 
 
 def ingest_runs(runs_dir: Path, client: LangfuseClient, dataset: str = PRODUCTION_DATASET) -> dict[str, Any]:
+    client.ensure_dataset(dataset)
     created: list[str] = []
     skipped: list[str] = []
     for path in run_logs(runs_dir):
