@@ -23,6 +23,32 @@ REPORT_SCHEMA = "forest.eval.calibration-report.v1"
 DIMENSIONS = ("correctness", "evidence", "scope")
 
 
+def _dimension_score(value):
+    """Return the boolean/null score from a prediction dimension.
+
+    ``judge.py`` writes each dimension as an object such as
+    ``{"score": false, "reason": "..."}`` while the normalized
+    ``forest.eval.judge-predictions.v1`` shape stores a flat boolean.
+    Accept both so a real ``details.json`` judge object can calibrate
+    without a separate collector/normalizer pass.
+    """
+    if isinstance(value, dict):
+        return value.get("score")
+    return value
+
+
+def _fingerprint_field(judge: dict, *keys: str):
+    """Return the first present fingerprint field from ``judge``.
+
+    ``judge.py`` emits ``judge_version``/``judge_model`` while the
+    predictions schema uses ``version``/``model``.
+    """
+    for key in keys:
+        if judge.get(key) is not None:
+            return judge.get(key)
+    return None
+
+
 def load_json(path: Path, schema: str) -> dict:
     try:
         value = json.loads(path.read_text(errors="replace"))
@@ -78,8 +104,8 @@ def dimension_agreement(labels: dict[str, dict], predictions: dict[str, dict]) -
             prediction = predictions.get(case)
             if prediction is None:
                 continue
-            expected = label.get("dimensions", {}).get(dimension)
-            observed = prediction.get("dimensions", {}).get(dimension)
+            expected = _dimension_score(label.get("dimensions", {}).get(dimension))
+            observed = _dimension_score(prediction.get("dimensions", {}).get(dimension))
             if expected is None or observed is None:
                 unknown += 1
                 continue
@@ -100,9 +126,19 @@ def judge_fingerprint_matches(bank: dict, predictions: dict) -> bool | None:
     observed = predictions.get("judge")
     if not isinstance(expected, dict) or not isinstance(observed, dict):
         return None
-    if any(expected.get(key) is None or observed.get(key) is None for key in ("version", "model", "prompt_sha256")):
+    expected_values = (
+        _fingerprint_field(expected, "version", "judge_version"),
+        _fingerprint_field(expected, "model", "judge_model"),
+        expected.get("prompt_sha256"),
+    )
+    observed_values = (
+        _fingerprint_field(observed, "version", "judge_version"),
+        _fingerprint_field(observed, "model", "judge_model"),
+        observed.get("prompt_sha256"),
+    )
+    if any(value is None for value in expected_values + observed_values):
         return None
-    return all(expected.get(key) == observed.get(key) for key in ("version", "model", "prompt_sha256"))
+    return expected_values == observed_values
 
 
 def calibrate(bank: dict, predictions: dict) -> dict:

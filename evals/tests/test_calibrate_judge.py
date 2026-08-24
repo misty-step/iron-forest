@@ -85,6 +85,56 @@ class DimensionAgreementTest(unittest.TestCase):
         self.assertEqual(agreement["scope"]["unknown"], 1)
 
 
+class JudgeOutputIntegrationTest(unittest.TestCase):
+    def test_raw_judge_output_calibrates_against_bank(self):
+        labels = bank(
+            [
+                trial("a", "pass"),
+                trial("b", "fail", correctness=False, evidence=False, scope=False),
+            ]
+        )
+        observed = {
+            "schema": "forest.eval.judge-predictions.v1",
+            "judge": {
+                "judge_version": "judge-v2",
+                "judge_model": "judge/model",
+                "prompt_sha256": "a" * 64,
+            },
+            "trials": [
+                {
+                    "case": "a",
+                    "pass": True,
+                    "dimensions": {
+                        "correctness": {"score": True, "reason": "ok"},
+                        "evidence": {"score": True, "reason": "ok"},
+                        "scope": {"score": True, "reason": "ok"},
+                    },
+                },
+                {
+                    "case": "b",
+                    "pass": False,
+                    "dimensions": {
+                        "correctness": {
+                            "score": False,
+                            "reason": "ok",
+                            "false_findings": [],
+                            "missed_findings": [],
+                        },
+                        "evidence": {"score": False, "reason": "ok"},
+                        "scope": {"score": False, "reason": "ok"},
+                    },
+                },
+            ],
+        }
+        result = calibrate(labels, observed)
+        self.assertEqual(result["confusion_matrix"]["false_negative"], 0)
+        self.assertEqual(result["dimension_agreement"]["correctness"]["agreement"], 1.0)
+        self.assertEqual(result["dimension_agreement"]["evidence"]["agreement"], 1.0)
+        self.assertEqual(result["dimension_agreement"]["scope"]["agreement"], 1.0)
+        self.assertTrue(result["judge_fingerprint_matched"])
+        self.assertFalse(result["regrade_required"])
+
+
 class CalibrateTest(unittest.TestCase):
     def test_report_zero_false_negatives_and_full_agreement(self):
         result = calibrate(
