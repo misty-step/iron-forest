@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -13,8 +14,20 @@ from hidden import CANDIDATE_MODEL, POWDER_JOBS, POWDER_OPS, PR_CREATED, RACE_TR
 from judge import evaluate
 
 GIT = "/usr/bin/git"
-ORIGIN = Path("/origin.git")
-WORKSPACE = Path("/workspace")
+
+# In a separate-verifier Harbor trial the agent environment is gone, so the
+# grader reads the recorded artifact bundle instead of the live sandbox paths.
+# The generated test script exports FOREST_EVAL_HIDDEN to point at the bundle;
+# the shared-verifier unit-test path leaves it unset and keeps the sandbox paths.
+_EVAL_HIDDEN = os.environ.get("FOREST_EVAL_HIDDEN")
+if _EVAL_HIDDEN:
+    ORIGIN = Path(_EVAL_HIDDEN) / "origin.git"
+    WORKSPACE = Path(_EVAL_HIDDEN) / "workspace"
+    BUNDLE = Path(_EVAL_HIDDEN)
+else:
+    ORIGIN = Path("/origin.git")
+    WORKSPACE = Path("/workspace")
+    BUNDLE = None
 
 
 def git(*args: str, check: bool = True) -> str:
@@ -412,14 +425,87 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     return details, transcript
 
 
+def verify_bundle(bundle: Path) -> str | None:
+    """Return None when the recorded bundle is complete and untampered.
+
+    The collector writes a manifest of SHA-256 digests for every file in the
+    bundle. The separate verifier re-checks those digests before grading so a
+    missing or modified artifact fails closed instead of silently grading
+    partial evidence.
+    """
+    manifest_path = bundle / "manifest.json"
+    if not manifest_path.is_file():
+        return "artifact bundle is missing manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError) as error:
+        return f"artifact bundle manifest is unreadable: {error}"
+    if manifest.get("schema") != "forest.eval.artifact-bundle.v1":
+        return "artifact bundle manifest has an unknown schema"
+    declared = manifest.get("files")
+    if not isinstance(declared, dict):
+        return "artifact bundle manifest has no files map"
+
+    on_disk: set[str] = set()
+    for path in bundle.rglob("*"):
+        if path == manifest_path or path.is_dir():
+            continue
+        if path.is_symlink():
+            return f"artifact bundle contains a symlink: {path.name}"
+        on_disk.add(path.relative_to(bundle).as_posix())
+
+    declared_keys = set(declared)
+    if on_disk != declared_keys:
+        return "artifact bundle files do not match its manifest"
+
+    for relative, entry in declared.items():
+        if not isinstance(relative, str) or ".." in Path(relative).parts:
+            return f"artifact bundle manifest has an invalid path: {relative!r}"
+        if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+            return f"artifact bundle manifest entry is invalid: {relative!r}"
+        path = bundle / relative
+        try:
+            size = path.stat().st_size
+        except OSError as error:
+            return f"artifact bundle is missing {relative}: {error}"
+        if entry.get("size") != size:
+            return f"artifact bundle file size changed: {relative}"
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(65536), b""):
+                    digest.update(chunk)
+        except OSError as error:
+            return f"artifact bundle file is unreadable: {relative}: {error}"
+        if digest.hexdigest() != entry["sha256"]:
+            return f"artifact bundle file was modified: {relative}"
+    return None
+
+
 def main() -> None:
     scenario = json.loads(Path(sys.argv[1]).read_text())
+    logs = Path("/logs/verifier")
+    logs.mkdir(parents=True, exist_ok=True)
+
+    integrity_error = verify_bundle(BUNDLE) if BUNDLE is not None else None
+    if integrity_error is not None:
+        details = {
+            "case": scenario.get("id"),
+            "checks": ["artifact bundle integrity"],
+            "failures": [integrity_error],
+            "observed": {},
+            "passed": False,
+        }
+        rewards: dict[str, float] = {"deterministic": 0.0}
+        (logs / "reward.json").write_text(
+            json.dumps(rewards, indent=2, sort_keys=True) + "\n"
+        )
+        rendered = json.dumps(details, indent=2, sort_keys=True) + "\n"
+        (logs / "details.json").write_text(rendered)
+        return
+
     state = json.loads(STATE.read_text())
     details, transcript = grade(scenario, state)
-    logs = Path("/logs/verifier")
-    artifacts = Path("/logs/artifacts")
-    logs.mkdir(parents=True, exist_ok=True)
-    artifacts.mkdir(parents=True, exist_ok=True)
     rewards: dict[str, float] = {"deterministic": 1.0 if details["passed"] else 0.0}
     if os.environ.get("FOREST_EVAL_REQUIRE_JUDGE") == "1":
         try:
@@ -433,7 +519,6 @@ def main() -> None:
     (logs / "reward.json").write_text(json.dumps(rewards, indent=2, sort_keys=True) + "\n")
     rendered = json.dumps(details, indent=2, sort_keys=True) + "\n"
     (logs / "details.json").write_text(rendered)
-    (artifacts / "forest-eval-details.json").write_text(rendered)
 
 
 if __name__ == "__main__":

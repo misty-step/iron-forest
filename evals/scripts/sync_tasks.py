@@ -13,6 +13,8 @@ def task_toml(case: dict) -> str:
     description = json.dumps(case["summary"])
     return f'''schema_version = "1.4"
 
+artifacts = [{{ source = "/var/lib/forest-eval/bundle", destination = "forest-eval-bundle" }}]
+
 [task]
 name = "iron-forest/{case["id"]}"
 version = "0.1.0"
@@ -29,6 +31,17 @@ timeout_sec = 1800.0
 network_mode = "allowlist"
 allowed_hosts = ["openrouter.ai"]
 env = {{ FOREST_EVAL_JUDGE_API_KEY = "${{FOREST_EVAL_JUDGE_API_KEY:-}}", FOREST_EVAL_JUDGE_MODEL = "${{FOREST_EVAL_JUDGE_MODEL:-}}", FOREST_EVAL_REQUIRE_JUDGE = "${{FOREST_EVAL_REQUIRE_JUDGE:-0}}" }}
+environment_mode = "separate"
+
+[verifier.environment]
+docker_image = "iron-forest-eval:local"
+network_mode = "no-network"
+workdir = "/tests"
+
+[[verifier.collect]]
+command = "python3 /opt/iron-forest-eval/collect.py"
+user = "root"
+timeout_sec = 120.0
 
 [agent]
 user = "forest"
@@ -61,7 +74,12 @@ def main() -> None:
         )
         (task / "task.toml").write_text(task_toml(case))
         test = task / "tests" / "test.sh"
-        test.write_text("#!/bin/sh\nset -eu\npython3 /opt/iron-forest-eval/grade.py /tests/scenario.json\n")
+        test.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "export FOREST_EVAL_HIDDEN=/var/lib/forest-eval/bundle\n"
+            "python3 /opt/iron-forest-eval/grade.py /tests/scenario.json\n"
+        )
         test.chmod(0o755)
         solve = task / "solution" / "solve.sh"
         solve.write_text(
