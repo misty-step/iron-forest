@@ -1269,6 +1269,7 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
 	}
 	runner := NewRunner(root)
 	runner.PiPath = pi
+	runner.Repo = "misty-step/iron-forest"
 	record, err := runner.Run(context.Background(), Declaration{
 		Name:         "verifier",
 		Model:        "openrouter/deepseek/deepseek-v4-pro-0813",
@@ -1288,6 +1289,54 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
       "compat": {
         "sendSessionAffinityHeaders": true,
         "sessionAffinityFormat": "openrouter"
+      },
+      "samplingParams": {
+        "trace": {
+          "trace_id": "` + record.RunID + `",
+          "trace_name": "forest/verifier",
+          "environment": "production",
+          "release": "unknown",
+          "repo": "misty-step/iron-forest",
+          "agent": "verifier",
+          "run_id": "` + record.RunID + `",
+          "definition_sha": ""
+        }
+      }
+    }
+  }
+}
+`
+	if string(config) != want {
+		t.Fatalf("models.json:\n%s\nwant:\n%s", config, want)
+	}
+}
+
+func TestPiOpenRouterConfigIncludesDeterministicTraceMetadata(t *testing.T) {
+	config, err := piOpenRouterConfig("123-builder", Declaration{
+		Name:          "builder",
+		DefinitionSHA: "declaration-digest",
+	}, "misty-step/iron-forest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "providers": {
+    "openrouter": {
+      "compat": {
+        "sendSessionAffinityHeaders": true,
+        "sessionAffinityFormat": "openrouter"
+      },
+      "samplingParams": {
+        "trace": {
+          "trace_id": "123-builder",
+          "trace_name": "forest/builder",
+          "environment": "production",
+          "release": "unknown",
+          "repo": "misty-step/iron-forest",
+          "agent": "builder",
+          "run_id": "123-builder",
+          "definition_sha": "declaration-digest"
+        }
       }
     }
   }

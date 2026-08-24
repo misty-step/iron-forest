@@ -192,6 +192,13 @@ prompt/completion content.
 Langfuse currently has no repetition inside one experiment, so Harbor remains
 the repeat authority and each attempt index becomes one Langfuse run on export.
 
+The post-run exporter is `evals/scripts/langfuse_export.py`; `run-model.sh`
+invokes it after Harbor completes without changing the Harbor job exit. The
+export depends on the optional `langfuse` dependency group and reads
+`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` from the
+evaluation credential environment. Panel definitions live in
+[`langfuse-dashboards.md`](langfuse-dashboards.md).
+
 ## Suites
 
 Six suites partition evaluation work:
@@ -288,8 +295,9 @@ normal Gate:
   graders.
 - **adversarial/security** — add planted-defect, credential-shaped, and
   prompt-injection counterexamples.
-- **production replay** — implement the post-run Langfuse exporter (retryable
-  outbox, stable identities, dataset upsert) and a production replay pipeline.
+- **production replay** — the post-run Langfuse exporter is implemented
+  (`evals/scripts/langfuse_export.py`); the remaining work is the production
+  replay pipeline that feeds production-derived traces back through Harbor.
 
 ## Harness designs to compare
 

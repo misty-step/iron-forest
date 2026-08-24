@@ -21,7 +21,7 @@ load_credentials() {
     name="${line%%=*}"
     value="${line#*=}"
     case "$name" in
-      OPENROUTER_API_KEY|FOREST_EVAL_JUDGE_API_KEY) ;;
+      OPENROUTER_API_KEY|FOREST_EVAL_JUDGE_API_KEY|LANGFUSE_PUBLIC_KEY|LANGFUSE_SECRET_KEY|LANGFUSE_BASE_URL) ;;
       *)
         echo "unsupported evaluation credential name $name: $credential_file" >&2
         exit 2
@@ -33,7 +33,7 @@ load_credentials() {
     fi
   done < "$credential_file"
 }
-if [[ -z "${OPENROUTER_API_KEY:-}" || -z "${FOREST_EVAL_JUDGE_API_KEY:-}" ]]; then
+if [[ -z "${OPENROUTER_API_KEY:-}" || -z "${FOREST_EVAL_JUDGE_API_KEY:-}" || -z "${LANGFUSE_PUBLIC_KEY:-}" || -z "${LANGFUSE_SECRET_KEY:-}" ]]; then
   load_credentials
 fi
 : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}"
@@ -66,3 +66,4 @@ uv run harbor run \
   --n-concurrent "${FOREST_EVAL_CONCURRENCY:-3}" \
   --yes
 python3 scripts/assert_results.py "jobs/model/$job_name"
+python3 scripts/langfuse_export.py "jobs/model/$job_name"

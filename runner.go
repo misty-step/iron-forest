@@ -23,6 +23,7 @@ type Runner struct {
 	GitPath    string
 	PiPath     string
 	PrimaryRef string
+	Repo       string
 }
 
 const (
@@ -32,19 +33,72 @@ const (
 	runLogTruncationMarker      = "\n--- Iron Forest Run log truncated; retained first 1 MiB and last 1 MiB ---\n"
 	// harnessUnavailableExit is the shell convention for a command that could not
 	// be executed. A Run that never started has no usage to report.
-	harnessUnavailableExit    = 127
-	piOpenRouterSessionConfig = `{
-  "providers": {
-    "openrouter": {
-      "compat": {
-        "sendSessionAffinityHeaders": true,
-        "sessionAffinityFormat": "openrouter"
-      }
-    }
-  }
-}
-`
+	harnessUnavailableExit = 127
 )
+
+// piOpenRouterTraceMetadata is the deterministic trace identity sent as a
+// free-form samplingParam on every OpenRouter request. It keeps the existing
+// session-affinity correlation (the Run ID is still sent as x-session-id) and
+// additionally gives Broadcast destinations such as Langfuse a stable trace
+// identity that does not depend on provider-side session mapping.
+type piOpenRouterTraceMetadata struct {
+	TraceID       string `json:"trace_id"`
+	TraceName     string `json:"trace_name"`
+	Environment   string `json:"environment"`
+	Release       string `json:"release"`
+	Repo          string `json:"repo"`
+	Agent         string `json:"agent"`
+	RunID         string `json:"run_id"`
+	DefinitionSHA string `json:"definition_sha"`
+}
+
+type piOpenRouterSamplingParams struct {
+	Trace piOpenRouterTraceMetadata `json:"trace"`
+}
+
+type piOpenRouterCompat struct {
+	SendSessionAffinityHeaders bool   `json:"sendSessionAffinityHeaders"`
+	SessionAffinityFormat      string `json:"sessionAffinityFormat"`
+}
+
+type piOpenRouterProvider struct {
+	Compat         piOpenRouterCompat         `json:"compat"`
+	SamplingParams piOpenRouterSamplingParams `json:"samplingParams"`
+}
+
+type piOpenRouterModels struct {
+	Providers map[string]piOpenRouterProvider `json:"providers"`
+}
+
+func piOpenRouterConfig(runID string, declaration Declaration, repo string) ([]byte, error) {
+	config := piOpenRouterModels{
+		Providers: map[string]piOpenRouterProvider{
+			"openrouter": {
+				Compat: piOpenRouterCompat{
+					SendSessionAffinityHeaders: true,
+					SessionAffinityFormat:      "openrouter",
+				},
+				SamplingParams: piOpenRouterSamplingParams{
+					Trace: piOpenRouterTraceMetadata{
+						TraceID:       runID,
+						TraceName:     "forest/" + declaration.Name,
+						Environment:   "production",
+						Release:       buildSHA,
+						Repo:          repo,
+						Agent:         declaration.Name,
+						RunID:         runID,
+						DefinitionSHA: declaration.DefinitionSHA,
+					},
+				},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
 
 var (
 	errTrustedTransportOutputOverflow = errors.New("trusted transport output exceeded 1 MiB")
@@ -185,12 +239,16 @@ func runEnvironment(root, name, email, runID, piDir, primaryRef string) ([]strin
 	return environment, nil
 }
 
-func configurePiSessionAffinity(piDir, model string) error {
-	provider, modelID, found := strings.Cut(model, "/")
+func configurePiSessionAffinity(piDir, runID string, declaration Declaration, repo string) error {
+	provider, modelID, found := strings.Cut(declaration.Model, "/")
 	if !found || provider != "openrouter" || modelID == "" {
 		return nil
 	}
-	if err := os.WriteFile(filepath.Join(piDir, "models.json"), []byte(piOpenRouterSessionConfig), 0o600); err != nil {
+	config, err := piOpenRouterConfig(runID, declaration, repo)
+	if err != nil {
+		return fmt.Errorf("build Pi session-affinity override: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(piDir, "models.json"), config, 0o600); err != nil {
 		return fmt.Errorf("write Pi session-affinity override: %w", err)
 	}
 	return nil
@@ -438,7 +496,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, e
 		// enter the Run.
 		piDir, piErr = os.MkdirTemp("", "iron-forest-pi-")
 		if piErr == nil {
-			piErr = configurePiSessionAffinity(piDir, declaration.Model)
+			piErr = configurePiSessionAffinity(piDir, record.RunID, declaration, r.Repo)
 		}
 		if piErr != nil {
 			piErr = fmt.Errorf("prepare Run Pi directory: %w", piErr)

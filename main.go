@@ -168,6 +168,7 @@ func serve(root string) int {
 			return exitError
 		}
 		runner := NewRunner(root)
+		runner.Repo = cfg.Repo
 		runner.PrimaryRef, _, err = resolvePrimary(context.Background(), root, cfg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -207,6 +208,7 @@ func once(root, agent string) int {
 			return exitError
 		}
 		runner := NewRunner(root)
+		runner.Repo = cfg.Repo
 		runner.PrimaryRef, _, err = resolvePrimary(context.Background(), root, cfg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)

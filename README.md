@@ -462,11 +462,18 @@ current user, have mode `0600`, and contain only:
 ```dotenv
 OPENROUTER_API_KEY=<evaluation candidate key>
 FOREST_EVAL_JUDGE_API_KEY=<evaluation Judge key>
+LANGFUSE_PUBLIC_KEY=<optional Langfuse public key>
+LANGFUSE_SECRET_KEY=<optional Langfuse secret key>
+LANGFUSE_BASE_URL=<optional Langfuse host>
 ```
 
 Existing environment values take precedence. `FOREST_EVAL_ENV_FILE` selects a
 different file. The OpenRouter management key stays outside production and
-evaluation runtime environments.
+evaluation runtime environments. Langfuse keys are optional; when present,
+`run-model.sh` exports completed Harbor trials post-run with
+`evals/scripts/langfuse_export.py` (see
+[`docs/langfuse-dashboards.md`](docs/langfuse-dashboards.md)). Export is
+fail-open and never changes a Harbor reward or job exit.
 
 ```sh
 ./evals/run-model.sh
