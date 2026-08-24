@@ -105,7 +105,8 @@
       "note_layout": "fanout",
       "effect": "verifier_changes",
       "verdict_summary": "value.txt violates the requested ready value.",
-      "semantic_contract": "The reviewed change is defective because value.txt must contain ready, not wrong."
+      "semantic_contract": "The reviewed change is defective because value.txt must contain ready, not wrong.",
+      "judge_high_risk": true
     },
     {
       "id": "verifier-clean-approve",
@@ -123,7 +124,8 @@
       "candidate_files": {"value.txt": "wrong\n"},
       "check": "test \"$(cat value.txt)\" = ready",
       "effect": "verifier_changes",
-      "verdict_summary": "The declared value Check fails."
+      "verdict_summary": "The declared value Check fails.",
+      "judge_high_risk": true
     },
     {
       "id": "verifier-conflicting-destination",

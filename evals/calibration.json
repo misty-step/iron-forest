@@ -1,0 +1,253 @@
+{
+  "judge": {
+    "model": "openrouter/google/gemini-3.7-flash",
+    "prompt_sha256": "c6d41493579b3ee3c81a151d98969c9239ba1eb5a1eb2fb968230122f5f7403d",
+    "version": "judge-v2"
+  },
+  "note": "Seeded from the 22 deterministic reference outcomes (all correct/clean). The bank must grow to >=40 trials and add human-labeled failing trials before the >=85% dimension-agreement gate is measured.",
+  "schema": "forest.eval.calibration.v1",
+  "trials": [
+    {
+      "case": "builder-ready-issue",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "builder-no-eligible-issue",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "builder-fanout-notes",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "builder-canonical-note-race",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "builder-branch-race",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "builder-failed-check",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "builder-scope-subjects",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "builder-scope-held-outside",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "builder",
+      "source": "reference"
+    },
+    {
+      "case": "verifier-stale-flat-notes",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "verifier",
+      "source": "reference"
+    },
+    {
+      "case": "verifier-fanout-defect",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "verifier",
+      "source": "reference"
+    },
+    {
+      "case": "verifier-clean-approve",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "verifier",
+      "source": "reference"
+    },
+    {
+      "case": "verifier-failed-check",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "verifier",
+      "source": "reference"
+    },
+    {
+      "case": "verifier-conflicting-destination",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "verifier",
+      "source": "reference"
+    },
+    {
+      "case": "verifier-approve-race",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "verifier",
+      "source": "reference"
+    },
+    {
+      "case": "fixer-one-finding",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "fixer",
+      "source": "reference"
+    },
+    {
+      "case": "fixer-multiple-findings",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "fixer",
+      "source": "reference"
+    },
+    {
+      "case": "fixer-fanout-notes",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "fixer",
+      "source": "reference"
+    },
+    {
+      "case": "fixer-conflicting-destination",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "fixer",
+      "source": "reference"
+    },
+    {
+      "case": "fixer-branch-race",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "fixer",
+      "source": "reference"
+    },
+    {
+      "case": "fixer-no-rejected-revision",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "fixer",
+      "source": "reference"
+    },
+    {
+      "case": "critic-sweep-draft-only",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "critic",
+      "source": "reference"
+    },
+    {
+      "case": "tester-sweep-draft-only",
+      "dimensions": {
+        "correctness": true,
+        "evidence": true,
+        "scope": true
+      },
+      "label": "pass",
+      "role": "tester",
+      "source": "reference"
+    }
+  ]
+}

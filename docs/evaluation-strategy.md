@@ -167,11 +167,27 @@ reads, and work after a provisional decision are diagnostics, not failures.
 
 ### Model and human graders
 
-Use calibrated model graders for review quality that deterministic state cannot
-capture: whether a blocking defect was found, whether evidence supports it,
-whether severity is calibrated, and whether the `changes` summary is actionable.
-Human reviewers calibrate those rubrics and inspect sampled transcripts. Model
-judges never authorize a merge and never override a failed deterministic grader.
+Model grading is split into three focused dimension judges —
+`correctness`/defect detection, `evidence`/actionability, and
+`scope`/overengineering — each of which returns a structured boolean score plus
+`null` (Unknown) when the recorded evidence is insufficient. A trial passes the
+Judge only when every dimension scores true; any false score fails it.
+Deterministic graders remain authoritative and a model judge never overrides a
+failed deterministic grader.
+
+Ambiguous (Unknown), high-risk, and code-review cases escalate to a read-only
+agentic forensic judge that inspects the recorded artifact bundle and the full
+agent trajectory with `read`, `grep`, `find`, and `ls` only. It has no network
+access, no mutation tool, and no hidden reference solution.
+
+Human reviewers calibrate the dimension rubrics against a labeled calibration
+bank (`evals/calibration.json`). `evals/scripts/calibrate_judge.py` records the
+confusion matrix, per-dimension agreement, and judge version/model/prompt
+fingerprint. A prompt or model change that does not match the bank's fingerprint
+sets `regrade_required`, so stale human labels cannot silently certify a new
+Judge. The bank is seeded from the deterministic reference outcomes and must
+reach at least 40 trials, including human-labeled failing trials, before the
+agreement gate is measured.
 
 ## Trace catalog and export
 

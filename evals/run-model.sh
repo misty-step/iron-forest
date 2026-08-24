@@ -40,8 +40,14 @@ fi
 : "${FOREST_EVAL_JUDGE_API_KEY:?FOREST_EVAL_JUDGE_API_KEY is required}"
 : "${FOREST_EVAL_JUDGE_MODEL:=openrouter/google/gemini-3.7-flash}"
 export FOREST_EVAL_JUDGE_MODEL
+: "${FOREST_EVAL_FORENSIC_JUDGE_MODEL:=}"
+export FOREST_EVAL_FORENSIC_JUDGE_MODEL
 if [[ -n "${FOREST_EVAL_CANDIDATE_MODEL:-}" && "$FOREST_EVAL_CANDIDATE_MODEL" == "$FOREST_EVAL_JUDGE_MODEL" ]]; then
   echo "candidate and Judge models must differ" >&2
+  exit 2
+fi
+if [[ -n "${FOREST_EVAL_FORENSIC_JUDGE_MODEL:-}" && -n "${FOREST_EVAL_CANDIDATE_MODEL:-}" && "$FOREST_EVAL_CANDIDATE_MODEL" == "$FOREST_EVAL_FORENSIC_JUDGE_MODEL" ]]; then
+  echo "candidate and forensic Judge models must differ" >&2
   exit 2
 fi
 

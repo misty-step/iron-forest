@@ -510,7 +510,7 @@ def main() -> None:
     if os.environ.get("FOREST_EVAL_REQUIRE_JUDGE") == "1":
         try:
             candidate_model = CANDIDATE_MODEL.read_text().strip()
-            judge = evaluate(scenario, details, transcript, candidate_model)
+            judge = evaluate(scenario, details, transcript, candidate_model, artifact_dir=BUNDLE)
             details["judge"] = judge
             rewards["judge"] = 1.0 if judge["pass"] else 0.0
         except Exception as error:
