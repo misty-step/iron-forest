@@ -62,7 +62,11 @@ type piOpenRouterCompat struct {
 }
 
 type piOpenRouterProvider struct {
-	Compat         piOpenRouterCompat         `json:"compat"`
+	Compat         piOpenRouterCompat                   `json:"compat"`
+	ModelOverrides map[string]piOpenRouterModelOverride `json:"modelOverrides,omitempty"`
+}
+
+type piOpenRouterModelOverride struct {
 	SamplingParams piOpenRouterSamplingParams `json:"samplingParams"`
 }
 
@@ -71,26 +75,31 @@ type piOpenRouterModels struct {
 }
 
 func piOpenRouterConfig(runID string, declaration Declaration, repo string) ([]byte, error) {
+	trace := piOpenRouterTraceMetadata{
+		TraceID:       runID,
+		TraceName:     "forest/" + declaration.Name,
+		Environment:   "production",
+		Release:       buildSHA,
+		Repo:          repo,
+		Agent:         declaration.Name,
+		RunID:         runID,
+		DefinitionSHA: declaration.DefinitionSHA,
+	}
+	provider := piOpenRouterProvider{
+		Compat: piOpenRouterCompat{
+			SendSessionAffinityHeaders: true,
+			SessionAffinityFormat:      "openrouter",
+		},
+	}
+	_, modelID, found := strings.Cut(declaration.Model, "/")
+	if found && modelID != "" {
+		provider.ModelOverrides = map[string]piOpenRouterModelOverride{
+			modelID: {SamplingParams: piOpenRouterSamplingParams{Trace: trace}},
+		}
+	}
 	config := piOpenRouterModels{
 		Providers: map[string]piOpenRouterProvider{
-			"openrouter": {
-				Compat: piOpenRouterCompat{
-					SendSessionAffinityHeaders: true,
-					SessionAffinityFormat:      "openrouter",
-				},
-				SamplingParams: piOpenRouterSamplingParams{
-					Trace: piOpenRouterTraceMetadata{
-						TraceID:       runID,
-						TraceName:     "forest/" + declaration.Name,
-						Environment:   "production",
-						Release:       buildSHA,
-						Repo:          repo,
-						Agent:         declaration.Name,
-						RunID:         runID,
-						DefinitionSHA: declaration.DefinitionSHA,
-					},
-				},
-			},
+			"openrouter": provider,
 		},
 	}
 	data, err := json.MarshalIndent(config, "", "  ")

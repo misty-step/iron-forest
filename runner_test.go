@@ -1290,16 +1290,20 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
         "sendSessionAffinityHeaders": true,
         "sessionAffinityFormat": "openrouter"
       },
-      "samplingParams": {
-        "trace": {
-          "trace_id": "` + record.RunID + `",
-          "trace_name": "forest/verifier",
-          "environment": "production",
-          "release": "unknown",
-          "repo": "misty-step/iron-forest",
-          "agent": "verifier",
-          "run_id": "` + record.RunID + `",
-          "definition_sha": ""
+      "modelOverrides": {
+        "deepseek/deepseek-v4-pro-0813": {
+          "samplingParams": {
+            "trace": {
+              "trace_id": "` + record.RunID + `",
+              "trace_name": "forest/verifier",
+              "environment": "production",
+              "release": "unknown",
+              "repo": "misty-step/iron-forest",
+              "agent": "verifier",
+              "run_id": "` + record.RunID + `",
+              "definition_sha": ""
+            }
+          }
         }
       }
     }
@@ -1314,6 +1318,7 @@ printf '%s\n' '{"type":"message_end","message":{"usage":{"input":1,"output":2}}}
 func TestPiOpenRouterConfigIncludesDeterministicTraceMetadata(t *testing.T) {
 	config, err := piOpenRouterConfig("123-builder", Declaration{
 		Name:          "builder",
+		Model:         "openrouter/deepseek/deepseek-v4-pro-0813",
 		DefinitionSHA: "declaration-digest",
 	}, "misty-step/iron-forest")
 	if err != nil {
@@ -1326,16 +1331,20 @@ func TestPiOpenRouterConfigIncludesDeterministicTraceMetadata(t *testing.T) {
         "sendSessionAffinityHeaders": true,
         "sessionAffinityFormat": "openrouter"
       },
-      "samplingParams": {
-        "trace": {
-          "trace_id": "123-builder",
-          "trace_name": "forest/builder",
-          "environment": "production",
-          "release": "unknown",
-          "repo": "misty-step/iron-forest",
-          "agent": "builder",
-          "run_id": "123-builder",
-          "definition_sha": "declaration-digest"
+      "modelOverrides": {
+        "deepseek/deepseek-v4-pro-0813": {
+          "samplingParams": {
+            "trace": {
+              "trace_id": "123-builder",
+              "trace_name": "forest/builder",
+              "environment": "production",
+              "release": "unknown",
+              "repo": "misty-step/iron-forest",
+              "agent": "builder",
+              "run_id": "123-builder",
+              "definition_sha": "declaration-digest"
+            }
+          }
         }
       }
     }
