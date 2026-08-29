@@ -1,6 +1,19 @@
 # 0024 — Subject claim refs
 
-Status: accepted, 2026-08-21
+Status: superseded, 2026-08-29
+
+> Superseded by the 2026-08-29 topology decision: exactly one Kernel per
+> repository; agent-owned Subject selection; Powder is exclusive lease
+> authority for Powder jobs; no cross-Kernel claims and no claim refs. The
+> replacement contract is recorded in
+> [0015](0015-one-kernel-per-repository.md),
+> [0023](0023-powder-jobs-and-review-request-v2.md), and
+> [VISION.md](../../VISION.md). This document is retained as historical
+> rationale only. The if-233 design slice `b361e2c` that introduced this
+> document is preserved only as a historical design slice, not as
+> implementation proof. The `forest publish claim`, `claim-release`, and
+> `refs/forest/v1/claim/*` paths below are rejected and are not implemented,
+> required, or a current product contract.
 
 Extends [0009](0009-git-coordination-authority.md),
 [0010](0010-agent-owned-effects-and-merge-gate.md),
