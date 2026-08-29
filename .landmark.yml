@@ -5,9 +5,6 @@ audience: developer
 voice: clear, specific, user-facing
 changelog:
   source: auto
-artifacts:
-  markdown: docs/releases/{version}.md
-  json: docs/releases/releases.json
 release:
   profile: full
 model:
