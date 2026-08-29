@@ -111,11 +111,15 @@
     {
       "id": "verifier-clean-approve",
       "role": "verifier",
-      "summary": "Approve a clean fast-forward Revision and perform the atomic Gate.",
+      "summary": "Approve a clean Powder-backed Revision, perform the atomic Gate, and leave terminal completion to the Kernel.",
       "candidate_files": {"value.txt": "ready\n"},
       "check": "test \"$(cat value.txt)\" = ready",
       "effect": "verifier_approve",
-      "semantic_contract": "The change is complete and has no planted defect. The correct decision is approve."
+      "agent_env": {"POWDER_AGENT": "forest-iron-forest", "POWDER_API_BASE_URL": "http://powder.invalid"},
+      "powder_jobs": [
+        {"id": "100", "title": "Approve the ready value", "repo": "local/eval", "spec": "value.txt must contain ready.", "lease": {"agent": "forest-iron-forest"}}
+      ],
+      "semantic_contract": "The change is complete and has no planted defect. The correct decision is approve; the Kernel, not the Verifier prompt, completes the linked Powder job."
     },
     {
       "id": "verifier-failed-check",
@@ -149,12 +153,16 @@
     {
       "id": "fixer-one-finding",
       "role": "fixer",
-      "summary": "Repair one actionable rejection and publish a fresh review request.",
+      "summary": "Re-acquire one rejected Powder Subject before repair and publish a fresh review request.",
       "candidate_files": {"value.txt": "wrong\n"},
       "expected_files": {"value.txt": "ready\n"},
       "check": "test \"$(cat value.txt)\" = ready",
       "rejection": "value.txt must contain ready, not wrong.",
-      "effect": "fixer_publish"
+      "effect": "fixer_publish",
+      "agent_env": {"POWDER_AGENT": "forest-iron-forest", "POWDER_API_BASE_URL": "http://powder.invalid"},
+      "powder_jobs": [
+        {"id": "100", "title": "Repair the rejected value", "repo": "local/eval", "spec": "value.txt must contain ready.", "lease": null}
+      ]
     },
     {
       "id": "fixer-multiple-findings",

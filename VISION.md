@@ -29,7 +29,7 @@ Delete a requirement that does not change an observable Git outcome.
 
 | Term | Meaning |
 | --- | --- |
-| Kernel | The `forest` process. It polls, isolates a Run, starts the harness, and owns closed Git protocols. |
+| Kernel | The `forest` process. It polls, isolates a Run, starts the harness, and owns closed Git and Tracker protocols. |
 | Declaration | One role: `agents/<name>/agent.md` and `task.md`. |
 | Run | One dispatch of one declaration. At most one live Run per declaration. |
 | Subject | One GitHub Issue or one Powder job that a Builder may select. |
@@ -49,6 +49,7 @@ terms.
 forest:ready Issue or takeable Powder job
   → Builder implements and calls forest publish request
   → Verifier checks, judges, and calls forest publish verdict
+  → Kernel reconciles a landed Powder Subject to terminal
   → Fixer repairs a rejected Revision
 
 The shipped review roster is Builder, Verifier, and Fixer
@@ -92,7 +93,8 @@ store.
 ## Boundaries
 
 The Kernel owns mechanics: the lock, Poll, worktree, harness start, declaration
-digest, and publication. Two commands cover every Effect:
+digest, publication, and deterministic Powder terminal reconciliation. Two
+commands cover every agent-requested Git Effect:
 
 ```text
 forest publish request <role> <branch> <file> [--rejected <sha>]
@@ -104,8 +106,16 @@ runs `forest.yaml` Checks, then pushes those refs and `sha:refs/heads/master`
 in one atomic update. Agents write the files and decide to call. They do not
 push `master`.
 
-Agents own Subject selection, implementation, review judgment, the Powder
-take/done lease, and the decision to publish
+For a Powder-backed Gate, current primary is the single pending reconciliation
+slot. Before Builder dispatch or a later approve, the Kernel reads only that
+Revision's exact request and approve refs and the bound Powder job. If the job
+is non-terminal, the same repository principal re-takes it and calls `done`
+with the Revision as proof. Failure blocks later work but never reverses or
+misreports a successful Gate. The Kernel keeps no outbox and performs no
+historical evidence or board scan.
+
+Agents own Subject selection, implementation, review judgment, the initial
+Powder take, and the decision to publish
 ([ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md)).
 
 The operator owns the host, credentials, backlog labels, and Powder jobs.
@@ -144,8 +154,10 @@ Mint, Habitat, Olympus, Fly Sprites, a Tracker adapter interface, a
 Kernel substrate seam, and a central trace store are not Iron Forest.
 
 Git remains the coordination authority. Powder is exclusive-work for jobs.
-The Kernel may list takeable or held jobs the same way it lists ready
-Issues. It does not take, release, or complete them.
+Agents select and initially take Powder work. The Kernel may list jobs and may
+re-take and complete only the current Git-landed Subject through the bounded
+reconciliation loop above; it does not rank, release, ask about, or otherwise
+manage Powder work.
 
 ## Never finished
 

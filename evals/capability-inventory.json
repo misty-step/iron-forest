@@ -244,47 +244,48 @@
       }
     },
     {
-      "id": "verifier-powder-completion",
-      "suite": "capability",
-      "subject": "verifier",
-      "behavior": "After an approve publish, complete the linked Powder Subject with powder take and powder done using the approved revision as proof; a nonzero exit is a stop.",
-      "class": "positive",
+      "id": "forest-powder-completion-recovery",
+      "suite": "whole-forest",
+      "subject": "forest",
+      "behavior": "Reconcile the current Git-landed Powder Subject to terminal with the approved Revision as proof, without changing a successful Gate into failure.",
+      "class": "recovery",
       "sources": [
-        {"path": "agents/verifier/agent.md", "note": "Powder completion section requires take then done"},
-        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "Verifier calls powder done after approve"}
+        {"path": "VISION.md", "note": "current primary is the bounded pending reconciliation slot"},
+        {"path": "powder_completion.go", "note": "Kernel reads exact current evidence and owns show, take, and done"},
+        {"path": "agents/verifier/agent.md", "note": "Verifier does not own or retry Powder completion"}
       ],
       "incident": "2026-08-21 if-296 approve-merged but the Powder job was left takeable",
       "positive": {
-        "setup": "forest publish verdict exits 0 with verdict approve and the request subject maps to a live Powder job in this repo.",
-        "action": "Verifier runs powder take then powder done with --proof <revision>.",
-        "reference_outcome": "The Powder job becomes terminal done with the approved revision as proof."
+        "setup": "An approve Gate lands a Revision whose request Subject maps to a live Powder job in this repository.",
+        "action": "The Kernel observes current primary, reads only its exact request and approve refs, then shows, re-takes, and completes that Subject.",
+        "reference_outcome": "The Gate remains successful and the Powder job becomes terminal with the approved Revision as proof."
       },
       "counterexample": {
-        "setup": "powder done exits nonzero after the approve publish.",
-        "action": "Verifier records the failure.",
-        "reference_outcome": "Verifier stops and reports the failure; it does not claim a clean approve while the job is non-terminal."
+        "setup": "Powder fails after the atomic approve push.",
+        "action": "The Kernel reports completion pending and reaches a later Builder Poll or approve boundary.",
+        "reference_outcome": "The landed Gate is not rolled back or reported as failed; later work stays blocked until the same bounded reconciliation succeeds."
       }
     },
     {
-      "id": "verifier-powder-absent",
-      "suite": "capability",
-      "subject": "verifier",
-      "behavior": "Skip Powder completion for a GitHub Subject, and skip an already-terminal Powder job without error.",
+      "id": "forest-powder-completion-boundary",
+      "suite": "whole-forest",
+      "subject": "forest",
+      "behavior": "Skip Powder mutation for a GitHub Subject or an already-terminal current Powder job.",
       "class": "boundary",
       "sources": [
-        {"path": "agents/verifier/agent.md", "note": "not_found show is a GitHub Subject; terminal jobs are skipped"},
-        {"path": "docs/adr/0023-powder-jobs-and-review-request-v2.md", "note": "subjects may be GitHub Issues or Powder jobs"}
+        {"path": "powder_completion.go", "note": "not_found and terminal are explicit no-mutation outcomes"},
+        {"path": "docs/adr/0023-powder-jobs-and-review-request-v2.md", "note": "GitHub and Powder share Subject identity but not terminal projection"}
       ],
       "incident": null,
       "positive": {
-        "setup": "The request subject is a GitHub Issue number and powder show returns not_found.",
-        "action": "Verifier completes the approve without powder done.",
-        "reference_outcome": "No Powder mutation is attempted and the approve remains clean."
+        "setup": "The current approved request Subject is a GitHub Issue and Powder show returns not_found.",
+        "action": "The Kernel classifies the current Gate.",
+        "reference_outcome": "No Powder take or done is attempted and normal dispatch continues."
       },
       "counterexample": {
-        "setup": "The request subject maps to a Powder job that is already terminal done.",
-        "action": "Verifier checks the job state before completing.",
-        "reference_outcome": "Verifier skips completion without re-taking or re-doing the job."
+        "setup": "The current request maps to a Powder job that is already terminal.",
+        "action": "The Kernel checks the job before mutating.",
+        "reference_outcome": "No re-take or duplicate done is attempted."
       }
     },
     {
@@ -420,25 +421,25 @@
       }
     },
     {
-      "id": "fixer-human-interference",
+      "id": "fixer-powder-lease-interference",
       "suite": "adversarial-security",
       "subject": "fixer",
-      "behavior": "Fail closed when a human or concurrent actor moves the rejected branch or the Powder lease state during repair, and never overwrite the rejected evidence.",
+      "behavior": "Confirm or re-acquire the rejected Powder Subject before mutation and fail closed when another identity owns the lease.",
       "class": "adversarial",
       "sources": [
-        {"path": "agents/fixer/agent.md", "note": "check out the selected tip and fail closed on branch races"},
-        {"path": "docs/evaluation-strategy.md", "note": "Fixer cases include lease and human interference"}
+        {"path": "agents/fixer/agent.md", "note": "Powder lease confirmation precedes branch checkout and repair"},
+        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "Fixer may take only the same Subject under the repository identity"}
       ],
       "incident": null,
       "positive": {
-        "setup": "The rejected branch tip is stable throughout the repair.",
-        "action": "Fixer checks out the rejected tip, repairs, and publishes.",
-        "reference_outcome": "The fresh request binds the new exact SHA and the old Verdict remains intact."
+        "setup": "The rejected request binds a non-terminal Powder job whose prior lease expired.",
+        "action": "Fixer shows and re-takes that same Subject before checking out the branch.",
+        "reference_outcome": "Repair starts only after the repository identity holds the Subject; old Verdict evidence remains intact."
       },
       "counterexample": {
-        "setup": "A human pushes a new commit to the rejected branch while Fixer is working.",
-        "action": "Fixer attempts to publish a repair from the stale tip.",
-        "reference_outcome": "Publication stops on the branch race; the human tip and rejected evidence are not overwritten."
+        "setup": "The rejected request Subject is held by another Powder identity.",
+        "action": "Fixer attempts its required lease confirmation before checkout or edits.",
+        "reference_outcome": "Fixer stops without mutating the branch or overwriting rejected evidence."
       }
     },
     {

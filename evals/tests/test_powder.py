@@ -58,7 +58,7 @@ class PowderIntakeTest(unittest.TestCase):
             hidden = Path(root) / "hidden"
             hidden.mkdir()
             forbidden = (
-                "renew", "answer", "done", "abandon", "reopen",
+                "renew", "answer", "abandon", "reopen",
                 "set-title", "set-spec", "set-repo", "set-blockers",
                 "version", "skill",
             )
@@ -126,21 +126,35 @@ class PowderIntakeTest(unittest.TestCase):
             )
 
             already = self.run_powder(hidden, "take", "if-held")
-            self.assertNotEqual(already.returncode, 0, msg=already.stderr)
+            self.assertEqual(already.returncode, 0, msg=already.stderr)
+            foreign = self.run_powder(hidden, "take", "if-held", "--agent", "forest-other")
+            self.assertNotEqual(foreign.returncode, 0, msg=foreign.stderr)
+            self.assertEqual(json.loads(foreign.stderr)["code"], "already_holding")
 
             released = self.run_powder(hidden, "release", "if-held")
             self.assertEqual(released.returncode, 0, msg=released.stderr)
             self.assertIsNone(json.loads(released.stdout)["lease"])
+            retaken = self.run_powder(hidden, "take", "if-held")
+            self.assertEqual(retaken.returncode, 0, msg=retaken.stderr)
+            completed = self.run_powder(hidden, "done", "if-held", "--proof", "abc123")
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            completed_job = json.loads(completed.stdout)
+            self.assertTrue(completed_job["derived"]["terminal"])
+            self.assertEqual(completed_job["proof"], "abc123")
+            self.assertIsNone(completed_job["lease"])
+            jobs_before_terminal_take = (hidden / "powder-jobs.json").read_text()
+            ops_before_terminal_take = (hidden / "powder-ops.jsonl").read_text()
+            terminal_take = self.run_powder(hidden, "take", "if-held")
+            self.assertNotEqual(terminal_take.returncode, 0, msg=terminal_take.stderr)
+            self.assertEqual(json.loads(terminal_take.stderr)["code"], "terminal")
+            self.assertEqual((hidden / "powder-jobs.json").read_text(), jobs_before_terminal_take)
+            self.assertEqual((hidden / "powder-ops.jsonl").read_text(), ops_before_terminal_take)
             mine_after = self.run_powder(hidden, "list", "--mine", agent, "--repo", repo)
             self.assertEqual(json.loads(mine_after.stdout), [])
 
-            asked = self.run_powder(
-                hidden, "ask", "if-held", "--question", "is this released?"
-            )
-            self.assertEqual(asked.returncode, 0, msg=asked.stderr)
             shown = self.run_powder(hidden, "show", "if-held")
             self.assertEqual(shown.returncode, 0, msg=shown.stderr)
-            self.assertEqual(json.loads(shown.stdout)["id"], "if-held")
+            self.assertTrue(json.loads(shown.stdout)["derived"]["terminal"])
 
             ops = [
                 json.loads(line)
@@ -149,7 +163,7 @@ class PowderIntakeTest(unittest.TestCase):
             ]
             self.assertEqual(
                 [op["op"] for op in ops if op["id"] == "if-held"],
-                ["create", "take", "release", "ask", "show"],
+                ["create", "take", "take", "release", "take", "done", "show"],
             )
 
 

@@ -248,16 +248,20 @@ Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit, and still dual-writes
 `refs/notes/forest/review-request`. Verifier calls `forest publish verdict`.
 The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
-`master` in the same atomic push. See [ADR 0021](docs/adr/0021-kernel-review-request-publication.md)
-and [ADR 0022](docs/adr/0022-kernel-verdict-publication.md).
+`master` in the same atomic push. It then reconciles the landed Subject to
+terminal Powder state without changing a successful Gate into failure. See
+[ADR 0021](docs/adr/0021-kernel-review-request-publication.md),
+[ADR 0022](docs/adr/0022-kernel-verdict-publication.md), and
+[ADR 0023](docs/adr/0023-powder-jobs-and-review-request-v2.md).
 
 Which identity may create or update which ref is in
 [onboarding](docs/onboarding-managed-repo.md#forge-identities-and-references).
 A read-only forge credential breaks every declaration. Branch protection cannot
 see evidence refs. Restrict `master` with a forge ruleset.
 
-Agents own Subject selection, implementation, and the decision to publish.
-The Kernel owns publication. See [managed-repository
+Agents own Subject selection, implementation, review judgment, and the initial
+Powder take. The Kernel owns publication and bounded terminal Powder
+reconciliation. See [managed-repository
 onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
 
 ## Ready subjects
@@ -285,7 +289,8 @@ than 1, timeout, or malformed behavior records an unhealthy trigger. See
 [onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
 
 Builder Poll also wakes on a takeable or held Powder job for `forest.yaml`
-`repo` when `POWDER_AGENT` is set. The Kernel only lists jobs.
+`repo` when `POWDER_AGENT` is set. Before dispatch it reconciles the current
+Git-landed Subject to terminal Powder state or fails closed.
 
 Verifier and Fixer Poll `ls-remote` evidence refs for each `forest/*` tip.
 Leftover `refs/notes/forest/*` are unread. A missing evidence ref is no work.

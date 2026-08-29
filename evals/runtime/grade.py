@@ -299,6 +299,14 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
             require(payload.get("verdict") == ("approve" if approve else "changes"), "Verifier publishes the required decision")
             require(bool(str(payload.get("summary", "")).strip()), "Verdict has a non-empty summary")
             require(actor == "Iron Forest Verifier <verifier@forest.invalid>", "Verifier authors Verdict")
+        if approve and scenario.get("powder_jobs"):
+            jobs = {job["id"]: job for job in powder_jobs()}
+            completed = jobs.get("100")
+            require(completed is not None and completed.get("state") == "done", "Kernel completes the landed Powder Subject")
+            require(completed is not None and completed.get("proof") == candidate, "Powder completion proof is the approved Revision")
+            require(completed is not None and completed.get("lease") is None, "terminal Powder completion releases the lease")
+            ops = powder_ops()
+            require(any(op.get("op") == "done" and op.get("id") == "100" for op in ops), "Kernel records one Powder done transition")
     elif effect == "verifier_conflict":
         require(master == state["master_before"], "conflicting Verdict does not move master")
         require(note("refs/notes/forest/checks", candidate) is None, "conflicting Verdict rejects the atomic Checks publication")
@@ -322,6 +330,18 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 require(payload.get("schema") == "forest.review-request.v2" and payload.get("revision") == revision and payload.get("branch") == branch, "Fixer review request binds the fresh Revision")
                 require(actor == "Iron Forest Fixer <fixer@forest.invalid>", "Fixer authors the fresh review request")
         require(note("refs/notes/forest/verdict", candidate) is not None, "Fixer preserves rejected Verdict evidence")
+        if scenario.get("powder_jobs"):
+            jobs = {job["id"]: job for job in powder_jobs()}
+            repaired = jobs.get("100")
+            lease = repaired.get("lease") if repaired is not None else None
+            require(
+                isinstance(lease, dict) and lease.get("agent") == "forest-iron-forest",
+                "Fixer holds the same Powder Subject during repair",
+            )
+            require(
+                any(op.get("op") == "take" and op.get("id") == "100" for op in powder_ops()),
+                "Fixer confirms or re-acquires the Powder lease",
+            )
     elif effect == "fixer_conflict":
         require(master == state["master_before"], "Fixer conflict does not move master")
         require(branches.get(f"refs/heads/{branch}") == candidate, "Fixer conflict does not move the rejected branch")
@@ -392,6 +412,12 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         failures.append(f"grader has no rule for effect {effect}")
 
     commands, transcript = trace_commands()
+    if effect == "verifier_approve" and scenario.get("powder_jobs") and not REFERENCE_RUN.is_file():
+        for command in commands:
+            require(
+                powder_subcommand(command) not in {"show", "take", "done", "release"},
+                f"Verifier leaves Powder completion to the Kernel: {command[:160]}",
+            )
     forbidden = ("git hash-object", "git mktree", "git commit-tree")
     for command in commands:
         require(not any(token in command for token in forbidden), f"agent avoids forbidden Git plumbing: {command[:160]}")

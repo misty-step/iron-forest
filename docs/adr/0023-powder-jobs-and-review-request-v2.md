@@ -41,12 +41,15 @@ have an unclaimed Subject?
 Powder listing runs only when `POWDER_AGENT` is set. Origin is `POWDER_URL`
 or `POWDER_API_BASE_URL`. Agent set and origin missing is Poll exit 2.
 
-The Kernel does not `take`, `release`, `ask`, or `done`. Builder takes before
-creating a branch. Verifier calls `powder done` after a successful approve
-when `powder show <subject>` names a non-terminal job for this repository.
-Fixer reuses the selected `subject` and branch.
+Builder takes a Powder job before creating its branch. A Fixer confirms or
+idempotently re-takes that same Subject before mutating a rejected branch.
+Agents may release only a failed or unpublished Builder attempt.
 
-`POWDER_AGENT` is one identity per Kernel.
+After an approve Gate, the Kernel owns terminal completion. It reads current
+primary and that Revision's exact request and approve refs, then runs
+`powder show`, an idempotent same-identity `take`, and
+`done --proof <revision>`. It retries at Builder Poll and before a later
+approve. `POWDER_AGENT` is one identity per repository Kernel.
 
 ## Consequences
 
@@ -54,11 +57,13 @@ GitHub and Powder differ only at the list/claim programs. Publish, Poll,
 Auditor, and prompts share one note and one branch grammar. There is no
 adapter type.
 
-Powder's `done` requires the completing agent to hold the live lease. The
-Builder therefore keeps the lease from `take` until the Verifier's `done`, and
-must not release a published job to take different work. A held job that already
-has a `forest/<id>/*` branch has finished its Builder pass; the Builder Poll
-treats no other Powder job as ready until that lease is normalized. The Verifier
-re-takes the selected subject (idempotent for the same holder) and then runs
-`done`, failing closed on any nonzero exit rather than leaving the merged
-Subject non-terminal.
+Powder's `done` requires the completing identity to hold the live lease. The
+Builder therefore keeps the lease after request publication. Fixer and Kernel
+may re-take only that same Subject under the same repository identity.
+
+Current primary is one bounded pending-completion slot. A later approve cannot
+replace it, and Builder cannot dispatch, until its Powder job is terminal.
+Failure after the atomic approve push is projection lag: the Gate remains
+successful and the next Kernel boundary retries. Recovery reads no historical
+ref set or board list and stores no outbox. A GitHub Subject produces
+`not_found` from `powder show` and needs no Powder mutation.

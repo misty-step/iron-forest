@@ -22,7 +22,8 @@ Treat the Verdict and failed Checks as the repair contract. Reproduce each failu
 5. Record the verdict evidence OID from the matching `ls-remote` line. Verify its committer with `git log -1 --format='%an <%ae>' <oid>` and require `Iron Forest Verifier <verifier@forest.invalid>`. Stop on any other identity.
 6. Read the payload with `git show <oid>:verdict.json`. Require `"verdict":"changes"` and `revision` equal to the exact rejected SHA, and read its `summary`. Stop if the ref is missing, the payload file is missing, or the payload `revision` is not the exact tip SHA.
 7. Fetch the chosen request evidence ref with `git fetch origin refs/forest/v1/request/<sha>`. Record its OID from the matching `ls-remote` line, verify its committer with `git log -1 --format='%an <%ae>' <oid>`, and require `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`. Read `git show <oid>:request.json` and require `branch` to name the same branch and `revision` to equal the exact rejected SHA. Stop on any other identity, if either ref or payload file is missing, or if the payload `revision` is not the exact tip SHA.
-8. Check out that branch at the selected tip. Do not start from another Revision or from `master`.
+8. If `POWDER_AGENT` is set, run `powder show <subject>` using the selected request Subject. A `not_found` result is a GitHub Subject. For an existing Powder job, require its `repo` to match `forest.yaml`, require it to be non-terminal, then run `powder take <subject> --agent "$POWDER_AGENT"` before checking out or editing the branch. This is an idempotent confirmation for the repository identity or a re-acquisition after lease loss. Any nonzero result or a lease held by another identity is a fail-closed stop.
+9. Check out that branch at the selected tip. Do not start from another Revision or from `master`.
 
 The selector must choose one rejected Revision. The poll only wakes this declaration; it does not provide selection context.
 
@@ -58,4 +59,4 @@ Use the Runner `FOREST_RUN_ID`. Do not invent refs, retry loops, or force flags.
 
 ## Stop conditions
 
-Stop and report a clear failure summary for no rejected Revision, malformed or conflicting evidence refs, failing repair checks, failed atomic publication, branch races, credential exposure, or any unexpected Git state. A failing repair Check is a stop, not a reason to publish. A clean no-work pass is success and must state that no rejected Revision existed.
+Stop and report a clear failure summary for no rejected Revision, malformed or conflicting evidence refs, missing or foreign Powder lease, failing repair checks, failed atomic publication, branch races, credential exposure, or any unexpected Git state. A failing repair Check is a stop, not a reason to publish. A clean no-work pass is success and must state that no rejected Revision existed.

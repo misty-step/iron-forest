@@ -16,11 +16,12 @@ import (
 type toolFunc func(context.Context, string, ...string) ([]byte, error)
 
 type Poller struct {
-	Root         string
-	Repo         string
-	Scope        Scope
-	Run          toolFunc
-	ResolveTools bool
+	Root          string
+	Repo          string
+	Scope         Scope
+	Run           toolFunc
+	PowderCommand powderCommandFunc
+	ResolveTools  bool
 }
 
 func NewPoller(root, repo string, scope Scope) *Poller {
@@ -102,6 +103,9 @@ func (p *Poller) readyIssues(ctx context.Context, label string) ([]string, error
 // accompanies exitError so the caller can say why the Poll failed instead of
 // exiting silently.
 func (p *Poller) builder(ctx context.Context) (int, error) {
+	if _, err := p.reconcilePowderPrimary(ctx); err != nil {
+		return exitError, fmt.Errorf("reconcile current Powder Subject: %w", err)
+	}
 	issues, err := p.issueSubjects(ctx)
 	if err != nil {
 		return exitError, err
@@ -216,8 +220,9 @@ func (p *Poller) listPowderSubjects(ctx context.Context) ([]string, error) {
 	// A held job wins over every takeable job. If it has no branch, the Builder
 	// Poll continues it. If it already has a branch, the Revision is published
 	// and its Powder lease must stay with the same POWDER_AGENT until the
-	// Verifier calls `powder done`; report only the held job so the Poll does
-	// not dispatch a Builder to take different work and release that lease.
+	// Kernel reconciles the landed Subject to terminal; report only the held job
+	// so the Poll does not dispatch a Builder to take different work and release
+	// that lease.
 	for _, id := range mine {
 		if !validSubject(id) {
 			return nil, fmt.Errorf("malformed powder job id %q", id)

@@ -140,7 +140,9 @@ POWDER_AGENT=forest-<repo-slug>
 
 The job must have a nonempty spec and `repo` equal to `forest.yaml` `repo`.
 Builder takes it and publishes `forest/<id>/<slug>` with review-request v2.
-Verifier calls `powder done` after a successful approve. Unset `POWDER_AGENT`
+Fixer re-takes that same Subject before repair when necessary. After approve,
+the Kernel completes the current Git-landed Subject with the approved Revision
+as proof and retries at later Poll/approve boundaries. Unset `POWDER_AGENT`
 keeps GitHub-only selection.
 
 ## 3. Add declarations

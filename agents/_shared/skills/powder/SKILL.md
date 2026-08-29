@@ -28,11 +28,14 @@ the Tracker.
 3. `powder show <id>`
    The spec is the work. Empty spec is not takeable.
 4. `powder take <id>`
-   Do this before creating a branch. `already_holding` means finish,
-   ask, or release first.
-5. Publish with schema v2 and branch `forest/<id>/<slug>`. Every Subject uses that shape, including GitHub Issue numbers.
-6. Do not `powder done` from Builder. Verifier calls
-   `powder done <id> --proof <revision>` after a successful approve.
+   Do this before creating a branch. `already_holding` means finish or ask;
+   release only a failed or unpublished Builder attempt. Keep a published
+   Subject held for the Kernel completion loop.
+5. A Fixer confirms or re-takes that same Subject before branch mutation.
+6. Publish with schema v2 and branch `forest/<id>/<slug>`. Every Subject uses
+   that shape, including GitHub Issue numbers.
+7. Agents do not call `powder done`. The Kernel completes the current
+   Git-landed Subject with the approved Revision as proof.
 
 One live lease per agent. Use one `POWDER_AGENT` per Kernel.
 
@@ -45,5 +48,4 @@ powder show ID
 powder take ID
 powder release ID
 powder ask ID --question '...'
-powder done ID --proof PROOF
 ```

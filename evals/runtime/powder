@@ -32,6 +32,15 @@ def emit(value) -> None:
     print(json.dumps(value, separators=(",", ":")))
 
 
+def job_payload(job: dict) -> dict:
+    payload = dict(job)
+    payload["derived"] = {"terminal": job.get("state") in {"done", "abandoned"}}
+    return payload
+
+
+def fail(code: str, message: str) -> None:
+    print(json.dumps({"code": code, "error": message}, separators=(",", ":")), file=sys.stderr)
+
 def option(args: list[str], *names: str) -> str | None:
     for index, arg in enumerate(args):
         if arg in names and index + 1 < len(args):
@@ -59,8 +68,7 @@ def current_agent(args: list[str]) -> str:
 
 
 def missing(job_id: str | None) -> None:
-    print(f"powder fixture: job {job_id!r} not found", file=sys.stderr)
-
+    fail("not_found", f"job {job_id!r} not found")
 
 def main() -> int:
     args = sys.argv[1:]
@@ -116,7 +124,9 @@ def main() -> int:
             jobs = [
                 job
                 for job in jobs
-                if str(job.get("spec") or "").strip() and job.get("lease") is None
+                if str(job.get("spec") or "").strip()
+                and job.get("lease") is None
+                and job.get("state") not in {"done", "abandoned"}
             ]
         emit(jobs)
         return 0
@@ -129,7 +139,7 @@ def main() -> int:
             missing(job_id)
             return 1
         append_op({"op": "show", "id": job_id})
-        emit(job)
+        emit(job_payload(job))
         return 0
 
     if command == "take":
@@ -139,14 +149,19 @@ def main() -> int:
         if job is None:
             missing(job_id)
             return 1
-        if job.get("lease") is not None:
-            print(f"powder fixture: job {job_id!r} is already held", file=sys.stderr)
-            return 1
         agent = current_agent(args)
-        job["lease"] = {"agent": agent}
-        save_jobs(jobs)
+        if job.get("state") in {"done", "abandoned"}:
+            fail("terminal", f"job {job_id!r} is terminal")
+            return 1
+        lease = job.get("lease")
+        if lease is not None and lease.get("agent") != agent:
+            fail("already_holding", f"job {job_id!r} is held by {lease.get('agent')!r}")
+            return 1
+        if lease is None:
+            job["lease"] = {"agent": agent}
+            save_jobs(jobs)
         append_op({"op": "take", "id": job_id, "agent": agent})
-        emit(job)
+        emit(job_payload(job))
         return 0
 
     if command == "release":
@@ -174,8 +189,32 @@ def main() -> int:
         emit(job)
         return 0
 
+    if command == "done":
+        jobs = load_jobs()
+        job_id = option(args, "--id") or positional_id(args)
+        job = find_job(jobs, job_id)
+        if job is None:
+            missing(job_id)
+            return 1
+        agent = current_agent(args)
+        lease = job.get("lease")
+        if lease is None or lease.get("agent") != agent:
+            fail("not_holder", f"job {job_id!r} is not held by {agent!r}")
+            return 1
+        proof = option(args, "--proof")
+        if not proof:
+            fail("invalid_argument", "proof is required")
+            return 2
+        job["state"] = "done"
+        job["proof"] = proof
+        job["lease"] = None
+        save_jobs(jobs)
+        append_op({"op": "done", "id": job_id, "agent": agent, "proof": proof})
+        emit(job_payload(job))
+        return 0
+
     if command in {
-        "renew", "answer", "done", "abandon", "reopen",
+        "renew", "answer", "abandon", "reopen",
         "set-title", "set-spec", "set-repo", "set-blockers",
         "version", "skill",
     }:

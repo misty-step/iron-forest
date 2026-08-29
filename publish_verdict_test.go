@@ -162,3 +162,68 @@ checks:
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func pushRequestForRevision(t *testing.T, root, subject, revision string) {
+	t.Helper()
+	branch := "forest/" + subject + "/work"
+	request := `{"schema":"forest.review-request.v2","subject":"` + subject + `","branch":"` + branch + `","revision":"` + revision + `","time":"2026-08-29T00:00:00Z"}`
+	pushEvidence(t, root, "request", revision, request, "Iron Forest Builder", "builder@forest.invalid")
+	runGitDir(t, root, "push", "origin", revision+":refs/heads/"+branch)
+}
+
+func TestPublishVerdictPreservesLandedApproveWhilePowderRetries(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-next", revision)
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	lifecycle := &fakePowderLifecycle{doneFailure: 1}
+	poller := configuredPowderPoller(t, root, "if-next", lifecycle)
+
+	result, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "published" || result.PowderStatus != "pending" || result.PowderSubject != "if-next" {
+		t.Fatalf("result=%#v", result)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != revision {
+		t.Fatalf("master=%s want %s", got, revision)
+	}
+
+	result, err = publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "identical" || result.PowderStatus != "terminal" || lifecycle.proof != revision {
+		t.Fatalf("retry result=%#v proof=%q", result, lifecycle.proof)
+	}
+}
+
+func TestPublishVerdictBlocksLaterApproveOnPendingCurrentPowder(t *testing.T) {
+	root, origin := testClone(t)
+	current := seedApprovedCurrent(t, root, "if-current")
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-next", revision)
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	lifecycle := &fakePowderLifecycle{doneFailure: 1}
+	poller := configuredPowderPoller(t, root, "if-current", lifecycle)
+
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+	})
+	if err == nil || !strings.Contains(err.Error(), "reconcile current Powder Subject before approve") {
+		t.Fatalf("error=%v", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != current {
+		t.Fatalf("master=%s want %s", got, current)
+	}
+	if got, oidErr := remoteOID(context.Background(), root, evidenceVerdictRefPrefix+revision); oidErr != nil || got != "" {
+		t.Fatalf("new verdict oid=%q error=%v", got, oidErr)
+	}
+}

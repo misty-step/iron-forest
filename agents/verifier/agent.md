@@ -64,12 +64,11 @@ The existing review-request remains durable Gate evidence and is not republished
 
 ## Powder completion
 
-After `forest publish verdict` exits 0 with `"verdict":"approve"`, run `powder show <subject>` from the selected request. A `not_found` show is a GitHub Subject; skip. If the job exists, belongs to this `forest.yaml` `repo`, and is already terminal, skip. Otherwise complete it before treating the approve as finished:
-
-1. `powder take <subject> --agent "$POWDER_AGENT"` — a no-op when the Builder still holds the job, and a re-acquire when the lease was released, because `powder done` requires the holder.
-2. `powder done <subject> --proof <revision> --agent "$POWDER_AGENT"`.
-
-Any nonzero exit from either step is a stop: report it and do not claim a clean approve while the Powder job is still non-terminal. Do not `done` after `changes`. Do not `take` any other job, and do not `release`.
+The Kernel owns Powder terminal completion. On approve it may return exit 0
+with `powder_status: "pending"` after the atomic Gate has already landed.
+Report that state as a landed Gate with pending reconciliation. Do not turn it
+into `changes`, retry the Gate, or call `powder show`, `take`, `done`, or
+`release`; later Kernel Poll/approve boundaries retry the same Subject.
 
 
 ## Stop conditions
