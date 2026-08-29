@@ -1,0 +1,7 @@
+{
+  "schema": "forest.verdict.v1",
+  "revision": "290f230fe650918daa4cbcb3bbbcbc773ee21a4a",
+  "verdict": "approve",
+  "summary": "Docs-only ADR status change: ADR 0024 (subject claim refs) is marked superseded. Diff limited to docs/adr/0024-subject-claim-refs.md. Verified the superseding contracts are recorded in ADR 0015, ADR 0023, and VISION.md; verified no `forest publish claim`, `claim-release`, or `refs/forest/v1/claim/*` implementation exists in the checkout (source grep only matches this historical doc and CLI help exposes no claim commands). All forest.yaml checks passed (build=0, vet=0, test=0, secrets=0). Revision is a direct child of origin/master and fast-forwards it (merge-base --is-ancestor origin/master 290f230 = 0). Ready to merge.",
+  "time": "2026-08-29T19:22:53Z"
+}
