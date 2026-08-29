@@ -86,7 +86,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 				t.Fatalf("Git actor=%q, want author and committer %s <%s>", identity, test.name, test.email)
 			}
 			config := string(runGitDir(t, root, "config", "--get-regexp", `^user\.(name|email)$`))
-			if !strings.Contains(config, "user.name Builder\n") || !strings.Contains(config, "user.email builder@forest.invalid\n") {
+			if !strings.Contains(config, "user.name Iron Forest Builder\n") || !strings.Contains(config, "user.email builder@forest.invalid\n") {
 				t.Fatalf("root Git actor changed:\n%s", config)
 			}
 			args, err := os.ReadFile(argsFile)

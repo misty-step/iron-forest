@@ -125,7 +125,7 @@ func testClone(t *testing.T) (string, string) {
 	origin := filepath.Join(t.TempDir(), "origin.git")
 	runGit(t, "init", "--bare", origin)
 	runGit(t, "clone", origin, root)
-	configGit(t, root, "Builder", "builder@forest.invalid")
+	configGit(t, root, "Iron Forest Builder", "builder@forest.invalid")
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("initial\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
