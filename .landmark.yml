@@ -1,6 +1,6 @@
 product:
   name: Iron Forest
-  description: Iron Forest is a headless software factory. Exactly one live Kernel serves
+  description: Iron Forest is a headless software factory. Exactly one live Kernel serves one repository, on a machine the operator chooses.
 audience: developer
 voice: clear, specific, user-facing
 changelog:
