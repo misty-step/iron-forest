@@ -299,10 +299,6 @@ func syncLedgerDirectory(path string, files ledgerFileOps) error {
 	return errors.Join(syncErr, closeErr)
 }
 
-func ReadLedger(root string) ([]RunRecord, error) {
-	return readLedger(root, -1)
-}
-
 func ReadLedgerTail(root string, limit int) ([]RunRecord, error) {
 	if limit < 0 {
 		return nil, errors.New("ledger tail limit must be non-negative")
