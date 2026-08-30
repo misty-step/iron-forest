@@ -22,7 +22,7 @@ Treat the Verdict and failed Checks as the repair contract. Reproduce each failu
 5. Record the verdict evidence OID from the matching `ls-remote` line. Verify its committer with `git log -1 --format='%an <%ae>' <oid>` and require `Iron Forest Verifier <verifier@forest.invalid>`. Stop on any other identity.
 6. Read the payload with `git show <oid>:verdict.json`. Require `"verdict":"changes"` and `revision` equal to the exact rejected SHA, and read its `summary`. Stop if the ref is missing, the payload file is missing, or the payload `revision` is not the exact tip SHA.
 7. Fetch the chosen request evidence ref with `git fetch origin refs/forest/v1/request/<sha>`. Record its OID from the matching `ls-remote` line, verify its committer with `git log -1 --format='%an <%ae>' <oid>`, and require `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`. Read `git show <oid>:request.json` and require `branch` to name the same branch and `revision` to equal the exact rejected SHA. Stop on any other identity, if either ref or payload file is missing, or if the payload `revision` is not the exact tip SHA.
-8. If `POWDER_AGENT` is set, run `powder show <subject>` using the selected request Subject. A `not_found` result is a GitHub Subject. For an existing Powder job, require its `repo` to match `forest.yaml`, require it to be non-terminal, then run `powder take <subject> --agent "$POWDER_AGENT"` before checking out or editing the branch. This is an idempotent confirmation for the repository identity or a re-acquisition after lease loss. Any nonzero result or a lease held by another identity is a fail-closed stop.
+8. Read `tracker` from the selected request payload. If `tracker` is `powder`, run `powder show <subject>` using that Subject. Require the job's `repo` to match `forest.yaml`, require it to be non-terminal, then run `powder take <subject> --agent "$POWDER_AGENT"` before checking out or editing the branch. This is an idempotent confirmation for the repository identity or a re-acquisition after lease loss. Any nonzero result or a lease held by another identity is a fail-closed stop. If `tracker` is `github` or absent, do not call Powder. Do not treat `powder show` `not_found` or a colliding job id as proof of the selected source.
 9. Check out that branch at the selected tip. Do not start from another Revision or from `master`.
 
 The selector must choose one rejected Revision. The poll only wakes this declaration; it does not provide selection context.
@@ -40,9 +40,9 @@ The selector must choose one rejected Revision. The poll only wakes this declara
 ## Coordination schema
 
 Reuse the selected request's `subject`, `branch`, and `tracker`. Replace only
-`revision` and `time`. If the selected request has no `tracker`, set it to
-`powder` when this Subject is a Powder job, otherwise `github`. Do not infer
-`tracker` from whether the Subject id looks numeric.
+`revision` and `time`. If `tracker` is `github` or `powder`, copy it. If it is
+absent, set `github` and do not call Powder: this Run did not claim a Powder
+job. Do not infer `tracker` from the Subject id or from `powder show`.
 
 ```json
 {"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","tracker":"github|powder"}
