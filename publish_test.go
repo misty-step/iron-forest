@@ -31,13 +31,27 @@ checks:
 }
 
 func writeReviewPayload(t *testing.T, root, revision, branch string) string {
+	return writeReviewPayloadTracker(t, root, revision, branch, "github")
+}
+
+func writeReviewPayloadTracker(t *testing.T, root, revision, branch, tracker string) string {
 	t.Helper()
-	payload := `{"schema":"forest.review-request.v2","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + revision + `","time":"2026-08-15T00:00:00Z","tracker":"github"}`
+	payload := `{"schema":"forest.review-request.v2","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + revision + `","time":"2026-08-15T00:00:00Z","tracker":"` + tracker + `"}`
 	path := filepath.Join(t.TempDir(), "review.json")
 	if err := os.WriteFile(path, []byte(payload+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func pushRejectedRequest(t *testing.T, root, rejected, branch, tracker string) {
+	t.Helper()
+	payload := `{"schema":"forest.review-request.v2","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + rejected + `","time":"2026-08-15T00:00:00Z"`
+	if tracker != "" {
+		payload += `,"tracker":"` + tracker + `"`
+	}
+	payload += `}`
+	pushEvidence(t, root, "request", rejected, payload+"\n", "Iron Forest Builder", "builder@forest.invalid")
 }
 
 func TestPublishReviewRequestCreatesBranchAndNote(t *testing.T) {
@@ -385,6 +399,7 @@ func TestPublishReviewRequestFixerRejectsBranchWithoutNote(t *testing.T) {
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
 	rejected := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRejectedRequest(t, root, rejected, "forest/1/ready", "github")
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("fixed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -493,6 +508,7 @@ func TestPublishReviewRequestFixerAdvancesRejectedBranch(t *testing.T) {
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
 	rejected := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRejectedRequest(t, root, rejected, "forest/1/ready", "github")
 	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1/ready")
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("fixed\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -511,6 +527,51 @@ func TestPublishReviewRequestFixerAdvancesRejectedBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Status != "published" || result.Revision != revision {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestPublishReviewRequestFixerRejectsTrackerFlip(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+	rejected := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRejectedRequest(t, root, rejected, "forest/1/ready", "github")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1/ready")
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "commit", "-am", "fix")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "fixer", Branch: "forest/1/ready", Rejected: rejected,
+		PayloadPath: writeReviewPayloadTracker(t, root, revision, "forest/1/ready", "powder"), RunID: "2-fixer",
+	})
+	if err == nil || !strings.Contains(err.Error(), `fixer tracker "powder" does not match rejected request "github"`) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPublishReviewRequestFixerStampsGithubOnTrackerlessRejected(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+	rejected := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRejectedRequest(t, root, rejected, "forest/1/ready", "")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1/ready")
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "commit", "-am", "fix")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root: root, Role: "fixer", Branch: "forest/1/ready", Rejected: rejected,
+		PayloadPath: writeReviewPayloadTracker(t, root, revision, "forest/1/ready", "github"), RunID: "2-fixer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "published" {
 		t.Fatalf("result=%#v", result)
 	}
 }

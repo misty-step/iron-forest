@@ -74,5 +74,7 @@ successful and the next Kernel boundary retries. Recovery reads no historical
 ref set or board list and stores no outbox. The Kernel probes Powder only when
 the current request has `tracker: powder`. A GitHub or undiscriminated
 historical request never calls `show`, `take`, or `done`, even if a Powder job
-shares that id. Every accepted terminal observation requires `proof` equal to
+shares that id. A Fixer repairing a trackerless historical request does not
+probe Powder and publishes `tracker: github` because that Run did not claim a
+Powder job. Every accepted terminal observation requires `proof` equal to
 the landed Revision.
