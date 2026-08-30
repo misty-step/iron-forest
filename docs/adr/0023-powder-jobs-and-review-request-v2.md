@@ -48,17 +48,20 @@ Builder takes a Powder job before creating its branch. A Fixer confirms or
 idempotently re-takes that same Subject before mutating a rejected branch.
 Agents may release only a failed or unpublished Builder attempt.
 
-After an approve Gate, the Kernel owns terminal completion. It reads current
-primary and that Revision's exact request and approve refs, then runs
-`powder show`, an idempotent same-identity `take`, and
-`done --proof <revision>`. It retries at Builder Poll and before a later
-approve. `POWDER_AGENT` is one identity per repository Kernel.
+After an approve Gate, the Kernel owns terminal completion for a request
+with `tracker: powder`. It reads current primary and that Revision's exact
+request and approve refs, then runs `powder show`, an idempotent
+same-identity `take`, and `done --proof <revision>`. It retries at Builder
+Poll and before a later approve. `POWDER_AGENT` is one identity per
+repository Kernel.
 
 ## Consequences
 
-GitHub and Powder differ only at the list/claim programs. Publish, Poll,
-Auditor, and prompts share one note and one branch grammar. There is no
-adapter type.
+GitHub and Powder still share one Subject grammar and one branch shape.
+There is no adapter type and no second Git dialect. List and claim stay
+tracker-specific. The review-request note records the source actually
+selected as `tracker`. Kernel Powder completion reads that field; it does
+not infer tracker from the Subject id.
 
 Powder's `done` requires the completing identity to hold the live lease. The
 Builder therefore keeps the lease after request publication. Fixer and Kernel
