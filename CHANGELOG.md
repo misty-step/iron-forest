@@ -1,3 +1,10 @@
+## [0.0.3](https://github.com/misty-step/iron-forest/compare/v0.0.2...v0.0.3) (2026-08-30)
+
+
+### Bug Fixes
+
+* **powder:** reconcile landed subjects in kernel ([#334](https://github.com/misty-step/iron-forest/issues/334)) ([26c0191](https://github.com/misty-step/iron-forest/commit/26c0191d175383f67208e8431507af66475ef6ec))
+
 ## [0.0.2](https://github.com/misty-step/iron-forest/compare/v0.0.1...v0.0.2) (2026-08-30)
 
 
