@@ -391,11 +391,23 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 	}
 	runGitDir(t, root, "remote", "remove", "origin")
 	cfg := Config{
-		Repo:   "owner/name",
-		Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}},
+		Repo: "owner/name",
+		Agents: map[string]AgentConfig{
+			"builder": {Poll: "poll", Interval: 1},
+			"fixer":   {Poll: "poll", Interval: 1},
+		},
 		Checks: []Check{{Name: "test", Run: "true"}},
 	}
+	configData := "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder:\n    poll: poll\n    interval: 1\n  fixer:\n    poll: poll\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
+	if err := os.WriteFile(configPath(root), []byte(configData), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	scheduler := NewScheduler(root, cfg, nil)
+	scheduler.health["fixer"] = TriggerHealth{
+		Agent:      "fixer",
+		RunError:   "fixer run",
+		AuditError: "old fixer audit",
+	}
 	scheduler.Poll = func(context.Context, string) PollResult { return PollResult{Code: 0} }
 	runFailure := errors.New("run failed")
 	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
@@ -410,6 +422,10 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 		t.Fatalf("Run and Audit failure state=%#v", health)
 	}
 	auditFailure := health.AuditError
+	other := schedulerHealth(scheduler, "fixer")
+	if other.RunError != "fixer run" || other.AuditError != "old fixer audit" {
+		t.Fatalf("failed Audit replaced another agent's cause=%#v", other)
+	}
 
 	pollFailure := errors.New("poll failed")
 	scheduler.Poll = func(context.Context, string) PollResult {
@@ -437,6 +453,9 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 	if err != nil || persisted["builder"] != health {
 		t.Fatalf("persisted trigger state=%#v err=%v, want %#v", persisted["builder"], err, health)
 	}
+	if persisted["fixer"] != other {
+		t.Fatalf("persisted fixer state=%#v, want %#v", persisted["fixer"], other)
+	}
 	auditState, err := readAuditState(root)
 	if err != nil || auditState.LastResult != "pass" {
 		t.Fatalf("last successful audit state=%#v err=%v", auditState, err)
@@ -457,6 +476,20 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 	health = schedulerHealth(scheduler, "builder")
 	if health.PollError != "" || health.RunError != runFailure.Error() || health.AuditError != "" {
 		t.Fatalf("successful Audit cleared a non-Audit cause=%#v", health)
+	}
+	other = schedulerHealth(scheduler, "fixer")
+	if other.RunError != "fixer run" || other.AuditError != "" {
+		t.Fatalf("successful Audit did not clear another agent=%#v", other)
+	}
+	persisted, _, err = readTriggerHealth(root)
+	if err != nil || persisted["builder"] != health || persisted["fixer"] != other {
+		t.Fatalf("persisted successful-Audit health=%#v err=%v", persisted, err)
+	}
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runCLI([]string{"status", "--root", root})
+	})
+	if code != exitOK || stderr != "" || strings.Contains(stdout, "old fixer audit") {
+		t.Fatalf("status code=%d stderr=%q stdout=%q", code, stderr, stdout)
 	}
 	auditState, err = readAuditState(root)
 	if err != nil || auditState.LastResult != "violations" || len(auditState.Violations) == 0 {

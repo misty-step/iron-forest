@@ -258,6 +258,12 @@ func (s *Scheduler) completeRun(agent string, record RunRecord, runErr error) er
 	auditCtx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 	auditMessage := auditSummary(auditCtx, s.Root)
 	cancel()
+	if auditMessage == "" {
+		for name, health := range s.health {
+			health.AuditError = ""
+			s.health[name] = health
+		}
+	}
 	health := s.health[agent]
 	health.Agent = agent
 	health.Running = false
