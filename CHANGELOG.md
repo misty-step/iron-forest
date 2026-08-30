@@ -1,3 +1,10 @@
+## [0.0.2](https://github.com/misty-step/iron-forest/compare/v0.0.1...v0.0.2) (2026-08-30)
+
+
+### Bug Fixes
+
+* clear all in-memory audit errors ([#336](https://github.com/misty-step/iron-forest/issues/336)) ([4eec748](https://github.com/misty-step/iron-forest/commit/4eec74870cb31fdd15af1977bbbc2ab57e207284))
+
 ## [0.0.1](https://github.com/misty-step/iron-forest/compare/v0.0.0...v0.0.1) (2026-08-29)
 
 
