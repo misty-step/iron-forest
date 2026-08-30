@@ -20,12 +20,16 @@ type publishVerdictInput struct {
 	Root        string
 	ChecksPath  string
 	VerdictPath string
+	Powder      *Poller
 }
 
 type publishVerdictResult struct {
-	Status   string `json:"status"`
-	Revision string `json:"revision"`
-	Verdict  string `json:"verdict"`
+	Status        string `json:"status"`
+	Revision      string `json:"revision"`
+	Verdict       string `json:"verdict"`
+	PowderStatus  string `json:"powder_status,omitempty"`
+	PowderSubject string `json:"powder_subject,omitempty"`
+	PowderError   string `json:"powder_error,omitempty"`
 }
 
 func runPublishVerdict(rest []string, flags cliFlags) cliOutcome {
@@ -44,7 +48,28 @@ func runPublishVerdict(rest []string, flags cliFlags) cliOutcome {
 	if result.Status == "identical" {
 		human = fmt.Sprintf("accepted identical %s verdict for %s", result.Verdict, result.Revision)
 	}
+	if result.PowderStatus == "pending" {
+		target := result.PowderSubject
+		if target == "" {
+			target = "current primary"
+		}
+		human += fmt.Sprintf("; Powder completion pending for %s: %s", target, result.PowderError)
+	}
 	return cliOutcome{Exit: exitOK, Data: result, Human: human}
+}
+
+func withPowderReconciliation(result publishVerdictResult, reconciliation powderReconcileResult, err error) publishVerdictResult {
+	if err != nil {
+		result.PowderStatus = "pending"
+		result.PowderSubject = reconciliation.Subject
+		result.PowderError = err.Error()
+		return result
+	}
+	if reconciliation.Powder && reconciliation.Terminal {
+		result.PowderStatus = "terminal"
+		result.PowderSubject = reconciliation.Subject
+	}
+	return result
 }
 
 func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerdictResult, error) {
@@ -91,13 +116,27 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		return publishVerdictResult{}, err
 	}
 	if identical {
-		return publishVerdictResult{Status: "identical", Revision: revision, Verdict: verdict.Verdict}, nil
+		result := publishVerdictResult{Status: "identical", Revision: revision, Verdict: verdict.Verdict}
+		if verdict.Verdict != "approve" {
+			return result, nil
+		}
+		cfg, loadErr := loadConfig(configPath(input.Root))
+		if loadErr != nil {
+			return withPowderReconciliation(result, powderReconcileResult{}, loadErr), nil
+		}
+		powder := input.Powder
+		if powder == nil {
+			powder = NewPoller(input.Root, cfg.Repo, Scope{})
+		}
+		reconciliation, reconcileErr := powder.reconcilePowderPrimary(ctx)
+		return withPowderReconciliation(result, reconciliation, reconcileErr), nil
 	}
 	if existingChecks != "" || existingVerdict != "" {
 		return publishVerdictResult{}, conflictError("conflicting evidence ref for %s", revision)
 	}
 
 	var primaryRef string
+	var powder *Poller
 	if verdict.Verdict == "approve" {
 		cfg, loadErr := loadConfig(configPath(input.Root))
 		if loadErr != nil {
@@ -106,6 +145,13 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		primaryRef, _, err = resolvePrimary(ctx, input.Root, cfg)
 		if err != nil {
 			return publishVerdictResult{}, fmt.Errorf("resolve primary ref: %w", err)
+		}
+		powder = input.Powder
+		if powder == nil {
+			powder = NewPoller(input.Root, cfg.Repo, Scope{})
+		}
+		if _, err := powder.reconcilePowderPrimary(ctx); err != nil {
+			return publishVerdictResult{}, fmt.Errorf("reconcile current Powder Subject before approve: %w", err)
 		}
 		if err := runConfiguredChecks(ctx, input.Root, revision); err != nil {
 			return publishVerdictResult{}, err
@@ -134,7 +180,12 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err := gitRun(ctx, input.Root, args...); err != nil {
 		return publishVerdictResult{}, classifyVerdictPush(err)
 	}
-	return publishVerdictResult{Status: "published", Revision: revision, Verdict: verdict.Verdict}, nil
+	result := publishVerdictResult{Status: "published", Revision: revision, Verdict: verdict.Verdict}
+	if verdict.Verdict == "approve" {
+		reconciliation, reconcileErr := powder.reconcilePowderPrimary(ctx)
+		result = withPowderReconciliation(result, reconciliation, reconcileErr)
+	}
+	return result, nil
 }
 
 func payloadRevision(data []byte) (string, error) {

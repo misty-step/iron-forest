@@ -213,6 +213,7 @@ def main() -> None:
             "branch": branch,
             "revision": candidate,
             "time": TIME,
+            "tracker": "powder" if scenario.get("powder_jobs") else "github",
         }
         note_add(workspace, "refs/notes/forest/review-request", candidate, review_request, request_actor, scenario.get("note_layout", "flat"))
         push_note(workspace, "refs/notes/forest/review-request")

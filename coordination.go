@@ -84,6 +84,7 @@ type reviewRequest struct {
 	Branch   string `json:"branch"`
 	Revision string `json:"revision"`
 	Time     string `json:"time"`
+	Tracker  string `json:"tracker"`
 }
 
 type checksNote struct {
@@ -221,12 +222,21 @@ func validNoteTime(value string) bool {
 	return err == nil
 }
 
+func validTracker(value string) bool {
+	switch value {
+	case "", "github", "powder":
+		return true
+	default:
+		return false
+	}
+}
+
 func decodeReview(data []byte, sha string) (reviewRequest, error) {
 	var note reviewRequest
-	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "subject", "branch", "revision", "time")); err != nil {
+	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "subject", "branch", "revision", "time", "tracker")); err != nil {
 		return note, err
 	}
-	if note.Schema != "forest.review-request.v2" || note.Revision != sha || !branchBelongsToSubject(note.Branch, note.Subject) || !validNoteTime(note.Time) {
+	if note.Schema != "forest.review-request.v2" || note.Revision != sha || !branchBelongsToSubject(note.Branch, note.Subject) || !validNoteTime(note.Time) || !validTracker(note.Tracker) {
 		return note, fmt.Errorf("invalid review-request note")
 	}
 	return note, nil

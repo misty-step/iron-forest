@@ -34,13 +34,14 @@ def add_canonical(canonical: str, target: str, payload: dict, actor: str) -> str
     return private
 
 
-def review_payload(subject: str, branch: str, revision: str) -> dict:
+def review_payload(subject: str, branch: str, revision: str, tracker: str) -> dict:
     return {
         "schema": "forest.review-request.v2",
         "subject": subject,
         "branch": branch,
         "revision": revision,
         "time": TIME,
+        "tracker": tracker,
     }
 
 
@@ -83,11 +84,33 @@ def publish_builder_subject(scenario: dict, state: dict, subject: str) -> None:
     revision = commit_files(state["master_before"], branch, scenario["expected_files"], "builder", "eval: reference implementation")
     if scenario.get("race") == "canonical_note":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/notes/forest/review-request", state["race_note_tip"])
-    payload = review_payload(subject, branch, revision)
+    payload = review_payload(subject, branch, revision, "powder" if powder_job_exists(scenario, subject) else "github")
     private = add_canonical("refs/notes/forest/review-request", revision, payload, "builder")
     evidence_push(WORKSPACE, "request", revision, payload, "builder")
     git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
     PR_CREATED.write_text(json.dumps({"head": branch, "base": "master"}) + "\n")
+
+def powder_job_exists(scenario: dict, subject: str) -> bool:
+    return any(job.get("id") == subject for job in scenario.get("powder_jobs", []))
+
+
+def powder_take(subject: str) -> None:
+    powder_script = Path(__file__).resolve().parent / "powder"
+    run("/usr/bin/python3", str(powder_script), "take", subject, "--agent", "forest-iron-forest")
+
+
+def powder_done(subject: str, revision: str) -> None:
+    powder_script = Path(__file__).resolve().parent / "powder"
+    run(
+        "/usr/bin/python3",
+        str(powder_script),
+        "done",
+        subject,
+        "--proof",
+        revision,
+        "--agent",
+        "forest-iron-forest",
+    )
 
 
 def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
@@ -108,13 +131,16 @@ def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
     if approve:
         refspecs.append(f"{revision}:refs/heads/master")
     git(WORKSPACE, "push", "--atomic", "origin", *refspecs)
+    if approve and powder_job_exists(scenario, "100"):
+        powder_take("100")
+        powder_done("100", revision)
 
 
 
 def publish_fixer(scenario: dict, state: dict) -> str:
     branch = state["branch"]
     revision = commit_files(state["candidate"], branch, scenario["expected_files"], "fixer", "eval: reference repair")
-    payload = review_payload("100", branch, revision)
+    payload = review_payload("100", branch, revision, "powder" if powder_job_exists(scenario, "100") else "github")
     private = add_canonical("refs/notes/forest/review-request", revision, payload, "fixer")
     evidence_push(WORKSPACE, "request", revision, payload, "fixer")
     git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
@@ -209,8 +235,7 @@ def main() -> None:
         publish_builder(scenario, state)
     elif effect == "builder_scope_publish":
         subject = scenario["subject"]
-        powder_script = Path(__file__).resolve().parent / "powder"
-        run("/usr/bin/python3", str(powder_script), "take", subject)
+        powder_take(subject)
         publish_builder_subject(scenario, state, subject)
     elif effect == "builder_scope_held_outside":
         pass
@@ -231,13 +256,15 @@ def main() -> None:
     elif effect == "verifier_approve_race":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/heads/master", state["competitor"])
     elif effect == "fixer_publish":
+        if powder_job_exists(scenario, "100"):
+            powder_take("100")
         publish_fixer(scenario, state)
     elif effect == "fixer_conflict":
         target = commit_files(state["candidate"], state["branch"], scenario["expected_files"], "fixer", "eval: unpublished reference repair")
         publish_conflicting_note(
             "refs/notes/forest/review-request",
             target,
-            review_payload("100", state["branch"], target),
+            review_payload("100", state["branch"], target, "powder" if powder_job_exists(scenario, "100") else "github"),
         )
         git(WORKSPACE, "reset", "--hard", state["candidate"])
     elif effect == "fixer_branch_race":

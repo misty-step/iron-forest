@@ -12,16 +12,24 @@ func TestDecodeReviewAcceptsV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("v2: %v", err)
 	}
-	if note.Schema != "forest.review-request.v2" || note.Subject != "iron-forest-ready" {
+	if note.Schema != "forest.review-request.v2" || note.Subject != "iron-forest-ready" || note.Tracker != "" {
 		t.Fatalf("v2 note=%#v", note)
 	}
-	issue := `{"schema":"forest.review-request.v2","subject":"4","branch":"forest/4/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
+	issue := `{"schema":"forest.review-request.v2","subject":"4","branch":"forest/4/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z","tracker":"github"}`
 	note, err = decodeReview([]byte(issue), sha)
 	if err != nil {
 		t.Fatalf("issue subject: %v", err)
 	}
-	if note.Subject != "4" {
+	if note.Subject != "4" || note.Tracker != "github" {
 		t.Fatalf("issue subject=%#v", note)
+	}
+	powder := `{"schema":"forest.review-request.v2","subject":"if-ready","branch":"forest/if-ready/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z","tracker":"powder"}`
+	note, err = decodeReview([]byte(powder), sha)
+	if err != nil {
+		t.Fatalf("powder tracker: %v", err)
+	}
+	if note.Tracker != "powder" {
+		t.Fatalf("powder note=%#v", note)
 	}
 }
 
@@ -33,6 +41,7 @@ func TestDecodeReviewRejectsV1AndCrossFields(t *testing.T) {
 		`{"schema":"forest.review-request.v2","subject":"iron-forest-ready","branch":"forest/iron-forest-ready-work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`,
 		`{"schema":"forest.review-request.v2","subject":"bad id","branch":"forest/bad-id/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`,
 		`{"schema":"forest.review-request.v3","subject":"x","branch":"forest/x/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`,
+		`{"schema":"forest.review-request.v2","subject":"4","branch":"forest/4/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z","tracker":"jira"}`,
 	}
 	for _, payload := range cases {
 		if _, err := decodeReview([]byte(payload), sha); err == nil {

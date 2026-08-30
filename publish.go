@@ -95,8 +95,16 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if err != nil {
 		return publishReviewRequestResult{}, err
 	}
+	if note.Tracker != "github" && note.Tracker != "powder" {
+		return publishReviewRequestResult{}, fmt.Errorf("review-request tracker must be github or powder")
+	}
 	if note.Branch != input.Branch {
 		return publishReviewRequestResult{}, fmt.Errorf("payload branch %q does not match %q", note.Branch, input.Branch)
+	}
+	if input.Role == "fixer" {
+		if err := requireFixerRequestContinuity(ctx, input.Root, input.Rejected, note); err != nil {
+			return publishReviewRequestResult{}, err
+		}
 	}
 	if err := runConfiguredChecks(ctx, input.Root, revision); err != nil {
 		return publishReviewRequestResult{}, err
@@ -219,6 +227,39 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		}
 	}
 	return publishReviewRequestResult{}, conflictError("canonical note race stopped")
+}
+
+func requireFixerRequestContinuity(ctx context.Context, root, rejected string, note reviewRequest) error {
+	requestRef := evidenceRequestRefPrefix + rejected
+	existing, err := remoteOID(ctx, root, requestRef)
+	if err != nil {
+		return err
+	}
+	if existing == "" {
+		return fmt.Errorf("rejected request evidence is missing")
+	}
+	data, err := evidenceBlob(ctx, root, requestRef, "request.json")
+	if err != nil {
+		return fmt.Errorf("read rejected request: %w", err)
+	}
+	previous, err := decodeReview(data, rejected)
+	if err != nil {
+		return fmt.Errorf("invalid rejected request: %w", err)
+	}
+	if previous.Subject != note.Subject {
+		return fmt.Errorf("fixer subject %q does not match rejected request %q", note.Subject, previous.Subject)
+	}
+	if previous.Branch != note.Branch {
+		return fmt.Errorf("fixer branch %q does not match rejected request %q", note.Branch, previous.Branch)
+	}
+	wantTracker := previous.Tracker
+	if wantTracker == "" {
+		wantTracker = "github"
+	}
+	if note.Tracker != wantTracker {
+		return fmt.Errorf("fixer tracker %q does not match rejected request %q", note.Tracker, wantTracker)
+	}
+	return nil
 }
 
 func runConfiguredChecks(ctx context.Context, root, revision string) (err error) {
