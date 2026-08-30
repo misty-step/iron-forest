@@ -14,6 +14,7 @@ type powderCommandFunc func(context.Context, ...string) ([]byte, []byte, error)
 type powderReconcileResult struct {
 	Revision string
 	Subject  string
+	Tracker  string
 	Powder   bool
 	Terminal bool
 }
@@ -149,6 +150,7 @@ func (p *Poller) currentPowderLanding(ctx context.Context) (powderReconcileResul
 		return result, fmt.Errorf("current primary %s has non-approve verdict", revision)
 	}
 	result.Subject = request.Subject
+	result.Tracker = request.Tracker
 	return result, nil
 }
 
@@ -166,7 +168,7 @@ func (p *Poller) reconcilePowderPrimary(ctx context.Context) (powderReconcileRes
 		return powderReconcileResult{}, fmt.Errorf("POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty")
 	}
 	result, err := p.currentPowderLanding(ctx)
-	if err != nil || result.Subject == "" {
+	if err != nil || result.Subject == "" || result.Tracker != "powder" {
 		return result, err
 	}
 	job, exists, err := p.showPowderJob(ctx, result.Subject)
@@ -184,8 +186,7 @@ func (p *Poller) reconcilePowderPrimary(ctx context.Context) (powderReconcileRes
 		return result, fmt.Errorf("powder job %s belongs to %q, want %q", result.Subject, job.Repo, p.Repo)
 	}
 	if *job.Derived.Terminal {
-		result.Terminal = true
-		return result, nil
+		return acceptTerminalPowder(job, result)
 	}
 	if job.Lease != nil && job.Lease.Agent != agent {
 		return result, fmt.Errorf("powder job %s is held by %q, want %q", result.Subject, job.Lease.Agent, agent)
@@ -202,6 +203,13 @@ func (p *Poller) reconcilePowderPrimary(ctx context.Context) (powderReconcileRes
 	}
 	if !exists || job.ID != result.Subject || job.Repo != p.Repo || !*job.Derived.Terminal {
 		return result, fmt.Errorf("powder job %s did not become terminal", result.Subject)
+	}
+	return acceptTerminalPowder(job, result)
+}
+
+func acceptTerminalPowder(job powderJob, result powderReconcileResult) (powderReconcileResult, error) {
+	if job.Proof != result.Revision {
+		return result, fmt.Errorf("powder job %s proof %q does not match revision %q", result.Subject, job.Proof, result.Revision)
 	}
 	result.Terminal = true
 	return result, nil

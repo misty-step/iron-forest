@@ -10,14 +10,15 @@ import (
 )
 
 type fakePowderLifecycle struct {
-	subject          string
-	repo             string
-	leaseAgent       string
-	terminal         bool
-	proof            string
-	doneFailure      int
-	doneResponseLoss int
-	calls            []string
+	subject               string
+	repo                  string
+	leaseAgent            string
+	terminal              bool
+	proof                 string
+	doneFailure           int
+	doneResponseLoss      int
+	corruptProofAfterDone bool
+	calls                 []string
 }
 
 func (f *fakePowderLifecycle) command(_ context.Context, args ...string) ([]byte, []byte, error) {
@@ -66,6 +67,9 @@ func (f *fakePowderLifecycle) command(_ context.Context, args ...string) ([]byte
 			return nil, []byte(`{"code":"unavailable","error":"temporary outage"}`), errors.New("exit status 1")
 		}
 		f.proof = argumentValue(args, "--proof")
+		if f.corruptProofAfterDone {
+			f.proof = strings.Repeat("c", 40)
+		}
 		f.terminal = true
 		f.leaseAgent = ""
 		return []byte(`{"id":"` + subject + `"}`), nil, nil
@@ -83,10 +87,22 @@ func argumentValue(args []string, name string) string {
 	return ""
 }
 
+func reviewRequestJSON(subject, revision, tracker string) string {
+	payload := `{"schema":"forest.review-request.v2","subject":"` + subject + `","branch":"forest/` + subject + `/work","revision":"` + revision + `","time":"2026-08-29T00:00:00Z"`
+	if tracker != "" {
+		payload += `,"tracker":"` + tracker + `"`
+	}
+	return payload + `}`
+}
+
 func seedApprovedCurrent(t *testing.T, root, subject string) string {
+	return seedApprovedCurrentTracker(t, root, subject, "powder")
+}
+
+func seedApprovedCurrentTracker(t *testing.T, root, subject, tracker string) string {
 	t.Helper()
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	request := `{"schema":"forest.review-request.v2","subject":"` + subject + `","branch":"forest/` + subject + `/work","revision":"` + revision + `","time":"2026-08-29T00:00:00Z"}`
+	request := reviewRequestJSON(subject, revision, tracker)
 	verdict := `{"schema":"forest.verdict.v1","revision":"` + revision + `","verdict":"approve","summary":"approved","time":"2026-08-29T00:00:01Z"}`
 	pushEvidence(t, root, "request", revision, request, "Iron Forest Builder", "builder@forest.invalid")
 	pushEvidence(t, root, "verdict", revision, verdict, "Iron Forest Verifier", "verifier@forest.invalid")
@@ -131,6 +147,20 @@ func TestReconcilePowderPrimaryCompletesCurrentSubject(t *testing.T) {
 	}
 }
 
+func TestReconcilePowderPrimaryCompletesExplicitDecimalPowderSubject(t *testing.T) {
+	root, _ := testClone(t)
+	revision := seedApprovedCurrentTracker(t, root, "100", "powder")
+	lifecycle := &fakePowderLifecycle{leaseAgent: "forest-owner-name"}
+	poller := configuredPowderPoller(t, root, "100", lifecycle)
+	result, err := poller.reconcilePowderPrimary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Powder || !result.Terminal || result.Subject != "100" || lifecycle.proof != revision {
+		t.Fatalf("result=%#v proof=%q", result, lifecycle.proof)
+	}
+}
+
 func TestReconcilePowderPrimaryRetriesAfterDoneFailure(t *testing.T) {
 	root, _ := testClone(t)
 	revision := seedApprovedCurrent(t, root, "if-retry")
@@ -171,16 +201,30 @@ func TestReconcilePowderPrimaryObservesTerminalAfterLostDoneResponse(t *testing.
 }
 
 func TestReconcilePowderPrimarySkipsGitHubAndTerminalSubjects(t *testing.T) {
-	t.Run("GitHub not found", func(t *testing.T) {
+	t.Run("github tracker never probes colliding powder id", func(t *testing.T) {
 		root, _ := testClone(t)
-		seedApprovedCurrent(t, root, "100")
+		seedApprovedCurrentTracker(t, root, "100", "github")
 		lifecycle := &fakePowderLifecycle{}
-		poller := configuredPowderPoller(t, root, "if-other", lifecycle)
+		poller := configuredPowderPoller(t, root, "100", lifecycle)
 		result, err := poller.reconcilePowderPrimary(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Powder || result.Subject != "100" || len(lifecycle.calls) != 1 {
+		if result.Powder || result.Subject != "100" || result.Tracker != "github" || len(lifecycle.calls) != 0 {
+			t.Fatalf("result=%#v calls=%v", result, lifecycle.calls)
+		}
+	})
+
+	t.Run("undiscriminated historical request never probes powder", func(t *testing.T) {
+		root, _ := testClone(t)
+		seedApprovedCurrentTracker(t, root, "if-ready", "")
+		lifecycle := &fakePowderLifecycle{}
+		poller := configuredPowderPoller(t, root, "if-ready", lifecycle)
+		result, err := poller.reconcilePowderPrimary(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Powder || result.Tracker != "" || len(lifecycle.calls) != 0 {
 			t.Fatalf("result=%#v calls=%v", result, lifecycle.calls)
 		}
 	})
@@ -198,7 +242,28 @@ func TestReconcilePowderPrimarySkipsGitHubAndTerminalSubjects(t *testing.T) {
 			t.Fatalf("result=%#v calls=%v", result, lifecycle.calls)
 		}
 	})
+}
 
+func TestReconcilePowderPrimaryRejectsMismatchedProof(t *testing.T) {
+	t.Run("already terminal with other proof", func(t *testing.T) {
+		root, _ := testClone(t)
+		seedApprovedCurrent(t, root, "if-stale")
+		lifecycle := &fakePowderLifecycle{terminal: true, proof: strings.Repeat("b", 40)}
+		poller := configuredPowderPoller(t, root, "if-stale", lifecycle)
+		if _, err := poller.reconcilePowderPrimary(context.Background()); err == nil || !strings.Contains(err.Error(), "does not match revision") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("post-done show returns other proof", func(t *testing.T) {
+		root, _ := testClone(t)
+		seedApprovedCurrent(t, root, "if-corrupt")
+		lifecycle := &fakePowderLifecycle{corruptProofAfterDone: true}
+		poller := configuredPowderPoller(t, root, "if-corrupt", lifecycle)
+		if _, err := poller.reconcilePowderPrimary(context.Background()); err == nil || !strings.Contains(err.Error(), "does not match revision") {
+			t.Fatalf("error=%v", err)
+		}
+	})
 }
 
 func TestReconcilePowderPrimaryRejectsForeignLease(t *testing.T) {

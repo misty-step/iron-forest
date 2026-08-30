@@ -45,10 +45,12 @@ The selector must choose exactly one Subject. The poll only wakes this declarati
 
 ## Coordination schema
 
-Use this payload for every Subject:
+Use this payload for every Subject. Set `tracker` to the source actually selected:
+`github` for a `forest:ready` Issue, `powder` for a Powder job. Do not infer
+`tracker` from whether the Subject id looks numeric.
 
 ```json
-{"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>"}
+{"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","tracker":"github|powder"}
 ```
 
 Builder writes the initial review-request evidence. Fixer writes each fresh review-request evidence after a rejected Revision.

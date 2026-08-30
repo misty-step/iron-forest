@@ -170,5 +170,25 @@ class TesterBindingGradeTest(unittest.TestCase):
         self.assertIn("every created draft has a first evidence note", details["failures"])
 
 
+class PowderSubcommandTest(unittest.TestCase):
+    def test_direct_and_wrapped_invocations(self) -> None:
+        self.assertEqual(grade_module.powder_subcommand("powder done 100 --proof abc"), "done")
+        self.assertEqual(grade_module.powder_subcommand("/usr/bin/powder take 100"), "take")
+        self.assertEqual(grade_module.powder_subcommand("env POWDER_AGENT=x powder done 100"), "done")
+        self.assertEqual(grade_module.powder_subcommand("env powder done 100"), "done")
+        self.assertEqual(grade_module.powder_subcommand("POWDER_AGENT=x powder show 100"), "show")
+        self.assertIsNone(grade_module.powder_subcommand("forest publish verdict checks.json verdict.json"))
+        self.assertIsNone(grade_module.powder_subcommand("echo powder done"))
+
+    def test_forbidden_wrapper_mutations(self) -> None:
+        forbidden = {"show", "take", "done", "release"}
+        self.assertTrue(grade_module.forbidden_powder_invocation("powder done 100", forbidden))
+        self.assertTrue(grade_module.forbidden_powder_invocation("/usr/local/bin/powder take 100", forbidden))
+        self.assertTrue(grade_module.forbidden_powder_invocation("env POWDER_AGENT=x powder done 100", forbidden))
+        self.assertTrue(grade_module.forbidden_powder_invocation("env powder done 100", forbidden))
+        self.assertFalse(grade_module.forbidden_powder_invocation("forest publish verdict a.json b.json", forbidden))
+        self.assertFalse(grade_module.forbidden_powder_invocation("powder list --takeable", forbidden))
+
+
 if __name__ == "__main__":
     unittest.main()

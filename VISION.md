@@ -108,9 +108,12 @@ push `master`.
 
 For a Powder-backed Gate, current primary is the single pending reconciliation
 slot. Before Builder dispatch or a later approve, the Kernel reads only that
-Revision's exact request and approve refs and the bound Powder job. If the job
-is non-terminal, the same repository principal re-takes it and calls `done`
-with the Revision as proof. Failure blocks later work but never reverses or
+Revision's exact request and approve refs. It probes Powder only when the
+request records `tracker: powder`. GitHub and undiscriminated historical
+requests never complete a job, even when a Powder id collides. If the bound
+job is non-terminal, the same repository principal re-takes it and calls
+`done` with the Revision as proof. Terminal observation requires that proof
+to equal the landed Revision. Failure blocks later work but never reverses or
 misreports a successful Gate. The Kernel keeps no outbox and performs no
 historical evidence or board scan.
 

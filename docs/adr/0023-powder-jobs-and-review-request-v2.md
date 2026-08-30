@@ -17,14 +17,17 @@ same factory work are also out.
 
 ## Decision
 
-Git stores one Subject. The review-request note is only:
+Git stores one Subject. New review-request evidence is:
 
 ```json
-{"schema":"forest.review-request.v2","subject":"<id>","branch":"...","revision":"<sha>","time":"<rfc3339>"}
+{"schema":"forest.review-request.v2","subject":"<id>","branch":"...","revision":"<sha>","time":"<rfc3339>","tracker":"github|powder"}
 ```
 
 `<subject>` is a Powder slug: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. A GitHub
-Issue number is that decimal string. The branch is only
+Issue number is that decimal string. `tracker` is the source actually selected,
+never inferred from the id. Publication requires `github` or `powder`.
+Historical v2 evidence without `tracker` stays Gate-readable and is never
+Powder-completion-eligible. The branch is only
 `forest/<subject>/<slug>`. `<slug>` keeps the old work-slug rule. The slash
 is required because subjects contain hyphens.
 
@@ -65,5 +68,8 @@ Current primary is one bounded pending-completion slot. A later approve cannot
 replace it, and Builder cannot dispatch, until its Powder job is terminal.
 Failure after the atomic approve push is projection lag: the Gate remains
 successful and the next Kernel boundary retries. Recovery reads no historical
-ref set or board list and stores no outbox. A GitHub Subject produces
-`not_found` from `powder show` and needs no Powder mutation.
+ref set or board list and stores no outbox. The Kernel probes Powder only when
+the current request has `tracker: powder`. A GitHub or undiscriminated
+historical request never calls `show`, `take`, or `done`, even if a Powder job
+shares that id. Every accepted terminal observation requires `proof` equal to
+the landed Revision.

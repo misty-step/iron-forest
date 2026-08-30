@@ -39,10 +39,13 @@ The selector must choose one rejected Revision. The poll only wakes this declara
 
 ## Coordination schema
 
-Reuse the selected request's `subject` and `branch`. Replace only `revision` and `time`.
+Reuse the selected request's `subject`, `branch`, and `tracker`. Replace only
+`revision` and `time`. If the selected request has no `tracker`, set it to
+`powder` when this Subject is a Powder job, otherwise `github`. Do not infer
+`tracker` from whether the Subject id looks numeric.
 
 ```json
-{"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>"}
+{"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","tracker":"github|powder"}
 ```
 
 Builder writes the initial review-request evidence. Fixer writes each fresh review-request evidence after a rejected Revision.

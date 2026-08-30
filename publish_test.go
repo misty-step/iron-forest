@@ -32,7 +32,7 @@ checks:
 
 func writeReviewPayload(t *testing.T, root, revision, branch string) string {
 	t.Helper()
-	payload := `{"schema":"forest.review-request.v2","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + revision + `","time":"2026-08-15T00:00:00Z"}`
+	payload := `{"schema":"forest.review-request.v2","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + revision + `","time":"2026-08-15T00:00:00Z","tracker":"github"}`
 	path := filepath.Join(t.TempDir(), "review.json")
 	if err := os.WriteFile(path, []byte(payload+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestPublishReviewRequestAcceptsV2PowderSubject(t *testing.T) {
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/iron-forest-ready/work")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	payload := `{"schema":"forest.review-request.v2","subject":"iron-forest-ready","branch":"forest/iron-forest-ready/work","revision":"` + revision + `","time":"2026-08-15T00:00:00Z"}`
+	payload := `{"schema":"forest.review-request.v2","subject":"iron-forest-ready","branch":"forest/iron-forest-ready/work","revision":"` + revision + `","time":"2026-08-15T00:00:00Z","tracker":"powder"}`
 	path := filepath.Join(t.TempDir(), "review.json")
 	if err := os.WriteFile(path, []byte(payload+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -96,8 +96,31 @@ func TestPublishReviewRequestAcceptsV2PowderSubject(t *testing.T) {
 	}
 	runGitDir(t, root, "fetch", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
 	note := string(runGitDir(t, root, "notes", "--ref="+reviewRequestNoteRef, "show", revision))
-	if !strings.Contains(note, `"schema":"forest.review-request.v2"`) || !strings.Contains(note, `"subject":"iron-forest-ready"`) {
+	if !strings.Contains(note, `"schema":"forest.review-request.v2"`) || !strings.Contains(note, `"subject":"iron-forest-ready"`) || !strings.Contains(note, `"tracker":"powder"`) {
 		t.Fatalf("note=%q", note)
+	}
+}
+
+func TestPublishReviewRequestRequiresTracker(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	payload := `{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/ready","revision":"` + revision + `","time":"2026-08-15T00:00:00Z"}`
+	path := filepath.Join(t.TempDir(), "review.json")
+	if err := os.WriteFile(path, []byte(payload+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FOREST_RUN_ID", "1-builder")
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root:        root,
+		Role:        "builder",
+		Branch:      "forest/1/ready",
+		PayloadPath: path,
+		RunID:       "1-builder",
+	})
+	if err == nil || !strings.Contains(err.Error(), "tracker must be github or powder") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -639,7 +662,7 @@ func TestPublishReviewRequestKeepsCapturedPayloadIfCheckRewritesFile(t *testing.
 	}
 	runGitDir(t, root, "commit", "-am", "check rewrites payload")
 	revision = strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	original := []byte(`{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/ready","revision":"` + revision + `","time":"2026-08-15T00:00:00Z"}` + "\n")
+	original := []byte(`{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/ready","revision":"` + revision + `","time":"2026-08-15T00:00:00Z","tracker":"github"}` + "\n")
 	if err := os.WriteFile(payload, original, 0o644); err != nil {
 		t.Fatal(err)
 	}

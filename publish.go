@@ -95,6 +95,9 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if err != nil {
 		return publishReviewRequestResult{}, err
 	}
+	if note.Tracker != "github" && note.Tracker != "powder" {
+		return publishReviewRequestResult{}, fmt.Errorf("review-request tracker must be github or powder")
+	}
 	if note.Branch != input.Branch {
 		return publishReviewRequestResult{}, fmt.Errorf("payload branch %q does not match %q", note.Branch, input.Branch)
 	}

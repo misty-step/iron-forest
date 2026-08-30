@@ -166,7 +166,7 @@ checks:
 func pushRequestForRevision(t *testing.T, root, subject, revision string) {
 	t.Helper()
 	branch := "forest/" + subject + "/work"
-	request := `{"schema":"forest.review-request.v2","subject":"` + subject + `","branch":"` + branch + `","revision":"` + revision + `","time":"2026-08-29T00:00:00Z"}`
+	request := reviewRequestJSON(subject, revision, "powder")
 	pushEvidence(t, root, "request", revision, request, "Iron Forest Builder", "builder@forest.invalid")
 	runGitDir(t, root, "push", "origin", revision+":refs/heads/"+branch)
 }

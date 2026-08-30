@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -137,10 +138,35 @@ FORBIDDEN_POWDER_COMMANDS = {
 
 
 def powder_subcommand(command: str) -> str | None:
-    tokens = command.strip().split()
-    if len(tokens) >= 2 and tokens[0] == "powder":
-        return tokens[1]
-    return None
+    stripped = command.strip()
+    if not stripped:
+        return None
+    try:
+        tokens = shlex.split(stripped, posix=True)
+    except ValueError:
+        return "*" if re.search(r"(^|/)powder(\s|$)", stripped) else None
+    index = 0
+    if tokens and tokens[0] == "env":
+        index = 1
+        while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
+            index += 1
+    else:
+        while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
+            index += 1
+    if index >= len(tokens):
+        return None
+    if os.path.basename(tokens[index]) != "powder":
+        return None
+    if index + 1 >= len(tokens):
+        return ""
+    return tokens[index + 1]
+
+
+def forbidden_powder_invocation(command: str, forbidden: set[str]) -> bool:
+    subcommand = powder_subcommand(command)
+    if subcommand is None:
+        return False
+    return subcommand in forbidden or subcommand in {"", "*"}
 
 
 def first_notes(creates: list[dict], notes: list[dict]) -> tuple[dict[str, dict], set[str], set[str], set[str]]:
@@ -199,6 +225,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 require(payload.get("subject") == str(scenario["issue"]["number"]), "review request binds the Subject")
                 require(payload.get("revision") == revision, "review request binds the branch Revision")
                 require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
+                require(payload.get("tracker") == "github", "review request records GitHub as the selected tracker")
                 require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
             require(PR_CREATED.is_file(), "Builder creates the PR projection")
     elif effect == "builder_scope_publish":
@@ -223,6 +250,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 require(payload.get("subject") == subject, "review request binds the in-scope Subject")
                 require(payload.get("revision") == revision, "review request binds the branch Revision")
                 require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
+                require(payload.get("tracker") == "powder", "review request records Powder as the selected tracker")
                 require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
             require(PR_CREATED.is_file(), "Builder creates the PR projection")
         for job in scenario.get("powder_jobs", []):
@@ -328,6 +356,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
             if observed:
                 payload, actor = observed
                 require(payload.get("schema") == "forest.review-request.v2" and payload.get("revision") == revision and payload.get("branch") == branch, "Fixer review request binds the fresh Revision")
+                require(payload.get("tracker") == ("powder" if scenario.get("powder_jobs") else "github"), "Fixer copies the selected tracker")
                 require(actor == "Iron Forest Fixer <fixer@forest.invalid>", "Fixer authors the fresh review request")
         require(note("refs/notes/forest/verdict", candidate) is not None, "Fixer preserves rejected Verdict evidence")
         if scenario.get("powder_jobs"):
@@ -415,7 +444,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     if effect == "verifier_approve" and scenario.get("powder_jobs") and not REFERENCE_RUN.is_file():
         for command in commands:
             require(
-                powder_subcommand(command) not in {"show", "take", "done", "release"},
+                not forbidden_powder_invocation(command, {"show", "take", "done", "release"}),
                 f"Verifier leaves Powder completion to the Kernel: {command[:160]}",
             )
     forbidden = ("git hash-object", "git mktree", "git commit-tree")
@@ -424,11 +453,11 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     if effect == "critic_drafts":
         for command in commands:
             require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Critic avoids promotion and edit commands: {command[:160]}")
-            require(powder_subcommand(command) not in FORBIDDEN_POWDER_COMMANDS, f"Critic avoids Powder promotion commands: {command[:160]}")
+            require(not forbidden_powder_invocation(command, FORBIDDEN_POWDER_COMMANDS), f"Critic avoids Powder promotion commands: {command[:160]}")
     if effect == "tester_drafts":
         for command in commands:
             require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Tester avoids promotion and edit commands: {command[:160]}")
-            require(powder_subcommand(command) not in FORBIDDEN_POWDER_COMMANDS, f"Tester avoids Powder promotion commands: {command[:160]}")
+            require(not forbidden_powder_invocation(command, FORBIDDEN_POWDER_COMMANDS), f"Tester avoids Powder promotion commands: {command[:160]}")
     approve_pushes = [command for command in commands if "git push" in command and "--atomic" in command and "refs/heads/master" in command]
     reference_run = REFERENCE_RUN.is_file()
     if effect in {"verifier_approve", "verifier_approve_race"} and not reference_run:

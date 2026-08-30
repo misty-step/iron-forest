@@ -34,13 +34,14 @@ def add_canonical(canonical: str, target: str, payload: dict, actor: str) -> str
     return private
 
 
-def review_payload(subject: str, branch: str, revision: str) -> dict:
+def review_payload(subject: str, branch: str, revision: str, tracker: str) -> dict:
     return {
         "schema": "forest.review-request.v2",
         "subject": subject,
         "branch": branch,
         "revision": revision,
         "time": TIME,
+        "tracker": tracker,
     }
 
 
@@ -83,7 +84,7 @@ def publish_builder_subject(scenario: dict, state: dict, subject: str) -> None:
     revision = commit_files(state["master_before"], branch, scenario["expected_files"], "builder", "eval: reference implementation")
     if scenario.get("race") == "canonical_note":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/notes/forest/review-request", state["race_note_tip"])
-    payload = review_payload(subject, branch, revision)
+    payload = review_payload(subject, branch, revision, "powder" if powder_job_exists(scenario, subject) else "github")
     private = add_canonical("refs/notes/forest/review-request", revision, payload, "builder")
     evidence_push(WORKSPACE, "request", revision, payload, "builder")
     git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
@@ -139,7 +140,7 @@ def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
 def publish_fixer(scenario: dict, state: dict) -> str:
     branch = state["branch"]
     revision = commit_files(state["candidate"], branch, scenario["expected_files"], "fixer", "eval: reference repair")
-    payload = review_payload("100", branch, revision)
+    payload = review_payload("100", branch, revision, "powder" if powder_job_exists(scenario, "100") else "github")
     private = add_canonical("refs/notes/forest/review-request", revision, payload, "fixer")
     evidence_push(WORKSPACE, "request", revision, payload, "fixer")
     git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
@@ -263,7 +264,7 @@ def main() -> None:
         publish_conflicting_note(
             "refs/notes/forest/review-request",
             target,
-            review_payload("100", state["branch"], target),
+            review_payload("100", state["branch"], target, "powder" if powder_job_exists(scenario, "100") else "github"),
         )
         git(WORKSPACE, "reset", "--hard", state["candidate"])
     elif effect == "fixer_branch_race":

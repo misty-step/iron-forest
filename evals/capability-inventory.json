@@ -270,22 +270,22 @@
       "id": "forest-powder-completion-boundary",
       "suite": "whole-forest",
       "subject": "forest",
-      "behavior": "Skip Powder mutation for a GitHub Subject or an already-terminal current Powder job.",
+      "behavior": "Skip Powder mutation unless current request evidence has tracker powder and matching terminal proof.",
       "class": "boundary",
       "sources": [
-        {"path": "powder_completion.go", "note": "not_found and terminal are explicit no-mutation outcomes"},
-        {"path": "docs/adr/0023-powder-jobs-and-review-request-v2.md", "note": "GitHub and Powder share Subject identity but not terminal projection"}
+        {"path": "powder_completion.go", "note": "tracker other than powder never probes; terminal requires proof equality"},
+        {"path": "docs/adr/0023-powder-jobs-and-review-request-v2.md", "note": "tracker is selected source evidence, never an id heuristic"}
       ],
       "incident": null,
       "positive": {
-        "setup": "The current approved request Subject is a GitHub Issue and Powder show returns not_found.",
+        "setup": "The current approved request has tracker github even when a Powder job shares that decimal id.",
         "action": "The Kernel classifies the current Gate.",
-        "reference_outcome": "No Powder take or done is attempted and normal dispatch continues."
+        "reference_outcome": "No Powder show, take, or done is attempted and normal dispatch continues."
       },
       "counterexample": {
-        "setup": "The current request maps to a Powder job that is already terminal.",
+        "setup": "The current request maps to a Powder job that is already terminal with a different proof.",
         "action": "The Kernel checks the job before mutating.",
-        "reference_outcome": "No re-take or duplicate done is attempted."
+        "reference_outcome": "Reconciliation fails closed and later work stays blocked."
       }
     },
     {
