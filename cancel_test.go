@@ -130,7 +130,7 @@ done
 		t.Fatal("Runner did not finish after cancel")
 	}
 
-	rows, err := ReadLedger(root)
+	rows, err := readLedger(root, -1)
 	if err != nil {
 		t.Fatal(err)
 	}

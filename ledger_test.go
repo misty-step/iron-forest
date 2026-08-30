@@ -381,8 +381,8 @@ func TestLedgerRejectsInvalidExistingBytesWithoutPublication(t *testing.T) {
 	if !reflect.DeepEqual(got, before) {
 		t.Fatalf("ledger bytes=%q, want unchanged %q", got, before)
 	}
-	if _, err := ReadLedger(root); err == nil || !strings.Contains(err.Error(), "missing newline") {
-		t.Fatalf("ReadLedger() error=%v, want missing-newline validation error", err)
+	if _, err := readLedger(root, -1); err == nil || !strings.Contains(err.Error(), "missing newline") {
+		t.Fatalf("readLedger() error=%v, want missing-newline validation error", err)
 	}
 	requireNoLedgerTemps(t, root)
 }
@@ -672,13 +672,13 @@ func TestLedgerProcessDeathKeepsCanonicalIntegrity(t *testing.T) {
 	readDone := make(chan readResult, 1)
 	go func() {
 		close(readerStarted)
-		rows, err := ReadLedger(root)
+		rows, err := readLedger(root, -1)
 		readDone <- readResult{rows: rows, err: err}
 	}()
 	<-readerStarted
 	select {
 	case result := <-readDone:
-		t.Fatalf("ReadLedger completed while writer held the directory lock: rows=%#v error=%v", result.rows, result.err)
+		t.Fatalf("readLedger completed while writer held the directory lock: rows=%#v error=%v", result.rows, result.err)
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -694,10 +694,10 @@ func TestLedgerProcessDeathKeepsCanonicalIntegrity(t *testing.T) {
 	select {
 	case result = <-readDone:
 	case <-time.After(5 * time.Second):
-		t.Fatal("ReadLedger did not continue after crash writer released the directory lock")
+		t.Fatal("readLedger did not continue after crash writer released the directory lock")
 	}
 	if result.err != nil || !reflect.DeepEqual(result.rows, []RunRecord{first}) {
-		t.Fatalf("ReadLedger after process death rows=%#v error=%v, want prior row", result.rows, result.err)
+		t.Fatalf("readLedger after process death rows=%#v error=%v, want prior row", result.rows, result.err)
 	}
 	if countLedgerTemps(t, root) == 0 {
 		t.Fatal("crash writer left no temp, so the stale-temp read path was not exercised")
@@ -706,7 +706,7 @@ func TestLedgerProcessDeathKeepsCanonicalIntegrity(t *testing.T) {
 	if err := AppendRun(root, second); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := ReadLedger(root)
+	rows, err := readLedger(root, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +767,7 @@ func TestLedgerConcurrentAppendSerialization(t *testing.T) {
 	if overlapped {
 		t.Fatal("ledger temp writes overlapped")
 	}
-	rows, err := ReadLedger(root)
+	rows, err := readLedger(root, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +802,7 @@ func requireLedgerState(t *testing.T, root string, wantBytes []byte, wantRows []
 			t.Fatalf("ledger bytes=%q, want %q", gotBytes, wantBytes)
 		}
 	}
-	gotRows, err := ReadLedger(root)
+	gotRows, err := readLedger(root, -1)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -105,7 +105,7 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 				}
 			}
 			assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, test.noteKind)
-			rows, err := ReadLedger(root)
+			rows, err := readLedger(root, -1)
 			if err != nil || len(rows) != 1 {
 				t.Fatalf("ledger rows=%v err=%v", rows, err)
 			}
@@ -214,7 +214,7 @@ func TestRunnerRejectsChangedDeclarationBundle(t *testing.T) {
 	if body, readErr := os.ReadFile(marker); readErr != nil || string(body) != "ran" {
 		t.Fatalf("Pi did not start for an unchanged bundle: %q err=%v", body, readErr)
 	}
-	rows, ledgerErr := ReadLedger(root)
+	rows, ledgerErr := readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 || rows[0].DefinitionSHA != declaration.DefinitionSHA {
 		t.Fatalf("ledger rows=%v err=%v, want one passing row with the digest", rows, ledgerErr)
 	}
@@ -241,7 +241,7 @@ func TestRunnerRejectsChangedDeclarationBundle(t *testing.T) {
 	if body, readErr := os.ReadFile(marker); !errors.Is(readErr, os.ErrNotExist) {
 		t.Fatalf("Pi started despite the changed bundle: %q err=%v", body, readErr)
 	}
-	rows, ledgerErr = ReadLedger(root)
+	rows, ledgerErr = readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 2 || rows[1].Exit == 0 || rows[1].DefinitionSHA != "" {
 		t.Fatalf("ledger rows=%v err=%v, want a second nonzero-exit row without a verified digest", rows, ledgerErr)
 	}
@@ -263,7 +263,7 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	if record.Exit != 1 {
 		t.Fatalf("invalid usage exit=%d, want 1", record.Exit)
 	}
-	rows, ledgerErr := ReadLedger(root)
+	rows, ledgerErr := readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
 		t.Fatalf("invalid usage ledger=%v err=%v, want one failing row", rows, ledgerErr)
 	}
@@ -304,7 +304,7 @@ exit 0
 	if record.TokensIn != 1 || record.TokensOut != 2 {
 		t.Fatalf("terminal Pi error usage=%#v, want earlier valid usage", record)
 	}
-	rows, ledgerErr := ReadLedger(root)
+	rows, ledgerErr := readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != 1 {
 		t.Fatalf("terminal Pi error ledger=%v err=%v, want one failing row", rows, ledgerErr)
 	}
@@ -368,7 +368,7 @@ func TestRunnerRejectsUsageWithoutRecognizedAlias(t *testing.T) {
 			if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "parse harness usage") {
 				t.Fatalf("drifted usage record=%#v err=%v", record, err)
 			}
-			rows, ledgerErr := ReadLedger(root)
+			rows, ledgerErr := readLedger(root, -1)
 			if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
 				t.Fatalf("drifted usage ledger=%v err=%v, want one failing row", rows, ledgerErr)
 			}
@@ -515,7 +515,7 @@ func TestRunnerAllowsRunsPastFormerMinimumDeadline(t *testing.T) {
 	if record.Duration < 1 {
 		t.Fatalf("long Run duration=%v, want at least one second", record.Duration)
 	}
-	rows, ledgerErr := ReadLedger(root)
+	rows, ledgerErr := readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 {
 		t.Fatalf("long Run ledger=%v err=%v", rows, ledgerErr)
 	}
@@ -550,7 +550,7 @@ exit 0
 		t.Fatalf("leader-success record=%#v err=%v", record, err)
 	}
 	assertProcessQuiescent(t, heartbeat, "group child", "successful leader")
-	rows, ledgerErr := ReadLedger(root)
+	rows, ledgerErr := readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 0 {
 		t.Fatalf("leader-success ledger=%v err=%v, want one success row", rows, ledgerErr)
 	}
@@ -608,7 +608,7 @@ done
 	if time.Since(started) > 15*time.Second {
 		t.Fatalf("watchdog took %v", time.Since(started))
 	}
-	rows, ledgerErr := ReadLedger(root)
+	rows, ledgerErr := readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != runCancelledExit || rows[0].Error != runCancelledError {
 		t.Fatalf("watchdog ledger=%v err=%v, want one cancelled row", rows, ledgerErr)
 	}
@@ -645,7 +645,7 @@ while :; do sleep 1; done
 	if err == nil || record.Exit != 124 {
 		t.Fatalf("leader-stop record=%#v err=%v", record, err)
 	}
-	rows, ledgerErr := ReadLedger(root)
+	rows, ledgerErr := readLedger(root, -1)
 	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 124 {
 		t.Fatalf("leader-stop ledger=%v err=%v, want one deadline row", rows, ledgerErr)
 	}
@@ -749,7 +749,7 @@ func TestRunnerCallerDeadlineIncludesPreparation(t *testing.T) {
 	if err == nil || record.Exit != 124 || time.Since(started) > 3*time.Second {
 		t.Fatalf("prepare deadline record=%#v err=%v elapsed=%v", record, err, time.Since(started))
 	}
-	rows, readErr := ReadLedger(root)
+	rows, readErr := readLedger(root, -1)
 	if readErr != nil || len(rows) != 1 || rows[0].Exit != 124 {
 		t.Fatalf("ledger=%v err=%v", rows, readErr)
 	}
@@ -881,7 +881,7 @@ exec "$REAL_GIT" "$@"
 	if list := string(runGitDir(t, root, "worktree", "list", "--porcelain")); strings.Contains(list, worktree) {
 		t.Fatalf("failed Git remove left registry residue:\n%s", list)
 	}
-	rows, readErr := ReadLedger(root)
+	rows, readErr := readLedger(root, -1)
 	if readErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
 		t.Fatalf("ledger=%v err=%v", rows, readErr)
 	}
