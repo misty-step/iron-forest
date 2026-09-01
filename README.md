@@ -164,6 +164,19 @@ mise exec -- go build -o forest .
 The read-only Auditor runs after each completed agent dispatch. Starting the
 Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
 
+### Adopting merged revisions
+
+Adopt merged revisions with the fenced update procedure:
+
+    deploy/install-service.sh update <instance>
+
+It checks that the working tree is clean, stops the service (which stops new
+dispatches and drains live Runs), confirms the instance is inactive,
+fast-forwards the checkout to the remote primary, rebuilds, runs
+`./forest selfcheck`, forces a fresh audit with `./forest audit show --rescan`,
+restarts the service, and verifies it is active. Never restart-only: the unit
+runs the checkout-local binary.
+
 Before `serve` or `once` loads trigger health, the Scheduler performs reserved
 garbage collection under the Kernel lock. One 30-second deadline bounds the
 total operation. It removes reserved `.forest/worktrees/<run-id>` paths through
