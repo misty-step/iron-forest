@@ -146,6 +146,7 @@ func TestAuditSnapshotsPrimaryBranch(t *testing.T) {
 func TestPublishVerdictApproveFastForwardsPrimaryBranch(t *testing.T) {
 	root, origin := newPrimaryBranchFixture(t, "main")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-primary-branch", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
 		Root: root, ChecksPath: checks, VerdictPath: verdict,

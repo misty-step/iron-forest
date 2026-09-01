@@ -262,7 +262,11 @@ func requireFixerRequestContinuity(ctx context.Context, root, rejected string, n
 	return nil
 }
 
-func runConfiguredChecks(ctx context.Context, root, revision string) (err error) {
+func runConfiguredChecks(ctx context.Context, root, revision string) error {
+	return runConfiguredChecksWithAttestation(ctx, root, revision, nil)
+}
+
+func runConfiguredChecksWithAttestation(ctx context.Context, root, revision string, attested []checkResult) (err error) {
 	shell, err := trustedExecutable(root, "sh")
 	if err != nil {
 		return err
@@ -285,6 +289,11 @@ func runConfiguredChecks(ctx context.Context, root, revision string) (err error)
 	if loadErr != nil {
 		return loadErr
 	}
+	if attested != nil {
+		if matchErr := requireMatchingCheckNames(cfg.Checks, attested); matchErr != nil {
+			return matchErr
+		}
+	}
 	path, pathErr := trustedPath(root)
 	if pathErr != nil {
 		return pathErr
@@ -299,6 +308,25 @@ func runConfiguredChecks(ctx context.Context, root, revision string) (err error)
 		if runErr != nil {
 			return fmt.Errorf("check %q failed: %w\n%s%s", check.Name, runErr, output, stderr.Bytes())
 		}
+	}
+	return nil
+}
+
+func requireMatchingCheckNames(configured []Check, attested []checkResult) error {
+	configuredNames := make([]string, len(configured))
+	for index, check := range configured {
+		configuredNames[index] = check.Name
+	}
+	attestedNames := make([]string, len(attested))
+	match := len(configured) == len(attested)
+	for index, result := range attested {
+		attestedNames[index] = result.Name
+		if index >= len(configured) || result.Name != configured[index].Name {
+			match = false
+		}
+	}
+	if !match {
+		return fmt.Errorf("submitted Checks names %v do not match configured names %v", attestedNames, configuredNames)
 	}
 	return nil
 }

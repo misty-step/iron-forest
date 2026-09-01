@@ -98,8 +98,14 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err != nil {
 		return publishVerdictResult{}, err
 	}
-	if _, err := decodeChecks(checksData, revision); err != nil {
+	checks, err := decodeChecks(checksData, revision)
+	if err != nil {
 		return publishVerdictResult{}, err
+	}
+	if verdict.Verdict == "approve" {
+		if err := requirePassingApprovalChecks(checks); err != nil {
+			return publishVerdictResult{}, err
+		}
 	}
 
 	checksRef := evidenceChecksRefPrefix + revision
@@ -138,6 +144,7 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 
 	var primaryRef string
 	var powder *Poller
+	var requestOID string
 	if verdict.Verdict == "approve" {
 		cfg, loadErr := loadConfig(configPath(input.Root))
 		if loadErr != nil {
@@ -151,10 +158,14 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		if powder == nil {
 			powder = NewPoller(input.Root, cfg.Repo, Scope{})
 		}
+		requestOID, err = requireApprovalRequest(ctx, input.Root, powder, revision)
+		if err != nil {
+			return publishVerdictResult{}, err
+		}
 		if _, err := powder.reconcilePowderPrimary(ctx); err != nil {
 			return publishVerdictResult{}, fmt.Errorf("reconcile current Powder Subject before approve: %w", err)
 		}
-		if err := runConfiguredChecks(ctx, input.Root, revision); err != nil {
+		if err := runConfiguredChecksWithAttestation(ctx, input.Root, revision, checks.Results); err != nil {
 			return publishVerdictResult{}, err
 		}
 	}
@@ -171,12 +182,18 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		"push", "--atomic",
 		"--force-with-lease=" + checksRef + ":",
 		"--force-with-lease=" + verdictRef + ":",
-		"origin",
-		checksCommit + ":" + checksRef,
-		verdictCommit + ":" + verdictRef,
 	}
 	if verdict.Verdict == "approve" {
-		args = append(args, revision+":"+primaryRef)
+		args = append(args, "--force-with-lease="+evidenceRequestRefPrefix+revision+":"+requestOID)
+	}
+	args = append(args,
+		"origin",
+		checksCommit+":"+checksRef,
+		verdictCommit+":"+verdictRef,
+	)
+	if verdict.Verdict == "approve" {
+		requestRef := evidenceRequestRefPrefix + revision
+		args = append(args, requestOID+":"+requestRef, revision+":"+primaryRef)
 	}
 	if err := gitRun(ctx, input.Root, args...); err != nil {
 		return publishVerdictResult{}, classifyVerdictPush(err)
@@ -187,6 +204,38 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		result = withPowderReconciliation(result, reconciliation, reconcileErr)
 	}
 	return result, nil
+}
+
+func requirePassingApprovalChecks(checks checksNote) error {
+	for _, result := range checks.Results {
+		if !result.OK || result.Exit != 0 {
+			return fmt.Errorf("cannot approve with failing Checks result %q (ok=%t exit=%d)", result.Name, result.OK, result.Exit)
+		}
+	}
+	return nil
+}
+
+func requireApprovalRequest(ctx context.Context, root string, poller *Poller, revision string) (string, error) {
+	data, oid, err := poller.evidencePayloadAndOID(ctx, "request", revision, "builder", "fixer")
+	if isMissingNote(err) {
+		return "", fmt.Errorf("missing request evidence for approve revision %s", revision)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read request evidence for approve: %w", err)
+	}
+	request, err := decodeReview(data, revision)
+	if err != nil {
+		return "", fmt.Errorf("invalid request evidence for approve: %w", err)
+	}
+	branchRef := "refs/heads/" + request.Branch
+	tip, err := remoteOID(ctx, root, branchRef)
+	if err != nil {
+		return "", fmt.Errorf("read request branch tip: %w", err)
+	}
+	if tip != revision {
+		return "", fmt.Errorf("request branch %q tip %q does not match revision %s", request.Branch, tip, revision)
+	}
+	return oid, nil
 }
 
 func payloadRevision(data []byte) (string, error) {

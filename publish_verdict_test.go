@@ -10,14 +10,17 @@ import (
 
 func writeEvidencePayloads(t *testing.T, revision, verdict string) (string, string) {
 	t.Helper()
-	dir := t.TempDir()
-	ok := "true"
-	exit := "0"
+	results := `[{"name":"test","ok":true,"exit":0}]`
 	if verdict == "changes" {
-		ok = "false"
-		exit = "1"
+		results = `[{"name":"test","ok":false,"exit":1}]`
 	}
-	checks := `{"schema":"forest.checks.v1","revision":"` + revision + `","results":[{"name":"test","ok":` + ok + `,"exit":` + exit + `}],"time":"2026-08-17T00:00:00Z"}` + "\n"
+	return writeEvidencePayloadsWithResults(t, revision, verdict, results)
+}
+
+func writeEvidencePayloadsWithResults(t *testing.T, revision, verdict, results string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	checks := `{"schema":"forest.checks.v1","revision":"` + revision + `","results":` + results + `,"time":"2026-08-17T00:00:00Z"}` + "\n"
 	verdictPayload := `{"schema":"forest.verdict.v1","revision":"` + revision + `","verdict":"` + verdict + `","summary":"eval","time":"2026-08-17T00:00:00Z"}` + "\n"
 	checksPath := filepath.Join(dir, "checks.json")
 	verdictPath := filepath.Join(dir, "verdict.json")
@@ -28,6 +31,13 @@ func writeEvidencePayloads(t *testing.T, revision, verdict string) (string, stri
 		t.Fatal(err)
 	}
 	return checksPath, verdictPath
+}
+
+func requireMissingRemoteRef(t *testing.T, root, ref string) {
+	t.Helper()
+	if output := strings.TrimSpace(string(runGitDir(t, root, "ls-remote", "origin", ref))); output != "" {
+		t.Fatalf("remote ref %s exists: %s", ref, output)
+	}
 }
 
 func TestPublishVerdictChangesCreatesEvidenceRefs(t *testing.T) {
@@ -60,6 +70,7 @@ func TestPublishVerdictApproveFastForwardsMaster(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-approve", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
 		Root: root, ChecksPath: checks, VerdictPath: verdict,
@@ -74,6 +85,130 @@ func TestPublishVerdictApproveFastForwardsMaster(t *testing.T) {
 	if got != revision {
 		t.Fatalf("master=%s want %s", got, revision)
 	}
+}
+
+func TestPublishVerdictApproveRejectsMissingRequest(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing request evidence") {
+		t.Fatalf("error=%v, want missing request evidence", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != before {
+		t.Fatalf("master moved to %s", got)
+	}
+	requireMissingRemoteRef(t, root, evidenceChecksRefPrefix+revision)
+	requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
+}
+
+func TestPublishVerdictApproveRejectsFailingChecks(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
+	pushRequestForRevision(t, root, "if-failing-checks", revision)
+	checks, verdict := writeEvidencePayloadsWithResults(t, revision, "approve", `[{"name":"test","ok":false,"exit":1}]`)
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict,
+	})
+	if err == nil || !strings.Contains(err.Error(), "failing Checks result") {
+		t.Fatalf("error=%v, want failing Checks result", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != before {
+		t.Fatalf("master moved to %s", got)
+	}
+	requireMissingRemoteRef(t, root, evidenceChecksRefPrefix+revision)
+	requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
+}
+
+func TestPublishVerdictApproveRejectsCheckNameMismatch(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
+	pushRequestForRevision(t, root, "if-check-names", revision)
+	checks, verdict := writeEvidencePayloadsWithResults(t, revision, "approve", `[{"name":"other","ok":true,"exit":0}]`)
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict,
+	})
+	if err == nil || !strings.Contains(err.Error(), "do not match configured names") {
+		t.Fatalf("error=%v, want configured-name mismatch", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != before {
+		t.Fatalf("master moved to %s", got)
+	}
+	requireMissingRemoteRef(t, root, evidenceChecksRefPrefix+revision)
+	requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
+}
+
+func TestRequireMatchingCheckNamesRejectsDifferentOrder(t *testing.T) {
+	configured := []Check{{Name: "test"}, {Name: "vet"}}
+	attested := []checkResult{{Name: "vet"}, {Name: "test"}}
+	if err := requireMatchingCheckNames(configured, attested); err == nil {
+		t.Fatal("expected configured order mismatch")
+	}
+}
+
+func TestPublishVerdictApproveRejectsMovedRequestBranch(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
+	pushRequestForRevision(t, root, "if-moved-branch", revision)
+	if err := os.WriteFile(filepath.Join(root, "later"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "add", "later")
+	runGitDir(t, root, "commit", "-m", "move request branch")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/if-moved-branch/work")
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match revision") {
+		t.Fatalf("error=%v, want request branch mismatch", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != before {
+		t.Fatalf("master moved to %s", got)
+	}
+	requireMissingRemoteRef(t, root, evidenceChecksRefPrefix+revision)
+	requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
+}
+
+func TestPublishVerdictApproveLeasesRequest(t *testing.T) {
+	root, origin := testClone(t)
+	config := []byte(`repo: owner/name
+primary: refs/heads/master
+agents:
+  builder: {poll: "true", interval: 1}
+checks:
+  - {name: test, run: 'sha=$(git rev-parse HEAD); git push --force origin HEAD:refs/forest/v1/request/$sha'}
+`)
+	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "add", "forest.yaml")
+	runGitDir(t, root, "commit", "-m", "move request during checks")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
+	pushRequestForRevision(t, root, "if-request-lease", revision)
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict,
+	})
+	if err == nil || !publishConflict(err) {
+		t.Fatalf("error=%v, want request lease conflict", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != before {
+		t.Fatalf("master moved to %s", got)
+	}
+	requireMissingRemoteRef(t, root, evidenceChecksRefPrefix+revision)
+	requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
 }
 
 func TestPublishVerdictSecondPublishConflicts(t *testing.T) {
@@ -121,6 +256,7 @@ func TestPublishVerdictApproveRejectsNonFastForward(t *testing.T) {
 	base := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-non-fast-forward", revision)
 	runGitDir(t, root, "checkout", "--detach", base)
 	if err := os.WriteFile(filepath.Join(root, "other"), []byte("side\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -154,6 +290,7 @@ checks:
 	runGitDir(t, root, "add", "forest.yaml")
 	runGitDir(t, root, "commit", "-m", "failing checks")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-runs-checks", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	_, err := publishVerdict(context.Background(), publishVerdictInput{
 		Root: root, ChecksPath: checks, VerdictPath: verdict,

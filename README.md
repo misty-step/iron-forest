@@ -299,10 +299,16 @@ Leftover `refs/notes/forest/*` are unread. A missing evidence ref is no work.
 
 The Gate requires one valid request evidence ref, passing Checks, and an
 approve Verdict for the same Revision, plus a fast-forward of `master` to that
-Revision. `forest publish verdict` performs that push. The existing request is
-not republished. The merge never uses force. Except for the trusted first
-`master` baseline, the Auditor checks the observable final state after the
-Effect; it does not enforce it. See [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
+Revision. Before `forest publish verdict` runs the configured Checks, it
+validates the Builder or Fixer request, confirms the request branch still
+points to the Revision, requires every submitted result to pass, and requires
+the submitted names to equal the `forest.yaml` Check names at that Revision.
+The atomic push publishes Checks and Verdict, fast-forwards `master`, and
+includes the validated request OID as a no-op leased refspec. The request
+content is not replaced, and the primary branch is never forced. Except for
+the trusted first `master` baseline, the Auditor checks the observable final
+state after the Effect; it remains the observer rather than the Gate owner.
+See [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
 
 ## Auditor and trust boundary
 
