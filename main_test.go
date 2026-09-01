@@ -97,6 +97,24 @@ func TestPollAgentCancellationWinsFinalResult(t *testing.T) {
 	}
 }
 
+// envWithoutPowder builds a process environment from the current test process
+// with the Powder identity and origin variables removed. The CLI signal fixture
+// exercises the built-in Poll, which must reach the gh descendant; an ambient
+// Powder environment would instead make reconcilePowderPrimary fail on the
+// non-repo fixture before the descendant starts.
+func envWithoutPowder(extra ...string) []string {
+	env := make([]string, 0, len(os.Environ())+len(extra))
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "POWDER_AGENT=") ||
+			strings.HasPrefix(entry, "POWDER_URL=") ||
+			strings.HasPrefix(entry, "POWDER_API_BASE_URL=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, extra...)
+}
+
 func TestCLISignalsStopPollDescendants(t *testing.T) {
 	if command := os.Getenv("FOREST_CLI_SIGNAL_HELPER"); command != "" {
 		os.Exit(runCLI([]string{command, "builder"}))
@@ -127,7 +145,7 @@ func TestCLISignalsStopPollDescendants(t *testing.T) {
 				state, heartbeat := processHeartbeatFixture(t)
 				command := exec.Command(os.Args[0], "-test.run=^TestCLISignalsStopPollDescendants$")
 				command.Dir = root
-				command.Env = append(os.Environ(), "FOREST_CLI_SIGNAL_HELPER="+cliCommand)
+				command.Env = envWithoutPowder("FOREST_CLI_SIGNAL_HELPER=" + cliCommand)
 				var stderr strings.Builder
 				command.Stderr = &stderr
 				if err := command.Start(); err != nil {
