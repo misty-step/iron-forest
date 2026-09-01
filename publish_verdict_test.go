@@ -146,6 +146,14 @@ func TestPublishVerdictApproveRejectsCheckNameMismatch(t *testing.T) {
 	requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
 }
 
+func TestRequireMatchingCheckNamesRejectsDifferentOrder(t *testing.T) {
+	configured := []Check{{Name: "test"}, {Name: "vet"}}
+	attested := []checkResult{{Name: "vet"}, {Name: "test"}}
+	if err := requireMatchingCheckNames(configured, attested); err == nil {
+		t.Fatal("expected configured order mismatch")
+	}
+}
+
 func TestPublishVerdictApproveRejectsMovedRequestBranch(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)

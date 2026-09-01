@@ -314,16 +314,14 @@ func runConfiguredChecksWithAttestation(ctx context.Context, root, revision stri
 
 func requireMatchingCheckNames(configured []Check, attested []checkResult) error {
 	configuredNames := make([]string, len(configured))
-	expected := make(map[string]struct{}, len(configured))
 	for index, check := range configured {
 		configuredNames[index] = check.Name
-		expected[check.Name] = struct{}{}
 	}
 	attestedNames := make([]string, len(attested))
 	match := len(configured) == len(attested)
 	for index, result := range attested {
 		attestedNames[index] = result.Name
-		if _, ok := expected[result.Name]; !ok {
+		if index >= len(configured) || result.Name != configured[index].Name {
 			match = false
 		}
 	}
