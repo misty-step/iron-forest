@@ -15,6 +15,7 @@ type fakePowderLifecycle struct {
 	leaseAgent            string
 	terminal              bool
 	proof                 string
+	notFound              bool
 	doneFailure           int
 	doneResponseLoss      int
 	corruptProofAfterDone bool
@@ -35,6 +36,9 @@ func (f *fakePowderLifecycle) command(_ context.Context, args ...string) ([]byte
 	}
 	switch command {
 	case "show":
+		if f.notFound {
+			return nil, []byte(`{"code":"not_found","error":"job not found"}`), errors.New("exit status 1")
+		}
 		lease := any(nil)
 		if f.leaseAgent != "" {
 			lease = map[string]string{"agent": f.leaseAgent}
@@ -279,6 +283,20 @@ func TestReconcilePowderPrimaryRejectsForeignLease(t *testing.T) {
 	}
 }
 
+func TestReconcilePowderPrimaryRejectsNotFound(t *testing.T) {
+	root, _ := testClone(t)
+	seedApprovedCurrent(t, root, "if-gone")
+	lifecycle := &fakePowderLifecycle{notFound: true}
+	poller := configuredPowderPoller(t, root, "if-gone", lifecycle)
+	_, err := poller.reconcilePowderPrimary(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "if-gone") {
+		t.Fatalf("error=%v", err)
+	}
+	if got := strings.Join(lifecycle.calls, "\n"); got != "show if-gone" {
+		t.Fatalf("calls=%q", got)
+	}
+}
+
 func TestBuilderPollFailsBeforeTrackerDispatchWhenPowderCompletionFails(t *testing.T) {
 	root, _ := testClone(t)
 	seedApprovedCurrent(t, root, "if-pending")
@@ -286,6 +304,17 @@ func TestBuilderPollFailsBeforeTrackerDispatchWhenPowderCompletionFails(t *testi
 	poller := configuredPowderPoller(t, root, "if-pending", lifecycle)
 	code, err := poller.builder(context.Background())
 	if code != exitError || err == nil || !strings.Contains(err.Error(), "temporary outage") {
+		t.Fatalf("builder code=%d error=%v", code, err)
+	}
+}
+
+func TestBuilderPollFailsBeforeTrackerDispatchWhenPowderNotFound(t *testing.T) {
+	root, _ := testClone(t)
+	seedApprovedCurrent(t, root, "if-gone")
+	lifecycle := &fakePowderLifecycle{notFound: true}
+	poller := configuredPowderPoller(t, root, "if-gone", lifecycle)
+	code, err := poller.builder(context.Background())
+	if code != exitError || err == nil || !strings.Contains(err.Error(), "if-gone") {
 		t.Fatalf("builder code=%d error=%v", code, err)
 	}
 }

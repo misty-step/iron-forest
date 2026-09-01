@@ -176,7 +176,7 @@ func (p *Poller) reconcilePowderPrimary(ctx context.Context) (powderReconcileRes
 		return result, err
 	}
 	if !exists {
-		return result, nil
+		return result, fmt.Errorf("powder show %s: job not found", result.Subject)
 	}
 	result.Powder = true
 	if job.ID != result.Subject {

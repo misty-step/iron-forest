@@ -227,3 +227,53 @@ func TestPublishVerdictBlocksLaterApproveOnPendingCurrentPowder(t *testing.T) {
 		t.Fatalf("new verdict oid=%q error=%v", got, oidErr)
 	}
 }
+
+func TestPublishVerdictBlocksLaterApproveOnNotFoundCurrentPowder(t *testing.T) {
+	root, origin := testClone(t)
+	current := seedApprovedCurrent(t, root, "if-current")
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-next", revision)
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	lifecycle := &fakePowderLifecycle{notFound: true}
+	poller := configuredPowderPoller(t, root, "if-current", lifecycle)
+
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+	})
+	if err == nil || !strings.Contains(err.Error(), "reconcile current Powder Subject before approve") {
+		t.Fatalf("error=%v", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != current {
+		t.Fatalf("master=%s want %s", got, current)
+	}
+	if got, oidErr := remoteOID(context.Background(), root, evidenceVerdictRefPrefix+revision); oidErr != nil || got != "" {
+		t.Fatalf("new verdict oid=%q error=%v", got, oidErr)
+	}
+}
+
+func TestPublishVerdictPreservesLandedApproveWhenPowderNotFound(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-next", revision)
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	lifecycle := &fakePowderLifecycle{notFound: true}
+	poller := configuredPowderPoller(t, root, "if-next", lifecycle)
+
+	result, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "published" || result.PowderStatus != "pending" || result.PowderSubject != "if-next" {
+		t.Fatalf("result=%#v", result)
+	}
+	if !strings.Contains(result.PowderError, "if-next") {
+		t.Fatalf("powder_error=%q", result.PowderError)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != revision {
+		t.Fatalf("master=%s want %s", got, revision)
+	}
+}

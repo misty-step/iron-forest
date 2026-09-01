@@ -70,7 +70,10 @@ may re-take only that same Subject under the same repository identity.
 Current primary is one bounded pending-completion slot. A later approve cannot
 replace it, and Builder cannot dispatch, until its Powder job is terminal.
 Failure after the atomic approve push is projection lag: the Gate remains
-successful and the next Kernel boundary retries. Recovery reads no historical
+successful and the next Kernel boundary retries. If Powder `show` returns
+`not_found` for the current Subject, Builder dispatch and later approves block
+until the job exists again or primary carries a later request; a Gate that
+already landed reports `powder_status: pending`. Recovery reads no historical
 ref set or board list and stores no outbox. The Kernel probes Powder only when
 the current request has `tracker: powder`. A GitHub or undiscriminated
 historical request never calls `show`, `take`, or `done`, even if a Powder job
