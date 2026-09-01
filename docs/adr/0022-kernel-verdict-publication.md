@@ -2,6 +2,10 @@
 
 Status: accepted, 2026-08-17
 
+> Amended 2026-09-01: approve now enforces the request, submitted Checks,
+> configured Check-name set, request-branch tip, and request-ref lease before
+> moving the primary branch.
+
 Extends [0010](0010-agent-owned-effects-and-merge-gate.md),
 [0017](0017-eval-driven-design.md), and
 [0021](0021-kernel-review-request-publication.md). Destination store:
@@ -30,10 +34,16 @@ publication.
 - Each ref is a commit. The tree is one JSON file. The committer is
   `Iron Forest Verifier <verifier@forest.invalid>`.
 - `changes`: one atomic push of the two refs. `master` does not move.
-- `approve`: run `forest.yaml` Checks, then one atomic push of the two refs
-  and `sha:refs/heads/master`. One attempt. No `--force`.
+- `approve`: fetch and validate the Builder or Fixer request, require its
+  branch tip to equal the Revision, require every submitted Checks result to
+  pass, and require the submitted names to equal the `forest.yaml` Check names
+  at that Revision. Run those configured Checks, then make one atomic push of
+  the Checks and Verdict refs plus `sha:refs/heads/master`. The validated
+  request OID participates as a no-op refspec guarded by its exact
+  `--force-with-lease`; request content cannot change. One attempt; the primary
+  update remains a fast-forward.
 - A byte-identical remote pair is success. Any other existing ref is conflict.
-- A non-fast-forward `master` rejects the whole push.
+- A non-fast-forward `master` or moved request ref rejects the whole push.
 
 The Verifier still decides approve versus changes and writes the files. It
 does not push `master`.
