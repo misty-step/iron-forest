@@ -63,7 +63,11 @@ func (p *Poller) evidencePayloadAndOID(ctx context.Context, kind, sha string, ro
 	if oid == "" {
 		return nil, "", pollMissingNote
 	}
-	return p.fetchEvidencePayload(ctx, kind, sha, oid, roles...)
+	payload, err := p.fetchEvidencePayload(ctx, kind, sha, oid, roles...)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, oid, nil
 }
 
 func (p *Poller) fetchEvidencePayload(ctx context.Context, kind, sha, oid string, roles ...string) ([]byte, error) {
@@ -73,36 +77,32 @@ func (p *Poller) fetchEvidencePayload(ctx context.Context, kind, sha, oid string
 	}
 	local, err := newPrivateEvidenceRef("refs/forest/private/poll/" + kind + "/")
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if _, err := p.git(ctx, "fetch", "origin", ref+":"+local); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer p.deletePrivateRef(local)
 	fetched, err := p.git(ctx, "rev-parse", "--verify", local)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if strings.TrimSpace(string(fetched)) != oid {
-		return nil, "", fmt.Errorf("evidence ref moved while fetching %s", ref)
+		return nil, fmt.Errorf("evidence ref moved while fetching %s", ref)
 	}
 	identityOut, err := p.git(ctx, "log", "-1", "--format=%an%x00%ae", local)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	identityLine, err := exactGitLine(identityOut)
 	if err != nil {
-		return nil, "", fmt.Errorf("malformed evidence identity on %s", ref)
+		return nil, fmt.Errorf("malformed evidence identity on %s", ref)
 	}
 	parts := strings.SplitN(identityLine, "\x00", 2)
 	if len(parts) != 2 || !validIdentity(noteEntry{Author: parts[0], Email: parts[1]}, roles...) {
-		return nil, "", fmt.Errorf("wrong note identity on %s for %s", ref, sha)
+		return nil, fmt.Errorf("wrong note identity on %s for %s", ref, sha)
 	}
-	payload, err := p.git(ctx, "show", local+":"+evidenceFileName(kind))
-	if err != nil {
-		return nil, "", err
-	}
-	return payload, oid, nil
+	return p.git(ctx, "show", local+":"+evidenceFileName(kind))
 }
 
 func (p *Poller) deletePrivateRef(ref string) {
