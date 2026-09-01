@@ -42,3 +42,50 @@ func TestAuditorToleratesLegacyV1RequestButFlagsUnknownV2Key(t *testing.T) {
 		t.Fatalf("violations=%v, want exactly the unknown-key violation for the v2 payload", result.Violations)
 	}
 }
+
+func TestAuditFetchesEvidenceInOneWildcardTransport(t *testing.T) {
+	root, sha := newAdvancedAuditFixture(t, "")
+	addGateNotes(t, root, sha, `[{"name":"test","ok":true,"exit":0}]`)
+
+	deps := defaultAuditDependencies()
+	runGit := deps.runGit
+	wildcardFetches := 0
+	deps.runGit = func(ctx context.Context, root string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "fetch" {
+			for _, arg := range args {
+				if strings.HasPrefix(arg, evidenceRefPrefix+"*:") {
+					wildcardFetches++
+				}
+			}
+		}
+		return runGit(ctx, root, args...)
+	}
+
+	if _, err := auditWithDependencies(context.Background(), root, deps); err != nil {
+		t.Fatal(err)
+	}
+	if wildcardFetches != 1 {
+		t.Fatalf("wildcard evidence fetches=%d want 1", wildcardFetches)
+	}
+}
+
+func TestVerifyEvidenceSnapshotRefsRejectsChangedObject(t *testing.T) {
+	revision := strings.Repeat("c", 40)
+	advertised := strings.Repeat("a", 40)
+	fetched := strings.Repeat("b", 40)
+	snapshot := auditSnapshot{
+		id:       "snapshot",
+		Evidence: map[string]string{evidenceRequestRefPrefix + revision: advertised},
+	}
+	deps := auditDependencies{runGit: func(ctx context.Context, root string, args ...string) ([]byte, error) {
+		if len(args) == 0 || args[0] != "for-each-ref" {
+			t.Fatalf("unexpected git command %v", args)
+		}
+		return []byte(fetched + "\n"), nil
+	}}
+
+	err := verifyEvidenceSnapshotRefs(context.Background(), "/repo", snapshot, deps)
+	if err == nil || !strings.Contains(err.Error(), "does not match advertised object") {
+		t.Fatalf("verifyEvidenceSnapshotRefs error=%v, want advertised-object mismatch", err)
+	}
+}

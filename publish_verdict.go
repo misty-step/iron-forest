@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	evidenceRefPrefix        = "refs/forest/v1/"
 	evidenceRequestRefPrefix = "refs/forest/v1/request/"
 	evidenceChecksRefPrefix  = "refs/forest/v1/checks/"
 	evidenceVerdictRefPrefix = "refs/forest/v1/verdict/"

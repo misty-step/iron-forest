@@ -52,7 +52,11 @@ func sameEvidenceSnapshot(left, right auditSnapshot) bool {
 }
 
 func auditorEvidenceRef(snapshot auditSnapshot, ref string) string {
-	return auditorNotesNamespace + "/" + snapshot.id + "/" + strings.TrimPrefix(ref, "refs/forest/")
+	return auditorEvidenceNamespace(snapshot) + strings.TrimPrefix(ref, "refs/forest/v1/")
+}
+
+func auditorEvidenceNamespace(snapshot auditSnapshot) string {
+	return auditorNotesNamespace + "/" + snapshot.id + "/v1/"
 }
 
 func advertiseEvidenceSnapshot(ctx context.Context, root string, deps auditDependencies) (auditSnapshot, error) {
@@ -95,8 +99,19 @@ func fetchEvidenceSnapshotRefs(ctx context.Context, root string, snapshot auditS
 	if err := fetchSnapshotRef(ctx, root, snapshot.Ref, auditorMasterRef(snapshot), snapshot.Master, deps); err != nil {
 		return err
 	}
+	if len(snapshot.Evidence) == 0 {
+		return nil
+	}
+	refspec := evidenceRefPrefix + "*:" + auditorEvidenceNamespace(snapshot) + "*"
+	if _, err := deps.runGit(ctx, root, "fetch", "--no-tags", "origin", refspec); err != nil {
+		return fmt.Errorf("fetch %s: %w", evidenceRefPrefix+"*", err)
+	}
+	return verifyEvidenceSnapshotRefs(ctx, root, snapshot, deps)
+}
+
+func verifyEvidenceSnapshotRefs(ctx context.Context, root string, snapshot auditSnapshot, deps auditDependencies) error {
 	for ref, oid := range snapshot.Evidence {
-		if err := fetchSnapshotRef(ctx, root, ref, auditorEvidenceRef(snapshot, ref), oid, deps); err != nil {
+		if err := verifyAuditRef(ctx, root, auditorEvidenceRef(snapshot, ref), oid, deps); err != nil {
 			return err
 		}
 	}
