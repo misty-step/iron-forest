@@ -311,33 +311,23 @@ func parseBranchOutput(output []byte, subject string) ([]branchTip, error) {
 }
 
 func (p *Poller) verifier(ctx context.Context) (code int, pollErr error) {
-	branches, err := p.branchTips(ctx)
+	snapshot, err := p.pollSnapshot(ctx)
 	if err != nil {
 		return exitError, err
 	}
-	if len(branches) == 0 {
-		return exitNoWork, nil
-	}
-	for _, tip := range branches {
-		review, reviewErr := p.evidencePayload(ctx, "request", tip.SHA, "builder", "fixer")
-		if reviewErr != nil {
-			if !isMissingNote(reviewErr) {
-				return exitError, reviewErr
-			}
+	for _, tip := range snapshot.Branches {
+		requestOID, hasRequest := snapshot.Evidence[evidenceRequestRefPrefix+tip.SHA]
+		if !hasRequest {
 			continue
 		}
-		if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
+		if _, hasVerdict := snapshot.Evidence[evidenceVerdictRefPrefix+tip.SHA]; hasVerdict {
+			continue
+		}
+		review, err := p.fetchEvidencePayload(ctx, "request", tip.SHA, requestOID, "builder", "fixer")
+		if err != nil {
 			return exitError, err
 		}
-		_, verdictErr := p.evidencePayload(ctx, "verdict", tip.SHA, "verifier")
-		if verdictErr == nil {
-			continue
-		}
-		if !isMissingNote(verdictErr) {
-			return exitError, verdictErr
-		}
-		requestOID, err := p.remoteEvidenceOID(ctx, "request", tip.SHA)
-		if err != nil {
+		if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
 			return exitError, err
 		}
 		if err := p.confirmEvidence(ctx, tip, requestOID, ""); err != nil {
@@ -349,20 +339,36 @@ func (p *Poller) verifier(ctx context.Context) (code int, pollErr error) {
 }
 
 func (p *Poller) fixer(ctx context.Context) (code int, pollErr error) {
-	branches, err := p.branchTips(ctx)
+	snapshot, err := p.pollSnapshot(ctx)
 	if err != nil {
 		return exitError, err
 	}
-	if len(branches) == 0 {
+	var candidates []branchTip
+	for _, tip := range snapshot.Branches {
+		if _, hasVerdict := snapshot.Evidence[evidenceVerdictRefPrefix+tip.SHA]; hasVerdict {
+			candidates = append(candidates, tip)
+		}
+	}
+	if len(candidates) == 0 {
 		return exitNoWork, nil
 	}
-	for _, tip := range branches {
-		verdict, verdictErr := p.evidencePayload(ctx, "verdict", tip.SHA, "verifier")
-		if verdictErr != nil {
-			if !isMissingNote(verdictErr) {
-				return exitError, verdictErr
-			}
+	privatePrimary, err := p.fetchPollPrimary(ctx, snapshot)
+	if err != nil {
+		return exitError, err
+	}
+	defer p.deletePrivateRef(privatePrimary)
+	for _, tip := range candidates {
+		ancestor, err := p.tipIsAncestor(ctx, tip, privatePrimary)
+		if err != nil {
+			return exitError, err
+		}
+		if ancestor {
 			continue
+		}
+		verdictOID := snapshot.Evidence[evidenceVerdictRefPrefix+tip.SHA]
+		verdict, err := p.fetchEvidencePayload(ctx, "verdict", tip.SHA, verdictOID, "verifier")
+		if err != nil {
+			return exitError, err
 		}
 		parsed, err := decodeVerdict(verdict, tip.SHA)
 		if err != nil {
@@ -371,19 +377,15 @@ func (p *Poller) fixer(ctx context.Context) (code int, pollErr error) {
 		if parsed.Verdict != "changes" {
 			continue
 		}
-		review, reviewErr := p.evidencePayload(ctx, "request", tip.SHA, "builder", "fixer")
-		if reviewErr != nil {
-			return exitError, reviewErr
+		requestOID, hasRequest := snapshot.Evidence[evidenceRequestRefPrefix+tip.SHA]
+		if !hasRequest {
+			return exitError, fmt.Errorf("missing request evidence for %s", tip.SHA)
+		}
+		review, err := p.fetchEvidencePayload(ctx, "request", tip.SHA, requestOID, "builder", "fixer")
+		if err != nil {
+			return exitError, err
 		}
 		if err := validatePollReviewRequestBranch(review, tip.SHA, tip.Name); err != nil {
-			return exitError, err
-		}
-		requestOID, err := p.remoteEvidenceOID(ctx, "request", tip.SHA)
-		if err != nil {
-			return exitError, err
-		}
-		verdictOID, err := p.remoteEvidenceOID(ctx, "verdict", tip.SHA)
-		if err != nil {
 			return exitError, err
 		}
 		if err := p.confirmEvidence(ctx, tip, requestOID, verdictOID); err != nil {
@@ -399,12 +401,112 @@ type branchTip struct {
 	SHA  string
 }
 
-func (p *Poller) branchTips(ctx context.Context) ([]branchTip, error) {
-	output, err := p.git(ctx, "ls-remote", "--heads", "origin", "refs/heads/forest/*")
+type pollSnapshot struct {
+	PrimaryRef string
+	PrimarySHA string
+	Branches   []branchTip
+	Evidence   map[string]string
+}
+
+const pollPrimaryPrivatePrefix = "refs/forest/private/poll/primary/"
+
+func (p *Poller) pollSnapshot(ctx context.Context) (pollSnapshot, error) {
+	cfg, err := loadConfig(configPath(p.Root))
 	if err != nil {
-		return nil, err
+		return pollSnapshot{}, fmt.Errorf("load poll config: %w", err)
 	}
-	return parseBranchOutput(output, "")
+	if override := strings.TrimSpace(cfg.Primary); override != "" {
+		if err := validatePrimaryRef(override); err != nil {
+			return pollSnapshot{}, err
+		}
+		output, err := p.git(ctx, "ls-remote", "origin", override, "refs/heads/forest/*", "refs/forest/v1/*")
+		if err != nil {
+			return pollSnapshot{}, fmt.Errorf("read poll snapshot: %w", err)
+		}
+		return parsePollSnapshot(output, override, false)
+	}
+	output, err := p.git(ctx, "ls-remote", "--symref", "origin", "HEAD", "refs/heads/forest/*", "refs/forest/v1/*")
+	if err != nil {
+		return pollSnapshot{}, fmt.Errorf("read poll snapshot: %w", err)
+	}
+	return parsePollSnapshot(output, "", true)
+}
+
+func parsePollSnapshot(output []byte, primaryOverride string, resolveHead bool) (pollSnapshot, error) {
+	snapshot := pollSnapshot{PrimaryRef: primaryOverride, Evidence: map[string]string{}}
+	seen := map[string]bool{}
+	var headPrimaryRef, headPrimarySHA string
+	for _, raw := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		first, ref, ok := strings.Cut(line, "\t")
+		if !ok {
+			return pollSnapshot{}, fmt.Errorf("malformed remote snapshot")
+		}
+		first = strings.TrimSpace(first)
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			return pollSnapshot{}, fmt.Errorf("malformed remote snapshot")
+		}
+		switch {
+		case ref == "HEAD":
+			if !resolveHead {
+				return pollSnapshot{}, fmt.Errorf("unexpected remote snapshot ref HEAD")
+			}
+			if strings.HasPrefix(first, "ref: ") {
+				got := strings.TrimSpace(strings.TrimPrefix(first, "ref: "))
+				if err := validatePrimaryRef(got); err != nil {
+					return pollSnapshot{}, fmt.Errorf("malformed remote snapshot HEAD symref: %w", err)
+				}
+				if headPrimaryRef != "" {
+					return pollSnapshot{}, fmt.Errorf("malformed remote snapshot")
+				}
+				headPrimaryRef = got
+				continue
+			}
+			if !isSHA(first) || seen["HEAD"] {
+				return pollSnapshot{}, fmt.Errorf("malformed remote snapshot")
+			}
+			seen["HEAD"] = true
+			headPrimarySHA = first
+		case primaryOverride != "" && ref == primaryOverride:
+			if !isSHA(first) || seen[ref] {
+				return pollSnapshot{}, fmt.Errorf("malformed remote snapshot")
+			}
+			seen[ref] = true
+			snapshot.PrimarySHA = first
+		case strings.HasPrefix(ref, "refs/heads/forest/"):
+			if !isSHA(first) || seen[ref] {
+				return pollSnapshot{}, fmt.Errorf("malformed remote snapshot")
+			}
+			seen[ref] = true
+			branch := strings.TrimPrefix(ref, "refs/heads/")
+			if validForestBranch(branch) {
+				snapshot.Branches = append(snapshot.Branches, branchTip{Name: branch, SHA: first})
+			}
+		case strings.HasPrefix(ref, "refs/forest/v1/"):
+			if !isSHA(first) || seen[ref] {
+				return pollSnapshot{}, fmt.Errorf("malformed remote snapshot")
+			}
+			seen[ref] = true
+			snapshot.Evidence[ref] = first
+		default:
+			return pollSnapshot{}, fmt.Errorf("malformed remote snapshot ref %s", ref)
+		}
+	}
+	if resolveHead {
+		snapshot.PrimaryRef = headPrimaryRef
+		snapshot.PrimarySHA = headPrimarySHA
+	}
+	if snapshot.PrimaryRef == "" {
+		return pollSnapshot{}, fmt.Errorf("remote primary ref is missing")
+	}
+	if snapshot.PrimarySHA == "" {
+		return pollSnapshot{}, fmt.Errorf("%s is missing or malformed", snapshot.PrimaryRef)
+	}
+	return snapshot, nil
 }
 
 const pollNotesNamespace = "refs/notes/forest-poll"

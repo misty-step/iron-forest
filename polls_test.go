@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -157,18 +158,138 @@ func TestParseBranchOutputSkipsLeftoverHyphenTips(t *testing.T) {
 }
 
 func TestVerifierPollSkipsLeftoverHyphenTips(t *testing.T) {
+	root, _ := testClone(t)
 	sha := strings.Repeat("a", 40)
-	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
+	p := &Poller{Root: root, Repo: "owner/name"}
 	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name == "git" && slices.Contains(args, "refs/heads/forest/*") {
-			return []byte(sha + " refs/heads/forest/259-cancel-live-run-cli\n" + sha + " refs/heads/forest/284-evidence-ref-selection\n"), nil
+		if name != "git" || !slices.Contains(args, "ls-remote") {
+			t.Fatalf("unexpected %s %v", name, args)
 		}
-		t.Fatalf("unexpected %s %v", name, args)
-		return nil, nil
+		return []byte(sha + "\trefs/heads/master\n" + sha + "\trefs/heads/forest/259-cancel-live-run-cli\n" + sha + "\trefs/heads/forest/284-evidence-ref-selection\n"), nil
 	}
 	code, err := p.verifier(context.Background())
 	if code != 1 || err != nil {
 		t.Fatalf("poll exit=%d err=%v want 1", code, err)
+	}
+}
+
+func pollTestSHA(n int) string {
+	return fmt.Sprintf("%040x", n)
+}
+
+func pollSnapshotFixture(tips int) []byte {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\trefs/heads/master\n", pollTestSHA(999))
+	for i := 1; i <= tips; i++ {
+		sha := pollTestSHA(i)
+		fmt.Fprintf(&b, "%s\trefs/heads/forest/4/work-%d\n", sha, i)
+		fmt.Fprintf(&b, "%s\trefs/forest/v1/request/%s\n", sha, sha)
+		fmt.Fprintf(&b, "%s\trefs/forest/v1/verdict/%s\n", sha, sha)
+	}
+	return []byte(b.String())
+}
+
+func TestPollOneLsRemoteSnapshotRegardlessOfTipCount(t *testing.T) {
+	for _, tips := range []int{3, 300} {
+		t.Run(fmt.Sprintf("%d-tips", tips), func(t *testing.T) {
+			for _, agent := range []string{"verifier", "fixer"} {
+				t.Run(agent, func(t *testing.T) {
+					root, _ := testClone(t)
+					lsRemote := 0
+					p := &Poller{Root: root, Repo: "owner/name"}
+					p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+						if name != "git" {
+							t.Fatalf("unexpected tool %s", name)
+						}
+						switch {
+						case slices.Contains(args, "ls-remote"):
+							lsRemote++
+							return pollSnapshotFixture(tips), nil
+						case slices.Contains(args, "fetch"):
+							return nil, nil
+						case slices.Contains(args, "rev-parse"):
+							return []byte(pollTestSHA(999) + "\n"), nil
+						case slices.Contains(args, "merge-base"):
+							return nil, nil
+						case slices.Contains(args, "update-ref"):
+							return nil, nil
+						default:
+							t.Fatalf("unexpected git args: %v", args)
+							return nil, nil
+						}
+					}
+					var code int
+					var err error
+					switch agent {
+					case "verifier":
+						code, err = p.verifier(context.Background())
+					case "fixer":
+						code, err = p.fixer(context.Background())
+					}
+					if code != exitNoWork || err != nil {
+						t.Fatalf("%s code=%d err=%v want no work", agent, code, err)
+					}
+					if lsRemote != 1 {
+						t.Fatalf("%s ls-remote calls=%d want 1", agent, lsRemote)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestFixerPollFailsWhenAdvertisedPrimaryMoved(t *testing.T) {
+	root, _ := testClone(t)
+	advertised := pollTestSHA(1)
+	fetched := pollTestSHA(2)
+	tip := pollTestSHA(3)
+	snapshot := []byte(advertised + "\trefs/heads/master\n" + tip + "\trefs/heads/forest/4/work\n" + tip + "\trefs/forest/v1/request/" + tip + "\n" + tip + "\trefs/forest/v1/verdict/" + tip + "\n")
+	p := &Poller{Root: root, Repo: "owner/name"}
+	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "git" {
+			t.Fatalf("unexpected tool %s", name)
+		}
+		switch {
+		case slices.Contains(args, "ls-remote"):
+			return snapshot, nil
+		case slices.Contains(args, "fetch"):
+			return nil, nil
+		case slices.Contains(args, "rev-parse"):
+			return []byte(fetched + "\n"), nil
+		case slices.Contains(args, "update-ref"):
+			return nil, nil
+		default:
+			t.Fatalf("unexpected git args: %v", args)
+			return nil, nil
+		}
+	}
+	code, err := p.fixer(context.Background())
+	if code != exitError || err == nil || !strings.Contains(err.Error(), "remote snapshot moved") {
+		t.Fatalf("fixer code=%d err=%v, want snapshot moved failure", code, err)
+	}
+}
+
+func TestParsePollSnapshotRejectsMalformedTransports(t *testing.T) {
+	primary := pollTestSHA(1)
+	tip := pollTestSHA(2)
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{name: "duplicate ref", output: primary + "\trefs/heads/master\n" + tip + "\trefs/heads/forest/4/work\n" + tip + "\trefs/heads/forest/4/work\n"},
+		{name: "non-SHA oid", output: "bad\trefs/heads/master\n"},
+		{name: "unexpected ref", output: primary + "\trefs/heads/master\n" + tip + "\trefs/tags/v1\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parsePollSnapshot([]byte(tc.output), "refs/heads/master", false); err == nil {
+				t.Fatalf("accepted malformed snapshot %q", tc.output)
+			}
+		})
+	}
+	valid := primary + "\trefs/heads/master\n" + tip + "\trefs/heads/forest/4/work\n" + tip + "\trefs/forest/v1/request/" + tip + "\n"
+	if _, err := parsePollSnapshot([]byte(valid), "refs/heads/master", false); err != nil {
+		t.Fatalf("rejected valid snapshot: %v", err)
 	}
 }
 

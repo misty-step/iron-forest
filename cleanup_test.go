@@ -25,6 +25,7 @@ func TestReservedGarbageCollectionRemovesRealResidue(t *testing.T) {
 		"refs/notes/forest-poll/snapshot/verdict",
 		"refs/notes/forest-audit/snapshot/checks",
 		"refs/heads/forest-audit/snapshot",
+		pollPrimaryPrivatePrefix + "residue",
 	}
 	for _, ref := range reservedRefs {
 		runGitDir(t, root, "update-ref", ref, revision)

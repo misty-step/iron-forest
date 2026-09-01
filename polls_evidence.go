@@ -58,6 +58,14 @@ func (p *Poller) evidencePayload(ctx context.Context, kind, sha string, roles ..
 	if oid == "" {
 		return nil, pollMissingNote
 	}
+	return p.fetchEvidencePayload(ctx, kind, sha, oid, roles...)
+}
+
+func (p *Poller) fetchEvidencePayload(ctx context.Context, kind, sha, oid string, roles ...string) ([]byte, error) {
+	ref := evidenceKindRef(kind, sha)
+	if ref == "" || !isSHA(sha) || !isSHA(oid) {
+		return nil, fmt.Errorf("invalid evidence identity")
+	}
 	local, err := newPrivateEvidenceRef("refs/forest/private/poll/" + kind + "/")
 	if err != nil {
 		return nil, err
@@ -65,11 +73,7 @@ func (p *Poller) evidencePayload(ctx context.Context, kind, sha string, roles ..
 	if _, err := p.git(ctx, "fetch", "origin", ref+":"+local); err != nil {
 		return nil, err
 	}
-	defer func() {
-		clean, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-		_, _ = p.git(clean, "update-ref", "-d", local)
-	}()
+	defer p.deletePrivateRef(local)
 	fetched, err := p.git(ctx, "rev-parse", "--verify", local)
 	if err != nil {
 		return nil, err
@@ -90,6 +94,47 @@ func (p *Poller) evidencePayload(ctx context.Context, kind, sha string, roles ..
 		return nil, fmt.Errorf("wrong note identity on %s for %s", ref, sha)
 	}
 	return p.git(ctx, "show", local+":"+evidenceFileName(kind))
+}
+
+func (p *Poller) deletePrivateRef(ref string) {
+	clean, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	_, _ = p.git(clean, "update-ref", "-d", ref)
+}
+
+func (p *Poller) fetchPollPrimary(ctx context.Context, snapshot pollSnapshot) (string, error) {
+	private, err := newPrivateEvidenceRef(pollPrimaryPrivatePrefix)
+	if err != nil {
+		return "", err
+	}
+	fail := func(cause error) (string, error) {
+		p.deletePrivateRef(private)
+		return "", cause
+	}
+	if _, err := p.git(ctx, "fetch", "origin", "+"+snapshot.PrimaryRef+":"+private); err != nil {
+		return fail(fmt.Errorf("fetch primary snapshot: %w", err))
+	}
+	fetched, err := p.git(ctx, "rev-parse", "--verify", private)
+	if err != nil {
+		return fail(err)
+	}
+	if strings.TrimSpace(string(fetched)) != snapshot.PrimarySHA {
+		return fail(fmt.Errorf("remote snapshot moved for %s", snapshot.PrimaryRef))
+	}
+	return private, nil
+}
+
+func (p *Poller) tipIsAncestor(ctx context.Context, tip branchTip, primaryPrivate string) (bool, error) {
+	if _, err := p.git(ctx, "merge-base", "--is-ancestor", tip.SHA, primaryPrivate); err != nil {
+		// Exit 1 is "not an ancestor". Exit 128 is "not a valid commit name",
+		// which for a tip we have already fetched is a missing local object;
+		// a missing tip cannot be an ancestor and must stay a candidate.
+		if soleExitCode(err, 1) || soleExitCode(err, 128) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func parseSingleRemoteOID(output []byte, wantRef string) (string, error) {
@@ -143,13 +188,4 @@ func (p *Poller) confirmEvidence(ctx context.Context, tip branchTip, requestOID,
 		}
 	}
 	return nil
-}
-
-func (p *Poller) remoteEvidenceOID(ctx context.Context, kind, sha string) (string, error) {
-	ref := evidenceKindRef(kind, sha)
-	output, err := p.git(ctx, "ls-remote", "origin", ref)
-	if err != nil {
-		return "", err
-	}
-	return parseSingleRemoteOID(output, ref)
 }
