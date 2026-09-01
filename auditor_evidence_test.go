@@ -8,7 +8,7 @@ import (
 
 func TestAuditorIgnoresLegacyNotes(t *testing.T) {
 	root, sha := newAdvancedAuditFixture(t, "")
-	addRemoteNote(t, root, checksNoteRef, sha, `{"status":"fail","results":[]}`, "phaedrus", "phraznikov@gmail.com")
+	addRemoteNote(t, root, "refs/notes/forest/checks", sha, `{"status":"fail","results":[]}`, "phaedrus", "phraznikov@gmail.com")
 	addGateNotes(t, root, sha, `[{"name":"test","ok":true,"exit":0}]`)
 	result, err := audit(context.Background(), root)
 	if err != nil {

@@ -1,6 +1,11 @@
 # 0021 — Kernel-owned review-request publication
 
-Status: accepted, 2026-08-15
+Status: accepted, 2026-08-15 (review-request note write retired by 0028, 2026-09-01)
+
+> Retired in part by [0028](0028-review-request-notes-retired.md): the
+> review-request note write described below is removed. Request publication
+> now commits evidence and pushes branch + `refs/forest/v1/request/<sha>` in
+> one atomic push. Decision text retained as historical record.
 
 Extends [0010](0010-agent-owned-effects-and-merge-gate.md) and
 [0017](0017-eval-driven-design.md).

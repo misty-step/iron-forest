@@ -142,11 +142,10 @@ are the escape. The Kernel does not wrap evidence inspection.
 
 ## Cutover
 
-This file is the destination. Kernel `publish verdict` ships only after
-[issue 238](https://github.com/misty-step/iron-forest/issues/238) records the
-Verifier-publication eval. Until [issue 278](https://github.com/misty-step/iron-forest/issues/278)
-lands, the running binary still follows ADR 0021 for review-request notes and
-prompted Verifier publication. Do not treat that binary as this lock.
+Cutover is complete. `forest publish verdict` and `forest publish
+review-request` both ship only create-only evidence refs under
+`refs/forest/v1/*`; prompted Verifier publication and the review-request note
+write are retired (ADR 0028).
 
 After cutover, unread `refs/notes/forest/*` is not a violation. Do not rewrite
 note authors.

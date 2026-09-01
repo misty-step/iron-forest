@@ -54,7 +54,31 @@ func pushRejectedRequest(t *testing.T, root, rejected, branch, tracker string) {
 	pushEvidence(t, root, "request", rejected, payload+"\n", "Iron Forest Builder", "builder@forest.invalid")
 }
 
-func TestPublishReviewRequestCreatesBranchAndNote(t *testing.T) {
+func fetchEvidence(t *testing.T, root, kind, sha string) string {
+	t.Helper()
+	ref := evidenceKindRef(kind, sha)
+	if ref == "" || !isSHA(sha) {
+		t.Fatalf("invalid evidence identity kind=%s sha=%s", kind, sha)
+	}
+	local := "refs/forest/test/" + kind + "-" + sha
+	runGitDir(t, root, "fetch", "origin", "+"+ref+":"+local)
+	t.Cleanup(func() { _ = exec.Command("git", "-C", root, "update-ref", "-d", local).Run() })
+	return local
+}
+
+func fetchEvidenceFile(t *testing.T, root, kind, sha, name string) []byte {
+	t.Helper()
+	local := fetchEvidence(t, root, kind, sha)
+	return runGitDir(t, root, "show", local+":"+name)
+}
+
+func fetchEvidenceIdentity(t *testing.T, root, kind, sha string) []byte {
+	t.Helper()
+	local := fetchEvidence(t, root, kind, sha)
+	return runGitDir(t, root, "log", "-1", "--format=%an <%ae>", local)
+}
+
+func TestPublishReviewRequestCreatesBranchAndRequestRef(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
@@ -77,10 +101,12 @@ func TestPublishReviewRequestCreatesBranchAndNote(t *testing.T) {
 	if !strings.HasPrefix(remote, revision) {
 		t.Fatalf("remote branch=%q", remote)
 	}
-	runGitDir(t, root, "fetch", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
-	shown := string(runGitDir(t, root, "notes", "--ref="+reviewRequestNoteRef, "show", revision))
+	if noteRef := strings.TrimSpace(string(runGitDir(t, root, "ls-remote", "origin", "refs/notes/forest/review-request"))); noteRef != "" {
+		t.Fatalf("unexpected review-request note ref=%q", noteRef)
+	}
+	shown := string(fetchEvidenceFile(t, root, "request", revision, "request.json"))
 	if !strings.Contains(shown, `"schema":"forest.review-request.v2"`) {
-		t.Fatalf("note=%q", shown)
+		t.Fatalf("request evidence=%q", shown)
 	}
 }
 
@@ -108,10 +134,9 @@ func TestPublishReviewRequestAcceptsV2PowderSubject(t *testing.T) {
 	if result.Status != "published" || result.Revision != revision {
 		t.Fatalf("result=%#v", result)
 	}
-	runGitDir(t, root, "fetch", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
-	note := string(runGitDir(t, root, "notes", "--ref="+reviewRequestNoteRef, "show", revision))
-	if !strings.Contains(note, `"schema":"forest.review-request.v2"`) || !strings.Contains(note, `"subject":"iron-forest-ready"`) || !strings.Contains(note, `"tracker":"powder"`) {
-		t.Fatalf("note=%q", note)
+	shown := string(fetchEvidenceFile(t, root, "request", revision, "request.json"))
+	if !strings.Contains(shown, `"schema":"forest.review-request.v2"`) || !strings.Contains(shown, `"subject":"iron-forest-ready"`) || !strings.Contains(shown, `"tracker":"powder"`) {
+		t.Fatalf("request evidence=%q", shown)
 	}
 }
 
@@ -173,34 +198,20 @@ func TestPublishReviewRequestIgnoresHostileGitIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	runGitDir(t, root, "fetch", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
-	identity := strings.TrimSpace(string(runGitDir(t, root, "log", "-1", "--format=%an <%ae>", reviewRequestNoteRef)))
+	identity := strings.TrimSpace(string(fetchEvidenceIdentity(t, root, "request", revision)))
 	if identity != "Iron Forest Builder <builder@forest.invalid>" {
-		t.Fatalf("note actor=%q", identity)
+		t.Fatalf("request actor=%q", identity)
 	}
 }
 
-func TestPublishReviewRequestAcceptsPushThatSucceededOnOrigin(t *testing.T) {
+func TestPublishReviewRequestAcceptsIdenticalRequest(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapperDir := t.TempDir()
-	script := "#!/bin/sh\n" +
-		"if printf '%s' \"$*\" | grep -q 'push --atomic'; then\n" +
-		"  \"" + realGit + "\" \"$@\"\n" +
-		"  test $? -eq 0 && exit 1\n" +
-		"  exit $?\n" +
-		"fi\n" +
-		"exec \"" + realGit + "\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1/ready")
+	payload := mustRead(t, writeReviewPayload(t, root, revision, "forest/1/ready"))
+	pushEvidence(t, root, "request", revision, string(payload), "Iron Forest Builder", "builder@forest.invalid")
 	result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
 		Root: root, Role: "builder", Branch: "forest/1/ready",
 		PayloadPath: writeReviewPayload(t, root, revision, "forest/1/ready"), RunID: "1-builder",
@@ -208,59 +219,7 @@ func TestPublishReviewRequestAcceptsPushThatSucceededOnOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "identical" || result.Attempts != 1 {
-		t.Fatalf("result=%#v", result)
-	}
-}
-
-func TestPublishReviewRequestAcceptsThirdPushClientFailure(t *testing.T) {
-	root, origin := testClone(t)
-	writePassingChecks(t, root)
-	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	work := t.TempDir()
-	runGit(t, "clone", origin, work)
-	configGit(t, work, "Iron Forest Builder", "builder@forest.invalid")
-	if err := os.WriteFile(filepath.Join(work, "other"), []byte("other\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, work, "add", "other")
-	runGitDir(t, work, "commit", "-m", "competitor")
-	competitor := strings.TrimSpace(string(runGitDir(t, work, "rev-parse", "HEAD")))
-	runGitDir(t, work, "push", "origin", "HEAD:refs/heads/forest/9/other")
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	countPath := filepath.Join(t.TempDir(), "pushes")
-	wrapperDir := t.TempDir()
-	script := "#!/bin/sh\n" +
-		"if printf '%s' \"$*\" | grep -q 'push --atomic'; then\n" +
-		"  count=0\n" +
-		"  if [ -f \"" + countPath + "\" ]; then count=$(cat \"" + countPath + "\"); fi\n" +
-		"  count=$((count + 1))\n" +
-		"  printf '%s' \"$count\" > \"" + countPath + "\"\n" +
-		"  if [ \"$count\" -lt 3 ]; then\n" +
-		"    \"" + realGit + "\" -C \"" + origin + "\" -c user.name='Iron Forest Builder' -c user.email='builder@forest.invalid' notes --ref=refs/notes/forest/review-request add -f -m \"{\\\"schema\\\":\\\"forest.review-request.v2\\\",\\\"issue\\\":9,\\\"branch\\\":\\\"forest/9/other\\\",\\\"revision\\\":\\\"" + competitor + "\\\",\\\"time\\\":\\\"2026-08-15T00:00:0${count}Z\\\"}\" \"" + competitor + "\"\n" +
-		"    exit 1\n" +
-		"  fi\n" +
-		"  \"" + realGit + "\" \"$@\"\n" +
-		"  test $? -eq 0 && exit 1\n" +
-		"  exit $?\n" +
-		"fi\n" +
-		"exec \"" + realGit + "\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
-		Root: root, Role: "builder", Branch: "forest/1/ready",
-		PayloadPath: writeReviewPayload(t, root, revision, "forest/1/ready"), RunID: "1-builder",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "identical" || result.Attempts != 3 {
+	if result.Status != "identical" || result.Revision != revision {
 		t.Fatalf("result=%#v", result)
 	}
 }
@@ -349,37 +308,7 @@ func TestPublishReviewRequestRejectsAncestorBranchCreatedDuringPush(t *testing.T
 	}
 }
 
-func TestPublishReviewRequestRejectsDeletedNotesRefDuringPush(t *testing.T) {
-	root, origin := testClone(t)
-	writePassingChecks(t, root)
-	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	competitor := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD^{tree}")))
-	addNote(t, origin, reviewRequestNoteRef, competitor, `{"schema":"forest.review-request.v2","subject":"9","branch":"forest/9/other","revision":"`+competitor+`","time":"2026-08-15T00:00:00Z"}`, "Iron Forest Builder", "builder@forest.invalid")
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapperDir := t.TempDir()
-	script := "#!/bin/sh\n" +
-		"if printf '%s' \"$*\" | grep -q 'push --atomic'; then\n" +
-		"  \"" + realGit + "\" -C \"" + origin + "\" update-ref -d refs/notes/forest/review-request\n" +
-		"fi\n" +
-		"exec \"" + realGit + "\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	_, err = publishReviewRequest(context.Background(), publishReviewRequestInput{
-		Root: root, Role: "builder", Branch: "forest/1/ready",
-		PayloadPath: writeReviewPayload(t, root, revision, "forest/1/ready"), RunID: "1-builder",
-	})
-	if err == nil || !(strings.Contains(err.Error(), "canonical note race") || strings.Contains(err.Error(), "stale info")) {
-		t.Fatalf("error=%v", err)
-	}
-}
-
-func TestPublishReviewRequestBuilderRejectsBranchWithoutNote(t *testing.T) {
+func TestPublishReviewRequestBuilderRejectsBranchWithoutRequestRef(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
@@ -394,7 +323,7 @@ func TestPublishReviewRequestBuilderRejectsBranchWithoutNote(t *testing.T) {
 	}
 }
 
-func TestPublishReviewRequestFixerRejectsBranchWithoutNote(t *testing.T) {
+func TestPublishReviewRequestFixerRejectsBranchWithoutRequestRef(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
@@ -412,94 +341,6 @@ func TestPublishReviewRequestFixerRejectsBranchWithoutNote(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "branch race") {
 		t.Fatalf("error=%v", err)
-	}
-}
-
-func TestPublishReviewRequestRetriesCanonicalNoteRace(t *testing.T) {
-	root, origin := testClone(t)
-	writePassingChecks(t, root)
-	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	work := t.TempDir()
-	runGit(t, "clone", origin, work)
-	configGit(t, work, "Iron Forest Builder", "builder@forest.invalid")
-	if err := os.WriteFile(filepath.Join(work, "other"), []byte("other\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, work, "add", "other")
-	runGitDir(t, work, "commit", "-m", "competitor")
-	competitor := strings.TrimSpace(string(runGitDir(t, work, "rev-parse", "HEAD")))
-	runGitDir(t, work, "push", "origin", "HEAD:refs/heads/forest/9/other")
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrapperDir := t.TempDir()
-	script := "#!/bin/sh\n" +
-		"if printf '%s' \"$*\" | grep -q 'push --atomic' && [ ! -f \"$RACE_ONCE\" ]; then\n" +
-		"  touch \"$RACE_ONCE\"\n" +
-		"  \"" + realGit + "\" -C \"$ORIGIN\" -c user.name='Iron Forest Builder' -c user.email='builder@forest.invalid' notes --ref=refs/notes/forest/review-request add -m '{\"schema\":\"forest.review-request.v2\",\"subject\":\"9\",\"branch\":\"forest/9/other\",\"revision\":\"" + competitor + "\",\"time\":\"2026-08-15T00:00:00Z\"}' \"" + competitor + "\"\n" +
-		"  exit 1\n" +
-		"fi\n" +
-		"exec \"" + realGit + "\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("ORIGIN", origin)
-	t.Setenv("RACE_ONCE", filepath.Join(t.TempDir(), "once"))
-	result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
-		Root:        root,
-		Role:        "builder",
-		Branch:      "forest/1/ready",
-		PayloadPath: writeReviewPayload(t, root, revision, "forest/1/ready"),
-		RunID:       "1-builder",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Attempts < 2 {
-		t.Fatalf("expected a retry, got %#v", result)
-	}
-}
-
-func TestPublishReviewRequestStopsWhenRefDeleteFails(t *testing.T) {
-	root, _ := testClone(t)
-	writePassingChecks(t, root)
-	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(t.TempDir(), "git.log")
-	wrapperDir := t.TempDir()
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> \"" + logPath + "\"\n" +
-		"for arg in \"$@\"; do\n" +
-		"  if [ \"$arg\" = \"-d\" ]; then\n" +
-		"    echo delete-blocked >&2\n" +
-		"    exit 1\n" +
-		"  fi\n" +
-		"done\n" +
-		"exec \"" + realGit + "\" \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(wrapperDir, "git"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", wrapperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	_, err = publishReviewRequest(context.Background(), publishReviewRequestInput{
-		Root: root, Role: "builder", Branch: "forest/1/ready",
-		PayloadPath: writeReviewPayload(t, root, revision, "forest/1/ready"), RunID: "1-builder",
-	})
-	if err == nil || !strings.Contains(err.Error(), "update-ref") {
-		t.Fatalf("error=%v", err)
-	}
-	logged, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(logged), "notes add") || strings.Contains(string(logged), "push --atomic") {
-		t.Fatalf("delete failure continued:\n%s", logged)
 	}
 }
 
@@ -590,24 +431,30 @@ func TestCLIPublishReviewRequestNeedsRunID(t *testing.T) {
 	}
 }
 
-func TestCLIPublishReviewRequestWrongAuthorIsConflict(t *testing.T) {
+func TestCLIPublishReviewRequestFixerBranchRaceIsConflict(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+	rejected := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRejectedRequest(t, root, rejected, "forest/1/ready", "github")
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1/ready")
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "commit", "-am", "fix")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/1/ready")
 	payload := writeReviewPayload(t, root, revision, "forest/1/ready")
-	addNote(t, root, reviewRequestNoteRef, revision, string(mustRead(t, payload)), "Eve", "eve@invalid")
-	runGitDir(t, root, "push", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
-	t.Setenv("FOREST_RUN_ID", "1-builder")
+	t.Setenv("FOREST_RUN_ID", "2-fixer")
 	code, stdout, stderr := captureCLIOutput(t, func() int {
-		return runSurfaceCommand([]string{"publish", "review-request", "builder", "forest/1/ready", payload, "--json", "--root", root})
+		return runSurfaceCommand([]string{"publish", "review-request", "fixer", "forest/1/ready", payload, "--rejected", rejected, "--json", "--root", root})
 	})
-	if code != exitConflict || !strings.Contains(stdout+stderr, "wrong author identity") {
+	if code != exitConflict || !strings.Contains(stdout+stderr, "branch race") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 
-func TestPublishReviewRequestConflictsOnWhitespaceOnlyNote(t *testing.T) {
+func TestPublishReviewRequestConflictsOnWhitespaceOnlyRequestRef(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
@@ -629,7 +476,7 @@ func TestPublishReviewRequestConflictsOnWhitespaceOnlyNote(t *testing.T) {
 	_, err = publishReviewRequest(context.Background(), publishReviewRequestInput{
 		Root: root, Role: "builder", Branch: "forest/1/ready", PayloadPath: padded, RunID: "2-builder",
 	})
-	if err == nil || !strings.Contains(err.Error(), "conflicting review-request note") {
+	if err == nil || !strings.Contains(err.Error(), "conflicting request evidence") {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -735,13 +582,12 @@ func TestPublishReviewRequestKeepsCapturedPayloadIfCheckRewritesFile(t *testing.
 	if got, err := os.ReadFile(payload); err != nil || string(got) != "TAMPERED" {
 		t.Fatalf("payload file after check=%q err=%v", got, err)
 	}
-	runGitDir(t, root, "fetch", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
-	shown := runGitDir(t, root, "notes", "--ref="+reviewRequestNoteRef, "show", revision)
+	shown := fetchEvidenceFile(t, root, "request", revision, "request.json")
 	if bytes.Contains(shown, []byte("TAMPERED")) {
 		t.Fatalf("published tampered payload: %q", shown)
 	}
 	if !bytes.Contains(shown, []byte(`"revision":"`+revision+`"`)) {
-		t.Fatalf("published note=%q", shown)
+		t.Fatalf("published request evidence=%q", shown)
 	}
 }
 func TestPublishReviewRequestCleansCanceledCheckWorktree(t *testing.T) {
@@ -784,29 +630,6 @@ func TestPublishReviewRequestCleansCanceledCheckWorktree(t *testing.T) {
 	listed := string(runGitDir(t, root, "worktree", "list", "--porcelain"))
 	if strings.Contains(listed, "-checks") {
 		t.Fatalf("stale worktree remains:\n%s", listed)
-	}
-}
-
-func TestPublishReviewRequestRejectsEmptyNoteAuthor(t *testing.T) {
-	name, email := parseNoteIdentity(" <nobody@invalid>")
-	if name != "" || email != "nobody@invalid" {
-		t.Fatalf("parseNoteIdentity=%q %q", name, email)
-	}
-	if validIdentity(noteEntry{Author: name, Email: email}, "builder", "fixer") {
-		t.Fatal("empty author accepted")
-	}
-	root, _ := testClone(t)
-	writePassingChecks(t, root)
-	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	payload := writeReviewPayload(t, root, revision, "forest/1/ready")
-	addNote(t, root, reviewRequestNoteRef, revision, string(mustRead(t, payload)), "Eve", "eve@invalid")
-	runGitDir(t, root, "push", "origin", reviewRequestNoteRef+":"+reviewRequestNoteRef)
-	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
-		Root: root, Role: "builder", Branch: "forest/1/ready", PayloadPath: payload, RunID: "1-builder",
-	})
-	if err == nil || !strings.Contains(err.Error(), "wrong author identity") {
-		t.Fatalf("error=%v", err)
 	}
 }
 

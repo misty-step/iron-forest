@@ -48,7 +48,7 @@ must create Checks and Verdict evidence and, on approve, fast-forward `master`.
 
 | Actor | Command | May create | May update |
 | --- | --- | --- | --- |
-| Builder / Fixer | `forest publish review-request` | `refs/heads/forest/<subject>/*`, `refs/forest/v1/request/<sha>`, `refs/notes/forest/review-request` | nothing else |
+| Builder / Fixer | `forest publish review-request` | `refs/heads/forest/<subject>/*`, `refs/forest/v1/request/<sha>` | nothing else |
 | Verifier | `forest publish verdict` | `refs/forest/v1/checks/<sha>`, `refs/forest/v1/verdict/<sha>` | `refs/heads/master` on approve only, fast-forward |
 | Operator | forge ruleset | — | restrict who may update `master` |
 
@@ -59,7 +59,7 @@ not forge logins. The forge account is the host credential that performs the
 push.
 
 GitHub branch protection matches `refs/heads/*` only. It cannot allow or deny
-`refs/forest/v1/*` or `refs/notes/forest/*`. Create-only evidence refs are
+`refs/forest/v1/*`. Create-only evidence refs are
 enforced by the Kernel (`--force-with-lease` against an empty expected OID),
 not by the forge.
 
@@ -271,10 +271,10 @@ Run clears only its Run error. A successful Audit clears only its Audit error.
 The Auditor runs after a completed dispatch, not at startup or after an idle
 Poll skip.
 
-Verifier and Fixer Poll enumeration is bounded at 500 entries per canonical
-notes tree. A larger tree or a note-enumeration transport-output overflow is a
+Verifier and Fixer Poll enumeration is bounded at 500 entries per evidence
+snapshot. A larger snapshot or an enumeration transport-output overflow is a
 healthy exit-1 skip with an explicit log line. It does not mark the trigger
-unhealthy; the Auditor reports durable note growth as a bounded policy
+unhealthy; the Auditor reports durable evidence growth as a bounded policy
 violation.
 
 Poll once and conditionally dispatch one declaration:
@@ -293,42 +293,35 @@ Poll exits 0. A healthy Poll skip exits 1 without an agent Run.
 After an Issue receives `forest:ready`, or a takeable Powder job exists for this
 repository, the Builder selects it and creates `forest/<subject>/<slug>`.
 It writes a review-request payload and calls
-`forest publish review-request`, which publishes the branch and note with one
-normal atomic push. A canonical note race permits at most three total atomic
-attempts; a branch race stops. The Builder may open a pull request as a human
-Projection.
+`forest publish review-request`, which publishes the branch and request
+evidence ref with one atomic push. A branch race stops. The Builder may open a
+pull request as a human Projection.
 
 The Verifier selects that branch and runs every configured Check. For `changes`,
-it publishes Checks and Verdict together. A canonical note race permits at most
-three total atomic attempts. For `approve`, the Verifier makes exactly one
-non-retryable atomic attempt carrying Checks, Verdict, and the exact reviewed
-Revision's fast-forward `master` update. The Gate also requires the existing
-valid Builder-or-Fixer review-request for that Revision; the approve push does
-not republish it. No standalone master push is valid. If the Verdict is
-`changes`, the Fixer owns the branch, creates a new Revision, and publishes a
-fresh review request atomically. That note is the reject handoff back to the
-Verifier.
+it publishes Checks and Verdict evidence together in one atomic push. For
+`approve`, the Verifier makes exactly one non-retryable atomic attempt carrying
+Checks, Verdict, and the exact reviewed Revision's fast-forward `master`
+update. The Gate also requires the existing valid Builder-or-Fixer
+review-request for that Revision; the approve push does not republish it. No
+standalone master push is valid. If the Verdict is `changes`, the Fixer owns
+the branch, creates a new Revision, and publishes a fresh review request
+atomically. That request evidence is the reject handoff back to the Verifier.
 
-From the managed checkout, use status and Git notes as the evidence surface:
+From the managed checkout, use status and evidence refs as the evidence surface:
 
 ```sh
 ./forest status
 git log --oneline --decorate --all
-git fetch origin \
-  refs/notes/forest/review-request:refs/notes/forest/review-request \
-  refs/notes/forest/checks:refs/notes/forest/checks \
-  refs/notes/forest/verdict:refs/notes/forest/verdict
-git notes --ref=refs/notes/forest/review-request show <revision>
-git notes --ref=refs/notes/forest/checks show <revision>
-git notes --ref=refs/notes/forest/verdict show <revision>
+git fetch origin refs/forest/v1/request/<sha>
+git show FETCH_HEAD:request.json
 ```
 
 Pull requests and other forge artifacts are Projections. Git branches, commits,
-and notes remain authoritative. The first observed remote `master` tip becomes
+and evidence refs remain authoritative. The first observed remote `master` tip becomes
 a trusted baseline and is not Gate-checked. In each bounded stable snapshot,
 Auditor ancestry and Gate checks target only the final observed remote
 `master` tip. Schema and actor checks cover each snapshotted
-`refs/notes/forest/*` entry within a 500-entry-per-ref capacity bound. Remote
+`refs/forest/v1/*` evidence ref. Remote
 history cannot reveal a tip that advanced again between audits; such
 intermediate tips are not independently Gate-checked. The Auditor checks
 observable final Git state only. It cannot prove check execution, atomic push

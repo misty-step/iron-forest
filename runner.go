@@ -640,7 +640,6 @@ const (
 	cleanupRemoveExecutionTimeout     = 2 * time.Second
 	cleanupFilesystemExecutionTimeout = time.Second
 	cleanupPruneExecutionTimeout      = time.Second
-	runnerPrivateNotesPrefix          = "refs/notes/forest/private/"
 )
 
 func (r *Runner) cleanupWorktree(path, runID string) error {
@@ -657,10 +656,6 @@ func (r *Runner) cleanupFilesystem(path string) error {
 
 func (r *Runner) removeWorktree(ctx context.Context, path, runID string) error {
 	removeCtx, cancelRemove := context.WithTimeout(ctx, cleanupRemoveExecutionTimeout)
-	privateErr := r.cleanupPrivateRefs(removeCtx, runID)
-	if privateErr != nil {
-		privateErr = fmt.Errorf("delete private notes refs: %w", privateErr)
-	}
 	_, removeErr := r.git(removeCtx, r.Root, "worktree", "remove", "--force", path)
 	cancelRemove()
 	if removeErr != nil {
@@ -678,34 +673,7 @@ func (r *Runner) removeWorktree(ctx context.Context, path, runID string) error {
 	if pruneErr != nil {
 		pruneErr = fmt.Errorf("git worktree prune: %w", pruneErr)
 	}
-	return errors.Join(privateErr, removeErr, filesystemErr, pruneErr)
-}
-
-func (r *Runner) cleanupPrivateRefs(ctx context.Context, runID string) error {
-	prefix := runnerPrivateNotesPrefix + runID + "/"
-	output, listErr := r.git(ctx, r.Root, "for-each-ref", "--format=%(refname)", prefix)
-	if listErr != nil {
-		listErr = fmt.Errorf("enumerate: %w", listErr)
-	}
-	var commands strings.Builder
-	var invalidErr error
-	for _, ref := range strings.Fields(string(output)) {
-		if !strings.HasPrefix(ref, prefix) {
-			invalidErr = errors.Join(invalidErr, fmt.Errorf("ref outside run prefix: %s", ref))
-			continue
-		}
-		commands.WriteString("delete ")
-		commands.WriteString(ref)
-		commands.WriteByte('\n')
-	}
-	var deleteErr error
-	if commands.Len() > 0 {
-		_, deleteErr = r.gitInput(ctx, r.Root, strings.NewReader(commands.String()), "update-ref", "--no-deref", "--stdin")
-		if deleteErr != nil {
-			deleteErr = fmt.Errorf("delete: %w", deleteErr)
-		}
-	}
-	return errors.Join(listErr, invalidErr, deleteErr)
+	return errors.Join(removeErr, filesystemErr, pruneErr)
 }
 
 func (r *Runner) removeFilesystem(ctx context.Context, path string) error {

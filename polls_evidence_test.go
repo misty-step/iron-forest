@@ -28,8 +28,8 @@ func TestFixerPollIgnoresLegacyNotes(t *testing.T) {
 	runGitDir(t, root, "commit", "-m", "work")
 	tip := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/forest/4/work")
-	addNote(t, root, verdictNoteRef, tip, pollVerdictNote(tip, "changes"), "phaedrus", "phraznikov@gmail.com")
-	runGitDir(t, root, "push", "origin", verdictNoteRef+":"+verdictNoteRef)
+	addNote(t, root, "refs/notes/forest/verdict", tip, pollVerdictNote(tip, "changes"), "phaedrus", "phraznikov@gmail.com")
+	runGitDir(t, root, "push", "origin", "refs/notes/forest/verdict"+":"+"refs/notes/forest/verdict")
 
 	code, err := NewPoller(root, "owner/name", Scope{}).fixer(context.Background())
 	if code != exitNoWork || err != nil {

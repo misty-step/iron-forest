@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-const reviewRequestAttempts = 3
-
 type publishReviewRequestInput struct {
 	Root        string
 	Role        string
@@ -27,7 +25,6 @@ type publishReviewRequestResult struct {
 	Status   string `json:"status"`
 	Revision string `json:"revision"`
 	Branch   string `json:"branch"`
-	Attempts int    `json:"attempts"`
 }
 
 func runPublishReviewRequest(rest []string, flags cliFlags) cliOutcome {
@@ -45,7 +42,7 @@ func runPublishReviewRequest(rest []string, flags cliFlags) cliOutcome {
 		}
 		return failure(exitError, "%s", err)
 	}
-	human := fmt.Sprintf("published review-request %s on %s after %d attempt(s)", result.Revision, result.Branch, result.Attempts)
+	human := fmt.Sprintf("published review-request %s on %s", result.Revision, result.Branch)
 	if result.Status == "identical" {
 		human = fmt.Sprintf("accepted identical review-request %s on %s", result.Revision, result.Branch)
 	}
@@ -110,123 +107,74 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		return publishReviewRequestResult{}, err
 	}
 
-	baseRef := fmt.Sprintf("refs/notes/forest/private/%s/%s/review-request/%s/base", input.RunID, input.Role, revision)
-	privateRef := fmt.Sprintf("refs/notes/forest/private/%s/%s/review-request/%s/publication", input.RunID, input.Role, revision)
-	for attempt := 1; attempt <= reviewRequestAttempts; attempt++ {
-		noteOID, err := remoteOID(ctx, input.Root, reviewRequestNoteRef)
+	branchRef := "refs/heads/" + input.Branch
+	requestRef := evidenceRequestRefPrefix + revision
+	branchOID, err := remoteOID(ctx, input.Root, branchRef)
+	if err != nil {
+		return publishReviewRequestResult{}, err
+	}
+	existingRequest, err := remoteOID(ctx, input.Root, requestRef)
+	if err != nil {
+		return publishReviewRequestResult{}, err
+	}
+	if existingRequest != "" {
+		got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json")
 		if err != nil {
 			return publishReviewRequestResult{}, err
 		}
-		if err := snapshotNoteBase(ctx, input.Root, baseRef, noteOID); err != nil {
-			return publishReviewRequestResult{}, err
-		}
-		destination, destActor, destEmail, err := destinationNote(ctx, input.Root, baseRef, revision)
-		if err != nil {
-			return publishReviewRequestResult{}, err
-		}
-		if destination != nil {
-			if !bytes.Equal(destination, payload) {
-				return publishReviewRequestResult{}, conflictError("conflicting review-request note")
-			}
-			if !validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
-				return publishReviewRequestResult{}, conflictError("wrong author identity on review-request")
-			}
-		}
-		branchOID, err := remoteOID(ctx, input.Root, "refs/heads/"+input.Branch)
-		if err != nil {
-			return publishReviewRequestResult{}, err
-		}
-		if input.Role == "builder" {
-			if branchOID != "" && (branchOID != revision || destination == nil) {
-				return publishReviewRequestResult{}, conflictError("branch race")
-			}
-			if branchOID == revision && destination != nil {
-				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
-			}
-		} else {
-			if branchOID == "" || (branchOID == revision && destination == nil) || (branchOID != input.Rejected && branchOID != revision) {
-				return publishReviewRequestResult{}, conflictError("branch race")
-			}
-			if branchOID == revision && destination != nil {
-				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
-			}
-		}
-		if err := rebuildPublicationRef(ctx, input.Root, input.Role, privateRef, baseRef, noteOID, revision, payload, destination != nil); err != nil {
-			return publishReviewRequestResult{}, err
-		}
-		expectedNote := noteOID
-		if expectedNote == "" {
-			expectedNote = strings.Repeat("0", 40)
-		}
-		expectedBranch := strings.Repeat("0", 40)
-		if input.Role == "fixer" {
-			expectedBranch = input.Rejected
-		}
-		requestRef := evidenceRequestRefPrefix + revision
-		existingRequest, err := remoteOID(ctx, input.Root, requestRef)
-		if err != nil {
-			return publishReviewRequestResult{}, err
-		}
-		if existingRequest != "" {
-			got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json")
-			if err != nil {
-				return publishReviewRequestResult{}, err
-			}
-			if !bytes.Equal(got, payload) {
-				return publishReviewRequestResult{}, conflictError("conflicting request evidence for %s", revision)
-			}
-		}
-		pushArgs := []string{
-			"push", "--atomic",
-			"--force-with-lease=" + reviewRequestNoteRef + ":" + expectedNote,
-			"--force-with-lease=refs/heads/" + input.Branch + ":" + expectedBranch,
-		}
-		if existingRequest == "" {
-			name, email := publicationIdentity(input.Role)
-			requestCommit, err := commitEvidenceAs(ctx, input.Root, "request.json", payload, "forest request "+revision, name, email)
-			if err != nil {
-				return publishReviewRequestResult{}, err
-			}
-			pushArgs = append(pushArgs, "--force-with-lease="+requestRef+":")
-			pushArgs = append(pushArgs, "origin", privateRef+":"+reviewRequestNoteRef, revision+":refs/heads/"+input.Branch, requestCommit+":"+requestRef)
-		} else {
-			pushArgs = append(pushArgs, "origin", privateRef+":"+reviewRequestNoteRef, revision+":refs/heads/"+input.Branch)
-		}
-		pushErr := gitRun(ctx, input.Root, pushArgs...)
-
-		if pushErr == nil {
-			return publishReviewRequestResult{Status: "published", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
-		}
-		freshBranch, err := remoteOID(ctx, input.Root, "refs/heads/"+input.Branch)
-		if err != nil {
-			return publishReviewRequestResult{}, err
-		}
-		freshNote, err := remoteOID(ctx, input.Root, reviewRequestNoteRef)
-		if err != nil {
-			return publishReviewRequestResult{}, err
-		}
-		branchUnchanged := (input.Role == "builder" && freshBranch == "") || (input.Role == "fixer" && freshBranch == input.Rejected)
-		if freshBranch == revision {
-			if err := snapshotNoteBase(ctx, input.Root, baseRef, freshNote); err != nil {
-				return publishReviewRequestResult{}, err
-			}
-			destination, destActor, destEmail, err := destinationNote(ctx, input.Root, baseRef, revision)
-			if err != nil {
-				return publishReviewRequestResult{}, err
-			}
-			if destination != nil && bytes.Equal(destination, payload) && validIdentity(noteEntry{Author: destActor, Email: destEmail}, "builder", "fixer") {
-				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch, Attempts: attempt}, nil
-			}
-			return publishReviewRequestResult{}, conflictError("canonical note race stopped: %w", pushErr)
-		}
-		if !branchUnchanged {
-			return publishReviewRequestResult{}, conflictError("branch race")
-		}
-		if freshNote == "" || freshNote == noteOID || attempt == reviewRequestAttempts {
-			return publishReviewRequestResult{}, conflictError("canonical note race stopped: %w", pushErr)
+		if !bytes.Equal(got, payload) {
+			return publishReviewRequestResult{}, conflictError("conflicting request evidence for %s", revision)
 		}
 	}
-	return publishReviewRequestResult{}, conflictError("canonical note race stopped")
+
+	if input.Role == "builder" {
+		if branchOID != "" {
+			if branchOID == revision && existingRequest != "" {
+				return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch}, nil
+			}
+			return publishReviewRequestResult{}, conflictError("branch race")
+		}
+	} else {
+		if branchOID == "" || (branchOID == revision && existingRequest == "") || (branchOID != input.Rejected && branchOID != revision) {
+			return publishReviewRequestResult{}, conflictError("branch race")
+		}
+		if branchOID == revision && existingRequest != "" {
+			return publishReviewRequestResult{Status: "identical", Revision: revision, Branch: input.Branch}, nil
+		}
+	}
+
+	expectedBranch := strings.Repeat("0", 40)
+	if input.Role == "fixer" {
+		expectedBranch = input.Rejected
+	}
+	pushArgs := []string{
+		"push", "--atomic",
+		"--force-with-lease=" + branchRef + ":" + expectedBranch,
+	}
+	refspecs := []string{revision + ":" + branchRef}
+	if existingRequest == "" {
+		name, email := publicationIdentity(input.Role)
+		requestCommit, err := commitEvidenceAs(ctx, input.Root, "request.json", payload, "forest request "+revision, name, email)
+		if err != nil {
+			return publishReviewRequestResult{}, err
+		}
+		pushArgs = append(pushArgs, "--force-with-lease="+requestRef+":")
+		refspecs = append(refspecs, requestCommit+":"+requestRef)
+	}
+	pushArgs = append(pushArgs, "origin")
+	pushArgs = append(pushArgs, refspecs...)
+	if err := gitRun(ctx, input.Root, pushArgs...); err != nil {
+		return publishReviewRequestResult{}, classifyReviewPush(err)
+	}
+	return publishReviewRequestResult{Status: "published", Revision: revision, Branch: input.Branch}, nil
+}
+
+func classifyReviewPush(err error) error {
+	text := err.Error()
+	if strings.Contains(text, "non-fast-forward") || strings.Contains(text, "stale info") || strings.Contains(text, "failed to push") || strings.Contains(text, "rejected") {
+		return conflictError("branch race")
+	}
+	return err
 }
 
 func requireFixerRequestContinuity(ctx context.Context, root, rejected string, note reviewRequest) error {
@@ -351,46 +299,6 @@ func removePublishWorktree(root, dir string) error {
 	return errors.Join(removeErr, filesystemErr, pruneErr)
 }
 
-func snapshotNoteBase(ctx context.Context, root, baseRef, noteOID string) error {
-	if noteOID == "" {
-		return gitRun(ctx, root, "update-ref", "-d", baseRef)
-	}
-	return gitRun(ctx, root, "fetch", "origin", reviewRequestNoteRef+":"+baseRef)
-}
-
-func rebuildPublicationRef(ctx context.Context, root, role, privateRef, baseRef, noteOID, revision string, payload []byte, identical bool) error {
-	if err := gitRun(ctx, root, "update-ref", "-d", privateRef); err != nil {
-		return err
-	}
-	if noteOID != "" {
-		if err := gitRun(ctx, root, "update-ref", privateRef, baseRef); err != nil {
-			return err
-		}
-	}
-	if identical {
-		return nil
-	}
-	name, email := publicationIdentity(role)
-	return gitNotesAdd(ctx, root, name, email, privateRef, revision, payload)
-}
-
-func gitNotesAdd(ctx context.Context, root, name, email, ref, revision string, payload []byte) error {
-	path, err := trustedExecutable(root, "git")
-	if err != nil {
-		return err
-	}
-	command := exec.CommandContext(ctx, path, "-C", root, "notes", "--ref="+ref, "add", "-F", "-", revision)
-	command.Stdin = bytes.NewReader(payload)
-	command.Env = publicationGitEnv(name, email)
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("git notes add: %w\n%s", err, stderr.Bytes())
-	}
-	return nil
-}
-
 func publicationGitEnv(name, email string) []string {
 	environment := childEnvironment()
 	return append(environment,
@@ -406,59 +314,6 @@ func publicationIdentity(role string) (string, string) {
 		return "Iron Forest Fixer", "fixer@forest.invalid"
 	}
 	return "Iron Forest Builder", "builder@forest.invalid"
-}
-
-func destinationNote(ctx context.Context, root, ref, revision string) ([]byte, string, string, error) {
-	if _, err := gitOutput(ctx, root, "rev-parse", "--verify", ref); err != nil {
-		if soleExitCode(err, 128) {
-			return nil, "", "", nil
-		}
-		return nil, "", "", err
-	}
-	tree, err := gitOutput(ctx, root, "ls-tree", "-r", ref)
-	if err != nil {
-		return nil, "", "", err
-	}
-	var matches []string
-	for _, line := range strings.Split(strings.TrimSpace(string(tree)), "\n") {
-		if line == "" {
-			continue
-		}
-		modeType, path, ok := strings.Cut(line, "\t")
-		if !ok || !strings.Contains(modeType, " blob ") {
-			if ok && strings.ReplaceAll(path, "/", "") == revision {
-				return nil, "", "", fmt.Errorf("review-request note path is not a blob")
-			}
-			continue
-		}
-		if strings.ReplaceAll(path, "/", "") == revision {
-			matches = append(matches, path)
-		}
-	}
-	if len(matches) == 0 {
-		return nil, "", "", nil
-	}
-	if len(matches) != 1 {
-		return nil, "", "", fmt.Errorf("review-request note path is ambiguous")
-	}
-	payload, err := gitOutput(ctx, root, "show", ref+":"+matches[0])
-	if err != nil {
-		return nil, "", "", err
-	}
-	identity, err := gitLine(ctx, root, "log", "-1", "--format=%an <%ae>", ref, "--", matches[0])
-	if err != nil {
-		return nil, "", "", err
-	}
-	name, email := parseNoteIdentity(identity)
-	return payload, name, email, nil
-}
-
-func parseNoteIdentity(identity string) (string, string) {
-	name, email, ok := strings.Cut(identity, " <")
-	if !ok {
-		return "", ""
-	}
-	return name, strings.TrimSuffix(email, ">")
 }
 
 func remoteOID(ctx context.Context, root, ref string) (string, error) {

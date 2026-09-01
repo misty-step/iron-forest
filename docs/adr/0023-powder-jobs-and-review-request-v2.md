@@ -1,6 +1,11 @@
 # 0023 — One Subject identity
 
-Status: accepted, 2026-08-19
+Status: accepted, 2026-08-19 (review-request note write retired by 0028, 2026-09-01)
+
+> Retired in part by [0028](0028-review-request-notes-retired.md): the
+> review-request note described below no longer carries request evidence.
+> Request evidence is only the create-only `refs/forest/v1/request/<sha>`
+> commit. Decision text retained as historical record.
 
 Extends [0009](0009-git-coordination-authority.md),
 [0010](0010-agent-owned-effects-and-merge-gate.md), and

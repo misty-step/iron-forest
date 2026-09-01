@@ -245,8 +245,7 @@ and `master`. GitHub Issues and Powder jobs are the Tracker. Pull requests are d
 human Projections, never authority.
 
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
-the branch and a request evidence commit, and still dual-writes
-`refs/notes/forest/review-request`. Verifier calls `forest publish verdict`.
+the branch and a request evidence commit. Verifier calls `forest publish verdict`.
 The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
 `master` in the same atomic push. It then reconciles the landed Subject to
 terminal Powder state without changing a successful Gate into failure. See
@@ -293,7 +292,7 @@ Builder Poll also wakes on a takeable or held Powder job for `forest.yaml`
 Git-landed Subject to terminal Powder state or fails closed.
 
 Verifier and Fixer Poll `ls-remote` evidence refs for each `forest/*` tip.
-Leftover `refs/notes/forest/*` are unread. A missing evidence ref is no work.
+Historical notes are unread. A missing evidence ref is no work.
 
 ## Merge Gate
 

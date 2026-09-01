@@ -15,20 +15,13 @@ import (
 
 // The Runner's dispatch: invocation, identity, usage accounting, and cleanup.
 
-// runnerPrivateRefSetup is the per-Run private note publication a stub harness
-// performs, so a test exercises the same ref layout a real Run creates.
-const runnerPrivateRefSetup = `revision=$(git rev-parse HEAD)
-git update-ref "refs/notes/forest/private/$FOREST_RUN_ID/$ROLE/$NOTE_KIND/$revision/publication" "$revision"
-git update-ref "refs/notes/forest/private/$FOREST_RUN_ID/$ROLE/$NOTE_KIND/$revision/base" "$revision"
-`
-
 func TestRunnerWorktreeHarnessAndLedger(t *testing.T) {
 	for _, test := range []struct {
-		role, name, email, noteKind string
+		role, name, email string
 	}{
-		{role: "builder", name: "Iron Forest Builder", email: "builder@forest.invalid", noteKind: "review-request"},
-		{role: "verifier", name: "Iron Forest Verifier", email: "verifier@forest.invalid", noteKind: "checks"},
-		{role: "fixer", name: "Iron Forest Fixer", email: "fixer@forest.invalid", noteKind: "review-request"},
+		{role: "builder", name: "Iron Forest Builder", email: "builder@forest.invalid"},
+		{role: "verifier", name: "Iron Forest Verifier", email: "verifier@forest.invalid"},
+		{role: "fixer", name: "Iron Forest Fixer", email: "fixer@forest.invalid"},
 	} {
 		t.Run(test.role, func(t *testing.T) {
 			root, _ := testClone(t)
@@ -39,9 +32,6 @@ func TestRunnerWorktreeHarnessAndLedger(t *testing.T) {
 			t.Setenv("ARGS_FILE", argsFile)
 			t.Setenv("IDENTITY_FILE", identityFile)
 			t.Setenv("ROLE", test.role)
-			t.Setenv("NOTE_KIND", test.noteKind)
-			canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-			runGitDir(t, root, "update-ref", "refs/notes/forest/"+test.noteKind, canonical)
 			t.Setenv("GIT_AUTHOR_NAME", "Wrong")
 			t.Setenv("GIT_AUTHOR_EMAIL", "wrong@example.invalid")
 			t.Setenv("GIT_COMMITTER_NAME", "Wrong")
@@ -54,7 +44,7 @@ printf identity > identity.txt
 git add identity.txt
 git commit -m identity >/dev/null
 git log -1 --format='%an%n%ae%n%cn%n%ce' > "$IDENTITY_FILE"
-` + runnerPrivateRefSetup + `printf '%s\n' '{"type":"message_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
+` + `printf '%s\n' '{"type":"message_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
 printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":2,"output":3,"cacheRead":5,"cacheWrite":7}}}'
 printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"cacheRead":17,"cacheWrite":19}}}'
 `
@@ -104,7 +94,6 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 					t.Fatalf("harness args missing %q:\n%s", value, args)
 				}
 			}
-			assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, test.noteKind)
 			rows, err := readLedger(root, -1)
 			if err != nil || len(rows) != 1 {
 				t.Fatalf("ledger rows=%v err=%v", rows, err)
@@ -117,58 +106,6 @@ printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":11,"output":13,"ca
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("worktrees not cleaned: entries=%v err=%v", entries, err)
 			}
-		})
-	}
-}
-
-func assertRunnerPrivateRefsClean(t *testing.T, root, runID, revision, noteKind string, remaining ...string) {
-	t.Helper()
-	refs := strings.Fields(string(runGitDir(t, root, "for-each-ref", "--format=%(refname)", "refs/notes/forest/private/")))
-	if got, want := strings.Join(refs, "\n"), strings.Join(remaining, "\n"); got != want {
-		t.Fatalf("private refs=%v, want %v after cleaning run %s", refs, remaining, runID)
-	}
-	canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "refs/notes/forest/"+noteKind)))
-	if canonical != revision {
-		t.Fatalf("canonical %s ref=%s, want %s", noteKind, canonical, revision)
-	}
-}
-
-func TestRunnerCleansPrivateRefsAfterAgentFailureAndCancellation(t *testing.T) {
-	for name, cancelRun := range map[string]bool{"failure": false, "cancellation": true} {
-		t.Run(name, func(t *testing.T) {
-			root, _ := testClone(t)
-			omp := filepath.Join(t.TempDir(), "omp")
-			t.Setenv("ROLE", "builder")
-			t.Setenv("NOTE_KIND", "review-request")
-			canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-			runGitDir(t, root, "update-ref", "refs/notes/forest/review-request", canonical)
-			behavior := "exit 7\n"
-			wantExit := 7
-			if cancelRun {
-				behavior = "while :; do /bin/sleep 1; done\n"
-				wantExit = 130
-			}
-			script := "#!/bin/sh\nset -eu\n" + runnerPrivateRefSetup +
-				"printf '%s\\n' '{\"usage\":{\"input\":1}}'\n" + behavior
-			if err := os.WriteFile(omp, []byte(script), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			runner := NewRunner(root)
-			runner.PiPath = omp
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if cancelRun {
-				timer := time.AfterFunc(2*time.Second, cancel)
-				defer timer.Stop()
-			}
-			record, err := runner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
-			if record.Exit != wantExit || err == nil {
-				t.Fatalf("record=%#v err=%v, want exit %d", record, err, wantExit)
-			}
-			if cancelRun && !errors.Is(err, context.Canceled) {
-				t.Fatalf("cancellation err=%v", err)
-			}
-			assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, "review-request")
 		})
 	}
 }
@@ -826,7 +763,7 @@ exec "$REAL_GIT" "$@"
 	}
 }
 
-func TestRunnerJoinsCleanupErrorsAndPreservesConcurrentRunRefs(t *testing.T) {
+func TestRunnerJoinsCleanupErrors(t *testing.T) {
 	root, _ := testClone(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -835,12 +772,6 @@ func TestRunnerJoinsCleanupErrorsAndPreservesConcurrentRunRefs(t *testing.T) {
 	pruneMarker := filepath.Join(t.TempDir(), "pruned")
 	t.Setenv("REAL_GIT", realGit)
 	t.Setenv("PRUNE_MARKER", pruneMarker)
-	t.Setenv("ROLE", "builder")
-	t.Setenv("NOTE_KIND", "review-request")
-	canonical := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	runGitDir(t, root, "update-ref", "refs/notes/forest/review-request", canonical)
-	otherRef := "refs/notes/forest/private/live-run/verifier/checks/" + canonical + "/publication"
-	runGitDir(t, root, "update-ref", otherRef, canonical)
 	gitWrapper := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 if [ "$1" = worktree ] && [ "$2" = remove ]; then exit 9; fi
@@ -855,7 +786,7 @@ exec "$REAL_GIT" "$@"
 		t.Fatal(err)
 	}
 	omp := filepath.Join(t.TempDir(), "omp")
-	ompScript := "#!/bin/sh\nset -eu\n" + runnerPrivateRefSetup + "printf '%s\\n' '{\"usage\":{\"input\":1}}'\n"
+	ompScript := "#!/bin/sh\nset -eu\nprintf '%s\\n' '{\"usage\":{\"input\":1}}'\n"
 	if err := os.WriteFile(omp, []byte(ompScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -870,7 +801,6 @@ exec "$REAL_GIT" "$@"
 			t.Fatalf("cleanup error %q missing %q", err, want)
 		}
 	}
-	assertRunnerPrivateRefsClean(t, root, record.RunID, canonical, "review-request", otherRef)
 	worktree := forestPath(root, "worktrees", record.RunID)
 	if _, statErr := os.Stat(worktree); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("failed Git remove left filesystem residue: %v", statErr)
