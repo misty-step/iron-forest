@@ -1,3 +1,10 @@
+## [0.0.4](https://github.com/misty-step/iron-forest/compare/v0.0.3...v0.0.4) (2026-09-01)
+
+
+### Bug Fixes
+
+* **polls:** snapshot poll candidates in one ls-remote ([613e729](https://github.com/misty-step/iron-forest/commit/613e72956ab6d99b686cf154628a61a42463f4a9))
+
 ## [0.0.3](https://github.com/misty-step/iron-forest/compare/v0.0.2...v0.0.3) (2026-08-30)
 
 
