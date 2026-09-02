@@ -15,6 +15,8 @@ checks:
   # A published branch must never carry credential material. The generic
   # high-entropy scan runs over the whole worktree (untracked files included)
   # and fails closed when the trufflehog scanner is absent rather than silently
-  # narrowing. Legitimate fixtures are excluded in forest.secrets.yaml.
+  # narrowing. The Gate runs this check with the Kernel's own scanner, never by
+  # compiling or executing candidate code. Legitimate fixtures are excluded in
+  # forest.secrets.yaml.
   - name: secrets
-    run: mise exec -- go run . scan-secrets .
+    run: '"$FOREST_ROOT/forest" scan-secrets .'

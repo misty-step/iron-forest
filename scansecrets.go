@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,17 +66,92 @@ func scanSecretsTree(dir string) ([]secretFinding, error) {
 }
 
 // loadSecretsConfig reads forest.secrets.yaml from the scanned root, or returns
-// an os.IsNotExist error when the file is absent.
+// an os.IsNotExist error when the file is absent. It decodes with
+// KnownFields(true) so unknown keys fail rather than being silently ignored,
+// and every exclude is validated before it reaches the scanner.
 func loadSecretsConfig(dir string) (secretsConfig, error) {
 	var cfg secretsConfig
 	b, err := os.ReadFile(filepath.Join(dir, "forest.secrets.yaml"))
 	if err != nil {
 		return cfg, err
 	}
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(b))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
+		// An empty or comment-only file is the same as an absent one: the
+		// operator created the slot and has not filled it yet.
+		if errors.Is(err, io.EOF) {
+			return cfg, nil
+		}
 		return cfg, fmt.Errorf("parse forest.secrets.yaml: %w", err)
 	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return cfg, fmt.Errorf("parse forest.secrets.yaml: %w", err)
+		}
+		return cfg, fmt.Errorf("parse forest.secrets.yaml: multiple YAML documents")
+	}
+	for _, pattern := range cfg.Exclude {
+		if err := validateScanExclude(dir, pattern); err != nil {
+			return cfg, fmt.Errorf("forest.secrets.yaml exclude %q: %w", pattern, err)
+		}
+	}
 	return cfg, nil
+}
+
+// validateScanExclude keeps a configured exclusion narrow and unambiguous: it
+// must be a relative path with no parent element, no glob metacharacters, and
+// it must name a file or directory inside the scanned tree.
+func validateScanExclude(dir, pattern string) error {
+	if strings.TrimSpace(pattern) == "" {
+		return errors.New("must not be empty")
+	}
+	if filepath.IsAbs(pattern) {
+		return errors.New("must be a relative path")
+	}
+	if hasParentPathElement(pattern) {
+		return errors.New("must not contain a parent path element")
+	}
+	if strings.ContainsAny(pattern, "*?[") {
+		return errors.New("must not contain glob metacharacters")
+	}
+	clean := filepath.Clean(filepath.FromSlash(pattern))
+	if _, err := os.Stat(filepath.Join(dir, clean)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("names a path that does not exist")
+		}
+		return err
+	}
+	return nil
+}
+
+// hasParentPathElement reports whether a slash-separated path contains a `..`
+// element, even when filepath.Clean would later fold it away.
+func hasParentPathElement(pattern string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(pattern), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// scanSecretsCheckError turns a trusted scan's result into a single error for
+// the review/verdict check surface. It keeps the same redaction as the
+// `scan-secrets` CLI: findings name the path and rule, never a candidate value.
+func scanSecretsCheckError(findings []secretFinding, err error) error {
+	if err != nil {
+		return err
+	}
+	if len(findings) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for _, f := range findings {
+		fmt.Fprintf(&b, "\n%s in %s", f.Rule, oneLine(f.Path))
+	}
+	return fmt.Errorf("leaked credential material in the worktree%s", b.String())
 }
 
 // scanGeneric runs the external generic scanner over the working tree. If the

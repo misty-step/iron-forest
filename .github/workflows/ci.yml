@@ -48,8 +48,10 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/6f3c981e7b77f235fd2702dd74af25fc4b72bf11/scripts/install.sh \
             | sh -s -- -b /usr/local/bin v3.96.0
           trufflehog --version
+      - name: Build the forest scanner
+        run: mise exec -- go build -o /tmp/forest .
       - name: Scan for leaked credentials
-        run: mise exec -- go run . scan-secrets .
+        run: /tmp/forest scan-secrets .
 
   eval-fast:
     runs-on: ubuntu-latest

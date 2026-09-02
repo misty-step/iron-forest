@@ -84,6 +84,8 @@ func TestScanSecretsLoadsFixtureExclusions(t *testing.T) {
 
 	dir := t.TempDir()
 	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - testdata/fixture.txt\n  - config_test.go\n")
+	writeTree(t, dir, "testdata/fixture.txt", "validated fixture placeholder\n")
+	writeTree(t, dir, "config_test.go", "package main\n")
 	if _, err := scanSecretsTree(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +101,43 @@ func TestScanSecretsLoadsFixtureExclusions(t *testing.T) {
 		if !found {
 			t.Fatalf("scanner should have received exclusion %q, got %v", pattern, got)
 		}
+	}
+}
+
+func TestLoadSecretsConfigRejectsGlobExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - '*'\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "glob metacharacters") {
+		t.Fatalf("error=%v, want a glob metacharacter rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsParentExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - ../x\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "parent path element") {
+		t.Fatalf("error=%v, want a parent path rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsMissingExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - missing.txt\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("error=%v, want a missing path rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsUnknownField(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - config_test.go\nextra: true\n")
+	writeTree(t, dir, "config_test.go", "package main\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error=%v, want an unknown field rejection", err)
 	}
 }
 

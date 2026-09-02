@@ -791,18 +791,10 @@ func runAuditLog(_ []string, flags cliFlags) cliOutcome {
 // worktree fail the check with a nonzero exit; a clean tree passes.
 func runScanSecrets(rest []string, flags cliFlags) cliOutcome {
 	findings, err := scanSecretsTree(rest[0])
-	if err != nil {
-		return failure(exitError, "scan-secrets: %s", err)
+	if checkErr := scanSecretsCheckError(findings, err); checkErr != nil {
+		return failure(exitError, "scan-secrets: %s", checkErr)
 	}
-	if len(findings) == 0 {
-		return cliOutcome{Exit: exitOK, Human: "scan-secrets: ok"}
-	}
-	var b strings.Builder
-	for _, f := range findings {
-		fmt.Fprintf(&b, "\n%s in %s", f.Rule, oneLine(f.Path))
-	}
-
-	return failure(exitError, "scan-secrets: leaked credential material in the worktree%s", b.String())
+	return cliOutcome{Exit: exitOK, Human: "scan-secrets: ok"}
 }
 
 // oneLine keeps a stored value inside the line that reports it. Poll output, Run

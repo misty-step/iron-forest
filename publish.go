@@ -238,6 +238,13 @@ func runConfiguredChecks(ctx context.Context, root, revision string) (err error)
 		return pathErr
 	}
 	for _, check := range cfg.Checks {
+		if strings.TrimSpace(check.Name) == "secrets" {
+			findings, scanErr := scanSecretsTree(dir)
+			if checkErr := scanSecretsCheckError(findings, scanErr); checkErr != nil {
+				return fmt.Errorf("check %q failed: scan-secrets: %w", check.Name, checkErr)
+			}
+			continue
+		}
 		command := exec.CommandContext(ctx, shell, "-c", check.Run)
 		command.Dir = dir
 		command.Env = checkEnvironment(path)

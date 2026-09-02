@@ -244,6 +244,52 @@ func TestPublishReviewRequestRefusesFailedCheck(t *testing.T) {
 	}
 }
 
+func TestPublishReviewRequestUsesTrustedSecretsScanner(t *testing.T) {
+	root, _ := testClone(t)
+	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
+	scanEnv.lookPath = func(string, string) (string, error) { return "stub", nil }
+	scanEnv.runGeneric = func(string, string, []string) ([]secretFinding, error) {
+		return []secretFinding{{Path: "fixture.txt", Rule: "TestSecret"}}, nil
+	}
+	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
+
+	// The candidate carries a neutered scanner and still declares the old
+	// candidate-supplied command. The Gate must run its own scanner and find
+	// the planted fixture rather than compiling the candidate's scansecrets.go.
+	writeTree(t, root, "scansecrets.go", "package main\nfunc scanSecretsTree(string) ([]secretFinding, error) { return nil, nil }\n")
+	writeTree(t, root, "fixture.txt", "PLANTED-CREDENTIAL-FIXTURE\n")
+	config := []byte(`repo: owner/name
+primary: refs/heads/master
+agents:
+  builder: {poll: "true", interval: 1}
+  fixer: {poll: "true", interval: 1}
+checks:
+  - {name: test, run: "true"}
+  - {name: secrets, run: "go run . scan-secrets ."}
+`)
+	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "add", "forest.yaml", "scansecrets.go", "fixture.txt")
+	runGitDir(t, root, "commit", "-m", "candidate neutered scanner and planted fixture")
+	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	t.Setenv("FOREST_RUN_ID", "1-builder")
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root:        root,
+		Role:        "builder",
+		Branch:      "forest/1/ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1/ready"),
+		RunID:       "1-builder",
+	})
+	if err == nil || !strings.Contains(err.Error(), `check "secrets" failed`) || !strings.Contains(err.Error(), "fixture.txt") {
+		t.Fatalf("error=%v, want trusted secrets check to fail on the planted fixture", err)
+	}
+	if strings.Contains(err.Error(), "PLANTED-CREDENTIAL-FIXTURE") {
+		t.Fatalf("error leaked the planted credential value: %v", err)
+	}
+}
+
 func TestPublishReviewRequestDetectsBranchRace(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
