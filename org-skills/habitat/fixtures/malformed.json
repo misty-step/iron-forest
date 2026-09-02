@@ -1,0 +1,8 @@
+{
+  "scenario": "malformed",
+  "command": "habitat list --json",
+  "exit": 1,
+  "stdout": "",
+  "stderr": "Error (HTTP 200): Invalid JSON response from server.\nRequest ID: redacted-request-id\n",
+  "profile": null
+}

@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Redacted fake Habitat CLI fixture player for contract-case verification.
+
+This is not the real Habitat CLI. It replays one redacted fixture envelope so the
+offline contract cases in org-skills/habitat/run-contract-cases.py can assert the
+documented v0.5.4 output and exit behavior without a network or a live ledger.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+
+def emit(value: object, stream) -> None:
+    if value is None or value == "":
+        return
+    if isinstance(value, str):
+        print(value, file=stream)
+    else:
+        print(json.dumps(value, indent=2), file=stream)
+
+
+def main(argv: list[str]) -> int:
+    if argv == ["--version"]:
+        print("habitat-cli-v0.5.4")
+        return 0
+    if argv and argv[0] in ("help", "--help"):
+        print("fake Habitat CLI v0.5.4 fixture player (offline contract cases)")
+        return 0
+
+    fixture = os.environ.get("HABITAT_FIXTURE")
+    if not fixture:
+        print("Error: HABITAT_FIXTURE is required.", file=sys.stderr)
+        return 1
+
+    with open(fixture, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    emit(data.get("stdout"), sys.stdout)
+    emit(data.get("stderr"), sys.stderr)
+    return int(data.get("exit", 0))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

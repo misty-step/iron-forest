@@ -1,0 +1,46 @@
+{
+  "scenario": "list-page-1",
+  "command": "habitat list --limit 2 --offset 0 --json",
+  "exit": 0,
+  "stdout": {
+    "count": 3,
+    "items": [
+      {
+        "external_id": "IRON-101",
+        "revision": 1,
+        "title": "Redacted eligible fixture",
+        "status": "ready_for_dev",
+        "priority": "p1",
+        "size": "S",
+        "type": "task",
+        "owner": "redacted-agent",
+        "module": "fixture-module",
+        "tags": ["forest-ready"],
+        "pr_url": null,
+        "branch": null,
+        "head_sha": null,
+        "blocked_by": []
+      },
+      {
+        "external_id": "IRON-102",
+        "revision": 1,
+        "title": "Redacted second fixture",
+        "status": "ready_for_dev",
+        "priority": "p1",
+        "size": "S",
+        "type": "task",
+        "owner": "redacted-agent",
+        "module": "fixture-module",
+        "tags": ["forest-ready"],
+        "pr_url": null,
+        "branch": null,
+        "head_sha": null,
+        "blocked_by": []
+      }
+    ]
+  },
+  "stderr": "",
+  "profile": {
+    "repository": "misty-step/iron-forest"
+  }
+}

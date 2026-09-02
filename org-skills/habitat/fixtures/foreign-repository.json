@@ -1,0 +1,26 @@
+{
+  "scenario": "foreign-repository",
+  "command": "habitat get IRON-FOREIGN --json",
+  "exit": 0,
+  "stdout": {
+    "external_id": "IRON-FOREIGN",
+    "revision": 2,
+    "title": "Redacted foreign-repository fixture",
+    "status": "ready_for_dev",
+    "priority": "p0",
+    "size": "L",
+    "type": "bug",
+    "owner": "redacted-agent",
+    "module": "fixture-module",
+    "tags": ["forest-ready"],
+    "pr_url": null,
+    "branch": null,
+    "head_sha": null,
+    "blocked_by": []
+  },
+  "stderr": "",
+  "profile": {
+    "repository": "other/example-repo",
+    "eligibility": "eligible"
+  }
+}

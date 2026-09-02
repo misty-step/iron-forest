@@ -1,0 +1,26 @@
+{
+  "scenario": "missing-repository",
+  "command": "habitat get IRON-NOREPO --json",
+  "exit": 0,
+  "stdout": {
+    "external_id": "IRON-NOREPO",
+    "revision": 1,
+    "title": "Redacted missing-repository fixture",
+    "status": "ready_for_dev",
+    "priority": "p1",
+    "size": "S",
+    "type": "task",
+    "owner": "redacted-agent",
+    "module": "fixture-module",
+    "tags": ["forest-ready"],
+    "pr_url": null,
+    "branch": null,
+    "head_sha": null,
+    "blocked_by": []
+  },
+  "stderr": "",
+  "profile": {
+    "repository": null,
+    "eligibility": "eligible"
+  }
+}
