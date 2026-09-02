@@ -37,10 +37,17 @@ const (
 	openRouterProbeTimeout = 10 * time.Second
 )
 
-// errOpenRouterKeyRejected is the sentinel for a definitive, read-only
-// rejection: the endpoint answered and refused the key. It is distinguishable
-// from a transport failure, which is unknown rather than a diagnosed key fault.
-var errOpenRouterKeyRejected = errors.New("openrouter rejected the key")
+var (
+	// errOpenRouterKeyRejected is the sentinel for a definitive, read-only
+	// rejection: the endpoint answered and refused the key. It is distinguishable
+	// from a transport failure, which is unknown rather than a diagnosed key fault.
+	errOpenRouterKeyRejected = errors.New("openrouter rejected the key")
+
+	// doctorProbeTimeout bounds each read-only gh/powder subprocess probe so an
+	// unreachable or hung tool reports unknown instead of hanging the doctor
+	// command. It is a var so the timeout regression test can shrink it.
+	doctorProbeTimeout = 10 * time.Second
+)
 
 type doctorPayload struct {
 	Repo    string        `json:"repo"`
@@ -224,17 +231,38 @@ func probeOpenRouterKey(ctx context.Context, key string) error {
 }
 
 func doctorPowderCheck(ctx context.Context, root, repo string) doctorCheck {
-	agent := powderAgent()
-	if agent == "" {
-		return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: true, Evidence: "POWDER_AGENT is not set; Powder selection is disabled"}
+	path, err := serviceEnvPath(root)
+	if err != nil {
+		return doctorCheck{Name: "powder_reachability", Result: doctorUnknown, OK: false, Reason: err.Error()}
 	}
-	if !powderOriginSet() {
-		return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: false, Evidence: "POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty"}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: false, Evidence: "missing " + path}
+		}
+		return doctorCheck{Name: "powder_reachability", Result: doctorUnknown, OK: false, Reason: fmt.Sprintf("read %s: %v", path, err)}
+	}
+	agent, agentSet := envFileVariableValue(data, "POWDER_AGENT")
+	if !agentSet || strings.TrimSpace(agent) == "" {
+		return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: true, Evidence: "POWDER_AGENT is not set in " + path + "; Powder selection is disabled"}
+	}
+	agent = strings.TrimSpace(agent)
+	originURL, urlSet := envFileVariableValue(data, "POWDER_URL")
+	originBase, baseSet := envFileVariableValue(data, "POWDER_API_BASE_URL")
+	if (!urlSet || strings.TrimSpace(originURL) == "") && (!baseSet || strings.TrimSpace(originBase) == "") {
+		return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: false, Evidence: "POWDER_AGENT is set in " + path + " but POWDER_URL and POWDER_API_BASE_URL are empty"}
 	}
 	if _, err := trustedExecutable(root, "powder"); err != nil {
 		return doctorCheck{Name: "powder_reachability", Result: doctorUnknown, OK: false, Reason: "powder not found on PATH"}
 	}
-	stdout, stderr, err := doctorProbe(ctx, root, "powder", "list", "--mine", agent, "--repo", repo)
+	var probeEnv []string
+	probeEnv = append(probeEnv, "POWDER_AGENT="+agent)
+	if urlSet && strings.TrimSpace(originURL) != "" {
+		probeEnv = append(probeEnv, "POWDER_URL="+strings.TrimSpace(originURL))
+	} else if baseSet && strings.TrimSpace(originBase) != "" {
+		probeEnv = append(probeEnv, "POWDER_API_BASE_URL="+strings.TrimSpace(originBase))
+	}
+	stdout, stderr, err := doctorProbeEnv(ctx, root, "powder", probeEnv, "list", "--mine", agent, "--repo", repo)
 	if err != nil {
 		evidence := oneLine(firstLine(stdout + "\n" + stderr))
 		if evidence == "" {
@@ -249,14 +277,27 @@ func doctorPowderCheck(ctx context.Context, root, repo string) doctorCheck {
 // captured. The caller is responsible for not emitting credential values from
 // the returned text.
 func doctorProbe(ctx context.Context, root, name string, args ...string) (string, string, error) {
+	return doctorProbeEnv(ctx, root, name, nil, args...)
+}
+
+// doctorProbeEnv is doctorProbe with extra environment entries for one probe.
+// The entries are appended to the inherited environment, so a service-file value
+// overrides the same process variable for the probe only. It does not mutate the
+// caller's environment.
+func doctorProbeEnv(ctx context.Context, root, name string, extraEnv []string, args ...string) (string, string, error) {
 	path, err := trustedExecutable(root, name)
 	if err != nil {
 		return "", "", err
 	}
+	probeCtx, cancel := context.WithTimeout(ctx, doctorProbeTimeout)
+	defer cancel()
 	command := exec.Command(path, args...)
+	if len(extraEnv) > 0 {
+		command.Env = append(os.Environ(), extraEnv...)
+	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
-	stdout, err := processGroupOutput(ctx, command)
+	stdout, err := processGroupOutput(probeCtx, command)
 	return string(stdout), stderr.String(), err
 }
 
@@ -281,6 +322,14 @@ func envFileVariable(path, name string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
+	value, present := envFileVariableValue(data, name)
+	return value, present, nil
+}
+
+// envFileVariableValue parses one variable from dotenv-shaped file data. It is
+// the read-less core of envFileVariable so a check can read the service
+// environment file once and inspect several variables.
+func envFileVariableValue(data []byte, name string) (string, bool) {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -299,9 +348,9 @@ func envFileVariable(path, name string) (string, bool, error) {
 				value = value[1 : len(value)-1]
 			}
 		}
-		return value, true, nil
+		return value, true
 	}
-	return "", false, nil
+	return "", false
 }
 
 func firstLine(text string) string {

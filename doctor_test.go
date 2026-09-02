@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // doctorToolStubs writes stub mise/go/pi/gh executables into bin. gh dispatches
@@ -242,5 +243,95 @@ func TestCLIDoctorReportsOpenRouterKeyProbeUnknown(t *testing.T) {
 	check := byName["openrouter_key"]
 	if check.OK || check.Result != doctorUnknown || check.Reason == "" {
 		t.Fatalf("openrouter_key check=%+v, want unknown with reason", check)
+	}
+}
+
+func TestCLIDoctorPowderCheckUsesServiceEnvironment(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	bin := doctorToolStubs(t)
+	marker := filepath.Join(t.TempDir(), "powder-env")
+	writeDoctorStub(t, bin, "powder", `#!/bin/sh
+printf 'POWDER_AGENT=%s POWDER_URL=%s POWDER_API_BASE_URL=%s\n' "$POWDER_AGENT" "$POWDER_URL" "$POWDER_API_BASE_URL" > "$POWDER_ENV_MARKER"
+exit 0
+`)
+	home := t.TempDir()
+	server, seenAuth := doctorOpenRouterServer(t, http.StatusOK)
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENROUTER_API_BASE", server.URL)
+	t.Setenv("POWDER_ENV_MARKER", marker)
+	t.Setenv("POWDER_AGENT", "")
+	t.Setenv("POWDER_URL", "")
+	t.Setenv("POWDER_API_BASE_URL", "")
+	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\nPOWDER_AGENT=powder-agent\nPOWDER_URL=https://powder.example\n")
+
+	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
+	if code != exitOK {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	var payload doctorPayload
+	decodePayload(t, envelope, &payload)
+	if !payload.Healthy {
+		t.Fatalf("healthy=%t, want true (checks=%+v)", payload.Healthy, payload.Checks)
+	}
+	byName := map[string]doctorCheck{}
+	for _, check := range payload.Checks {
+		byName[check.Name] = check
+	}
+	check := byName["powder_reachability"]
+	if !check.OK || check.Result != doctorEvidenced {
+		t.Fatalf("powder_reachability check=%+v, want evidenced ok", check)
+	}
+	if *seenAuth != "Bearer test" {
+		t.Fatalf("openrouter probe Authorization=%q, want Bearer test", *seenAuth)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	want := "POWDER_AGENT=powder-agent POWDER_URL=https://powder.example POWDER_API_BASE_URL=\n"
+	if got != want {
+		t.Fatalf("powder probe environment=%q, want %q", got, want)
+	}
+}
+
+func TestCLIDoctorSubprocessProbeBounded(t *testing.T) {
+	oldTimeout := doctorProbeTimeout
+	doctorProbeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { doctorProbeTimeout = oldTimeout })
+
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	bin := doctorToolStubs(t)
+	writeDoctorStub(t, bin, "powder", "#!/bin/sh\nsleep 5\n")
+	home := t.TempDir()
+	server, _ := doctorOpenRouterServer(t, http.StatusOK)
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENROUTER_API_BASE", server.URL)
+	t.Setenv("POWDER_AGENT", "")
+	t.Setenv("POWDER_URL", "")
+	t.Setenv("POWDER_API_BASE_URL", "")
+	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\nPOWDER_AGENT=powder-agent\nPOWDER_URL=https://powder.example\n")
+
+	start := time.Now()
+	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("doctor took %v, want subprocess probe bounded", elapsed)
+	}
+	if code != exitError {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitError, stderr)
+	}
+	var payload doctorPayload
+	decodePayload(t, envelope, &payload)
+	byName := map[string]doctorCheck{}
+	for _, check := range payload.Checks {
+		byName[check.Name] = check
+	}
+	check := byName["powder_reachability"]
+	if check.OK || check.Result != doctorEvidenced || check.Evidence == "" {
+		t.Fatalf("powder_reachability check=%+v, want evidenced not ok with evidence", check)
 	}
 }

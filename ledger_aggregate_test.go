@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +54,27 @@ func TestComputeLedgerAggregatesEmptyLedgerHasNoInventedRows(t *testing.T) {
 	}
 	if aggregates.RecentFailures == nil || len(aggregates.RecentFailures) != 0 {
 		t.Fatalf("empty recent failures=%v, want empty list", aggregates.RecentFailures)
+	}
+}
+
+func TestStatusHumanSanitizesLedgerAgentNewline(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "poll")
+	writeLedgerRows(t, root,
+		`{"run_id":"ok-1","agent":"builder\nINJECTED","started":"2026-08-21T00:00:00Z","duration":1,"exit":0}`,
+	)
+
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"status", "--root", root})
+	})
+	if code != exitOK {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	if strings.Contains(stdout, "\nINJECTED") {
+		t.Fatalf("status human forged an extra line from ledger agent newline: %q", stdout)
+	}
+	if !strings.Contains(stdout, `"builder\nINJECTED"`) {
+		t.Fatalf("status human did not quote newline-bearing ledger agent: %q", stdout)
 	}
 }
 

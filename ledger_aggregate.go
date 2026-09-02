@@ -142,7 +142,7 @@ func ledgerAggregatesHuman(aggregates statusLedgerAggregates) string {
 	for _, agent := range aggregates.Agents {
 		fmt.Fprintf(&human,
 			"\n  %s runs=%d pass_rate=%.3f duration_p50=%.3fs duration_p95=%.3fs tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
-			agent.Agent, agent.Runs, agent.PassRate, agent.DurationP50, agent.DurationP95,
+			oneLine(agent.Agent), agent.Runs, agent.PassRate, agent.DurationP50, agent.DurationP95,
 			agent.TokensIn, agent.TokensOut, agent.CacheRead, agent.CacheWrite, agent.Reasoning)
 	}
 	return human.String()
