@@ -207,7 +207,7 @@ func probeOpenRouterKey(ctx context.Context, key string) error {
 	if base == "" {
 		base = openRouterDefaultBase
 	}
-	endpoint := strings.TrimRight(base, "/") + "/auth/key"
+	endpoint := strings.TrimRight(base, "/") + "/key"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err

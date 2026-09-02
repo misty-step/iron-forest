@@ -50,18 +50,21 @@ func writeDoctorEnvironment(t *testing.T, root string, content string) {
 	}
 }
 
-// doctorOpenRouterServer returns a test server that accepts the key probe and
-// reports back the Authorization header it received, so tests can assert the
-// key travels only in the header and never in evidence.
-func doctorOpenRouterServer(t *testing.T, status int) (*httptest.Server, *string) {
+// doctorOpenRouterServer returns a test server that accepts the key probe,
+// records the request path, and reports back the Authorization header it
+// received, so tests can assert the endpoint and that the key travels only in
+// the header and never in evidence.
+func doctorOpenRouterServer(t *testing.T, status int) (*httptest.Server, *string, *string) {
 	t.Helper()
 	var seenAuth string
+	var seenPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenAuth = r.Header.Get("Authorization")
+		seenPath = r.URL.Path
 		w.WriteHeader(status)
 	}))
 	t.Cleanup(server.Close)
-	return server, &seenAuth
+	return server, &seenAuth, &seenPath
 }
 
 func TestCLIDoctorReportsHealthyChecks(t *testing.T) {
@@ -69,7 +72,7 @@ func TestCLIDoctorReportsHealthyChecks(t *testing.T) {
 	writeCLIConfig(t, root, "exit 1")
 	bin := doctorToolStubs(t)
 	home := t.TempDir()
-	server, seenAuth := doctorOpenRouterServer(t, http.StatusOK)
+	server, seenAuth, seenPath := doctorOpenRouterServer(t, http.StatusOK)
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
@@ -120,6 +123,9 @@ func TestCLIDoctorReportsHealthyChecks(t *testing.T) {
 	if *seenAuth != "Bearer test" {
 		t.Fatalf("openrouter probe Authorization=%q, want Bearer test", *seenAuth)
 	}
+	if *seenPath != "/key" {
+		t.Fatalf("openrouter probe path=%q, want /key", *seenPath)
+	}
 }
 
 func TestCLIDoctorReportsMissingCredentialFile(t *testing.T) {
@@ -154,7 +160,7 @@ func TestCLIDoctorNeverPrintsCredentialValue(t *testing.T) {
 	writeCLIConfig(t, root, "exit 1")
 	bin := doctorToolStubs(t)
 	home := t.TempDir()
-	server, _ := doctorOpenRouterServer(t, http.StatusOK)
+	server, _, _ := doctorOpenRouterServer(t, http.StatusOK)
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
@@ -188,7 +194,7 @@ func TestCLIDoctorReportsOpenRouterKeyRejected(t *testing.T) {
 	writeCLIConfig(t, root, "exit 1")
 	bin := doctorToolStubs(t)
 	home := t.TempDir()
-	server, _ := doctorOpenRouterServer(t, http.StatusUnauthorized)
+	server, _, _ := doctorOpenRouterServer(t, http.StatusUnauthorized)
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
@@ -256,7 +262,7 @@ printf 'POWDER_AGENT=%s POWDER_URL=%s POWDER_API_BASE_URL=%s\n' "$POWDER_AGENT" 
 exit 0
 `)
 	home := t.TempDir()
-	server, seenAuth := doctorOpenRouterServer(t, http.StatusOK)
+	server, seenAuth, _ := doctorOpenRouterServer(t, http.StatusOK)
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
@@ -307,7 +313,7 @@ printf '%s\n' "$POWDER_API_KEY" > "$POWDER_API_KEY_MARKER"
 exit 0
 `)
 	home := t.TempDir()
-	server, _ := doctorOpenRouterServer(t, http.StatusOK)
+	server, _, _ := doctorOpenRouterServer(t, http.StatusOK)
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
@@ -355,7 +361,7 @@ func TestCLIDoctorSubprocessProbeBounded(t *testing.T) {
 	bin := doctorToolStubs(t)
 	writeDoctorStub(t, bin, "powder", "#!/bin/sh\nsleep 5\n")
 	home := t.TempDir()
-	server, _ := doctorOpenRouterServer(t, http.StatusOK)
+	server, _, _ := doctorOpenRouterServer(t, http.StatusOK)
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
