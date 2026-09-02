@@ -70,7 +70,21 @@ const (
 	flagFollow   = "--follow"
 	flagRescan   = "--rescan"
 	flagRejected = "--rejected"
+	flagAgent    = "--agent"
+	flagExit     = "--exit"
+	flagSince    = "--since"
 )
+
+// flagValueSuffix states which optional flags take a value and how usage should
+// spell that value.
+var flagValueSuffix = map[string]string{
+	flagLimit:    " N",
+	flagAfter:    " <id>",
+	flagRejected: " <sha>",
+	flagAgent:    " <agent>",
+	flagExit:     " <code>",
+	flagSince:    " <time>",
+}
 
 type cliFlags struct {
 	root     string
@@ -80,6 +94,11 @@ type cliFlags struct {
 	follow   bool
 	rescan   bool
 	rejected string
+	agent    string
+	exitCode int
+	exitSet  bool
+	since    time.Time
+	sinceSet bool
 	// seen records the optional flags the caller actually passed. Presence is
 	// recorded here rather than inferred from values, so an empty value cannot
 	// slip past a command's allowlist.
@@ -100,6 +119,7 @@ type cliCommand struct {
 func cliCommands() []cliCommand {
 	return []cliCommand{
 		{phrase: "status", run: runStatus},
+		{phrase: "doctor", run: runDoctor},
 		{phrase: "selfcheck", run: runSelfcheck},
 		{phrase: "version", run: runVersion},
 		{phrase: "config show", run: runConfigShow},
@@ -108,7 +128,7 @@ func cliCommands() []cliCommand {
 		{phrase: "trigger list", run: runTriggerList},
 		{phrase: "trigger show", args: 1, operands: "<agent>", run: runTriggerShow},
 		{phrase: "trigger reset", args: 1, operands: "<agent>", run: runTriggerReset},
-		{phrase: "run list", optional: []string{flagLimit, flagAfter}, run: runRunList},
+		{phrase: "run list", optional: []string{flagLimit, flagAfter, flagAgent, flagExit, flagSince}, run: runRunList},
 		{phrase: "run show", args: 1, operands: "<run-id>", run: runRunShow},
 		{phrase: "run cancel", args: 1, operands: "<run-id>", run: runRunCancel},
 		{phrase: "run logs", args: 1, operands: "<run-id>", optional: []string{flagFollow}, run: runRunLogs},
@@ -142,8 +162,8 @@ func (c cliCommand) usage() string {
 		return head + " [--json] [--root <dir>], or " + head + " --follow [--root <dir>]"
 	}
 	for _, name := range c.optional {
-		if name == flagRejected {
-			head += " [" + name + " <sha>]"
+		if suffix, ok := flagValueSuffix[name]; ok {
+			head += " [" + name + suffix + "]"
 			continue
 		}
 		head += " [" + name + "]"
@@ -353,6 +373,35 @@ func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 			}
 			flags.rejected, index = rejected, next
 			flags.seen = append(flags.seen, flagRejected)
+		case flagAgent:
+			agent, next, err := value(index, name)
+			if err != nil {
+				return positional, flags, err
+			}
+			flags.agent, index = agent, next
+			flags.seen = append(flags.seen, flagAgent)
+		case flagExit:
+			raw, next, err := value(index, name)
+			if err != nil {
+				return positional, flags, err
+			}
+			code, convErr := strconv.Atoi(raw)
+			if convErr != nil {
+				return positional, flags, fmt.Errorf("--exit must be an integer, got %q", raw)
+			}
+			flags.exitCode, flags.exitSet, index = code, true, next
+			flags.seen = append(flags.seen, flagExit)
+		case flagSince:
+			raw, next, err := value(index, name)
+			if err != nil {
+				return positional, flags, err
+			}
+			since, parseErr := parseSince(raw)
+			if parseErr != nil {
+				return positional, flags, parseErr
+			}
+			flags.since, flags.sinceSet, index = since, true, next
+			flags.seen = append(flags.seen, flagSince)
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return positional, flags, fmt.Errorf("unknown flag %q", arg)
@@ -592,7 +641,21 @@ func runRunList(_ []string, flags cliFlags) cliOutcome {
 	if limit <= 0 {
 		limit = defaultRunPage
 	}
-	records, nextAfter, err := ReadLedgerPage(flags.root, limit, flags.after)
+	filter := RunFilter{Agent: flags.agent}
+	if flags.exitSet {
+		filter.Exit = &flags.exitCode
+	}
+	if flags.sinceSet {
+		filter.Since = flags.since
+	}
+	var records []RunRecord
+	var nextAfter string
+	var err error
+	if filter.active() {
+		records, nextAfter, err = ReadLedgerPageFiltered(flags.root, limit, flags.after, filter)
+	} else {
+		records, nextAfter, err = ReadLedgerPage(flags.root, limit, flags.after)
+	}
 	if err != nil {
 		if errors.Is(err, errLedgerCursorUnknown) {
 			return failure(exitNotFound, "%s", err)
@@ -612,6 +675,19 @@ func runRunList(_ []string, flags cliFlags) cliOutcome {
 		human = "no more runs after " + oneLine(flags.after)
 	}
 	return cliOutcome{Exit: exitOK, Data: runListPayload{Runs: records, NextAfter: nextAfter}, Human: human}
+}
+
+// parseSince accepts an RFC3339 or RFC3339Nano timestamp for `run list
+// --since`. It stores a parsed time so the filter compares timestamps once, not
+// per row.
+func parseSince(raw string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed, nil
+	}
+	return time.Time{}, fmt.Errorf("--since must be an RFC3339 timestamp, got %q", raw)
 }
 
 func runRunShow(rest []string, flags cliFlags) cliOutcome {

@@ -178,8 +178,10 @@ before handoff:
    `systemctl --user stop forest@<sibling-directory-name>`, then
    `./forest audit show --rescan`, then
    `systemctl --user start forest@<sibling-directory-name>`.
-8. When the planned `forest doctor` surface lands (if-293), run it and resolve
-   every finding before declaring the deployment complete.
+8. Run `./forest doctor` and resolve every finding before declaring the
+   deployment complete. It checks tool presence, `gh` auth, the credential file
+   mode, read-only forge capability, the OpenRouter key, and Powder
+   reachability.
 
 Build with the pinned toolchain and validate local configuration:
 
@@ -397,13 +399,14 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest serve` | Poll and dispatch enabled declarations. |
 | `forest once <agent>` | Poll once, then dispatch that declaration only when the Poll exits 0. |
 | `forest poll <agent>` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`. |
-| `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, and recent Runs. |
+| `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, recent Runs, and Ledger aggregates. |
 | `forest selfcheck` | Validate `forest.yaml` and declarations locally. |
 | `forest config show` | Print the loaded configuration. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
 | `forest trigger list\|show <agent>` | Print resolved trigger state. |
 | `forest trigger reset <agent>` | Clear one agent's accumulated errors. Refuses while a Kernel runs. |
-| `forest run list` | Page the Ledger, newest first. |
+| `forest doctor` | Run non-mutating machine-operability checks and report one explicit result per check. |
+| `forest run list` | Page the Ledger, newest first, optionally filtered by agent, exit code, or start time. |
 | `forest run show <run-id>` | Print one Ledger row. |
 | `forest run cancel <run-id>` | Stop a live Run's process group and record the cancellation in the Ledger. |
 | `forest run logs [--follow] <run-id>` | Print a Run log, or stream it until the Run completes. |
@@ -459,9 +462,33 @@ empty on the last page. Paging with a cursor that no longer names a Run exits 4
 rather than silently restarting, and a ledger whose identities are duplicated or
 empty cannot carry a cursor, so paging fails instead of looping.
 
+`run list` filters the Ledger before paging with `--agent <agent>`,
+`--exit <code>`, and `--since <rfc3339>`. `--since` matches Runs whose recorded
+start time is at or after the timestamp. A filter and `--after` compose: the
+cursor stays inside the filtered sequence, so a client can walk only the rows it
+asked for.
+
 `run list` returns Runs newest first. `status` reports at most ten recent Runs in
 Ledger order, oldest first, because it is a snapshot of the tail rather than a
 pager; its human output labels the order.
+
+`status` also publishes `ledger`, a roll-up of the whole Ledger for one-command
+instance health: overall `runs` and `pass_rate`; one entry per agent with
+`runs`, `pass_rate`, `duration_p50`, `duration_p95`, and the five retained token
+classes (`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, `reasoning`);
+and `recent_failures`, the newest nonzero rows with `run_id`, `agent`, `exit`,
+and any recorded `error`. Token classes are observability, not accounting: no
+cost, price, spend, or currency value is ever computed.
+
+`doctor` checks one checkout without mutating it. Each check reports a result
+verb — `observed` for a local presence or mode read, `evidenced` for a
+read-only external probe, or `unknown` when no answer was obtained — plus
+`ok`, and either `evidence` or a `reason`. It checks `mise`, `go`, and `pi` on
+PATH; `gh auth status`; the instance credential file mode (`0600`); read-only
+forge push capability through `gh api`; the OpenRouter key with a read-only key
+probe; and Powder reachability when `POWDER_AGENT` is set. The forge and key
+probes never write remotely, and evidence/reason never contain credential
+values. Exit is `0` when every check is healthy and `2` otherwise.
 
 `status` also publishes `live_runs`: for every in-flight Run it reports
 `run_id`, `agent`, `started_at`, `elapsed`, and `cancel`. The `started_at`

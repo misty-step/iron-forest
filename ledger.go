@@ -316,6 +316,77 @@ var errLedgerCursorUnknown = errors.New("run identity is not in the ledger")
 // is what stops a client from looping on a cursor that never advances.
 var errLedgerIdentityUnusable = errors.New("ledger row identity cannot carry a cursor")
 
+// RunFilter is the optional `run list` filter set. A zero RunFilter matches
+// every row.
+type RunFilter struct {
+	Agent string
+	Exit  *int
+	Since time.Time
+}
+
+func (f RunFilter) active() bool {
+	return f.Agent != "" || f.Exit != nil || !f.Since.IsZero()
+}
+
+func (f RunFilter) matches(record RunRecord) bool {
+	if f.Agent != "" && record.Agent != f.Agent {
+		return false
+	}
+	if f.Exit != nil && record.Exit != *f.Exit {
+		return false
+	}
+	if !f.Since.IsZero() {
+		started, err := time.Parse(time.RFC3339Nano, record.Started)
+		if err != nil || started.Before(f.Since) {
+			return false
+		}
+	}
+	return true
+}
+
+// ReadLedgerPageFiltered pages the Ledger with a filter. The filter is applied
+// before the cursor and page bound, so a filtered page's cursor stays inside
+// the filtered sequence. It reads the whole Ledger because a matching row may
+// sit anywhere, not only in the newest tail window.
+func ReadLedgerPageFiltered(root string, limit int, after string, filter RunFilter) ([]RunRecord, string, error) {
+	if limit <= 0 {
+		return nil, "", errors.New("ledger page limit must be positive")
+	}
+	records, err := readLedger(root, -1)
+	if err != nil {
+		return nil, "", err
+	}
+	slices.Reverse(records)
+	if filter.active() {
+		filtered := make([]RunRecord, 0, len(records))
+		for _, record := range records {
+			if filter.matches(record) {
+				filtered = append(filtered, record)
+			}
+		}
+		records = filtered
+	}
+	if after != "" {
+		index := slices.IndexFunc(records, func(record RunRecord) bool { return record.RunID == after })
+		if index < 0 {
+			return nil, "", fmt.Errorf("%w: %q", errLedgerCursorUnknown, after)
+		}
+		records = records[index+1:]
+		if slices.ContainsFunc(records, func(record RunRecord) bool { return record.RunID == after }) {
+			return nil, "", fmt.Errorf("%w: %q names more than one row", errLedgerIdentityUnusable, after)
+		}
+	}
+	if len(records) <= limit {
+		return records, "", nil
+	}
+	page := records[:limit]
+	cursor := page[limit-1].RunID
+	if cursor == "" {
+		return nil, "", fmt.Errorf("%w: the page boundary has an empty identity", errLedgerIdentityUnusable)
+	}
+	return page, cursor, nil
+}
+
 // ReadLedgerPage returns one newest-first page. after names the oldest identity
 // already delivered; the page continues from the next older row. The returned
 // cursor is empty on the last page.

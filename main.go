@@ -118,13 +118,16 @@ inspect:`)
 	usage.WriteString(`
 
 flags:
-  --json        emit one forest.cli.v2 envelope on stdout
-  --root <dir>  read another checkout
-  --limit N     bound a listing
-  --after <id>  continue a listing after one identity
-  --rescan      re-run the Auditor before reporting (audit show)
-  --follow      stream a Run log until it completes; excludes --json (run logs)
-  --rejected S  fixer review-request: the rejected SHA that must still be the branch tip
+  --json          emit one forest.cli.v2 envelope on stdout
+  --root <dir>    read another checkout
+  --limit N       bound a listing
+  --after <id>    continue a listing after one identity
+  --agent <agent> filter run list by agent
+  --exit <code>   filter run list by exit code
+  --since <time>  filter run list by RFC3339 start time
+  --rescan        re-run the Auditor before reporting (audit show)
+  --follow        stream a Run log until it completes; excludes --json (run logs)
+  --rejected S    fixer review-request: the rejected SHA that must still be the branch tip
   exit: 0 ok, 1 no work, 2 error, 4 not found, 5 conflict, 6 invalid arg
         run logs --follow instead exits with the followed Run's own code`)
 	fmt.Fprintln(os.Stderr, usage.String())
@@ -285,6 +288,11 @@ type statusPayload struct {
 	Audit             AuditState    `json:"audit"`
 	Recent            []RunRecord   `json:"recent"`
 	LiveRuns          []LiveRunView `json:"live_runs"`
+	// Ledger rolls up the whole Ledger: overall and per-agent pass rate,
+	// duration percentiles, the five retained token-class totals, and the most
+	// recent failure reasons with their Run identities. It is observability, not
+	// accounting.
+	Ledger statusLedgerAggregates `json:"ledger"`
 }
 
 type kernelView struct {
@@ -325,10 +333,11 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
-	records, err := ReadLedgerTail(flags.root, statusRecentRuns)
+	ledger, err := readLedger(flags.root, -1)
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
+	records := tailRuns(ledger, statusRecentRuns)
 	liveRecords, liveErr := readLiveRuns(flags.root)
 	liveRuns := make([]LiveRunView, 0, len(liveRecords))
 	now := time.Now().UTC()
@@ -353,6 +362,7 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	// attributed to a factory and its newest Run cannot be mistaken for its
 	// oldest. `run list` pages the other way.
 	recent := fmt.Sprintf("recent runs (oldest first, at most %d):", statusRecentRuns)
+	aggregates := computeLedgerAggregates(ledger)
 	sections := []string{
 		"repo: " + oneLine(cfg.Repo),
 		"kernel: " + kernelHuman(kernel),
@@ -364,6 +374,7 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	if rows := runRecordsHuman(records, "  "); rows != "" {
 		sections = append(sections, rows)
 	}
+	sections = append(sections, ledgerAggregatesHuman(aggregates), recentFailuresHuman(aggregates.RecentFailures))
 	payload := statusPayload{
 		Repo:     cfg.Repo,
 		Kernel:   kernel,
@@ -371,6 +382,7 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 		Audit:    audit,
 		Recent:   records,
 		LiveRuns: liveRuns,
+		Ledger:   aggregates,
 	}
 	if state.StateErr != nil {
 		payload.TriggerStateError = state.StateErr.Error()
