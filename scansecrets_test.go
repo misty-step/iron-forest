@@ -190,6 +190,36 @@ func TestLoadSecretsConfigRejectsRootExclusion(t *testing.T) {
 	}
 }
 
+func TestLoadSecretsConfigRejectsSymlinkExclusion(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "credentials.txt")
+	link := filepath.Join(dir, "innocent_link")
+	if err := os.WriteFile(target, []byte("sk-or-v1-abcdef"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - innocent_link\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error=%v, want a symlink exclusion rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsSymlinkComponentExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "real/credentials.txt", "sk-or-v1-abcdef")
+	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - link/credentials.txt\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("error=%v, want a symlink path component rejection", err)
+	}
+}
+
 func TestLoadSecretsConfigRejectsUnknownField(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - config_test.go\nextra: true\n")
@@ -214,6 +244,26 @@ func TestExcludePathRuleMatchesOnlyExactPath(t *testing.T) {
 		if matched != want {
 			t.Fatalf("rule %q matched=%t for %q, want %t", rule, matched, target, want)
 		}
+	}
+}
+
+func TestExcludePathRuleDoesNotResolveSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "credentials.txt")
+	link := filepath.Join(dir, "innocent_link")
+	if err := os.WriteFile(target, []byte("sk-or-v1-abcdef"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	rule := excludePathRule(dir, "innocent_link")
+	configured := filepath.Join(dir, "innocent_link")
+	if !regexp.MustCompile(rule).MatchString(configured) {
+		t.Fatalf("rule %q should match configured symlink path %q", rule, configured)
+	}
+	if regexp.MustCompile(rule).MatchString(target) {
+		t.Fatalf("rule %q must not resolve to symlink target %q", rule, target)
 	}
 }
 

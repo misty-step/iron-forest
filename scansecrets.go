@@ -134,11 +134,19 @@ func validateScanExclude(dir, pattern string) error {
 	if clean == "." || clean == string(filepath.Separator) {
 		return errors.New("must not name the scanned tree root")
 	}
-	if _, err := os.Stat(filepath.Join(dir, clean)); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return errors.New("names a path that does not exist")
+	current := dir
+	for _, part := range strings.Split(filepath.ToSlash(clean), "/") {
+		current = filepath.Join(current, filepath.FromSlash(part))
+		info, err := os.Lstat(current)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return errors.New("names a path that does not exist")
+			}
+			return err
 		}
-		return err
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("must not be a symlink")
+		}
 	}
 	return nil
 }
@@ -280,12 +288,9 @@ func writeExcludePaths(dir string, excludes []string) (string, error) {
 
 // excludePathRule converts one literal repository-relative exclusion into a
 // trufflehog --exclude-paths regular expression that matches exactly that path
-// (or its resolved target when it is a symlink) instead of every path that
-// contains the name.
+// instead of every path that contains the name. It does not resolve symlinks:
+// the rule must name the configured path, never the target a symlink points at.
 func excludePathRule(dir, exclude string) string {
 	full := filepath.Join(filepath.Clean(dir), filepath.Clean(exclude))
-	if resolved, err := filepath.EvalSymlinks(full); err == nil {
-		full = resolved
-	}
 	return "^" + regexp.QuoteMeta(full) + "$"
 }
