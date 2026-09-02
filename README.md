@@ -340,9 +340,14 @@ Historical notes are unread. A missing evidence ref is no work.
 The Gate requires one valid request evidence ref, passing Checks, and an
 approve Verdict for the same Revision, plus a fast-forward of `master` to that
 Revision. `forest publish verdict` performs that push. The existing request is
-not republished. The merge never uses force. Except for the trusted first
-`master` baseline, the Auditor checks the observable final state after the
-Effect; it does not enforce it. See [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
+not republished. The merge never uses force. The credential scan is a
+Kernel-owned preflight (`forest scan-secrets` against the detached candidate
+worktree, resolved from the running Kernel binary and the external `trufflehog`
+outside the managed checkout). It runs unconditionally before configured Checks
+and never compiles or executes candidate code, so a candidate cannot supply the
+Gate's credential scanner. Except for the trusted first `master` baseline, the
+Auditor checks the observable final state after the Effect; it does not enforce
+it. See [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
 
 ## Auditor and trust boundary
 

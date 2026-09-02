@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTree(t *testing.T, dir, rel, content string) {
@@ -41,7 +44,7 @@ func TestScanSecretsMissingScannerFailsClosed(t *testing.T) {
 func TestScanSecretsCleanWorktreePasses(t *testing.T) {
 	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
 	scanEnv.lookPath = func(string, string) (string, error) { return "stub", nil }
-	scanEnv.runGeneric = func(string, string, []string) ([]secretFinding, error) { return nil, nil }
+	scanEnv.runGeneric = func(context.Context, string, string, []string) ([]secretFinding, error) { return nil, nil }
 	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
 
 	dir := t.TempDir()
@@ -55,7 +58,7 @@ func TestScanSecretsCleanWorktreePasses(t *testing.T) {
 func TestScanSecretsFindingFails(t *testing.T) {
 	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
 	scanEnv.lookPath = func(string, string) (string, error) { return "stub", nil }
-	scanEnv.runGeneric = func(string, string, []string) ([]secretFinding, error) {
+	scanEnv.runGeneric = func(context.Context, string, string, []string) ([]secretFinding, error) {
 		return []secretFinding{{Path: ".opencode/agents/builder.md", Rule: "Mint"}}, nil
 	}
 	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
@@ -76,7 +79,7 @@ func TestScanSecretsLoadsFixtureExclusions(t *testing.T) {
 	origLook, origRun := scanEnv.lookPath, scanEnv.runGeneric
 	scanEnv.lookPath = func(string, string) (string, error) { return "stub", nil }
 	var got []string
-	scanEnv.runGeneric = func(_ string, _ string, excludes []string) ([]secretFinding, error) {
+	scanEnv.runGeneric = func(_ context.Context, _ string, _ string, excludes []string) ([]secretFinding, error) {
 		got = excludes
 		return nil, nil
 	}
@@ -84,6 +87,8 @@ func TestScanSecretsLoadsFixtureExclusions(t *testing.T) {
 
 	dir := t.TempDir()
 	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - testdata/fixture.txt\n  - config_test.go\n")
+	writeTree(t, dir, "testdata/fixture.txt", "validated fixture placeholder\n")
+	writeTree(t, dir, "config_test.go", "package main\n")
 	if _, err := scanSecretsTree(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +136,8 @@ func TestScanSecretsMalformedScannerOutputFailsClosed(t *testing.T) {
 // TestWriteExcludePaths confirms the exclusions reach the scanner through a file
 // it reads, so a legitimate fixture cannot fail the generic pass.
 func TestWriteExcludePaths(t *testing.T) {
-	path, err := writeExcludePaths([]string{".git", ".forest", "config_test.go"})
+	dir := t.TempDir()
+	path, err := writeExcludePaths(dir, []string{".git", ".forest", "config_test.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +148,123 @@ func TestWriteExcludePaths(t *testing.T) {
 	}
 	s := string(b)
 	for _, want := range []string{".git", ".forest", "config_test.go"} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("exclusion file should contain %q, got %q", want, s)
+		if !strings.Contains(s, excludePathRule(dir, want)+"\n") {
+			t.Fatalf("exclusion file should contain the anchored rule for %q, got %q", want, s)
 		}
+	}
+}
+
+func TestLoadSecretsConfigRejectsGlobExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - '*'\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "glob metacharacters") {
+		t.Fatalf("error=%v, want a glob metacharacter rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsParentExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - ../x\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "parent path element") {
+		t.Fatalf("error=%v, want a parent path rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsMissingExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - missing.txt\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("error=%v, want a missing path rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsRootExclusion(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - .\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "root") {
+		t.Fatalf("error=%v, want a scanned-tree-root rejection", err)
+	}
+}
+
+func TestLoadSecretsConfigRejectsUnknownField(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - config_test.go\nextra: true\n")
+	writeTree(t, dir, "config_test.go", "package main\n")
+	_, err := loadSecretsConfig(dir)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error=%v, want an unknown field rejection", err)
+	}
+}
+
+func TestExcludePathRuleMatchesOnlyExactPath(t *testing.T) {
+	dir := t.TempDir()
+	rule := excludePathRule(dir, "a")
+	for _, target := range []string{
+		filepath.Join(dir, "a"),
+		filepath.Join(dir, "config_test.go"),
+		filepath.Join(dir, "a.txt"),
+		filepath.Join(dir, "sub", "a"),
+	} {
+		matched := regexp.MustCompile(rule).MatchString(target)
+		want := target == filepath.Join(dir, "a")
+		if matched != want {
+			t.Fatalf("rule %q matched=%t for %q, want %t", rule, matched, target, want)
+		}
+	}
+}
+
+func TestScanSecretsTreeRootRefusesManagedCheckoutScanner(t *testing.T) {
+	managed := t.TempDir()
+	scanned := t.TempDir()
+	script := filepath.Join(managed, secretScanner)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho PLANTED\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", managed+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err := scanSecretsTreeRoot(context.Background(), managed, scanned)
+	if err == nil || !strings.Contains(err.Error(), "refuse repository executable") {
+		t.Fatalf("error=%v, want the managed checkout scanner to be refused", err)
+	}
+}
+
+func TestRunTrufflehogCancelsBlockingScanner(t *testing.T) {
+	heartbeat := filepath.Join(t.TempDir(), "heartbeat")
+	t.Setenv("HEARTBEAT", heartbeat)
+	bin := filepath.Join(t.TempDir(), secretScanner)
+	script := "#!/bin/sh\nwhile :; do printf x >> \"$HEARTBEAT\"; /bin/sleep 0.02; done\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := runTrufflehog(ctx, bin, t.TempDir(), nil)
+		done <- err
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, err := os.ReadFile(heartbeat); err == nil && len(b) > 0 {
+			cancel()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("blocking scanner did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runTrufflehog did not return after cancel")
 	}
 }

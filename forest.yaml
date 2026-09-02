@@ -12,9 +12,7 @@ checks:
     run: mise exec -- go vet ./...
   - name: test
     run: mise exec -- go test ./...
-  # A published branch must never carry credential material. The generic
-  # high-entropy scan runs over the whole worktree (untracked files included)
-  # and fails closed when the trufflehog scanner is absent rather than silently
-  # narrowing. Legitimate fixtures are excluded in forest.secrets.yaml.
-  - name: secrets
-    run: mise exec -- go run . scan-secrets .
+  # A published branch must never carry credential material. The Kernel owns
+  # the credential scan as an unconditional Gate preflight and never compiles
+  # or executes candidate code for it; it is not a configured check here.
+  # Legitimate fixtures are excluded in forest.secrets.yaml.

@@ -229,6 +229,15 @@ func runConfiguredChecks(ctx context.Context, root, revision string) (err error)
 	defer func() {
 		err = errors.Join(err, removePublishWorktree(root, dir))
 	}()
+	// The credential scan is a Kernel-owned preflight, not a candidate-defined
+	// check: it runs unconditionally before any configured check and never
+	// compiles or executes candidate code. The scanner executable is resolved
+	// against the managed primary checkout, so a candidate cannot place a
+	// trufflehog on the path and have it trusted.
+	findings, scanErr := scanSecretsTreeRoot(ctx, primary, dir)
+	if checkErr := scanSecretsCheckError(findings, scanErr); checkErr != nil {
+		return fmt.Errorf("secrets scan: %w", checkErr)
+	}
 	cfg, loadErr := loadConfig(configPath(dir))
 	if loadErr != nil {
 		return loadErr

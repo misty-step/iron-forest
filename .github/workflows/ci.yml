@@ -39,17 +39,20 @@ jobs:
           bin="$(mktemp -d)/forest"
           mise exec -- go build -ldflags "-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty=$dirty" -o "$bin" .
           "$bin" version | grep -Fx "build_sha: $sha"
-      # Mirrors the `secrets` check in forest.yaml. A merged branch must never
-      # carry credential material; CI provisions the same generic scanner the
-      # local check uses and scans the whole worktree (untracked files
-      # included), so the merged gate is green only when the scan passes.
+      # Mirrors the Kernel-owned credential scan. The Gate itself runs the
+      # running Kernel binary against the detached candidate worktree and never
+      # compiles candidate code for the scan; CI builds the scanner binary and
+      # runs its scan-secrets command against the whole worktree (untracked
+      # files included).
       - name: Install the generic secret scanner
         run: |
           curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/6f3c981e7b77f235fd2702dd74af25fc4b72bf11/scripts/install.sh \
             | sh -s -- -b /usr/local/bin v3.96.0
           trufflehog --version
+      - name: Build the forest scanner
+        run: mise exec -- go build -o /tmp/forest .
       - name: Scan for leaked credentials
-        run: mise exec -- go run . scan-secrets .
+        run: /tmp/forest scan-secrets .
 
   eval-fast:
     runs-on: ubuntu-latest
