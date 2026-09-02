@@ -9,28 +9,25 @@ mechanics. Declarations state what agents think and do. See
 The shipped review roster has Builder, Verifier, and Fixer. A Builder turns a
 ready GitHub Issue or takeable Powder job into a branch. A Verifier checks and
 reviews the exact Revision. A Fixer repairs a rejected Revision and sends it back
-for review. Critic sweeps the codebase and files Powder drafts; it never edits
-code or joins the review loop. Tester maps under-tested observable behaviors
-into test-work Powder drafts; it never edits code or joins the review loop.
-Critic and Tester are EXPERIMENTAL and local-canary-only; see the rollout hold
-below.
+for review. Critic and Tester are default-profile, non-review, drafts-only
+roles: Critic sweeps the codebase and files Powder drafts; Tester maps
+under-tested observable behaviors into test-work Powder drafts. Neither edits
+code, publishes to Git, promotes backlog jobs, or adds Kernel Effects, and
+neither joins the review loop.
 
 
-## Critic and Tester rollout hold
+## Critic and Tester
 
-Critic and Tester are EXPERIMENTAL and local-canary-only. Iron Forest keeps
-them enabled in this self-host checkout only for canary observation. External
-operators must not copy or enable them until the rollout exit gate below
-closes.
+Critic and Tester are shipped default-profile roles. Both are non-review and
+drafts-only: they produce attributed spec-less Powder drafts, never edit code,
+never publish to Git, never promote backlog jobs, and never add Kernel
+Effects. Builder, Verifier, and Fixer remain the review and Gate roster.
 
-Rollout exit gate:
+Promotion evidence:
 
-- the blocking repair jobs are merged:
-  `if-investigator-provenance-contract`, `if-eval-powder-mutations`,
-  `if-tester-eval-observable-surface`, `if-eval-draft-note-binding`, and
-  `if-investigator-powder-availability`;
-- the corrected deterministic evals pass; and
-- one post-fix live sweep per role produces attributable spec-less drafts.
+- `evals/jobs/fast/fast-20260901T224519Z/report.md` is 22/22.
+- Settled Runs `1788301018846047029-critic` and
+  `1788301018844450077-tester` each produced one attributed spec-less draft.
 
 Their Polls skip cleanly (exit 1) when Powder is not configured: `POWDER_AGENT`
 and one of `POWDER_URL` or `POWDER_API_BASE_URL` must both be set, otherwise a

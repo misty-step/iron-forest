@@ -243,9 +243,9 @@ scope-allowlist selection (an in-scope Subject and a held out-of-scope
 Subject). Verifier covers stale flat notes, a planted defect in fanout notes,
 clean approval, a failed Check, a conflicting Verdict, and an approval race.
 Fixer covers one finding, multiple findings, fanout notes, a conflicting
-destination, a branch race, and no rejected Revision. The two experimental
-draft-only Critic and Tester sweeps are tracked separately and do not join the
-review loop.
+destination, a branch race, and no rejected Revision. The two draft-only
+Critic and Tester sweeps are tracked separately and do not join the review
+loop.
 
 ### Builder
 

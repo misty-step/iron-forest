@@ -41,8 +41,9 @@ Keep the Kernel generic. Configure each role through:
 Start with Pi's smallest useful tool set. Add a CLI through `bash` plus an explicit skill when that is sufficient. Add a Pi extension only through an accepted, inspectable declaration input; ambient Pi extensions are disabled. Keep credentials in the instance service environment, never in configuration, prompts, skills, or commits.
 
 The shipped Builder, Verifier, and Fixer are opinionated defaults, not a
-required roster. Critic and Tester remain experimental local canaries; keep
-them out of external profiles until the rollout gate in `README.md` closes. A
+required roster. Critic and Tester are default-profile, non-review,
+drafts-only roles: they produce attributed spec-less Powder drafts and never
+edit code, publish to Git, promote backlog jobs, or add Kernel Effects. A
 managed repository may otherwise replace the roster, Polls, prompts, model,
 thinking, tools, and skills without forking the Kernel.
 

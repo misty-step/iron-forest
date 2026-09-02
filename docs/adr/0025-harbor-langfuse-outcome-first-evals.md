@@ -91,8 +91,8 @@ the repeat authority and each attempt index becomes one Langfuse run on export.
 - The CLI remains the operations surface. Langfuse dashboards are eval
   instrumentation for humans, not a Kernel product surface.
 - The executable role suite is 20 cases across Builder, Verifier, and Fixer.
-  The two experimental draft-only Critic and Tester sweeps are tracked
-  separately and do not join the review loop.
+  The two draft-only Critic and Tester sweeps are tracked separately and do
+  not join the review loop.
 - Deterministic safety failure cannot be overridden by a model or human grader.
 - Follow-up work is filed as Powder jobs and lands through the normal Gate; the
   strategy document names the child jobs.

@@ -90,6 +90,11 @@
 
 # Changelog
 
+- 2026-09-02: Critic and Tester are promoted into the default profile as
+  non-review, drafts-only roles. Promotion evidence:
+  `evals/jobs/fast/fast-20260901T224519Z/report.md` is 22/22, and settled
+  Runs `1788301018846047029-critic` and `1788301018844450077-tester` each
+  produced one attributed spec-less draft.
 - 2026-08-22: Critic and Tester are EXPERIMENTAL and local-canary-only.
   They stay enabled only in the self-host Iron Forest checkout for canary
   observation; external operators must not copy or enable them until the
