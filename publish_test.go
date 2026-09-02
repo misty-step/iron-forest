@@ -369,6 +369,61 @@ func TestPublishReviewRequestDetectsBranchRace(t *testing.T) {
 	}
 }
 
+func TestPublishReviewRequestKeepsPolicyRejectionDistinct(t *testing.T) {
+	root, origin := testClone(t)
+	writePassingChecks(t, root)
+	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	hook := filepath.Join(origin, "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho 'policy rejects this ref' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
+		Root:        root,
+		Role:        "builder",
+		Branch:      "forest/1/ready",
+		PayloadPath: writeReviewPayload(t, root, revision, "forest/1/ready"),
+		RunID:       "1-builder",
+	})
+	if err == nil {
+		t.Fatal("expected remote policy rejection")
+	}
+	if publishConflict(err) {
+		t.Fatalf("policy rejection must not be classified as a branch race: %v", err)
+	}
+	if strings.Contains(err.Error(), "branch race") {
+		t.Fatalf("policy rejection must not emit a branch race: %v", err)
+	}
+	if !strings.Contains(err.Error(), "policy rejects this ref") {
+		t.Fatalf("policy rejection diagnostic lost: %v", err)
+	}
+}
+
+func TestClassifyReviewPushNarrowsToLeaseEvidence(t *testing.T) {
+	tests := []struct {
+		name         string
+		output       string
+		wantConflict bool
+	}{
+		{name: "stale lease", output: "! 0000000000000000000000000000000000000000:refs/heads/forest/1/ready\t[rejected] (stale info)", wantConflict: true},
+		{name: "non fast forward", output: "! 0000000000000000000000000000000000000000:refs/heads/forest/1/ready\t[rejected] (non-fast-forward)", wantConflict: true},
+		{name: "remote policy", output: "! 0000000000000000000000000000000000000000:refs/heads/forest/1/ready\t[remote rejected] (pre-receive hook declined)", wantConflict: false},
+		{name: "transport failure without porcelain", output: "", wantConflict: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := errors.New("git push failed")
+			got := classifyReviewPush([]byte(test.output), base)
+			if publishConflict(got) != test.wantConflict {
+				t.Fatalf("conflict=%v want %v (err=%v)", publishConflict(got), test.wantConflict, got)
+			}
+			if !test.wantConflict && !errors.Is(got, base) {
+				t.Fatalf("original error lost: %v", got)
+			}
+		})
+	}
+}
+
 func TestPublishReviewRequestRejectsAncestorBranchCreatedDuringPush(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)

@@ -148,7 +148,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		expectedBranch = input.Rejected
 	}
 	pushArgs := []string{
-		"push", "--atomic",
+		"push", "--porcelain", "--atomic",
 		"--force-with-lease=" + branchRef + ":" + expectedBranch,
 	}
 	refspecs := []string{revision + ":" + branchRef}
@@ -163,15 +163,16 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	}
 	pushArgs = append(pushArgs, "origin")
 	pushArgs = append(pushArgs, refspecs...)
-	if err := gitRun(ctx, input.Root, pushArgs...); err != nil {
-		return publishReviewRequestResult{}, classifyReviewPush(err)
+	output, err := gitOutput(ctx, input.Root, pushArgs...)
+	if err != nil {
+		return publishReviewRequestResult{}, classifyReviewPush(output, err)
 	}
 	return publishReviewRequestResult{Status: "published", Revision: revision, Branch: input.Branch}, nil
 }
 
-func classifyReviewPush(err error) error {
-	text := err.Error()
-	if strings.Contains(text, "non-fast-forward") || strings.Contains(text, "stale info") || strings.Contains(text, "failed to push") || strings.Contains(text, "rejected") {
+func classifyReviewPush(output []byte, err error) error {
+	text := string(output)
+	if strings.Contains(text, "(stale info)") || strings.Contains(text, "(non-fast-forward)") {
 		return conflictError("branch race")
 	}
 	return err
