@@ -1,0 +1,7 @@
+{
+  "schema": "forest.verdict.v1",
+  "revision": "136a34b260b56e3909b6eddbaa759af150616ba0",
+  "verdict": "approve",
+  "summary": "Docs-only promotion of Critic and Tester into the default profile. Checks build, vet, and test all passed with exit 0. Diff is limited to README, VISION, CHANGELOG, ADR 0014, ADR 0025, evaluation-strategy, onboarding-managed-repo, and org-skills and matches the shipped forest.yaml (critic/tester already enabled). Evidence checked: evals/jobs/fast/fast-20260901T224519Z/report.md is 22/22, and forest run show for 1788301018846047029-critic and 1788301018844450077-tester both exit 0. No code, security, or operational change; no blocking findings.",
+  "time": "2026-09-02T12:17:31Z"
+}
