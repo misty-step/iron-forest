@@ -138,6 +138,13 @@ POWDER_API_KEY=<key>
 POWDER_AGENT=forest-<repo-slug>
 ```
 
+`POWDER_AGENT` is the workload identity and must be unique per Kernel.
+`POWDER_API_KEY` authenticates the HTTP transport. It may be an approved shared
+organization credential; this contract does not require one Powder API key per
+Kernel. Copy approved values into the protected instance environment without
+printing them. A deployment that explicitly requires per-instance API keys
+must own their issuance and rotation path.
+
 The job must have a nonempty spec and `repo` equal to `forest.yaml` `repo`.
 Builder takes it and publishes `forest/<id>/<slug>` with review-request v2.
 Fixer re-takes that same Subject before repair when necessary. After approve,

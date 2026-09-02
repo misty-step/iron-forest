@@ -57,6 +57,29 @@ checks:
     run: mise exec -- go test ./...
 ```
 
+### Repository-owned composition
+
+`forest.yaml` accepts arbitrary declaration names. The roster above is the
+shipped opinionated profile, not a Kernel enum or a required workflow. Each
+managed repository may supply its own Polls, prompts, model, thinking level,
+Pi tool allowlists, shared skills, role skills, and Checks. One Kernel still
+serves exactly one repository; an external manager coordinates several
+instances through their CLI read surfaces.
+
+Start each declaration with Pi's smallest useful tool set. A role can use an
+installed CLI such as `gh`, `powder`, or a browser driver only when `bash` is
+in that declaration's Pi tool allowlist and an explicit skill defines the CLI
+contract. Pi extensions are different: the Runner disables extension discovery,
+and declarations cannot yet select an extension path. Do not add an
+extension-provided tool name until the Runner
+has an explicit, inspectable extension input and the role proves one real
+scenario with it.
+
+The current shipped workflow still contains GitHub and Powder mechanics in the
+Kernel. Tracker-independent profile executables and Habitat composition are
+open architecture work; a custom Poll alone does not yet make the complete
+review and terminal lifecycle tracker-agnostic.
+
 Agent Runs have no wall-clock deadline by default. To bound a declaration that
 has wedged before, set the optional `max_duration` key (seconds) under that
 agent; `0` or an omitted key leaves the Run unbounded:
@@ -84,6 +107,11 @@ agents/<name>/skills/           # optional; this declaration only
 Operator-supervised (org) skills live under `org-skills/`. They are not factory
 skill sources; the Runner never auto-loads them, and an operator passes one to a
 supervised `pi` session explicitly.
+
+Iron Forest ships the operator-facing
+[`iron-forest` skill](org-skills/iron-forest/SKILL.md). Pass that directory
+explicitly to a supervised Pi or company-agent session that configures,
+operates, or observes one or more repository instances.
 
 `agent.md` uses YAML frontmatter with optional `model`, `tools`, and `thinking`,
 followed by the system prompt. `task.md` is the standing user prompt. `model`

@@ -4,6 +4,12 @@ Iron Forest is a headless software factory. Exactly one live Kernel serves
 one repository, on a machine the operator chooses. The Kernel is small and
 deterministic. Agents judge.
 
+Each managed repository owns its profile: roster, executable Polls, declaration
+prompts, model and thinking choices, Pi tool allowlists, explicit skills, and
+Checks. The shipped profile is an opinionated default, not a Kernel roster.
+An external company or executive agent may observe and manage several
+repository instances; it does not become a cross-repository Kernel.
+
 This file is the product lock. Accepted ADRs state the contracts. GitHub
 Issues and Powder jobs track work. If a later plan disagrees with this file,
 change this file first.
@@ -136,6 +142,11 @@ is deployment, not Kernel policy.
 
 The CLI is the operations surface. An orchestrator on another machine manages
 a Kernel through SSH and `forest` commands. There is no HTML dashboard.
+The orchestrator may keep an explicit inventory of several independent
+instances and consume their JSON read surfaces. Cross-repository priorities,
+backlog grooming, profile changes, and compatibility choices remain external
+management work, not a shared Kernel state machine.
+
 
 `git ls-remote origin 'refs/forest/v1/*'` and `git show` of an evidence ref
 are the escape. The Kernel does not wrap evidence inspection.
