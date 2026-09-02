@@ -1,0 +1,7 @@
+{
+  "schema": "forest.verdict.v1",
+  "revision": "a4fecad05b2e9381500058b1244b054819793c78",
+  "verdict": "approve",
+  "summary": "Checks build/vet/test pass (exit 0). Revision is a fast-forward of origin/master (merge-base 513c019feb601923a512707747e69a2bad5bef86). Reviewed the two-commit diff: the Gate secrets scan now runs unconditionally as a Kernel-owned preflight before configured checks, resolves trufflehog against the managed primary checkout, and rejects symlink/glob/parent/root/missing excludes with anchored exact-path exclusion rules. No blocking findings.",
+  "time": "2026-09-02T05:29:58Z"
+}
