@@ -247,6 +247,7 @@ func doctorPowderCheck(ctx context.Context, root, repo string) doctorCheck {
 		return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: true, Evidence: "POWDER_AGENT is not set in " + path + "; Powder selection is disabled"}
 	}
 	agent = strings.TrimSpace(agent)
+	apiKey, apiKeySet := envFileVariableValue(data, "POWDER_API_KEY")
 	originURL, urlSet := envFileVariableValue(data, "POWDER_URL")
 	originBase, baseSet := envFileVariableValue(data, "POWDER_API_BASE_URL")
 	if (!urlSet || strings.TrimSpace(originURL) == "") && (!baseSet || strings.TrimSpace(originBase) == "") {
@@ -261,6 +262,9 @@ func doctorPowderCheck(ctx context.Context, root, repo string) doctorCheck {
 		probeEnv = append(probeEnv, "POWDER_URL="+strings.TrimSpace(originURL))
 	} else if baseSet && strings.TrimSpace(originBase) != "" {
 		probeEnv = append(probeEnv, "POWDER_API_BASE_URL="+strings.TrimSpace(originBase))
+	}
+	if apiKeySet && strings.TrimSpace(apiKey) != "" {
+		probeEnv = append(probeEnv, "POWDER_API_KEY="+strings.TrimSpace(apiKey))
 	}
 	stdout, stderr, err := doctorProbeEnv(ctx, root, "powder", probeEnv, "list", "--mine", agent, "--repo", repo)
 	if err != nil {

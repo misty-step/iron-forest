@@ -297,6 +297,54 @@ exit 0
 	}
 }
 
+func TestCLIDoctorPowderCheckPropagatesAPIKeyWithoutPrinting(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	bin := doctorToolStubs(t)
+	marker := filepath.Join(t.TempDir(), "powder-api-key-env")
+	writeDoctorStub(t, bin, "powder", `#!/bin/sh
+printf '%s\n' "$POWDER_API_KEY" > "$POWDER_API_KEY_MARKER"
+exit 0
+`)
+	home := t.TempDir()
+	server, _ := doctorOpenRouterServer(t, http.StatusOK)
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENROUTER_API_BASE", server.URL)
+	t.Setenv("POWDER_API_KEY_MARKER", marker)
+	t.Setenv("POWDER_AGENT", "")
+	t.Setenv("POWDER_URL", "")
+	t.Setenv("POWDER_API_BASE_URL", "")
+	t.Setenv("POWDER_API_KEY", "")
+	const secret = "powder-secret-key"
+	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\nPOWDER_AGENT=powder-agent\nPOWDER_URL=https://powder.example\nPOWDER_API_KEY="+secret+"\n")
+
+	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
+	if code != exitOK {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	if strings.Contains(stderr, secret) {
+		t.Fatalf("doctor leaked POWDER_API_KEY on stderr: %q", stderr)
+	}
+	var payload doctorPayload
+	decodePayload(t, envelope, &payload)
+	if !payload.Healthy {
+		t.Fatalf("healthy=%t, want true (checks=%+v)", payload.Healthy, payload.Checks)
+	}
+	for _, check := range payload.Checks {
+		if strings.Contains(check.Evidence, secret) || strings.Contains(check.Reason, secret) {
+			t.Fatalf("doctor leaked POWDER_API_KEY in check %q: %+v", check.Name, check)
+		}
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != secret+"\n" {
+		t.Fatalf("powder probe POWDER_API_KEY=%q, want %q", got, secret)
+	}
+}
+
 func TestCLIDoctorSubprocessProbeBounded(t *testing.T) {
 	oldTimeout := doctorProbeTimeout
 	doctorProbeTimeout = 100 * time.Millisecond
