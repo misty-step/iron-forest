@@ -344,5 +344,7 @@ startup and idle Poll skips do not audit. Keep `checks:` and
 `.github/workflows/ci.yml` aligned.
 
 Each `.forest/runs.jsonl` Ledger row records `run_id`, `agent`, `started`,
-`duration`, `exit`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
-`reasoning`. It never records or computes money.
+`duration`, `exit`, and exactly five retained token classes — `tokens_in`,
+`tokens_out`, `cache_read`, `cache_write`, and `reasoning` — as operational
+observability, not accounting. The Ledger never records a cost, price, spend,
+or currency field and never computes money.

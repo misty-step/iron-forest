@@ -535,9 +535,10 @@ The `model evals` GitHub workflow maps the distinct repository secrets
 under `evals/jobs/`, which is ignored by Git.
 
 The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
-`agent`), timing (`started` and `duration`), `exit`, and the token classes
-`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and `reasoning`. It never
-records or computes money.
+`agent`), timing (`started` and `duration`), `exit`, and exactly five retained
+token classes — `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
+`reasoning` — as operational observability, not accounting. The Ledger never
+records a cost, price, spend, or currency field and never computes money.
 
 ## License
 

@@ -469,3 +469,94 @@ func TestCLIRunRowShowsExitInside80Columns(t *testing.T) {
 		t.Fatalf("JSON hid identity: %v", keys)
 	}
 }
+
+// The Ledger token classes are observability, not accounting. Every run read
+// surface must publish the five canonical snake_case fields and nothing that
+// looks like a monetary field.
+func TestCLIRunSurfacesPublishCanonicalTokenFieldsWithoutCost(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	want := RunRecord{
+		RunID:      "run-tokens",
+		Agent:      "builder",
+		Started:    "2026-08-10T00:00:00Z",
+		Duration:   1.25,
+		Exit:       0,
+		TokensIn:   3,
+		TokensOut:  5,
+		CacheRead:  7,
+		CacheWrite: 11,
+		Reasoning:  13,
+	}
+	if err := AppendRun(root, want); err != nil {
+		t.Fatal(err)
+	}
+
+	_, show, _ := decodeEnvelope(t, "run", "show", "run-tokens", "--json", "--root", root)
+	var showRecord RunRecord
+	decodePayload(t, show, &showRecord)
+	requireTokenFields(t, showRecord, want, "run show")
+	requireNoMonetaryFields(t, payloadKeys(t, show), "run show")
+
+	_, list, _ := decodeEnvelope(t, "run", "list", "--json", "--root", root)
+	var listPayload runListPayload
+	decodePayload(t, list, &listPayload)
+	if len(listPayload.Runs) != 1 {
+		t.Fatalf("run list runs=%d, want 1", len(listPayload.Runs))
+	}
+	requireTokenFields(t, listPayload.Runs[0], want, "run list")
+	requireNoMonetaryFields(t, nestedRunKeys(t, list), "run list")
+
+	_, status, _ := decodeEnvelope(t, "status", "--json", "--root", root)
+	var statusPayload statusPayload
+	decodePayload(t, status, &statusPayload)
+	if len(statusPayload.Recent) != 1 {
+		t.Fatalf("status recent=%d, want 1", len(statusPayload.Recent))
+	}
+	requireTokenFields(t, statusPayload.Recent[0], want, "status")
+	requireNoMonetaryFields(t, nestedRunKeys(t, status), "status")
+}
+
+func requireTokenFields(t *testing.T, got, want RunRecord, surface string) {
+	t.Helper()
+	for name, pair := range map[string][2]int64{
+		"tokens_in":   {got.TokensIn, want.TokensIn},
+		"tokens_out":  {got.TokensOut, want.TokensOut},
+		"cache_read":  {got.CacheRead, want.CacheRead},
+		"cache_write": {got.CacheWrite, want.CacheWrite},
+		"reasoning":   {got.Reasoning, want.Reasoning},
+	} {
+		if pair[0] != pair[1] {
+			t.Fatalf("%s %s=%d, want %d", surface, name, pair[0], pair[1])
+		}
+	}
+}
+
+func requireNoMonetaryFields(t *testing.T, keys map[string]any, surface string) {
+	t.Helper()
+	for _, key := range []string{"cost", "price", "spend", "currency"} {
+		if _, ok := keys[key]; ok {
+			t.Fatalf("%s publishes monetary field %q: %v", surface, key, keys)
+		}
+	}
+}
+
+func nestedRunKeys(t *testing.T, envelope cliEnvelope) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"runs", "recent"} {
+		if rows, ok := data[key].([]any); ok && len(rows) > 0 {
+			if row, ok := rows[0].(map[string]any); ok {
+				return row
+			}
+		}
+	}
+	return data
+}
