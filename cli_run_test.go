@@ -517,6 +517,27 @@ func TestCLIRunSurfacesPublishCanonicalTokenFieldsWithoutCost(t *testing.T) {
 	requireNoMonetaryFields(t, nestedRunKeys(t, status), "status")
 }
 
+func TestCLIRunStatusEmptyLedgerPublishesEmptyRecentArray(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	_, envelope, _ := decodeEnvelope(t, "status", "--json", "--root", root)
+	encoded, err := json.Marshal(envelope.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(encoded, &data); err != nil {
+		t.Fatal(err)
+	}
+	recent, ok := data["recent"].([]any)
+	if !ok {
+		t.Fatalf("status --json empty ledger recent=%v (%T), want []", data["recent"], data["recent"])
+	}
+	if len(recent) != 0 {
+		t.Fatalf("status --json empty ledger recent length=%d, want 0", len(recent))
+	}
+}
+
 func requireTokenFields(t *testing.T, got, want RunRecord, surface string) {
 	t.Helper()
 	for name, pair := range map[string][2]int64{

@@ -266,13 +266,11 @@ func doctorPowderCheck(ctx context.Context, root, repo string) doctorCheck {
 	if apiKeySet && strings.TrimSpace(apiKey) != "" {
 		probeEnv = append(probeEnv, "POWDER_API_KEY="+strings.TrimSpace(apiKey))
 	}
-	stdout, stderr, err := doctorProbeEnv(ctx, root, "powder", probeEnv, "list", "--mine", agent, "--repo", repo)
-	if err != nil {
-		evidence := oneLine(firstLine(stdout + "\n" + stderr))
-		if evidence == "" {
-			evidence = "powder list failed"
-		}
-		return doctorCheck{Name: "powder_reachability", Result: doctorEvidenced, OK: false, Evidence: evidence}
+	// The probe inherits POWDER_API_KEY, so its stdout or stderr may echo the
+	// credential. Evidence and reason never contain credential values, so a
+	// failed probe reports a fixed non-secret reason instead of captured output.
+	if _, _, err := doctorProbeEnv(ctx, root, "powder", probeEnv, "list", "--mine", agent, "--repo", repo); err != nil {
+		return doctorCheck{Name: "powder_reachability", Result: doctorEvidenced, OK: false, Evidence: "powder reachability probe failed"}
 	}
 	return doctorCheck{Name: "powder_reachability", Result: doctorEvidenced, OK: true, Evidence: "powder reachable"}
 }

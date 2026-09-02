@@ -338,6 +338,9 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 		return failure(exitError, "%s", err)
 	}
 	records := tailRuns(ledger, statusRecentRuns)
+	if records == nil {
+		records = []RunRecord{}
+	}
 	liveRecords, liveErr := readLiveRuns(flags.root)
 	liveRuns := make([]LiveRunView, 0, len(liveRecords))
 	now := time.Now().UTC()
