@@ -1,0 +1,98 @@
+{
+  "schema": "forest.eval.experiment-space.v1",
+  "planner_model": "openrouter/google/gemini-3.7-flash",
+  "incumbent": {
+    "id": "production",
+    "estimated_max_usd_per_trial": 0.5
+  },
+  "sentinels": {
+    "builder": "builder-ready-issue",
+    "verifier": "verifier-clean-approve",
+    "fixer": "fixer-one-finding",
+    "critic": "critic-sweep-draft-only",
+    "tester": "tester-sweep-draft-only"
+  },
+  "tiers": {
+    "nightly": {
+      "attempts": 1,
+      "case_limit": 5,
+      "max_trials": 10,
+      "max_estimated_cost_usd": 10.0,
+      "concurrency": 2,
+      "timeout_minutes": 90
+    },
+    "weekly": {
+      "attempts": 1,
+      "case_limit": 64,
+      "max_trials": 128,
+      "max_estimated_cost_usd": 40.0,
+      "concurrency": 3,
+      "timeout_minutes": 300
+    },
+    "monthly": {
+      "attempts": 3,
+      "case_limit": 64,
+      "max_trials": 384,
+      "max_estimated_cost_usd": 120.0,
+      "concurrency": 3,
+      "timeout_minutes": 350
+    },
+    "promotion": {
+      "attempts": 3,
+      "case_limit": 32,
+      "max_trials": 192,
+      "max_estimated_cost_usd": 80.0,
+      "concurrency": 3,
+      "timeout_minutes": 350
+    },
+    "manual": {
+      "attempts": 1,
+      "case_limit": 64,
+      "max_trials": 384,
+      "max_estimated_cost_usd": 120.0,
+      "concurrency": 3,
+      "timeout_minutes": 350
+    }
+  },
+  "variants": [
+    {
+      "id": "deepseek-low",
+      "model": "openrouter/deepseek/deepseek-v4-pro-0813",
+      "thinking": "low",
+      "change_class": "thinking",
+      "estimated_max_usd_per_trial": 0.5,
+      "roles": ["builder", "verifier", "fixer", "critic", "tester"],
+      "hypothesis": "Lower reasoning effort preserves correctness with lower latency and spend."
+    },
+    {
+      "id": "qwen-3.7-high",
+      "model": "openrouter/qwen/qwen3.7-plus",
+      "change_class": "model",
+      "thinking": "high",
+      "estimated_max_usd_per_trial": 0.5,
+      "roles": ["builder", "verifier", "fixer", "critic", "tester"],
+      "hypothesis": "Qwen 3.7 Plus matches the incumbent at lower token prices."
+    },
+    {
+      "id": "gpt-5.6-sol-high",
+      "model": "openrouter/openai/gpt-5.6-sol",
+      "thinking": "high",
+      "change_class": "model",
+      "estimated_max_usd_per_trial": 1.5,
+      "roles": ["builder", "verifier", "fixer", "critic", "tester"],
+      "hypothesis": "GPT-5.6 Sol improves judgment-heavy tasks enough to justify higher spend."
+    },
+    {
+      "id": "verifier-readonly-lean",
+      "model": "openrouter/deepseek/deepseek-v4-pro-0813",
+      "change_class": "prompt",
+      "thinking": "high",
+      "tools": "read,grep,glob,bash",
+      "prompt_append": "\nPrefer the shortest review path that still proves every Gate invariant.\n",
+      "estimated_max_usd_per_trial": 0.5,
+      "roles": ["builder", "verifier", "fixer", "critic", "tester"],
+      "apply_roles": ["verifier"],
+      "hypothesis": "A concise terminal instruction reduces review drift without weakening the Gate."
+    }
+  ]
+}

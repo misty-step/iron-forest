@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from langfuse_config import normalized_base_url
 
 DATASET_NAME = "iron-forest-evals"
 ENVIRONMENT = "production"
@@ -132,7 +136,25 @@ _SECRET_FIELDS = {
 }
 
 
-def trial_summary(result: dict[str, Any], attempt_index: int, job_id: str, forest_run_id: str | None) -> dict[str, Any]:
+def duration_seconds(started_at: Any, finished_at: Any) -> float | None:
+    if not isinstance(started_at, str) or not isinstance(finished_at, str):
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0.0, (finished - started).total_seconds())
+
+
+def trial_summary(
+    result: dict[str, Any],
+    attempt_index: int,
+    job_id: str,
+    forest_run_id: str | None,
+    experiment: dict[str, Any] | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
     exception = result.get("exception_info") or {}
     totals = token_cost_totals(result)
     return {
@@ -145,10 +167,13 @@ def trial_summary(result: dict[str, Any], attempt_index: int, job_id: str, fores
         "model": model_name(result.get("agent_info") or {}),
         "provider": provider_name(result.get("agent_info") or {}),
         "exception_type": exception.get("exception_type"),
+        "status": status,
         "started_at": result.get("started_at"),
         "finished_at": result.get("finished_at"),
+        "duration_seconds": duration_seconds(result.get("started_at"), result.get("finished_at")),
         "rewards": sanitize_metadata((result.get("verifier_result") or {}).get("rewards") or {}),
         "token_cost": sanitize_metadata(totals),
+        "experiment": sanitize_metadata(experiment or {}),
     }
 
 
@@ -168,6 +193,16 @@ def build_plan(job_dir: Path) -> list[dict[str, Any]]:
     groups trials by task and sorts each group by start time (then trial name)
     so the same job directory always receives the same attempt indices.
     """
+    experiment_path = job_dir / "experiment.json"
+    experiment = read_json(experiment_path) if experiment_path.is_file() else {}
+    report_path = job_dir / "report.json"
+    status_by_trial: dict[str, str] = {}
+    if report_path.is_file():
+        report = read_json(report_path)
+        for case_report in (report.get("cases") or {}).values():
+            for attempt in case_report.get("attempts", []):
+                if attempt.get("trial") and attempt.get("status"):
+                    status_by_trial[str(attempt["trial"])] = str(attempt["status"])
     trials: list[tuple[str, dict[str, Any], Path]] = []
     for trial_dir in trial_dirs(job_dir):
         result = read_json(trial_dir / "result.json")
@@ -189,6 +224,8 @@ def build_plan(job_dir: Path) -> list[dict[str, Any]]:
                 "result": result,
                 "trial_dir": trial_dir,
                 "forest_run_id": find_forest_run_id(trial_dir),
+                "experiment": experiment,
+                "status": status_by_trial.get(str(result.get("id") or result.get("trial_name") or "")),
             })
     return plan
 
@@ -378,7 +415,16 @@ def export_run_item(client: LangfuseClient, entry: dict[str, Any], run_name: str
             run_name=run_name,
             dataset_item_id=entry["case"],
             trace_id=trace_id,
-            metadata=sanitize_metadata(trial_summary(entry["result"], entry["attempt_index"], entry["job_id"], entry["forest_run_id"])),
+            metadata=sanitize_metadata(
+                trial_summary(
+                    entry["result"],
+                    entry["attempt_index"],
+                    entry["job_id"],
+                    entry["forest_run_id"],
+                    entry.get("experiment"),
+                    entry.get("status"),
+                )
+            ),
             run_description=f"Forest {entry['case']} attempt {entry['attempt_index']}",
         )
         dataset_run_id = getattr(created, "dataset_run_id", None)
@@ -433,8 +479,8 @@ def export_job(job_dir: Path, client: LangfuseClient, manifest: dict[str, dict[s
             export_dataset_item(client, entry, manifest.get(entry["case"]))
             exported_cases.add(entry["case"])
 
-        if entry["forest_run_id"] is None:
-            continue
+        # Langfuse run metadata remains useful for provider and setup failures
+        # that occur before Forest can create a trace.
 
         run_name = attempt_key(entry["job_id"], entry["attempt_index"])
         dataset_run_id = export_run_item(client, entry, run_name)
@@ -451,18 +497,37 @@ def export_job(job_dir: Path, client: LangfuseClient, manifest: dict[str, dict[s
     }
 
 
+def retry_exports(
+    jobs_root: Path,
+    client: LangfuseClient,
+    manifest: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    retried: list[str] = []
+    failed: list[str] = []
+    for outbox_dir in sorted(jobs_root.glob(f"*/{OUTBOX_DIR_NAME}")):
+        job_dir = outbox_dir.parent
+        try:
+            export_job(job_dir, client, manifest)
+        except Exception:
+            failed.append(job_dir.name)
+            continue
+        shutil.rmtree(outbox_dir)
+        retried.append(job_dir.name)
+    return {"retried": retried, "failed": failed}
+
+
 def build_client() -> LangfuseClient:
     try:
         from langfuse import Langfuse
     except Exception as exc:
         raise RuntimeError(f"langfuse is not installed: {exc}") from exc
 
-    public_key = (sys.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip()
-    secret_key = (sys.environ.get("LANGFUSE_SECRET_KEY") or "").strip()
-    base_url = (sys.environ.get("LANGFUSE_BASE_URL") or "").strip()
+    public_key = (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip()
+    secret_key = (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip()
+    base_url = normalized_base_url(os.environ.get("LANGFUSE_BASE_URL"))
     if not public_key or not secret_key:
         raise RuntimeError("LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are required for export")
-    client = Langfuse(public_key=public_key, secret_key=secret_key, host=base_url or "https://cloud.langfuse.com")
+    client = Langfuse(public_key=public_key, secret_key=secret_key, host=base_url)
     return LangfuseSDKClient(client)
 
 
@@ -481,10 +546,23 @@ def write_outbox(job_dir: Path, error: str) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("job_dir", type=Path, help="Path to one completed Harbor job directory")
+    parser.add_argument("job_dir", type=Path, nargs="?", help="Path to one completed Harbor job directory")
+    parser.add_argument("--retry-root", type=Path, help="Retry every queued export beneath this jobs directory")
     args = parser.parse_args(argv)
+    if (args.job_dir is None) == (args.retry_root is None):
+        parser.error("provide exactly one job_dir or --retry-root")
+
+    if args.retry_root is not None:
+        try:
+            report = retry_exports(args.retry_root, build_client())
+        except Exception as exc:
+            print(f"langfuse retry skipped; queued exports remain: {exc}", file=sys.stderr)
+            return 0
+        print(f"langfuse retry complete: {json.dumps(report, sort_keys=True)}")
+        return 0
 
     job_dir = args.job_dir
+    assert job_dir is not None
     if not job_dir.is_dir():
         print(f"langfuse export: not a directory: {job_dir}", file=sys.stderr)
         return 0

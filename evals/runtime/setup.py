@@ -117,20 +117,44 @@ def prepare_object(workspace: Path, oid: str) -> None:
     git(workspace, "push", "origin", f":{temporary}")
 
 
-def configure_model(agent_file: Path, model: str) -> None:
+def configure_declaration(
+    agent_file: Path,
+    *,
+    model: str | None,
+    thinking: str | None,
+    tools: str | None,
+    prompt_append: str | None,
+) -> None:
+    replacements = {
+        "model": model,
+        "thinking": thinking,
+        "tools": tools,
+    }
     lines = agent_file.read_text().splitlines()
+    found: set[str] = set()
     for index, line in enumerate(lines):
-        if line.startswith("model:"):
-            lines[index] = f"model: {model}"
-            agent_file.write_text("\n".join(lines) + "\n")
-            return
-    raise RuntimeError(f"declaration has no model field: {agent_file}")
+        name, separator, _ = line.partition(":")
+        if separator and name in replacements and replacements[name] is not None:
+            lines[index] = f"{name}: {replacements[name]}"
+            found.add(name)
+    missing = {name for name, value in replacements.items() if value is not None and name not in found}
+    if missing:
+        raise RuntimeError(f"declaration has no fields: {', '.join(sorted(missing))}")
+    text = "\n".join(lines) + "\n"
+    if prompt_append:
+        text += prompt_append
+        if not text.endswith("\n"):
+            text += "\n"
+    agent_file.write_text(text)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", type=Path)
     parser.add_argument("--model")
+    parser.add_argument("--thinking")
+    parser.add_argument("--tools")
+    parser.add_argument("--prompt-append")
     args = parser.parse_args()
     scenario = json.loads(args.scenario.read_text())
 
@@ -154,8 +178,14 @@ def main() -> None:
     identity(workspace, "builder")
 
     shutil.copytree("/opt/iron-forest/agents", workspace / "agents")
-    if args.model:
-        configure_model(workspace / "agents" / scenario["role"] / "agent.md", args.model)
+    if args.model or args.thinking or args.tools or args.prompt_append:
+        configure_declaration(
+            workspace / "agents" / scenario["role"] / "agent.md",
+            model=args.model,
+            thinking=args.thinking,
+            tools=args.tools,
+            prompt_append=args.prompt_append,
+        )
     declaration_model = next(
         line.split(":", 1)[1].strip()
         for line in (workspace / "agents" / scenario["role"] / "agent.md").read_text().splitlines()

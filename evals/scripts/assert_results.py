@@ -73,6 +73,8 @@ _INFRA_MARKERS = (
     "connection reset",
     "no space left",
 )
+_PROVIDER_MARKERS = ("provider", "openrouter", "rate limit", "429", "quota", "billing", "guardrail")
+_INCOMPLETE_MARKERS = ("cancelled", "cancelerror", "interrupted", "workflow timeout")
 
 
 @dataclass(frozen=True)
@@ -164,6 +166,21 @@ def classify_exception(exception: dict[str, Any] | None) -> str | None:
         return "infra"
     return "agent"
 
+def exception_status(exception: dict[str, Any] | None) -> str | None:
+    if exception is None:
+        return None
+    text = " ".join(
+        str(exception.get(field) or "")
+        for field in ("exception_type", "exception_message")
+    ).lower()
+    if any(marker in text for marker in _PROVIDER_MARKERS):
+        return "provider-unavailable"
+    if any(marker in text for marker in _INCOMPLETE_MARKERS):
+        return "incomplete"
+    if classify_exception(exception) == "infra":
+        return "infra-error"
+    return "agent-error"
+
 
 def trial_outcome(result: dict[str, Any], require_judge: bool) -> dict[str, Any]:
     """Return a structured trial outcome.
@@ -178,19 +195,29 @@ def trial_outcome(result: dict[str, Any], require_judge: bool) -> dict[str, Any]
 
     if exception is not None:
         outcome = "exception"
+        status = exception_status(exception)
     elif deterministic is None:
         outcome = "no-reward"
+        status = "incomplete"
+    elif deterministic != 1 and judge == 1:
+        outcome = "fail"
+        status = "judge-disagreement"
     elif deterministic != 1:
         outcome = "fail"
+        status = "safety-failure"
     elif require_judge and judge is None:
         outcome = "judge-missing"
+        status = "judge-error"
     elif require_judge and judge != 1:
         outcome = "judge-fail"
+        status = "behavior-failure"
     else:
         outcome = "pass"
+        status = "pass"
 
     return {
         "outcome": outcome,
+        "status": status,
         "deterministic": deterministic,
         "judge": judge,
         "exception_type": (exception or {}).get("exception_type"),
@@ -430,6 +457,7 @@ def build_report(
                 "attempt": index,
                 "trial": result.get("id") or result.get("trial_name") or path.parent.name,
                 "outcome": outcome["outcome"],
+                "status": outcome["status"],
                 "deterministic": outcome["deterministic"],
                 "judge": outcome["judge"],
                 "exception_type": outcome["exception_type"],
@@ -484,6 +512,20 @@ def build_report(
     pass_at_1_cases = sum(1 for case in case_reports.values() if case["pass_at_1"])
     pass_cubed_cases = sum(1 for case in case_reports.values() if case["pass_cubed"])
     saturated_cases = [case_id for case_id, case in case_reports.items() if case["saturated"]]
+    status_counts: dict[str, int] = {}
+    for attempt in all_attempts:
+        status = str(attempt["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+    known_costs = [
+        float(attempt["tokens"]["cost_usd"])
+        for attempt in all_attempts
+        if attempt["tokens"]["cost_usd"] is not None
+    ]
+    known_durations = [
+        float(attempt["timing"]["duration_seconds"])
+        for attempt in all_attempts
+        if attempt["timing"]["duration_seconds"] is not None
+    ]
 
     report = {
         "schema": REPORT_SCHEMA,
@@ -500,11 +542,18 @@ def build_report(
             "exception_trials": exception_trials,
             "infra_exceptions": infra_exceptions,
             "agent_exceptions": agent_exceptions,
+            "status_counts": dict(sorted(status_counts.items())),
             "pass_at_1_cases": pass_at_1_cases,
             "pass_at_1_rate": round(pass_at_1_cases / case_count, 4) if case_count else None,
             "pass_at_1_wilson": wilson_interval(pass_at_1_cases, case_count),
             "pass_cubed_cases": pass_cubed_cases,
             "saturated_cases": saturated_cases,
+            "cost_usd": round(sum(known_costs), 8) if known_costs else None,
+            "mean_duration_seconds": (
+                round(sum(known_durations) / len(known_durations), 3)
+                if known_durations
+                else None
+            ),
             "environment": {
                 "concurrency": job_concurrency(job_dir),
                 "models": _unique(models),
@@ -535,38 +584,57 @@ def resource_signature(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
-    """Compare two reports and label whether the delta is a supported win.
-
-    A model difference below three percentage points is never called a win.
-    A three-or-more-point gain still needs matched infra ceilings/concurrency
-    and non-overlapping Wilson intervals before the report calls it a win;
-    otherwise it stays inconclusive.
-    """
-    current_rate = current["totals"]["pass_at_1_rate"]
-    baseline_rate = baseline["totals"]["pass_at_1_rate"]
-    if current_rate is None or baseline_rate is None:
+    """Compare paired quality and efficiency under identical infra ceilings."""
+    current_totals = current["totals"]
+    baseline_totals = baseline["totals"]
+    current_rate = current_totals["pass_at_1_rate"]
+    baseline_rate = baseline_totals["pass_at_1_rate"]
+    current_cost = current_totals.get("cost_usd")
+    baseline_cost = baseline_totals.get("cost_usd")
+    current_latency = current_totals.get("mean_duration_seconds")
+    baseline_latency = baseline_totals.get("mean_duration_seconds")
+    infra_matched = resource_signature(current) == resource_signature(baseline)
+    delta_points = (
+        round((current_rate - baseline_rate) * 100.0, 2)
+        if current_rate is not None and baseline_rate is not None
+        else None
+    )
+    cost_ratio = (
+        round(current_cost / baseline_cost, 4)
+        if current_cost is not None and baseline_cost not in {None, 0}
+        else None
+    )
+    latency_ratio = (
+        round(current_latency / baseline_latency, 4)
+        if current_latency is not None and baseline_latency not in {None, 0}
+        else None
+    )
+    efficiency_gain = (
+        (cost_ratio is not None and cost_ratio <= 0.9)
+        or (latency_ratio is not None and latency_ratio <= 0.9)
+    )
+    if delta_points is None or not infra_matched:
         verdict = "inconclusive"
+    elif delta_points < 0:
+        verdict = "regression"
+    elif delta_points == 0 and efficiency_gain:
+        verdict = "efficiency-win"
+    elif delta_points <= 0:
+        verdict = "no-improvement"
     else:
-        delta_points = round((current_rate - baseline_rate) * 100.0, 2)
-        current_ci = current["totals"]["pass_at_1_wilson"]
-        baseline_ci = baseline["totals"]["pass_at_1_wilson"]
+        current_ci = current_totals["pass_at_1_wilson"]
+        baseline_ci = baseline_totals["pass_at_1_wilson"]
         overlap = current_ci[0] <= baseline_ci[1] and baseline_ci[0] <= current_ci[1]
-        infra_matched = resource_signature(current) == resource_signature(baseline)
-        if delta_points <= 0:
-            verdict = "no-improvement"
-        elif delta_points < 3.0 or overlap or not infra_matched:
-            verdict = "inconclusive"
-        else:
-            verdict = "win"
+        verdict = "win" if delta_points >= 3.0 and not overlap else "inconclusive"
     return {
         "current_job": current["job"],
         "baseline_job": baseline["job"],
         "current_pass_at_1_rate": current_rate,
         "baseline_pass_at_1_rate": baseline_rate,
-        "delta_points": round((current_rate - baseline_rate) * 100.0, 2)
-        if current_rate is not None and baseline_rate is not None
-        else None,
-        "infra_matched": resource_signature(current) == resource_signature(baseline),
+        "delta_points": delta_points,
+        "cost_ratio": cost_ratio,
+        "latency_ratio": latency_ratio,
+        "infra_matched": infra_matched,
         "verdict": verdict,
     }
 
@@ -618,7 +686,7 @@ def evaluate_gate(
         comparison = report.get("comparison")
         if comparison is None:
             failures.append("model change has a baseline but no comparison was produced")
-        elif comparison["verdict"] != "win":
+        elif comparison["verdict"] not in {"win", "efficiency-win"}:
             failures.append(
                 f"model change is not a supported win: {comparison['verdict']} "
                 f"(delta {comparison['delta_points']} points, "

@@ -9,6 +9,7 @@ from typing import override
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from iron_forest_eval.usage import usage_from_run_logs
 
 CASES = Path(__file__).resolve().parents[1] / "cases.json"
 
@@ -28,8 +29,23 @@ def scenario_for(case_id: str) -> dict:
 class IronForestAgent(BaseAgent):
     """Run one production Forest declaration inside a Harbor task sandbox."""
 
-    def __init__(self, logs_dir: Path, model_name: str | None = None, **kwargs):
+    def __init__(
+        self,
+        logs_dir: Path,
+        model_name: str | None = None,
+        thinking: str | None = None,
+        tools: str | None = None,
+        prompt_append: str | None = None,
+        variant_roles: str | None = None,
+        **kwargs,
+    ):
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
+        self._thinking = thinking
+        self._tools = tools
+        self._prompt_append = prompt_append
+        self._variant_roles = {
+            role.strip() for role in (variant_roles or "").split(",") if role.strip()
+        }
         self._scenario_id = ""
         self._scenario: dict = {}
 
@@ -57,11 +73,22 @@ class IronForestAgent(BaseAgent):
             await environment.upload_file(local_scenario, "/hidden/scenario.json")
         finally:
             Path(local_scenario).unlink(missing_ok=True)
-        model_arg = ""
-        if self.model_name:
-            model_arg = " --model " + shlex.quote(self.model_name)
+        declaration_args = []
+        applies_variant = not self._variant_roles or case["role"] in self._variant_roles
+        if applies_variant:
+            for name, value in (
+                ("model", self.model_name),
+                ("thinking", self._thinking),
+                ("tools", self._tools),
+                ("prompt-append", self._prompt_append),
+            ):
+                if value:
+                    declaration_args.extend((f"--{name}", value))
+        command = "python3 /opt/iron-forest-eval/setup.py /hidden/scenario.json"
+        if declaration_args:
+            command += " " + shlex.join(declaration_args)
         result = await environment.exec(
-            command="python3 /opt/iron-forest-eval/setup.py /hidden/scenario.json" + model_arg,
+            command=command,
             user="root",
             timeout_sec=None,
         )
@@ -82,9 +109,15 @@ class IronForestAgent(BaseAgent):
         )
         (self.logs_dir / "forest-stdout.txt").write_text(result.stdout or "")
         (self.logs_dir / "forest-stderr.txt").write_text(result.stderr or "")
+        runs_dir = self.logs_dir / "runs"
         run_logs = await environment.exec(command="test -d /workspace/.forest/runs", timeout_sec=None)
         if run_logs.return_code == 0:
-            await environment.download_dir("/workspace/.forest/runs", self.logs_dir / "runs")
+            await environment.download_dir("/workspace/.forest/runs", runs_dir)
+            usage = usage_from_run_logs(runs_dir)
+            context.n_input_tokens = usage["n_input_tokens"]
+            context.n_cache_tokens = usage["n_cache_tokens"]
+            context.n_output_tokens = usage["n_output_tokens"]
+            context.cost_usd = usage["cost_usd"]
         recorded = await environment.exec(
             command=f"printf '%s\\n' {shlex.quote(str(result.return_code))} > /hidden/forest-exit",
             user="root",
@@ -95,4 +128,5 @@ class IronForestAgent(BaseAgent):
         context.metadata = {
             "forest_exit": result.return_code,
             "scenario": self._scenario_id,
+            "usage_source": "forest-run-jsonl",
         }

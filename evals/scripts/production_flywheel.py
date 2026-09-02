@@ -22,11 +22,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from langfuse_config import normalized_base_url
 
 PRODUCTION_DATASET = "iron-forest-production"
 PRODUCTION_MANIFEST = Path(__file__).resolve().parents[1] / "production-cases.json"
@@ -148,13 +151,9 @@ class LangfuseSDKClient(LangfuseClient):
             metadata=metadata,
             source_trace_id=source_trace_id,
         )
-
     def list_dataset_items(self, dataset_name: str) -> list[Any]:
-        try:
-            items = self._client.api.dataset_items.list(dataset_name=dataset_name)
-            return list(getattr(items, "data", []) or [])
-        except Exception:
-            return []
+        items = self._client.api.dataset_items.list(dataset_name=dataset_name)
+        return list(getattr(items, "data", []) or [])
 
     def trace_ids_for_session(self, session_id: str) -> list[str]:
         try:
@@ -170,12 +169,12 @@ def build_client() -> LangfuseClient:
     except Exception as exc:
         raise RuntimeError(f"langfuse is not installed: {exc}") from exc
 
-    public_key = (sys.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip()
-    secret_key = (sys.environ.get("LANGFUSE_SECRET_KEY") or "").strip()
-    base_url = (sys.environ.get("LANGFUSE_BASE_URL") or "").strip()
+    public_key = (os.environ.get("LANGFUSE_PUBLIC_KEY") or "").strip()
+    secret_key = (os.environ.get("LANGFUSE_SECRET_KEY") or "").strip()
+    base_url = normalized_base_url(os.environ.get("LANGFUSE_BASE_URL"))
     if not public_key or not secret_key:
         raise RuntimeError("LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are required")
-    client = Langfuse(public_key=public_key, secret_key=secret_key, host=base_url or "https://cloud.langfuse.com")
+    client = Langfuse(public_key=public_key, secret_key=secret_key, host=base_url)
     return LangfuseSDKClient(client)
 
 
@@ -282,7 +281,7 @@ def report_markdown(client: LangfuseClient, manifest_path: Path = PRODUCTION_MAN
     promoted_traces = {case.get("source_trace_id") for case in promoted.values() if case.get("source_trace_id")}
     items = [item for item in client.list_dataset_items(dataset)]
     lines: list[str] = [
-        "# Production flywheel weekly report",
+        "# Production flywheel maintenance report",
         "",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "",

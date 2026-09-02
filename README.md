@@ -159,6 +159,10 @@ before handoff:
    `mise exec -- go build -o forest . && ./forest selfcheck`.
 3. Install the service with `deploy/install-service.sh <sibling-directory-name>`
    (no argument in self-host mode).
+   Self-host mode also enables `forest-eval-flywheel@iron-forest.timer`. It
+   ingests retained production Runs and emits a coverage report every day when
+   the protected `~/.config/iron-forest/evals.env` exists. Sibling installs do
+   not receive this Iron Forest manager timer.
 4. Verify the installed service is active without starting a second Kernel:
    `systemctl --user is-active forest@<sibling-directory-name>` (expect
    `active`) and, from the managed checkout, `./forest status`.
@@ -524,10 +528,12 @@ declaration, prompt, skill, or publication contract:
 ./evals/run-fast.sh
 ```
 
-The manual model tier runs every Builder, Verifier, and Fixer case three times
-through the production `forest` binary. It uses each declaration's model unless
-`FOREST_EVAL_CANDIDATE_MODEL` is set. The independent Judge defaults to
-`openrouter/google/gemini-3.7-flash`.
+The live model path always runs the production incumbent and one allowlisted
+contender over identical frozen cases. `evals/run-experiment.sh` accepts
+`FOREST_EVAL_TIER=nightly|weekly|monthly|manual` and an optional
+`FOREST_EVAL_VARIANT` from `evals/experiment-space.json`. With no variant, a
+bounded planner selects a unique contender from historical results. The
+independent Judge defaults to `openrouter/google/gemini-3.7-flash`.
 
 Local runs load separate candidate and Judge completion keys from
 `$HOME/.config/iron-forest/evals.env` by default. The file must be owned by the
@@ -536,26 +542,29 @@ current user, have mode `0600`, and contain only:
 ```dotenv
 OPENROUTER_API_KEY=<evaluation candidate key>
 FOREST_EVAL_JUDGE_API_KEY=<evaluation Judge key>
-LANGFUSE_PUBLIC_KEY=<optional Langfuse public key>
-LANGFUSE_SECRET_KEY=<optional Langfuse secret key>
-LANGFUSE_BASE_URL=<optional Langfuse host>
+LANGFUSE_PUBLIC_KEY=<Langfuse public key>
+LANGFUSE_SECRET_KEY=<Langfuse secret key>
+LANGFUSE_BASE_URL=<Langfuse host>
 ```
 
 Existing environment values take precedence. `FOREST_EVAL_ENV_FILE` selects a
 different file. The OpenRouter management key stays outside production and
-evaluation runtime environments. Langfuse keys are optional; when present,
-`run-model.sh` exports completed Harbor trials post-run with
-`evals/scripts/langfuse_export.py` (see
-[`docs/langfuse-dashboards.md`](docs/langfuse-dashboards.md)). Export is
-fail-open and never changes a Harbor reward or job exit.
+evaluation runtime environments. Scheduled and paired runs require Langfuse
+history so they can reject duplicate contender fingerprints. Export remains
+fail-open after execution and never changes a Harbor reward or job exit.
+`evals/scripts/experiment_history.py` writes longitudinal quality, latency,
+token, and cost summaries from the Langfuse catalog.
 
 ```sh
-./evals/run-model.sh
+FOREST_EVAL_TIER=nightly FOREST_EVAL_VARIANT=qwen-3.7-high ./evals/run-experiment.sh
+./evals/run-model.sh # paired monthly pass^3 certification
 ```
 
-The `model evals` GitHub workflow maps the distinct repository secrets
-`IRON_FOREST_EVAL_CANDIDATE_API_KEY` and
-`IRON_FOREST_EVAL_JUDGE_API_KEY` into those runtime names. Harbor outputs remain
+The `model evals` workflow runs affected-role trials on agent-surface pull
+requests, a rotating nightly tier Tuesday through Saturday, a weekly full
+`pass@1` tier, and a monthly full `pass^3` tier. Manual dispatch preserves tier
+and allowlisted contender controls. It maps separate candidate, Judge, and
+Langfuse credentials into the runtime. Harbor and history artifacts remain
 under `evals/jobs/`, which is ignored by Git.
 
 The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and

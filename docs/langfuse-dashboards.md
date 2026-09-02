@@ -25,6 +25,13 @@ categorical `exception` score. Score names are the Harbor reward keys recorded
 by the deterministic grader (`deterministic`, and `judge` when the model Judge
 ran). The `exception` score is `none` or the Harbor `exception_type` class.
 
+Run metadata also carries `experiment.experiment_fingerprint`,
+`experiment.cohort`, `experiment.variant.id`, `experiment.planner`,
+`experiment.selection_reason`, and the role-specific entries in
+`experiment.configurations`. Configuration entries include model, thinking,
+tools, prompt, skill, task, declaration, and evaluator digests. These fields
+bind every score to the exact incumbent or contender configuration.
+
 ## Panels
 
 ### Pass rate by role
@@ -54,6 +61,23 @@ ran). The `exception` score is `none` or the Harbor `exception_type` class.
 - Group by: `metadata.provider` and `metadata.model`
 - Overlay: mean of score `deterministic`
 
+### Incumbent versus contender
+
+- Source: dataset run items
+- Group by: `metadata.experiment.cohort`
+- Breakdown: `metadata.experiment.variant.id`
+- Overlay: mean `deterministic`, mean `judge`, trial duration, and recorded cost
+- Filter: one `metadata.experiment.experiment_fingerprint`
+
+### Longitudinal configuration quality
+
+- Source: dataset run items
+- X axis: run creation time
+- Group by: role-specific
+  `metadata.experiment.configurations.configuration_fingerprint`
+- Overlay: deterministic pass rate, Judge pass rate, latency, and cost
+- Filter out neither failures nor provider-unavailable attempts
+
 ### Token and cost
 
 - Source: dataset run items
@@ -64,9 +88,9 @@ ran). The `exception` score is `none` or the Harbor `exception_type` class.
 ### Latency
 
 - Source: dataset run items
-- Latency = `finished_at - started_at` (stored as ISO timestamps in run-item
-  metadata), or the trace latency from the linked OpenRouter Broadcast trace
-  (`session_id = Forest Run id`).
+- Primary field: `metadata.duration_seconds`.
+- Cross-check: `finished_at - started_at`, or trace latency from the linked
+  OpenRouter Broadcast trace (`session_id = Forest Run id`).
 
 ## Trace linkage
 

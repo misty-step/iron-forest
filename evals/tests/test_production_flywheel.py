@@ -231,6 +231,21 @@ class ProductionFlywheelTest(unittest.TestCase):
             self.assertIn("- New draft cases awaiting verification: 0", report)
             self.assertIn("- Saturation: 1/1", report)
 
+    def test_sdk_report_listing_exposes_transport_failure(self):
+        class BrokenItems:
+            def list(self, **kwargs):
+                raise RuntimeError("transport down")
+
+        class API:
+            dataset_items = BrokenItems()
+
+        class Client:
+            api = API()
+
+        client = flywheel.LangfuseSDKClient(Client())
+        with self.assertRaisesRegex(RuntimeError, "transport down"):
+            client.list_dataset_items(flywheel.PRODUCTION_DATASET)
+
 
 if __name__ == "__main__":
     unittest.main()

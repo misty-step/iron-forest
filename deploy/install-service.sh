@@ -17,6 +17,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 factory="$(cd "$here/.." && pwd)"
 root="$(dirname "$factory")"
 unit="$HOME/.config/systemd/user/forest@.service"
+flywheel_service="$HOME/.config/systemd/user/forest-eval-flywheel@.service"
+flywheel_timer="$HOME/.config/systemd/user/forest-eval-flywheel@.timer"
 service_path="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin"
 
 # Bounded waits used only by `update`. The drain itself has no wall-clock
@@ -93,9 +95,9 @@ audit_ready() {
 }
 
 update_instance() {
-	# The update subcommand adopts a merged revision into an instance already
-	# installed by the no-argument or one-argument installer. It never refits the
-	# unit or writes the protected environment file.
+	# The update subcommand adopts a merged revision into an installed instance.
+	# It preserves the protected environment and refreshes only the self-host
+	# evaluation timer because that timer ships with this factory checkout.
 	command -v jq >/dev/null 2>&1 || die "jq is required for update"
 	[ -d "$target/.git" ] || [ -f "$target/.git" ] || die "no git checkout at $target"
 	[ -f "$target/forest.yaml" ] || die "no forest.yaml at $target; a managed repository declares its own factory"
@@ -203,6 +205,16 @@ update_instance() {
 	fi
 
 	update_success=true
+	if [ "$target" = "$factory" ] && [ "$name" = "$(basename "$factory")" ]; then
+		echo "$(basename "$0"): refreshing the self-host evaluation flywheel timer"
+		mkdir -p "$(dirname "$flywheel_service")"
+		sed -e "s|@FOREST_ROOT@|$root|g" \
+			"$target/deploy/forest-eval-flywheel@.service" > "$flywheel_service"
+		cp "$target/deploy/forest-eval-flywheel@.timer" "$flywheel_timer"
+		systemctl --user daemon-reload
+		systemctl --user enable "forest-eval-flywheel@$name.timer" >/dev/null
+		systemctl --user start "forest-eval-flywheel@$name.timer"
+	fi
 	echo "$(basename "$0"): updated forest@$name"
 	echo "  instance: forest@$name -> $target (mode: update; source: $factory at $stamp)"
 	echo "  status:   systemctl --user status 'forest@*'"
@@ -288,6 +300,11 @@ fi
 mkdir -p "$(dirname "$unit")"
 sed -e "s|@FOREST_ROOT@|$root|g" \
 	"$here/forest@.service" > "$unit"
+if [ "$mode" = self-host ]; then
+	sed -e "s|@FOREST_ROOT@|$root|g" \
+		"$here/forest-eval-flywheel@.service" > "$flywheel_service"
+	cp "$here/forest-eval-flywheel@.timer" "$flywheel_timer"
+fi
 
 # Build the Kernel from the factory source into the selected target. Build
 # metadata is stamped at link time so `forest version` reports the exact
@@ -308,8 +325,15 @@ ldflags="-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty
 
 systemctl --user daemon-reload
 systemctl --user enable "forest@$name" >/dev/null
+if [ "$mode" = self-host ]; then
+	systemctl --user enable "forest-eval-flywheel@$name.timer" >/dev/null
+	systemctl --user start "forest-eval-flywheel@$name.timer"
+fi
 systemctl --user restart "forest@$name"
 echo "$(basename "$0"): installed $unit"
 echo "  instance: forest@$name -> $target (mode: $mode; source: $factory at $stamp)"
+if [ "$mode" = self-host ]; then
+	echo "  evals:    systemctl --user status 'forest-eval-flywheel@*'"
+fi
 echo "  status:   systemctl --user status 'forest@*'"
 echo "  logs:     journalctl --user -u 'forest@*' -f"

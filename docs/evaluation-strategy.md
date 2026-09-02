@@ -63,20 +63,39 @@ recovery experiment: grade continuity benefits against the additional sensitive
 transcript retention and cleanup surface before adopting them.
 
 `evals/run-fast.sh` regenerates every task, validates the manifest, builds the
-production image, runs all 20 reference outcomes, and rejects any reward below
-one. Pull-request CI runs this tier. `evals/run-model.sh` runs every production
-role case three times, requires `pass^3`, and adds the Judge reward. It uses the
-model in each shipped declaration unless `FOREST_EVAL_CANDIDATE_MODEL` overrides
-it. The Judge defaults to `openrouter/google/gemini-3.7-flash`, must differ
-from the candidate, has no tools or project context, and receives a
+production image, runs every reference outcome, and rejects any reward below
+one. Pull-request CI always runs this no-model tier.
+
+`evals/run-experiment.sh` is the only live-model execution path. Every
+experiment runs the production incumbent and one allowlisted contender over
+the same frozen cases. The planner records model, thinking, tools, prompt,
+skill, task, evaluator digests, the selection hypothesis, and a deterministic
+configuration fingerprint. A completed fingerprint cannot run again until one
+of those inputs changes. `evals/run-model.sh` is the monthly `pass^3` entry
+point into that paired path.
+
+Agent-surface pull requests and the nightly schedule run up to five
+affected-role cases once per cohort. The weekly schedule runs the full suite
+once per cohort. The monthly schedule runs the full regression suite three
+times per cohort. Git-owned tier limits cap cases, attempts, concurrency,
+estimated spend, and wall time. The runner re-executes the complete experiment
+under the selected tier's deadline; a deadline exit cannot produce a passing
+promotion. It also rejects a completed experiment whose recorded cohort cost
+exceeds the tier budget. The planner may choose only from
+`evals/experiment-space.json`; if its model
+call fails, a visible deterministic fallback selects the least-tested unique
+allowlisted contender. Manual dispatch can select a tier, affected role, and
+allowlisted variant but cannot raise a tier's limits.
+
+The Judge defaults to `openrouter/google/gemini-3.7-flash`, must differ from
+the contender, has no tools or project context, and receives a
 credential-redacted trace. Task containers start without network access; only
 the agent and Judge phases may reach `openrouter.ai`. The candidate receives
 only `OPENROUTER_API_KEY`; Harbor adds `FOREST_EVAL_JUDGE_API_KEY` only to the
 Verifier phase, and the trusted grader replaces the candidate key before
 starting the tool-less Judge. Local runs load both from the mode-`0600`
-`$HOME/.config/iron-forest/evals.env`. The manual workflow maps distinct
-repository secrets into the two runtime names. Neither key is a production,
-personal interactive, or management credential.
+`$HOME/.config/iron-forest/evals.env`. The workflow maps distinct repository
+secrets into the runtime names.
 
 The executable suite covers the role-level publication and race contracts. The
 larger capability inventory and whole-Forest scenarios below remain adoption
@@ -193,28 +212,32 @@ agreement gate is measured.
 
 Langfuse export is post-run, idempotent, and fail-open. Git task/grader source
 plus Harbor lock, results, artifacts, and scores remain authoritative. A
-Langfuse outage, timeout, or retry never changes a Harbor reward, a promotion
-result, or a job exit. An export failure records a retryable outbox entry and
-an explicit warning.
+Langfuse outage, timeout, or retry never changes a Harbor reward or job exit.
+Scheduled planning fails closed when history is unavailable because duplicate
+rejection would otherwise be false; manual diagnostics can explicitly permit
+an empty-history fallback.
 
 Export identities are stable and derived from the Harbor job id plus trial id
 plus candidate Forest Run id, with the attempt index appended for dataset-run
-grouping. Retries upsert the same dataset item, run item, and scores; they never
-duplicate experiment data. The exporter locates existing OpenRouter Broadcast
-trace(s) through `sessionId = Forest Run ID` and attaches dataset links, scores,
-and metadata to them. It does not recreate model spans or duplicate
-prompt/completion content.
+grouping. Retries upsert the same dataset item, run item, and scores. Provider
+failures before a Forest trace still create a no-trace run item, so unavailable
+contenders stay in the history.
 
-Langfuse currently has no repetition inside one experiment, so Harbor remains
-the repeat authority and each attempt index becomes one Langfuse run on export.
+Each run item records its experiment and configuration fingerprints, cohort,
+selection reason, model, provider, thinking, tools, prompt/skill/task/evaluator
+digests, outcome class, latency, token counts, and cost. The Harbor adapter
+derives token and cost fields from retained Pi `message_end` usage records.
+`evals/scripts/experiment_history.py` reads the Langfuse dataset-run catalog and
+produces machine-readable JSON plus a quality/cost/latency summary artifact.
+Harbor remains the repetition and result authority; Langfuse owns longitudinal
+cataloging and dashboards.
 
-The post-run exporter is `evals/scripts/langfuse_export.py`; `run-model.sh`
-invokes it after Harbor completes without changing the Harbor job exit. The
-export depends on the optional `langfuse` dependency group and reads
-`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` from the
-evaluation credential environment. Panel definitions live in
+The post-run exporter is `evals/scripts/langfuse_export.py`; the paired runner
+invokes it for both cohorts without changing either Harbor job exit. The
+optional `langfuse` dependency reads `LANGFUSE_PUBLIC_KEY`,
+`LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL`. Panel definitions live in
 [`langfuse-dashboards.md`](langfuse-dashboards.md). Production-trace intake,
-promotion, and the weekly report are separate, equally fail-open steps in
+promotion, and reporting remain separate, equally fail-open steps in
 `evals/scripts/production_flywheel.py`; see
 [`production-flywheel.md`](production-flywheel.md).
 
@@ -316,12 +339,11 @@ normal Gate:
   graders.
 - **adversarial/security** — add planted-defect, credential-shaped, and
   prompt-injection counterexamples.
-- **production replay** — the post-run Langfuse exporter is implemented
-  (`evals/scripts/langfuse_export.py`); the production trace intake, promotion,
-  and weekly report are implemented in `evals/scripts/production_flywheel.py`
-  and documented in [`production-flywheel.md`](production-flywheel.md). The
-  remaining work is operating the loop and adding production-derived cases as
-  they pass human verification.
+- **production replay** — Langfuse export, production trace intake, daily
+  self-host scheduling, and coverage reporting are implemented. Human
+  annotation still controls promotion into `evals/production-cases.json`; the
+  remaining work is adding each verified production-derived case and its
+  paired counterexample.
 
 ## Harness designs to compare
 
@@ -382,12 +404,24 @@ may trigger an alert or a new context, but never an automatic wall-clock kill.
 
 ## Adoption gate
 
-Start with 20–50 production-derived tasks and paired counterexamples. The first
-set includes the Verifier failure above plus happy-path and negative controls.
-A harness or model change may ship when it improves the target capability cases,
-passes every deterministic safety grader, and maintains `pass^3` on the
-regression suite. Read failed transcripts before accepting any score. A change
-to the agent/tool/Kernel ownership boundary requires a new ADR, as required by
+Promotion scope follows the changed boundary instead of charging every change
+the same 69-trial tax:
+
+- prompt, skill, model, or thinking changes run the affected role at `pass^3`
+  plus cross-role sentinel cases;
+- shared Kernel, tool, grader, task-harness, or protocol changes run the full
+  regression suite at `pass^3`;
+- every promotion requires all deterministic safety grades, no incomplete or
+  infrastructure outcome, and no regression against the paired incumbent;
+- model and thinking changes require a statistically supported quality win or
+  equal quality with at least 10% lower recorded cost or mean latency;
+- production replay and whole-Forest cases join the gate when the changed
+  boundary reaches them.
+
+The nightly and weekly tiers discover regressions and contenders. Only the
+promotion tier can change a production declaration. Langfuse scores never
+promote a configuration. Read failed transcripts before accepting a result. A
+change to an agent/tool/Kernel ownership boundary still requires an ADR under
 ADR 0017.
 
 Research basis: Anthropic's [agent eval guide](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents),

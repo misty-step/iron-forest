@@ -89,19 +89,29 @@ manifest into the separate `evals/tasks-production/` directory, leaving the
 frozen regression suite in `evals/tasks/` untouched. Harbor remains the
 execution authority; the script never runs a trial.
 
-## Weekly report
+## Automated intake and report
+
+Self-host installation enables `forest-eval-flywheel@iron-forest.timer`. The
+timer runs daily with a bounded randomized delay and is persistent across host
+downtime. It first retries queued paired-eval exports, then reads the manager
+checkout's retained `.forest/runs`, performs idempotent production intake, and
+emits the current coverage report to the unit journal. Successful retries
+remove their outbox; failed jobs remain queued. The service has no write path
+to the Git production-case manifest.
+
+The unit starts only when the protected
+`~/.config/iron-forest/evals.env` exists. Langfuse failures remain fail-open and
+write retryable outbox entries. Inspect one run with:
 
 ```sh
-cd evals
-uv run --extra langfuse python scripts/production_flywheel.py report
+systemctl --user status forest-eval-flywheel@iron-forest.timer
+journalctl --user -u forest-eval-flywheel@iron-forest.service
 ```
 
 The report names new draft cases, coverage by role and outcome,
-production-distribution coverage (draft items carrying a source trace id),
-saturation (promoted vs draft), ambiguous or broken drafts, and promoted
-grader-exploit regressions. Judge drift is tracked through the existing
-calibration report and Langfuse score panels; the flywheel report points at
-those surfaces rather than duplicating them.
+production-distribution coverage, saturation, ambiguous or broken drafts, and
+promoted grader-exploit regressions. Judge drift remains in the calibration
+report and Langfuse score panels.
 
 ## Experiments
 

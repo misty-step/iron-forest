@@ -1,32 +1,78 @@
 name: model evals
 on:
+  pull_request:
+    paths:
+      - "agents/**"
+      - "evals/**"
+      - "*.go"
+      - "go.mod"
+      - "go.sum"
   workflow_dispatch:
     inputs:
-      candidate_model:
-        description: Optional Pi model override
+      tier:
+        description: Bounded experiment tier
+        required: true
+        default: manual
+        type: choice
+        options: [nightly, weekly, monthly, promotion, manual]
+      contender_variant:
+        description: Optional allowlisted contender id; blank uses the agentic planner
         required: false
         type: string
+      affected_role:
+        description: Optional role target; use shared for Kernel or harness changes
+        required: false
+        type: string
+      disable_agentic_planner:
+        description: Use deterministic selection instead of the planner model
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 3 * * 2-6"
+    - cron: "17 3 * * 0"
+    - cron: "17 3 1-7 * 1"
+concurrency:
+  group: iron-forest-model-evals
+  cancel-in-progress: false
 jobs:
-  regression:
+  experiment:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     permissions:
       contents: read
     env:
       OPENROUTER_API_KEY: ${{ secrets.IRON_FOREST_EVAL_CANDIDATE_API_KEY }}
       FOREST_EVAL_JUDGE_API_KEY: ${{ secrets.IRON_FOREST_EVAL_JUDGE_API_KEY }}
-      FOREST_EVAL_CANDIDATE_MODEL: ${{ inputs.candidate_model }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
       FOREST_EVAL_JUDGE_MODEL: openrouter/google/gemini-3.7-flash
+      FOREST_EVAL_TIER: ${{ inputs.tier || (github.event.schedule == '17 3 1-7 * 1' && 'monthly') || (github.event.schedule == '17 3 * * 0' && 'weekly') || 'nightly' }}
+      FOREST_EVAL_VARIANT: ${{ inputs.contender_variant }}
+      FOREST_EVAL_ROLE: ${{ inputs.affected_role }}
+      FOREST_EVAL_DISABLE_AGENTIC_PLANNER: ${{ inputs.disable_agentic_planner && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: select pull-request eval surface
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: echo "FOREST_EVAL_ROLE=$(python3 evals/scripts/affected_role.py --base \"$BASE_SHA\" --head \"$HEAD_SHA\")" >> "$GITHUB_ENV"
       - name: install uv
         run: pipx install uv==0.12.0
-      - name: run pass-cubed model regressions
-        run: ./evals/run-model.sh
-      - name: retain Harbor results
+      - name: run paired bounded experiment
+        run: ./evals/run-experiment.sh
+      - name: retain Harbor and longitudinal results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: iron-forest-model-evals
-          path: evals/jobs/model
+          name: iron-forest-model-evals-${{ github.run_id }}
+          path: |
+            evals/jobs/model
+            evals/jobs/experiments
           if-no-files-found: error
+          retention-days: 90

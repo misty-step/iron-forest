@@ -1,0 +1,19 @@
+# Iron Forest production-derived evaluation maintenance.
+
+[Unit]
+Description=Iron Forest evaluation flywheel for %i
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.config/iron-forest/evals.env
+
+[Service]
+Type=oneshot
+WorkingDirectory=@FOREST_ROOT@/%i
+EnvironmentFile=%h/.config/iron-forest/%i.env
+EnvironmentFile=%h/.config/iron-forest/evals.env
+Environment=PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
+PrivateTmp=yes
+NoNewPrivileges=yes
+ExecStart=/usr/bin/env uv run --project evals --extra langfuse python evals/scripts/langfuse_export.py --retry-root evals/jobs/model
+ExecStart=/usr/bin/env uv run --project evals --extra langfuse python evals/scripts/production_flywheel.py ingest --runs-dir .forest/runs
+ExecStart=/usr/bin/env uv run --project evals --extra langfuse python evals/scripts/production_flywheel.py report
