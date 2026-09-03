@@ -1038,6 +1038,7 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 	t.Setenv("FOREST_SCOPE_LABEL", "ambient-label")
 	t.Setenv("FOREST_SCOPE_BRANCH_PREFIX", "forest/ambient-")
 	t.Setenv("FOREST_SCOPE_SUBJECTS", "ambient-subject")
+	t.Setenv("FOREST_SCOPE_GITHUB_ONLY", "1")
 	t.Setenv("SERVICE_API_TOKEN", "inherited-only")
 	t.Setenv("GIT_AUTHOR_NAME", "ambient")
 	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.invalid")
@@ -1065,6 +1066,7 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 		"FOREST_SCOPE_LABEL":         "forest:ready",
 		"FOREST_SCOPE_BRANCH_PREFIX": "",
 		"FOREST_SCOPE_SUBJECTS":      "",
+		"FOREST_SCOPE_GITHUB_ONLY":   "0",
 		"GIT_CONFIG_COUNT":           "2",
 		"GIT_CONFIG_KEY_0":           "user.name",
 		"GIT_CONFIG_VALUE_0":         "Iron Forest Builder",
@@ -1093,23 +1095,33 @@ func TestRunEnvironmentExportsEffectiveScope(t *testing.T) {
 		wantLabel        string
 		wantBranchPrefix string
 		wantSubjects     string
+		wantGitHubOnly   string
 	}{
 		{
-			name:      "label",
-			scope:     Scope{Label: "forest:ready:canary"},
-			wantLabel: "forest:ready:canary",
+			name:           "label",
+			scope:          Scope{Label: "forest:ready:canary"},
+			wantLabel:      "forest:ready:canary",
+			wantGitHubOnly: "1",
+		},
+		{
+			name:           "default label value",
+			scope:          Scope{Label: "forest:ready"},
+			wantLabel:      "forest:ready",
+			wantGitHubOnly: "1",
 		},
 		{
 			name:             "branch prefix",
 			scope:            Scope{BranchPrefix: "forest/if-"},
 			wantLabel:        "forest:ready",
 			wantBranchPrefix: "forest/if-",
+			wantGitHubOnly:   "0",
 		},
 		{
-			name:         "subjects",
-			scope:        Scope{Subjects: []string{"if-1", "if-2"}},
-			wantLabel:    "forest:ready",
-			wantSubjects: "if-1,if-2",
+			name:           "subjects",
+			scope:          Scope{Subjects: []string{"if-1", "if-2"}},
+			wantLabel:      "forest:ready",
+			wantSubjects:   "if-1,if-2",
+			wantGitHubOnly: "0",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1130,6 +1142,9 @@ func TestRunEnvironmentExportsEffectiveScope(t *testing.T) {
 			}
 			if values["FOREST_SCOPE_SUBJECTS"] != tc.wantSubjects {
 				t.Fatalf("FOREST_SCOPE_SUBJECTS=%q, want %q", values["FOREST_SCOPE_SUBJECTS"], tc.wantSubjects)
+			}
+			if values["FOREST_SCOPE_GITHUB_ONLY"] != tc.wantGitHubOnly {
+				t.Fatalf("FOREST_SCOPE_GITHUB_ONLY=%q, want %q", values["FOREST_SCOPE_GITHUB_ONLY"], tc.wantGitHubOnly)
 			}
 		})
 	}

@@ -20,9 +20,11 @@ Work from evidence: read the Issue or Powder spec, local instructions, and affec
    - `FOREST_SCOPE_SUBJECTS` is a comma-separated Subject allowlist when
      non-empty. It is complete: every eligibility check and held-lease check
      must pass it, and a Subject outside it is never selectable.
-   - `FOREST_SCOPE_LABEL` is the GitHub Issue label (default `forest:ready`).
-     A value other than `forest:ready` means a label scope is configured and
-     selection is GitHub-only; do not list or take Powder jobs.
+   - `FOREST_SCOPE_LABEL` is the GitHub Issue label to use for listing
+     (default `forest:ready`).
+   - `FOREST_SCOPE_GITHUB_ONLY` is `1` when a label scope is configured and
+     `0` otherwise. When it is `1`, selection is GitHub-only; do not list or
+     take Powder jobs, even when `FOREST_SCOPE_LABEL` equals `forest:ready`.
    - `FOREST_SCOPE_BRANCH_PREFIX` is the required `forest/<subject>/` branch
      prefix when non-empty. A candidate whose `forest/<subject>/` does not
      start with this prefix is never selectable.
@@ -30,8 +32,8 @@ Work from evidence: read the Issue or Powder spec, local instructions, and affec
    Scope selectors never widen the subjects allowlist.
 1. If `POWDER_AGENT` is set, run `powder list --mine "$POWDER_AGENT" --repo <forest.yaml repo>`. If you already hold a job for this repository and `git ls-remote origin 'refs/heads/forest/<id>/*'` is empty, continue that job: `powder show <id>` then `powder take <id>`. If the held job is outside the allowlist from step 0, stop cleanly and name it; do not work it and do not release it.
 2. If you are not continuing a held job, list open GitHub Issues with the
-   `$FOREST_SCOPE_LABEL` label (default `forest:ready`). Unless step 0 set a
-   label scope, also list takeable Powder jobs with
+   `$FOREST_SCOPE_LABEL` label (default `forest:ready`). Unless step 0 set
+   `FOREST_SCOPE_GITHUB_ONLY=1`, also list takeable Powder jobs with
    `powder list --takeable --repo <repo>` when `POWDER_AGENT` is set.
 3. A GitHub candidate is eligible when it passes the allowlist from step 0, `git ls-remote origin 'refs/heads/forest/<n>/*'` is empty, no PR exists for that head, and `forest/<n>/` has the `$FOREST_SCOPE_BRANCH_PREFIX` prefix when one is configured.
 4. A Powder candidate is eligible when it passes the allowlist from step 0, its spec is nonempty, its `repo` matches this repository, `git ls-remote origin 'refs/heads/forest/<id>/*'` is empty, and `forest/<id>/` has the `$FOREST_SCOPE_BRANCH_PREFIX` prefix when one is configured.
