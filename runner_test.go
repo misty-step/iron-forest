@@ -1035,6 +1035,10 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 	root := t.TempDir()
 	t.Setenv("PI_CODING_AGENT_DIR", "/operator/pi")
 	t.Setenv("FOREST_ROOT", "/ambient-root")
+	t.Setenv("FOREST_SCOPE_LABEL", "ambient-label")
+	t.Setenv("FOREST_SCOPE_BRANCH_PREFIX", "forest/ambient-")
+	t.Setenv("FOREST_SCOPE_SUBJECTS", "ambient-subject")
+	t.Setenv("FOREST_SCOPE_GITHUB_ONLY", "1")
 	t.Setenv("SERVICE_API_TOKEN", "inherited-only")
 	t.Setenv("GIT_AUTHOR_NAME", "ambient")
 	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.invalid")
@@ -1044,7 +1048,7 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
 	t.Setenv("GIT_CONFIG_VALUE_0", "ambient")
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'user.name'='ambient' 'user.email'='ambient@example.invalid'")
-	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master")
+	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master", Scope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1054,16 +1058,20 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 		values[key] = value
 	}
 	for key, want := range map[string]string{
-		"PI_CODING_AGENT_DIR": "/tmp/run-pi",
-		"SERVICE_API_TOKEN":   "inherited-only",
-		"FOREST_RUN_ID":       "1-builder",
-		"FOREST_ROOT":         root,
-		"FOREST_PRIMARY_REF":  "refs/heads/master",
-		"GIT_CONFIG_COUNT":    "2",
-		"GIT_CONFIG_KEY_0":    "user.name",
-		"GIT_CONFIG_VALUE_0":  "Iron Forest Builder",
-		"GIT_CONFIG_KEY_1":    "user.email",
-		"GIT_CONFIG_VALUE_1":  "builder@forest.invalid",
+		"PI_CODING_AGENT_DIR":        "/tmp/run-pi",
+		"SERVICE_API_TOKEN":          "inherited-only",
+		"FOREST_RUN_ID":              "1-builder",
+		"FOREST_ROOT":                root,
+		"FOREST_PRIMARY_REF":         "refs/heads/master",
+		"FOREST_SCOPE_LABEL":         "forest:ready",
+		"FOREST_SCOPE_BRANCH_PREFIX": "",
+		"FOREST_SCOPE_SUBJECTS":      "",
+		"FOREST_SCOPE_GITHUB_ONLY":   "0",
+		"GIT_CONFIG_COUNT":           "2",
+		"GIT_CONFIG_KEY_0":           "user.name",
+		"GIT_CONFIG_VALUE_0":         "Iron Forest Builder",
+		"GIT_CONFIG_KEY_1":           "user.email",
+		"GIT_CONFIG_VALUE_1":         "builder@forest.invalid",
 	} {
 		if values[key] != want {
 			t.Fatalf("%s=%q, want %q", key, values[key], want)
@@ -1076,6 +1084,69 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 		if _, exists := values[key]; exists {
 			t.Fatalf("%s leaked into Run environment", key)
 		}
+	}
+}
+
+func TestRunEnvironmentExportsEffectiveScope(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct {
+		name             string
+		scope            Scope
+		wantLabel        string
+		wantBranchPrefix string
+		wantSubjects     string
+		wantGitHubOnly   string
+	}{
+		{
+			name:           "label",
+			scope:          Scope{Label: "forest:ready:canary"},
+			wantLabel:      "forest:ready:canary",
+			wantGitHubOnly: "1",
+		},
+		{
+			name:           "default label value",
+			scope:          Scope{Label: "forest:ready"},
+			wantLabel:      "forest:ready",
+			wantGitHubOnly: "1",
+		},
+		{
+			name:             "branch prefix",
+			scope:            Scope{BranchPrefix: "forest/if-"},
+			wantLabel:        "forest:ready",
+			wantBranchPrefix: "forest/if-",
+			wantGitHubOnly:   "0",
+		},
+		{
+			name:           "subjects",
+			scope:          Scope{Subjects: []string{"if-1", "if-2"}},
+			wantLabel:      "forest:ready",
+			wantSubjects:   "if-1,if-2",
+			wantGitHubOnly: "0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master", tc.scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values := make(map[string]string)
+			for _, entry := range environment {
+				key, value, _ := strings.Cut(entry, "=")
+				values[key] = value
+			}
+			if values["FOREST_SCOPE_LABEL"] != tc.wantLabel {
+				t.Fatalf("FOREST_SCOPE_LABEL=%q, want %q", values["FOREST_SCOPE_LABEL"], tc.wantLabel)
+			}
+			if values["FOREST_SCOPE_BRANCH_PREFIX"] != tc.wantBranchPrefix {
+				t.Fatalf("FOREST_SCOPE_BRANCH_PREFIX=%q, want %q", values["FOREST_SCOPE_BRANCH_PREFIX"], tc.wantBranchPrefix)
+			}
+			if values["FOREST_SCOPE_SUBJECTS"] != tc.wantSubjects {
+				t.Fatalf("FOREST_SCOPE_SUBJECTS=%q, want %q", values["FOREST_SCOPE_SUBJECTS"], tc.wantSubjects)
+			}
+			if values["FOREST_SCOPE_GITHUB_ONLY"] != tc.wantGitHubOnly {
+				t.Fatalf("FOREST_SCOPE_GITHUB_ONLY=%q, want %q", values["FOREST_SCOPE_GITHUB_ONLY"], tc.wantGitHubOnly)
+			}
+		})
 	}
 }
 

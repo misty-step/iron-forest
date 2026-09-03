@@ -15,15 +15,28 @@ Work from evidence: read the Issue or Powder spec, local instructions, and affec
 
 ## Select one Subject
 
-0. Read `forest.yaml` to compute the Subject allowlist before enumerating any
-   candidate. When `scope.subjects` is present it is the complete allowlist:
-   every subsequent eligibility check and held-lease check must pass it, and a
-   Subject outside it is never selectable. (`scope.label` and
-   `scope.branch_prefix` are Poll-side selectors; they never widen selection.)
-1. If `POWDER_AGENT` is set, run `powder list --mine "$POWDER_AGENT" --repo <forest.yaml repo>`. If you already hold a job for this repository and `git ls-remote origin 'refs/heads/forest/<id>/*'` is empty, continue that job: `powder show <id>` then `powder take <id>`. If the held job is outside the `scope.subjects` allowlist, stop cleanly and name it; do not work it and do not release it.
-2. If you are not continuing a held job, list takeable Powder jobs with `powder list --takeable --repo <repo>` when `POWDER_AGENT` is set, and list open GitHub Issues with the `forest:ready` label.
-3. A GitHub candidate is eligible when it passes the `scope.subjects` allowlist from step 0, `git ls-remote origin 'refs/heads/forest/<n>/*'` is empty, and no PR exists for that head.
-4. A Powder candidate is eligible when it passes the `scope.subjects` allowlist from step 0, its spec is nonempty, its `repo` matches this repository, and `git ls-remote origin 'refs/heads/forest/<id>/*'` is empty.
+0. Read the effective scope from the Run environment before enumerating any
+   candidate:
+   - `FOREST_SCOPE_SUBJECTS` is a comma-separated Subject allowlist when
+     non-empty. It is complete: every eligibility check and held-lease check
+     must pass it, and a Subject outside it is never selectable.
+   - `FOREST_SCOPE_LABEL` is the GitHub Issue label to use for listing
+     (default `forest:ready`).
+   - `FOREST_SCOPE_GITHUB_ONLY` is `1` when a label scope is configured and
+     `0` otherwise. When it is `1`, selection is GitHub-only; do not list or
+     take Powder jobs, even when `FOREST_SCOPE_LABEL` equals `forest:ready`.
+   - `FOREST_SCOPE_BRANCH_PREFIX` is the required `forest/<subject>/` branch
+     prefix when non-empty. A candidate whose `forest/<subject>/` does not
+     start with this prefix is never selectable.
+   These values are computed by the Runner from the same scope the Poll used.
+   Scope selectors never widen the subjects allowlist.
+1. If `POWDER_AGENT` is set and `FOREST_SCOPE_GITHUB_ONLY` is not `1`, run `powder list --mine "$POWDER_AGENT" --repo <forest.yaml repo>`. If you already hold a job for this repository and `git ls-remote origin 'refs/heads/forest/<id>/*'` is empty, continue that job: `powder show <id>` then `powder take <id>`. If the held job is outside the allowlist from step 0, stop cleanly and name it; do not work it and do not release it.
+2. If you are not continuing a held job, list open GitHub Issues with the
+   `$FOREST_SCOPE_LABEL` label (default `forest:ready`). Unless step 0 set
+   `FOREST_SCOPE_GITHUB_ONLY=1`, also list takeable Powder jobs with
+   `powder list --takeable --repo <repo>` when `POWDER_AGENT` is set.
+3. A GitHub candidate is eligible when it passes the allowlist from step 0, `git ls-remote origin 'refs/heads/forest/<n>/*'` is empty, no PR exists for that head, and `forest/<n>/` has the `$FOREST_SCOPE_BRANCH_PREFIX` prefix when one is configured.
+4. A Powder candidate is eligible when `FOREST_SCOPE_GITHUB_ONLY` is not `1`, it passes the allowlist from step 0, its spec is nonempty, its `repo` matches this repository, `git ls-remote origin 'refs/heads/forest/<id>/*'` is empty, and `forest/<id>/` has the `$FOREST_SCOPE_BRANCH_PREFIX` prefix when one is configured.
 5. If a Powder candidate is eligible, `powder take <id>` immediately. `already_holding` is not permission to `release`: if the held job already has a published `forest/<id>/*` branch, stop cleanly and report that its Revision is still in review. The Kernel completes the landed job under this same `POWDER_AGENT`, so a published held job must not be released to take different work. Release a held job only for that same job's failed or unpublished Builder attempt. Do not start a GitHub Issue while holding a Powder lease.
 6. If the candidate already has a branch or PR, pick a different Subject. If none remain, stop cleanly with an exit summary. Do not create a branch, PR, Issue, review-request, or Powder job.
 7. Immediately before creating the branch, run `git fetch origin`, resolve `base_sha="$(git rev-parse "refs/remotes/origin/${FOREST_PRIMARY_REF#refs/heads/}")"`, and record that full SHA in the run summary. Create `forest/<subject>/<slug>` from that exact `$base_sha` in the same step. The Subject is the Issue number or the Powder job id.

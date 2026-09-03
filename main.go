@@ -172,6 +172,9 @@ func serve(root string) int {
 		}
 		runner := NewRunner(root)
 		runner.Repo = cfg.Repo
+		if cfg.Scope != nil {
+			runner.Scope = *cfg.Scope
+		}
 		runner.PrimaryRef, _, err = resolvePrimary(context.Background(), root, cfg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -212,6 +215,9 @@ func once(root, agent string) int {
 		}
 		runner := NewRunner(root)
 		runner.Repo = cfg.Repo
+		if cfg.Scope != nil {
+			runner.Scope = *cfg.Scope
+		}
 		runner.PrimaryRef, _, err = resolvePrimary(context.Background(), root, cfg)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
