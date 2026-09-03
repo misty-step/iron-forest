@@ -24,6 +24,7 @@ type Runner struct {
 	PiPath     string
 	PrimaryRef string
 	Repo       string
+	Scope      Scope
 }
 
 const (
@@ -204,6 +205,7 @@ func pathInside(root, path string) (bool, error) {
 
 var overriddenChildEnvNames = []string{
 	"PATH", "FOREST_RUN_ID", "FOREST_ROOT", "FOREST_PRIMARY_REF", "PI_CODING_AGENT_DIR",
+	"FOREST_SCOPE_LABEL", "FOREST_SCOPE_BRANCH_PREFIX", "FOREST_SCOPE_SUBJECTS",
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 	"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
 	"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
@@ -221,9 +223,24 @@ func childEnvironment() []string {
 	return environment
 }
 
+// scopeEnvironment exports the effective selection scope as Run environment
+// values. The zero Scope exports the default label and empty remaining modes,
+// which matches the Poller's default GitHub label and unrestricted selection.
+func scopeEnvironment(scope Scope) []string {
+	label := defaultReadyLabel
+	if scope.Label != "" {
+		label = scope.Label
+	}
+	return []string{
+		"FOREST_SCOPE_LABEL=" + label,
+		"FOREST_SCOPE_BRANCH_PREFIX=" + scope.BranchPrefix,
+		"FOREST_SCOPE_SUBJECTS=" + strings.Join(scope.Subjects, ","),
+	}
+}
+
 // runEnvironment composes the child's inherited service values, trusted PATH,
 // scoped Run Git identity and marker, and fresh writable Pi directory.
-func runEnvironment(root, name, email, runID, piDir, primaryRef string) ([]string, error) {
+func runEnvironment(root, name, email, runID, piDir, primaryRef string, scope Scope) ([]string, error) {
 	path, err := trustedPath(root)
 	if err != nil {
 		return nil, err
@@ -245,6 +262,7 @@ func runEnvironment(root, name, email, runID, piDir, primaryRef string) ([]strin
 		"FOREST_PRIMARY_REF="+primaryRef,
 		"PI_CODING_AGENT_DIR="+piDir,
 	)
+	environment = append(environment, scopeEnvironment(scope)...)
 	return environment, nil
 }
 
@@ -936,7 +954,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir, primaryRef)
+	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir, primaryRef, r.Scope)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
 		return err, false
