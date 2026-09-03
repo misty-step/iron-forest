@@ -239,6 +239,8 @@ def main() -> None:
         publish_builder_subject(scenario, state, subject)
     elif effect == "builder_scope_held_outside":
         pass
+    elif effect == "builder_scope_branch_no_match":
+        pass
     elif effect == "builder_branch_race":
         branch = f"refs/heads/forest/{scenario['issue']['number']}/eval"
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", branch, state["competitor"])

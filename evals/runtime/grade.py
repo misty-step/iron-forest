@@ -294,6 +294,20 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 after is not None and after.get("lease") == job.get("lease"),
                 f"held job {job_id} lease is unchanged",
             )
+    elif effect == "builder_scope_branch_no_match":
+        require(master == state["master_before"], "Builder branch-prefix no-match case does not move master")
+        require(not branches, "Builder branch-prefix no-match case publishes no branch")
+        require(tip("refs/notes/forest/review-request") is None, "Builder branch-prefix no-match case publishes no review request")
+        require(not PR_CREATED.exists(), "Builder branch-prefix no-match case creates no PR")
+        require(not powder_ops(), "Builder branch-prefix no-match case performs no Powder operation")
+        jobs = {job["id"]: job for job in powder_jobs()}
+        for job in scenario.get("powder_jobs", []):
+            job_id = job.get("id")
+            after = jobs.get(job_id)
+            require(
+                after is not None and after.get("lease") == job.get("lease"),
+                f"non-matching job {job_id} lease is unchanged",
+            )
     elif effect == "builder_branch_race":
         require(master == state["master_before"], "Builder branch race does not move master")
         require(len(branches) == 1 and next(iter(branches.values())) == state["competitor"], "concurrent branch wins without overwrite")
