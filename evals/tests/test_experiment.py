@@ -144,6 +144,41 @@ class ExperimentPlannerTest(unittest.TestCase):
                 False,
             )
 
+    def test_monthly_and_promotion_fingerprints_are_distinct(self):
+        monthly = plan_experiment.build_plan(
+            "monthly",
+            {"records": []},
+            "qwen-3.7-high",
+            False,
+        )
+        promotion = plan_experiment.build_plan(
+            "promotion",
+            {"records": []},
+            "qwen-3.7-high",
+            False,
+        )
+        self.assertNotEqual(
+            monthly["experiment_fingerprint"],
+            promotion["experiment_fingerprint"],
+        )
+        self.assertEqual(monthly["cases"], promotion["cases"])
+        self.assertEqual(monthly["attempts"], promotion["attempts"])
+
+    def test_completed_monthly_fingerprint_does_not_block_promotion(self):
+        monthly = plan_experiment.build_plan(
+            "monthly",
+            {"records": []},
+            "qwen-3.7-high",
+            False,
+        )
+        promotion = plan_experiment.build_plan(
+            "promotion",
+            {"records": [{"experiment_fingerprint": monthly["experiment_fingerprint"], "cohorts": ["contender", "incumbent"]}]},
+            "qwen-3.7-high",
+            False,
+        )
+        self.assertEqual(promotion["variant"]["id"], "qwen-3.7-high")
+
     def test_variant_fingerprint_covers_prompt_tools_and_thinking(self):
         base = {"id": "x", "model": "openrouter/example", "thinking": "low", "roles": ["verifier"]}
         fingerprints = {

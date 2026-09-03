@@ -273,6 +273,7 @@ def plan_candidate(
         + float(read_json(SPACE_PATH)["incumbent"]["estimated_max_usd_per_trial"])
     )
     fingerprint_payload = {
+        "tier": tier_name,
         "variant": variant["id"],
         "cases": [case["id"] for case in selected_cases],
         "attempts": attempts,
