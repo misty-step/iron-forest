@@ -222,6 +222,50 @@ class AssertResultsTest(unittest.TestCase):
         comparison = reporter.compare_reports(current, baseline)
         self.assertEqual(comparison["verdict"], "efficiency-win")
 
+    def test_judge_quality_win_is_reachable_when_deterministic_regression_is_saturated(self):
+        """Promotion compares Judge quality rather than forcing pass@1 to 1.0.
+
+        The regression safety gate already enforces deterministic pass^3 on the
+        same cases. With the Judge included in the pass@1 metric, a
+        higher-quality contender can still earn a statistically supported win
+        even though every deterministic first attempt passed for both cohorts.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline_dir = write_job(Path(tmp), name="baseline")
+            contender_dir = write_job(Path(tmp), name="contender")
+            for index in range(23):
+                case = f"case-{index}"
+                for attempt in range(3):
+                    baseline_judge = 1.0 if index < 14 else 0.0
+                    contender_judge = 1.0 if index < 22 else 0.0
+                    write_trial(
+                        baseline_dir,
+                        case,
+                        attempt,
+                        deterministic=1.0,
+                        judge=baseline_judge if attempt == 0 else 1.0,
+                    )
+                    write_trial(
+                        contender_dir,
+                        case,
+                        attempt,
+                        deterministic=1.0,
+                        judge=contender_judge if attempt == 0 else 1.0,
+                    )
+
+            baseline = reporter.build_report(
+                baseline_dir, suite="capability", require_judge=True
+            )
+            contender = reporter.build_report(
+                contender_dir, suite="capability", require_judge=True
+            )
+            comparison = reporter.compare_reports(contender, baseline)
+            self.assertEqual(comparison["verdict"], "win")
+            self.assertLess(
+                baseline["totals"]["pass_at_1_rate"],
+                contender["totals"]["pass_at_1_rate"],
+            )
+
     def test_grader_change_requires_regrade(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = write_job(Path(tmp))

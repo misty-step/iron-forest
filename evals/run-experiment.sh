@@ -77,6 +77,19 @@ tools="$(jq -r '.variant.tools // empty' "$experiment_dir/plan.json")"
 prompt_append="$(jq -r '.variant.prompt_append // empty' "$experiment_dir/plan.json")"
 variant_id="$(jq -r '.variant.id' "$experiment_dir/plan.json")"
 variant_roles="$(jq -r '(.variant.apply_roles // .variant.roles) | join(",")' "$experiment_dir/plan.json")"
+change_class="$(jq -r '.variant.change_class' "$experiment_dir/plan.json")"
+# Model and thinking promotions use deterministic pass^3 as the safety gate
+# and the Judge as the quality signal. Other change classes keep the stricter
+# all-pass (Judge included) regression gate.
+promotion_quality_win=false
+if [[ "$tier" == "promotion" && ( "$change_class" == "model" || "$change_class" == "thinking" ) ]]; then
+  promotion_quality_win=true
+fi
+comparison_suite="$suite"
+if [[ "$promotion_quality_win" == "true" ]]; then comparison_suite="capability"; fi
+cohort_judge_args=(--require-judge)
+if [[ "$promotion_quality_win" == "true" ]]; then cohort_judge_args=(); fi
+
 if [[ "$contender_model" == "$FOREST_EVAL_JUDGE_MODEL" ]]; then
   echo "contender and Judge models must differ" >&2
   exit 2
@@ -121,7 +134,7 @@ run_cohort() {
     jq '. + {cohort: "contender", configurations: .contender_configurations}' "$experiment_dir/plan.json" > "$job_dir/experiment.json"
   fi
   set +e
-  python3 scripts/assert_results.py "$job_dir" --suite "$suite" --require-judge --min-attempts "$attempts" --expected-cases "$expected_cases_json"
+  python3 scripts/assert_results.py "$job_dir" --suite "$suite" "${cohort_judge_args[@]}" --min-attempts "$attempts" --expected-cases "$expected_cases_json"
   local report_exit=$?
   set -e
   [[ $harbor_exit -eq 0 && $report_exit -eq 0 ]]
@@ -135,14 +148,14 @@ contender_job_dir="jobs/model/experiment-${stamp}-contender"
 if [[ -d "$incumbent_job_dir" && -d "$contender_job_dir" ]]; then
   comparison_args=(
     "$contender_job_dir"
-    --suite "$suite"
+    --suite "$comparison_suite"
     --require-judge
     --min-attempts "$attempts"
     --expected-cases "$expected_cases_json"
     --baseline "$incumbent_job_dir"
   )
   if [[ "$tier" == "promotion" ]]; then
-    comparison_args+=(--change-class "$(jq -r '.variant.change_class' "$experiment_dir/plan.json")")
+    comparison_args+=(--change-class "$change_class")
   fi
   python3 scripts/assert_results.py "${comparison_args[@]}" || status=1
 
