@@ -24,7 +24,11 @@ on:
   schedule:
     - cron: "17 3 * * 2-6"
     - cron: "17 3 * * 0"
-    - cron: "17 3 1-7 * 1"
+    # A cron with both day-of-month and day-of-week restricted fires when
+    # either matches, so "17 3 1-7 * 1" would run the monthly tier up to ~11
+    # times per month. Schedule every Monday and gate the job to the first
+    # Monday instead.
+    - cron: "17 3 * * 1"
 concurrency:
   group: iron-forest-model-evals
   cancel-in-progress: false
@@ -41,7 +45,7 @@ jobs:
       LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
       LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
       FOREST_EVAL_JUDGE_MODEL: openrouter/google/gemini-3.7-flash
-      FOREST_EVAL_TIER: ${{ inputs.tier || (github.event.schedule == '17 3 1-7 * 1' && 'monthly') || (github.event.schedule == '17 3 * * 0' && 'weekly') || 'nightly' }}
+      FOREST_EVAL_TIER: ${{ inputs.tier || (github.event.schedule == '17 3 * * 1' && 'monthly') || (github.event.schedule == '17 3 * * 0' && 'weekly') || 'nightly' }}
       FOREST_EVAL_VARIANT: ${{ inputs.contender_variant }}
       FOREST_EVAL_ROLE: ${{ inputs.affected_role }}
       FOREST_EVAL_DISABLE_AGENTIC_PLANNER: ${{ inputs.disable_agentic_planner && '1' || '0' }}
@@ -51,10 +55,26 @@ jobs:
           fetch-depth: 0
       - name: install uv
         run: pipx install uv==0.12.0
+      - name: resolve first-Monday monthly gate
+        id: monthly-gate
+        shell: bash
+        run: |
+          day_of_month="$(date +%-d)"
+          day_of_week="$(date +%u)"
+          if [ "$day_of_week" = "1" ] && [ "$day_of_month" -le 7 ]; then
+            echo "monthly_allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "monthly_allowed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: run paired bounded experiment
+        id: experiment
+        if: |
+          github.event_name != 'schedule' ||
+          github.event.schedule != '17 3 * * 1' ||
+          steps.monthly-gate.outputs.monthly_allowed == 'true'
         run: ./evals/run-experiment.sh
       - name: retain Harbor and longitudinal results
-        if: always()
+        if: always() && steps.experiment.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: iron-forest-model-evals-${{ github.run_id }}
