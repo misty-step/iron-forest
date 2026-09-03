@@ -74,7 +74,7 @@ configuration fingerprint. A completed fingerprint cannot run again until one
 of those inputs changes. `evals/run-model.sh` is the monthly `pass^3` entry
 point into that paired path.
 
-Agent-surface pull requests and the nightly schedule run up to five
+The nightly schedule runs up to five
 affected-role cases once per cohort. The weekly schedule runs the full suite
 once per cohort. The monthly schedule runs the full regression suite three
 times per cohort. Git-owned tier limits cap cases, attempts, concurrency,
