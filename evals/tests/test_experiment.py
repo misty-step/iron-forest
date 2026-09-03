@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -81,6 +82,39 @@ class ExperimentPlannerTest(unittest.TestCase):
             {item["role"] for item in plan["incumbent_configurations"]},
             {item["role"] for item in plan["contender_configurations"]},
         )
+
+    def test_experiment_fingerprint_binds_production_source_digest(self):
+        with mock.patch.object(
+            plan_experiment, "production_source_digest", return_value="production-a"
+        ):
+            first = plan_experiment.build_plan(
+                "nightly",
+                {"records": []},
+                "qwen-3.7-high",
+                False,
+            )
+        with mock.patch.object(
+            plan_experiment, "production_source_digest", return_value="production-b"
+        ):
+            second = plan_experiment.build_plan(
+                "nightly",
+                {"records": []},
+                "qwen-3.7-high",
+                False,
+            )
+        self.assertNotEqual(first["experiment_fingerprint"], second["experiment_fingerprint"])
+
+    def test_production_source_digest_tracks_go_module_and_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "go.mod").write_text("module example\n\ngo 1.26.5\n")
+            (root / "go.sum").write_text("")
+            (root / ".mise.toml").write_text("[tools]\ngo = \"1.26.5\"\n")
+            (root / "main.go").write_text("package main\n")
+            first = plan_experiment.production_source_digest(root)
+            (root / "main.go").write_text("package main\n\nfunc main() {}\n")
+            second = plan_experiment.production_source_digest(root)
+            self.assertNotEqual(first, second)
 
     def test_budget_rejects_trial_and_cost_overruns(self):
         tier = {"max_trials": 10, "max_estimated_cost_usd": 5.0}

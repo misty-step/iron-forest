@@ -119,6 +119,33 @@ def evaluator_digest() -> str:
     payload.update({str(path.relative_to(ROOT)): tree_digest(path) for path in trees})
     return canonical_digest(payload)
 
+
+def production_source_digest(root: Path = ROOT) -> str:
+    """Hash the production Go module and toolchain pin under test.
+
+    The experiment fingerprint must change when the Forest Kernel, its
+    toolchain, or any non-test Go source changes. We hash the actual checked-out
+    files rather than the Git revision so a dirty candidate worktree cannot keep
+    the previous revision's fingerprint.
+    """
+    files = [
+        root / "go.mod",
+        root / "go.sum",
+        root / ".mise.toml",
+    ]
+    files.extend(
+        sorted(
+            file
+            for file in root.rglob("*.go")
+            if file.is_file()
+            and not file.name.endswith("_test.go")
+            and "evals" not in file.relative_to(root).parts
+        )
+    )
+    return canonical_digest(
+        {str(file.relative_to(root)): file_digest(file) for file in files}
+    )
+
 def load_history(path: Path | None) -> dict[str, Any]:
     if path is None or not path.exists():
         return {"records": []}
@@ -202,6 +229,7 @@ def plan_candidate(
     tier_name: str,
     tier: dict[str, Any],
     evaluator: str,
+    production_source: str,
     requested_role: str | None,
     sentinels: dict[str, str],
 ) -> dict[str, Any]:
@@ -250,6 +278,7 @@ def plan_candidate(
         "attempts": attempts,
         "contender_configurations": [item["configuration_fingerprint"] for item in contender_configs],
         "evaluator_digest": evaluator,
+        "production_source_digest": production_source,
     }
     return {
         "variant": variant,
@@ -360,6 +389,7 @@ def build_plan(
     tier = dict(space["tiers"][tier_name])
     cases = read_json(CASES_PATH)["cases"]
     evaluator = evaluator_digest()
+    production_source = production_source_digest()
     variants = [variant for variant in space["variants"] if requested_variant in {None, variant["id"]}]
     if requested_variant and not variants:
         raise ValueError(f"unknown contender variant: {requested_variant}")
@@ -375,6 +405,7 @@ def build_plan(
                 tier_name,
                 tier,
                 evaluator,
+                production_source,
                 requested_role,
                 space["sentinels"],
             )
@@ -417,6 +448,7 @@ def build_plan(
         "selection_reason": reason,
         "budgets": tier,
         "evaluator_digest": evaluator,
+        "production_source_digest": production_source,
         **selected,
     }
 

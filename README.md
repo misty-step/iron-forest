@@ -560,10 +560,11 @@ FOREST_EVAL_TIER=nightly FOREST_EVAL_VARIANT=qwen-3.7-high ./evals/run-experimen
 ./evals/run-model.sh # paired monthly pass^3 certification
 ```
 
-The `model evals` workflow runs affected-role trials on agent-surface pull
-requests, a rotating nightly tier Tuesday through Saturday, a weekly full
-`pass@1` tier, and a monthly full `pass^3` tier. Manual dispatch preserves tier
-and allowlisted contender controls. It maps separate candidate, Judge, and
+The `ci` workflow runs the fast deterministic agent regression
+(`./evals/run-fast.sh`) on every pull request. The `model evals` workflow runs
+a rotating nightly tier Tuesday through Saturday, a weekly full `pass@1` tier,
+and a monthly full `pass^3` tier. Manual dispatch preserves tier and
+allowlisted contender controls. It maps separate candidate, Judge, and
 Langfuse credentials into the runtime. Harbor and history artifacts remain
 under `evals/jobs/`, which is ignored by Git.
 
