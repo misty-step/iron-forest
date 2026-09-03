@@ -169,7 +169,7 @@ class ExperimentPlannerTest(unittest.TestCase):
             case for case in manifest if case["role"] in plan_experiment.REGRESSION_ROLES
         ]
         self.assertEqual(len(plan["cases"]), len(regression_cases))
-        self.assertEqual(len(plan["cases"]), 20)
+        self.assertEqual(len(plan["cases"]), 23)
         self.assertEqual(plan["attempts"], 3)
 
     def test_promotion_rejects_roles_without_regression_cases(self):
