@@ -83,6 +83,7 @@ if [[ "$contender_model" == "$FOREST_EVAL_JUDGE_MODEL" ]]; then
 fi
 case_args=()
 while IFS= read -r case_id; do case_args+=(--include-task-name "$case_id"); done < <(jq -r '.cases[]' "$experiment_dir/plan.json")
+expected_cases_json="$(jq -c '.cases' "$experiment_dir/plan.json")"
 
 run_cohort() {
   local cohort="$1"
@@ -120,7 +121,7 @@ run_cohort() {
     jq '. + {cohort: "contender", configurations: .contender_configurations}' "$experiment_dir/plan.json" > "$job_dir/experiment.json"
   fi
   set +e
-  python3 scripts/assert_results.py "$job_dir" --suite "$suite" --require-judge --min-attempts "$attempts"
+  python3 scripts/assert_results.py "$job_dir" --suite "$suite" --require-judge --min-attempts "$attempts" --expected-cases "$expected_cases_json"
   local report_exit=$?
   set -e
   [[ $harbor_exit -eq 0 && $report_exit -eq 0 ]]
@@ -137,6 +138,7 @@ if [[ -d "$incumbent_job_dir" && -d "$contender_job_dir" ]]; then
     --suite "$suite"
     --require-judge
     --min-attempts "$attempts"
+    --expected-cases "$expected_cases_json"
     --baseline "$incumbent_job_dir"
   )
   if [[ "$tier" == "promotion" ]]; then

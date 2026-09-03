@@ -265,6 +265,66 @@ class AssertResultsTest(unittest.TestCase):
             self.assertIn("saturated cases", markdown)
             self.assertIn("infra", markdown)
 
+    def test_expected_cases_match_passes_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0)
+            report = reporter.build_report(job_dir, suite="regression")
+            self.assertEqual(
+                reporter.evaluate_gate(report, expected_cases={"builder-ready-issue"}),
+                [],
+            )
+
+    def test_missing_planned_case_fails_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0)
+            report = reporter.build_report(job_dir, suite="regression")
+            failures = reporter.evaluate_gate(
+                report,
+                expected_cases={"builder-ready-issue", "verifier-clean-approve"},
+            )
+            self.assertTrue(
+                any(
+                    "missing" in failure and "verifier-clean-approve" in failure
+                    for failure in failures
+                )
+            )
+
+    def test_unexpected_case_fails_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0)
+            report = reporter.build_report(job_dir, suite="regression")
+            failures = reporter.evaluate_gate(report, expected_cases={"other-case"})
+            self.assertTrue(
+                any(
+                    "unexpected" in failure and "builder-ready-issue" in failure
+                    for failure in failures
+                )
+            )
+
+    def test_baseline_coverage_is_checked_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp), name="current")
+            baseline_dir = write_job(Path(tmp), name="baseline")
+            write_trial(job_dir, "builder-ready-issue", 0)
+            write_trial(baseline_dir, "verifier-clean-approve", 0)
+            report = reporter.build_report(job_dir, suite="regression")
+            baseline = reporter.build_report(baseline_dir, suite="regression")
+            failures = reporter.evaluate_gate(
+                report,
+                baseline_report=baseline,
+                expected_cases={"builder-ready-issue"},
+            )
+            self.assertTrue(
+                any(
+                    "baseline" in failure and "missing" in failure
+                    and "builder-ready-issue" in failure
+                    for failure in failures
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

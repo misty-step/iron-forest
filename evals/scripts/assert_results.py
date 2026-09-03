@@ -108,6 +108,36 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def parse_expected_cases(value: str) -> set[str]:
+    """Parse ``--expected-cases`` as a JSON array of case id strings."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise argparse.ArgumentTypeError(f"invalid JSON: {error}") from error
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise argparse.ArgumentTypeError(
+            "--expected-cases must be a JSON array of case id strings"
+        )
+    return set(parsed)
+
+
+def case_coverage_failures(
+    report: dict[str, Any], expected_cases: set[str] | None
+) -> list[str]:
+    """Fail closed when a produced report does not cover the planned cases."""
+    if expected_cases is None:
+        return []
+    actual = set(report["cases"])
+    missing = sorted(expected_cases - actual)
+    unexpected = sorted(actual - expected_cases)
+    if not missing and not unexpected:
+        return []
+    return [
+        f"case coverage mismatch for {report['job']}: "
+        f"missing {missing or 'none'}, unexpected {unexpected or 'none'}"
+    ]
+
+
 def discover_trials(job_dir: Path) -> list[Path]:
     """Return every Harbor trial ``result.json`` under a job directory.
 
@@ -646,12 +676,18 @@ def evaluate_gate(
     min_attempts: int | None = None,
     baseline_report: dict[str, Any] | None = None,
     adr: str = "",
+    expected_cases: set[str] | None = None,
 ) -> list[str]:
     """Return every reason the promotion gate does not pass."""
     failures: list[str] = []
     policy = CHANGE_CLASS_POLICY.get(change_class) if change_class else None
     if change_class is not None and policy is None:
         failures.append(f"unknown change class: {change_class}")
+
+    if expected_cases is not None:
+        failures.extend(case_coverage_failures(report, expected_cases))
+        if baseline_report is not None:
+            failures.extend(case_coverage_failures(baseline_report, expected_cases))
 
     if report["suite"] == SUITE_REGRESSION:
         for case_id, case in report["cases"].items():
@@ -813,6 +849,12 @@ def main(argv: list[str] | None = None) -> int:
         help="ADR reference required for tool/kernel boundary changes",
     )
     parser.add_argument(
+        "--expected-cases",
+        type=parse_expected_cases,
+        default=None,
+        help="JSON array of planned case ids the produced report must cover exactly",
+    )
+    parser.add_argument(
         "--report-dir",
         type=Path,
         default=None,
@@ -851,6 +893,7 @@ def main(argv: list[str] | None = None) -> int:
         min_attempts=args.min_attempts,
         baseline_report=baseline_report,
         adr=args.adr,
+        expected_cases=args.expected_cases,
     )
 
     report_dir = args.report_dir or args.job_dir
