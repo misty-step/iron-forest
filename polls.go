@@ -103,6 +103,15 @@ func (p *Poller) readyIssues(ctx context.Context, label string) ([]string, error
 // accompanies exitError so the caller can say why the Poll failed instead of
 // exiting silently.
 func (p *Poller) builder(ctx context.Context) (int, error) {
+	// A configured Powder selection must fail loudly when the powder binary is
+	// missing, even if a ready GitHub issue would otherwise win the
+	// GitHub-first selection path. The scope label selects GitHub only, so a
+	// label scope does not require Powder.
+	if powderAgent() != "" && p.Scope.Label == "" && p.ResolveTools {
+		if _, err := trustedExecutable(p.Root, "powder"); err != nil {
+			return exitError, fmt.Errorf("powder unavailable: %w", err)
+		}
+	}
 	if _, err := p.reconcilePowderPrimary(ctx); err != nil {
 		return exitError, fmt.Errorf("reconcile current Powder Subject: %w", err)
 	}

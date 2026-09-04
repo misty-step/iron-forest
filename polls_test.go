@@ -143,6 +143,25 @@ func TestBuilderPollPowderMatrix(t *testing.T) {
 	}
 }
 
+func TestPollBuilderFailsWhenPowderMissingWithGitHubIssues(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "forest-owner-name")
+	t.Setenv("POWDER_URL", "https://powder.example")
+	t.Setenv("PATH", t.TempDir())
+	p := &Poller{Root: t.TempDir(), Repo: "owner/name", ResolveTools: true}
+	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		t.Fatalf("tool transport invoked before powder resolution: %s %v", name, args)
+		return nil, nil
+	}
+
+	got, err := p.builder(context.Background())
+	if got != exitError {
+		t.Fatalf("poll exit=%d, want %d", got, exitError)
+	}
+	if err == nil || !strings.Contains(err.Error(), "powder unavailable") {
+		t.Fatalf("err=%v, want powder unavailable", err)
+	}
+}
+
 func TestListPowderSubjectsRequiresMatchingClaimForAuditMatches(t *testing.T) {
 	t.Setenv("POWDER_AGENT", "shared-audit-label")
 	t.Setenv("POWDER_URL", "https://powder.example")
