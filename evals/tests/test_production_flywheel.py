@@ -137,6 +137,87 @@ class ProductionFlywheelTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 flywheel.promote_contract(missing_scenario, manifest)
 
+
+    def test_promote_validates_role_effects(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / "production-cases.json"
+            manifest.write_text(json.dumps({"schema": "forest.production-cases.v1", "cases": []}) + "\n")
+            contract = {
+                "schema": "forest.production-case.v1",
+                "id": "prod-builder-test",
+                "role": "builder",
+                "summary": "Replay case.",
+                "effect": "invalid_effect",
+                "source_trace_id": "trace-1",
+                "source_run_id": "run-1",
+                "expected_files": {"value.txt": "ready\n"},
+            }
+            with self.assertRaisesRegex(ValueError, "unsupported effect 'invalid_effect' for role 'builder'"):
+                flywheel.promote_contract(contract, manifest)
+
+            # Verifier effect on builder contract is also rejected
+            contract["effect"] = "verifier_changes"
+            with self.assertRaisesRegex(ValueError, "unsupported effect 'verifier_changes' for role 'builder'"):
+                flywheel.promote_contract(contract, manifest)
+
+    def test_promote_validates_scenario_field_shapes(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / "production-cases.json"
+            manifest.write_text(json.dumps({"schema": "forest.production-cases.v1", "cases": []}) + "\n")
+            base = {
+                "schema": "forest.production-case.v1",
+                "id": "prod-builder-test",
+                "role": "builder",
+                "summary": "Replay case.",
+                "effect": "builder_publish",
+                "source_trace_id": "trace-1",
+                "source_run_id": "run-1",
+            }
+
+            # expected_files as string
+            bad_expected = dict(base, expected_files="not-a-dict")
+            with self.assertRaisesRegex(ValueError, "expected_files must be a dictionary"):
+                flywheel.promote_contract(bad_expected, manifest)
+
+            # expected_files with non-string value
+            bad_expected_val = dict(base, expected_files={"value.txt": 123})
+            with self.assertRaisesRegex(ValueError, "expected_files must be a dictionary"):
+                flywheel.promote_contract(bad_expected_val, manifest)
+
+            # planted_files as string
+            bad_planted = dict(base, planted_files="not-a-dict")
+            with self.assertRaisesRegex(ValueError, "planted_files must be a dictionary"):
+                flywheel.promote_contract(bad_planted, manifest)
+
+            # issue not a dict
+            bad_issue = dict(base, issue="not-an-issue-dict")
+            with self.assertRaisesRegex(ValueError, "issue must be an object"):
+                flywheel.promote_contract(bad_issue, manifest)
+
+            # issue without integer number
+            bad_issue_num = dict(base, issue={"number": "one", "title": "t", "body": "b"})
+            with self.assertRaisesRegex(ValueError, "issue.number must be an integer"):
+                flywheel.promote_contract(bad_issue_num, manifest)
+
+            # issue without title
+            bad_issue_title = dict(base, issue={"number": 1, "title": "", "body": "b"})
+            with self.assertRaisesRegex(ValueError, "issue.title must be a nonempty string"):
+                flywheel.promote_contract(bad_issue_title, manifest)
+
+            # check not a string
+            bad_check = dict(base, check=123)
+            with self.assertRaisesRegex(ValueError, "check must be a nonempty string command"):
+                flywheel.promote_contract(bad_check, manifest)
+
+            # powder_jobs not a list
+            bad_powder = dict(base, powder_jobs="not-a-list")
+            with self.assertRaisesRegex(ValueError, "powder_jobs must be a list"):
+                flywheel.promote_contract(bad_powder, manifest)
+
+            # powder_jobs entry without id
+            bad_powder_entry = dict(base, powder_jobs=[{"state": "open"}])
+            with self.assertRaisesRegex(ValueError, "powder_jobs entries must be objects with an id"):
+                flywheel.promote_contract(bad_powder_entry, manifest)
     def test_promote_sorts_and_writes_versioned_manifest(self):
         with tempfile.TemporaryDirectory() as root:
             manifest = Path(root) / "production-cases.json"

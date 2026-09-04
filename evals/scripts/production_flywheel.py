@@ -37,6 +37,29 @@ MANIFEST_SCHEMA = "forest.production-cases.v1"
 CONTRACT_SCHEMA = "forest.production-case.v1"
 OUTBOX_DIR_NAME = "production-flywheel-outbox"
 SHIPPED_ROLES = {"builder", "verifier", "fixer"}
+ROLE_EFFECTS: dict[str, set[str]] = {
+    "builder": {
+        "builder_publish",
+        "builder_branch_race",
+        "builder_scope_publish",
+        "builder_scope_held_outside",
+        "builder_scope_branch_no_match",
+        "no_effect",
+    },
+    "verifier": {
+        "verifier_changes",
+        "verifier_approve",
+        "verifier_conflict",
+        "verifier_approve_race",
+        "no_effect",
+    },
+    "fixer": {
+        "fixer_publish",
+        "fixer_conflict",
+        "fixer_branch_race",
+        "no_effect",
+    },
+}
 SCENARIO_FIELDS = ("issue", "powder_jobs", "check", "expected_files", "planted_files")
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
@@ -252,13 +275,44 @@ def validate_contract(contract: dict[str, Any], existing_ids: set[str]) -> None:
         raise ValueError("contract id must be a nonempty slug")
     if case_id in existing_ids:
         raise ValueError(f"duplicate production case id: {case_id}")
-    if contract.get("role") not in SHIPPED_ROLES:
+    role = contract.get("role")
+    if role not in SHIPPED_ROLES:
         raise ValueError("contract role must be builder, verifier, or fixer")
     for field in ("summary", "effect", "source_trace_id", "source_run_id"):
         if not isinstance(contract.get(field), str) or not contract[field]:
             raise ValueError(f"contract {field} must be a nonempty string")
+    allowed_effects = ROLE_EFFECTS.get(role, set())
+    if contract["effect"] not in allowed_effects:
+        raise ValueError(
+            f"unsupported effect '{contract['effect']}' for role '{role}'; allowed: {sorted(allowed_effects)}"
+        )
     if not any(contract.get(field) for field in SCENARIO_FIELDS):
         raise ValueError("contract must include at least one scenario field: " + ", ".join(SCENARIO_FIELDS))
+    for field in SCENARIO_FIELDS:
+        val = contract.get(field)
+        if val is None:
+            continue
+        if field in ("expected_files", "planted_files"):
+            if not isinstance(val, dict) or not all(isinstance(k, str) and bool(k) and isinstance(v, str) for k, v in val.items()):
+                raise ValueError(f"contract {field} must be a dictionary of string paths to string contents")
+        elif field == "issue":
+            if not isinstance(val, dict):
+                raise ValueError("contract issue must be an object with number, title, and body")
+            if not isinstance(val.get("number"), int) or isinstance(val.get("number"), bool):
+                raise ValueError("contract issue.number must be an integer")
+            if not isinstance(val.get("title"), str) or not val.get("title"):
+                raise ValueError("contract issue.title must be a nonempty string")
+            if not isinstance(val.get("body"), str):
+                raise ValueError("contract issue.body must be a string")
+        elif field == "check":
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError("contract check must be a nonempty string command")
+        elif field == "powder_jobs":
+            if not isinstance(val, list):
+                raise ValueError("contract powder_jobs must be a list of job objects")
+            for job in val:
+                if not isinstance(job, dict) or "id" not in job:
+                    raise ValueError("contract powder_jobs entries must be objects with an id")
 
 
 def promote_contract(contract: dict[str, Any], manifest_path: Path = PRODUCTION_MANIFEST) -> dict[str, Any]:
