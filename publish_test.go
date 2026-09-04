@@ -586,6 +586,47 @@ func TestCLIPublishReviewRequestNeedsRunID(t *testing.T) {
 	}
 }
 
+func TestCLIPublishReviewRequestPreflight(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	payload := filepath.Join(t.TempDir(), "review.json")
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "role neither builder nor fixer",
+			args: []string{"publish", "review-request", "verifier", "forest/1/ready", payload, "--root", root},
+			want: "role must be builder or fixer",
+		},
+		{
+			name: "fixer without rejected sha",
+			args: []string{"publish", "review-request", "fixer", "forest/1/ready", payload, "--root", root},
+			want: "fixer publication requires --rejected <sha>",
+		},
+		{
+			name: "builder carrying rejected sha",
+			args: []string{"publish", "review-request", "builder", "forest/1/ready", payload, "--rejected", "0123456789abcdef0123456789abcdef01234567", "--root", root},
+			want: "builder publication does not accept --rejected",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("FOREST_RUN_ID", "")
+			code, _, stderr := captureCLIOutput(t, func() int {
+				return runSurfaceCommand(test.args)
+			})
+			if code != exitError {
+				t.Fatalf("code=%d stderr=%q", code, stderr)
+			}
+			if !strings.Contains(stderr, test.want) {
+				t.Fatalf("stderr=%q, want substring %q", stderr, test.want)
+			}
+		})
+	}
+}
+
 func TestCLIPublishReviewRequestFixerBranchRaceIsConflict(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
