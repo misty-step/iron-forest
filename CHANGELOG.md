@@ -1,3 +1,11 @@
+## [0.0.8](https://github.com/misty-step/iron-forest/compare/v0.0.7...v0.0.8) (2026-09-04)
+
+
+### Bug Fixes
+
+* **doctor:** accept role-scoped OpenRouter keys without instance fallback ([80e3111](https://github.com/misty-step/iron-forest/commit/80e31112019855b2304d7be09d24214d2ed572f6))
+* **evals:** harden Powder claim state ([29b8e97](https://github.com/misty-step/iron-forest/commit/29b8e970bdaa61b184b7c5e1a6d23025fcc5baf5))
+
 ## [0.0.7](https://github.com/misty-step/iron-forest/compare/v0.0.6...v0.0.7) (2026-09-04)
 
 
