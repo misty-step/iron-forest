@@ -286,9 +286,9 @@ Run clears only its Run error. A successful Audit clears only its Audit error.
 The Auditor runs after a completed dispatch, not at startup or after an idle
 Poll skip.
 
-Verifier and Fixer Poll enumeration is bounded at 500 entries per evidence
-snapshot. A larger snapshot or an enumeration transport-output overflow is a
-healthy exit-1 skip with an explicit log line. It does not mark the trigger
+Verifier and Fixer Poll enumeration is bounded by the shared process transport
+output limit (1 MiB) and command execution timeouts. A transport-output overflow
+is a healthy exit-1 skip with an explicit log line. It does not mark the trigger
 unhealthy; the Auditor reports durable evidence growth as a bounded policy
 violation.
 
