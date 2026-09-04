@@ -20,6 +20,9 @@ EVAL_AGENT = "forest-iron-forest"
 
 JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
+class PostCommitSyncError(OSError):
+    pass
+
 
 def atomic_write(path: Path, content: str, mode: int) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
@@ -34,11 +37,16 @@ def atomic_write(path: Path, content: str, mode: int) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError as error:
+            raise PostCommitSyncError(
+                f"replaced {path}, but failed to sync its directory"
+            ) from error
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -145,11 +153,13 @@ def claim_matches(job: dict, token: str) -> bool:
     return isinstance(expected, str) and secrets.compare_digest(actual, expected)
 
 def persist_new_claim(jobs: list[dict], job: dict, job_id: str, agent: str, token: str) -> None:
+    save_claim(job_id, token)
     job["lease"] = {"agent": agent}
     job["_claim_hash"] = hashlib.sha256(token.encode()).hexdigest()
-    save_claim(job_id, token)
     try:
         save_jobs(jobs)
+    except PostCommitSyncError:
+        raise
     except Exception:
         try:
             delete_claim(job_id)

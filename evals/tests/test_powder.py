@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import runpy
+import stat
 import subprocess
 import sys
 import tempfile
@@ -194,6 +195,48 @@ class PowderIntakeTest(unittest.TestCase):
         )
         self.assertIsNone(job["lease"])
         self.assertNotIn("_claim_hash", job)
+
+    def test_postcommit_jobs_sync_failure_keeps_claim_and_lease(self) -> None:
+        job = {"id": "if-safe", "lease": None}
+        persist = POWDER_FIXTURE["persist_new_claim"]
+        sync_error = POWDER_FIXTURE["PostCommitSyncError"]
+        real_fsync = os.fsync
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            jobs_path = root_path / "powder-jobs.json"
+            state_path = root_path / "client-state"
+            jobs_path.write_text(json.dumps([job]))
+            jobs_directory = jobs_path.parent.stat()
+
+            def fail_jobs_directory_sync(descriptor: int) -> None:
+                info = os.fstat(descriptor)
+                if (
+                    stat.S_ISDIR(info.st_mode)
+                    and info.st_dev == jobs_directory.st_dev
+                    and info.st_ino == jobs_directory.st_ino
+                ):
+                    raise OSError("directory sync failed")
+                real_fsync(descriptor)
+
+            with (
+                mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_path)}),
+                mock.patch.dict(persist.__globals__, {"POWDER_JOBS": jobs_path}),
+                mock.patch.object(
+                    persist.__globals__["os"],
+                    "fsync",
+                    side_effect=fail_jobs_directory_sync,
+                ),
+            ):
+                with self.assertRaisesRegex(sync_error, "failed to sync"):
+                    persist([job], job, "if-safe", "audit", "claim")
+
+            persisted = json.loads(jobs_path.read_text())[0]
+            claim_path = (
+                state_path / "powder" / "claims" / "eval-origin" / "if-safe"
+            )
+            self.assertEqual(persisted["lease"], {"agent": "audit"})
+            self.assertEqual(persisted["_claim_hash"], job["_claim_hash"])
+            self.assertEqual(claim_path.read_text(), "claim")
 
     def test_partial_temporary_write_preserves_jobs_snapshot(self) -> None:
         class PartialWriter:
