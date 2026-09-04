@@ -272,7 +272,9 @@ func (s *Scheduler) completeRun(agent string, record RunRecord, runErr error) er
 	health.Agent = agent
 	health.Running = false
 	health.LastRun = record.Started
-	if runErr != nil {
+	if record.Error != "" {
+		health.RunError = record.Error
+	} else if runErr != nil {
 		health.RunError = runErr.Error()
 	} else {
 		health.RunError = ""
