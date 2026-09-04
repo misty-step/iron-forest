@@ -100,6 +100,110 @@ class PowderIntakeTest(unittest.TestCase):
                 [job["id"] for job in json.loads(all_.stdout)], ["if-draft"]
             )
 
+    def test_invalid_job_id_cannot_escape_claim_state(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            hidden = Path(root) / "hidden"
+            hidden.mkdir()
+            escaped = Path(root) / "escaped"
+
+            created = self.run_powder(
+                hidden,
+                "create",
+                "--id",
+                "../../escaped",
+                "--title",
+                "Invalid",
+                "--repo",
+                "local/eval",
+                "--spec",
+                "work",
+            )
+
+            self.assertNotEqual(created.returncode, 0, msg=created.stderr)
+            self.assertEqual(json.loads(created.stderr)["code"], "invalid_id")
+            self.assertFalse(escaped.exists())
+            self.assertFalse((hidden / "powder-jobs.json").exists())
+
+            (hidden / "powder-jobs.json").write_text(json.dumps([{
+                "id": "../../escaped",
+                "title": "Invalid",
+                "repo": "local/eval",
+                "spec": "work",
+                "state": "open",
+                "lease": None,
+            }]))
+            taken = self.run_powder(hidden, "take", "../../escaped")
+            self.assertNotEqual(taken.returncode, 0, msg=taken.stderr)
+            self.assertEqual(json.loads(taken.stderr)["code"], "invalid_id")
+            self.assertFalse(escaped.exists())
+
+    def test_failed_claim_persistence_does_not_lease_job(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            hidden = Path(root) / "hidden"
+            hidden.mkdir()
+            created = self.run_powder(
+                hidden,
+                "create",
+                "--id",
+                "if-safe",
+                "--title",
+                "Safe",
+                "--repo",
+                "local/eval",
+                "--spec",
+                "work",
+            )
+            self.assertEqual(created.returncode, 0, msg=created.stderr)
+            blocked_state = Path(root) / "blocked-state"
+            blocked_state.write_text("not a directory")
+
+            taken = self.run_powder(hidden, "take", "if-safe", state=blocked_state)
+
+            self.assertNotEqual(taken.returncode, 0)
+            jobs = json.loads((hidden / "powder-jobs.json").read_text())
+            self.assertIsNone(jobs[0]["lease"])
+            self.assertNotIn("_claim_hash", jobs[0])
+
+    def test_claim_symlink_cannot_target_another_job(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            hidden = Path(root) / "hidden"
+            hidden.mkdir()
+            state = hidden / "client-state"
+            for job_id in ("attacker", "victim"):
+                created = self.run_powder(
+                    hidden,
+                    "create",
+                    "--id",
+                    job_id,
+                    "--title",
+                    job_id,
+                    "--repo",
+                    "local/eval",
+                    "--spec",
+                    "work",
+                )
+                self.assertEqual(created.returncode, 0, msg=created.stderr)
+                taken = self.run_powder(hidden, "take", job_id)
+                self.assertEqual(taken.returncode, 0, msg=taken.stderr)
+
+            jobs_file = hidden / "powder-jobs.json"
+            jobs = json.loads(jobs_file.read_text())
+            hashes = {job["id"]: job["_claim_hash"] for job in jobs}
+            next(job for job in jobs if job["id"] == "attacker")["_claim_hash"] = hashes["victim"]
+            jobs_file.write_text(json.dumps(jobs))
+            claims = state / "powder" / "claims" / "eval-origin"
+            attacker_claim = claims / "attacker"
+            victim_claim = claims / "victim"
+            attacker_claim.unlink()
+            attacker_claim.symlink_to(victim_claim.name)
+
+            released = self.run_powder(hidden, "release", "attacker")
+
+            self.assertNotEqual(released.returncode, 0)
+            self.assertTrue(attacker_claim.is_symlink())
+            self.assertTrue(victim_claim.is_file())
+
+
     def test_claim_commands_are_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             hidden = Path(root) / "hidden"
@@ -164,6 +268,7 @@ class PowderIntakeTest(unittest.TestCase):
             )
             isolated_claim.parent.mkdir(parents=True)
             isolated_claim.write_text("wrong-claim")
+            os.chmod(isolated_claim, 0o600)
             invalid_claim = self.run_powder(
                 hidden, "done", "if-held", "--proof", "wrong", state=isolated_state
             )
@@ -173,6 +278,7 @@ class PowderIntakeTest(unittest.TestCase):
             ready_claim = (
                 client_state / "powder" / "claims" / "eval-origin" / "if-ready"
             )
+            self.assertEqual(ready_claim.stat().st_mode & 0o777, 0o600)
             released_ready = self.run_powder(hidden, "release", "if-ready")
             self.assertEqual(released_ready.returncode, 0, msg=released_ready.stderr)
             self.assertFalse(ready_claim.exists())

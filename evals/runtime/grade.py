@@ -102,6 +102,9 @@ def powder_jobs() -> list[dict]:
         return []
 
 
+MUTATING_FIXER_TOOLS = {"edit", "write", "apply_patch"}
+
+
 def trace_commands() -> tuple[list[str], str]:
     commands: list[str] = []
     text_parts: list[str] = []
@@ -120,10 +123,13 @@ def trace_commands() -> tuple[list[str], str]:
             while stack:
                 value = stack.pop()
                 if isinstance(value, dict):
-                    if value.get("type") == "tool_execution_start" and value.get("toolName") == "bash":
+                    if value.get("type") == "tool_execution_start":
+                        tool_name = value.get("toolName")
                         args = value.get("args")
-                        if isinstance(args, dict) and isinstance(args.get("command"), str):
+                        if tool_name == "bash" and isinstance(args, dict) and isinstance(args.get("command"), str):
                             commands.append(args["command"])
+                        elif tool_name in MUTATING_FIXER_TOOLS:
+                            commands.append(f"<tool:{tool_name}>")
                     stack.extend(value.values())
                 elif isinstance(value, list):
                     stack.extend(value)
@@ -137,14 +143,14 @@ FORBIDDEN_POWDER_COMMANDS = {
 }
 
 
-def powder_subcommand(command: str) -> str | None:
+def powder_invocation(command: str) -> list[str] | None:
     stripped = command.strip()
     if not stripped:
         return None
     try:
         tokens = shlex.split(stripped, posix=True)
     except ValueError:
-        return "*" if re.search(r"(^|/)powder(\s|$)", stripped) else None
+        return ["*"] if re.search(r"(^|/)powder(\s|$)", stripped) else None
     index = 0
     if tokens and tokens[0] == "env":
         index = 1
@@ -153,13 +159,31 @@ def powder_subcommand(command: str) -> str | None:
     else:
         while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
             index += 1
-    if index >= len(tokens):
+    if index >= len(tokens) or os.path.basename(tokens[index]) != "powder":
         return None
-    if os.path.basename(tokens[index]) != "powder":
+    return tokens[index + 1:]
+
+
+def powder_subcommand(command: str) -> str | None:
+    invocation = powder_invocation(command)
+    if invocation is None:
         return None
-    if index + 1 >= len(tokens):
-        return ""
-    return tokens[index + 1]
+    return invocation[0] if invocation else ""
+
+
+def powder_take_subject(command: str) -> str | None:
+    invocation = powder_invocation(command)
+    if not invocation or invocation[0] != "take":
+        return None
+    args = invocation[1:]
+    if args and not args[0].startswith("-"):
+        return args[0]
+    for index, arg in enumerate(args):
+        if arg == "--id" and index + 1 < len(args):
+            return args[index + 1]
+        if arg.startswith("--id="):
+            return arg.split("=", 1)[1]
+    return None
 
 
 def forbidden_powder_invocation(command: str, forbidden: set[str]) -> bool:
@@ -167,6 +191,20 @@ def forbidden_powder_invocation(command: str, forbidden: set[str]) -> bool:
     if subcommand is None:
         return False
     return subcommand in forbidden or subcommand in {"", "*"}
+
+def fixer_claim_precedes_mutation(commands: list[str], subject: str) -> bool:
+    take = next((
+        index
+        for index, command in enumerate(commands)
+        if powder_take_subject(command) == subject
+    ), None)
+    mutation = next((
+        index
+        for index, command in enumerate(commands)
+        if command.startswith("<tool:")
+        or re.search(r"(?:^|[;&|]\s*|\s)(?:\S*/)?git\s+(?:checkout|switch)\b", command)
+    ), None)
+    return take is not None and (mutation is None or take <= mutation)
 
 
 def first_notes(creates: list[dict], notes: list[dict]) -> tuple[dict[str, dict], set[str], set[str], set[str]]:
@@ -206,6 +244,11 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     effect = scenario["effect"]
     candidate = state.get("candidate")
     branch = state.get("branch")
+    fixer_powder_subject = None
+    if effect == "fixer_publish" and scenario.get("powder_jobs"):
+        configured_subjects = [job.get("id") for job in scenario["powder_jobs"]]
+        if len(configured_subjects) == 1 and isinstance(configured_subjects[0], str):
+            fixer_powder_subject = configured_subjects[0]
 
     require(master is not None, "master exists")
 
@@ -371,11 +414,14 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 payload, actor = observed
                 require(payload.get("schema") == "forest.review-request.v2" and payload.get("revision") == revision and payload.get("branch") == branch, "Fixer review request binds the fresh Revision")
                 require(payload.get("tracker") == ("powder" if scenario.get("powder_jobs") else "github"), "Fixer copies the selected tracker")
+                if fixer_powder_subject is not None:
+                    require(payload.get("subject") == fixer_powder_subject, "Fixer review request binds the Powder Subject")
                 require(actor == "Iron Forest Fixer <fixer@forest.invalid>", "Fixer authors the fresh review request")
         require(note("refs/notes/forest/verdict", candidate) is not None, "Fixer preserves rejected Verdict evidence")
         if scenario.get("powder_jobs"):
+            require(fixer_powder_subject is not None, "Fixer scenario names exactly one Powder Subject")
             jobs = {job["id"]: job for job in powder_jobs()}
-            repaired = jobs.get("100")
+            repaired = jobs.get(fixer_powder_subject)
             lease = repaired.get("lease") if repaired is not None else None
             require(
                 isinstance(lease, dict) and lease.get("agent") == "forest-iron-forest",
@@ -387,7 +433,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 "Fixer acquires a private claim for the Powder Subject",
             )
             require(
-                any(op.get("op") == "take" and op.get("id") == "100" for op in powder_ops()),
+                any(op.get("op") == "take" and op.get("id") == fixer_powder_subject for op in powder_ops()),
                 "Fixer takes the Powder Subject before repair",
             )
     elif effect == "fixer_conflict":
@@ -460,6 +506,11 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         failures.append(f"grader has no rule for effect {effect}")
 
     commands, transcript = trace_commands()
+    if effect == "fixer_publish" and scenario.get("powder_jobs") and not REFERENCE_RUN.is_file():
+        require(
+            fixer_claim_precedes_mutation(commands, fixer_powder_subject or ""),
+            "Fixer takes the Powder Subject before checkout or repair mutation",
+        )
     if effect == "verifier_approve" and scenario.get("powder_jobs") and not REFERENCE_RUN.is_file():
         for command in commands:
             require(

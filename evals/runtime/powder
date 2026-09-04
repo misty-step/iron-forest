@@ -4,7 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
+import stat
 import sys
 from pathlib import Path
 
@@ -14,6 +16,8 @@ from hidden import POWDER_JOBS, POWDER_OPS
 # --agent operand in the production prompt, so the fixture falls back to this
 # identity when sudo drops POWDER_AGENT from the fixture's environment.
 EVAL_AGENT = "forest-iron-forest"
+
+JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def load_jobs() -> list[dict]:
@@ -70,22 +74,43 @@ def current_agent(args: list[str]) -> str:
     return option(args, "--agent") or os.environ.get("POWDER_AGENT") or EVAL_AGENT
 
 
+def valid_job_id(job_id: object) -> bool:
+    return isinstance(job_id, str) and JOB_ID.fullmatch(job_id) is not None
+
+
 def claim_path(job_id: str) -> Path:
+    if not valid_job_id(job_id):
+        raise ValueError(f"invalid Powder job id {job_id!r}")
     state_root = Path(os.environ.get("XDG_STATE_HOME") or POWDER_JOBS.parent / "claim-state")
-    return state_root / "powder" / "claims" / "eval-origin" / job_id
+    claims_root = (state_root / "powder" / "claims" / "eval-origin").resolve()
+    path = claims_root / job_id
+    if path.parent != claims_root:
+        raise ValueError(f"Powder claim path escapes its state root: {job_id!r}")
+    return path
 
 
 def stored_claim(job_id: str) -> str | None:
     path = claim_path(job_id)
-    if not path.exists():
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
         return None
-    return path.read_text().strip()
+    with os.fdopen(descriptor) as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError(f"Powder claim state is not a private regular file: {job_id!r}")
+        return handle.read().strip()
 
 
 def save_claim(job_id: str, token: str) -> None:
     path = claim_path(job_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(token)
 
 
 def delete_claim(job_id: str) -> None:
@@ -121,6 +146,9 @@ def main() -> int:
         job_id = option(args, "--id")
         title = option(args, "--title")
         repo = option(args, "--repo")
+        if not valid_job_id(job_id):
+            fail("invalid_id", f"id {job_id!r} is not a slug")
+            return 1
         spec = option(args, "--spec")
         jobs = load_jobs()
         existing = next((job for job in jobs if job["id"] == job_id), None)
@@ -186,6 +214,9 @@ def main() -> int:
     if command == "take":
         jobs = load_jobs()
         job_id = option(args, "--id") or positional_id(args)
+        if not valid_job_id(job_id):
+            fail("invalid_id", f"id {job_id!r} is not a slug")
+            return 1
         job = find_job(jobs, job_id)
         if job is None:
             missing(job_id)
@@ -204,8 +235,12 @@ def main() -> int:
             token = secrets.token_urlsafe(32)
             job["lease"] = {"agent": agent}
             job["_claim_hash"] = hashlib.sha256(token.encode()).hexdigest()
-            save_jobs(jobs)
             save_claim(job_id, token)
+            try:
+                save_jobs(jobs)
+            except Exception:
+                delete_claim(job_id)
+                raise
         append_op({"op": "take", "id": job_id, "agent": agent})
         emit(job_payload(job))
         return 0
@@ -213,6 +248,9 @@ def main() -> int:
     if command == "release":
         jobs = load_jobs()
         job_id = option(args, "--id") or positional_id(args)
+        if not valid_job_id(job_id):
+            fail("invalid_id", f"id {job_id!r} is not a slug")
+            return 1
         job = find_job(jobs, job_id)
         if job is None:
             missing(job_id)
@@ -230,6 +268,9 @@ def main() -> int:
     if command == "ask":
         jobs = load_jobs()
         job_id = option(args, "--id") or positional_id(args)
+        if not valid_job_id(job_id):
+            fail("invalid_id", f"id {job_id!r} is not a slug")
+            return 1
         job = find_job(jobs, job_id)
         if job is None:
             missing(job_id)
@@ -248,6 +289,9 @@ def main() -> int:
     if command == "done":
         jobs = load_jobs()
         job_id = option(args, "--id") or positional_id(args)
+        if not valid_job_id(job_id):
+            fail("invalid_id", f"id {job_id!r} is not a slug")
+            return 1
         job = find_job(jobs, job_id)
         if job is None:
             missing(job_id)
