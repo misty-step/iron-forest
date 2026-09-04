@@ -21,6 +21,30 @@ EVAL_AGENT = "forest-iron-forest"
 JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
+def atomic_write(path: Path, content: str, mode: int) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}-", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            descriptor = -1
+            os.fchmod(handle.fileno(), mode)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
 def load_jobs() -> list[dict]:
     if POWDER_JOBS.exists():
         return json.loads(POWDER_JOBS.read_text())
@@ -28,7 +52,8 @@ def load_jobs() -> list[dict]:
 
 
 def save_jobs(jobs: list[dict]) -> None:
-    POWDER_JOBS.write_text(json.dumps(jobs, indent=2, sort_keys=True) + "\n")
+    content = json.dumps(jobs, indent=2, sort_keys=True) + "\n"
+    atomic_write(POWDER_JOBS, content, 0o600)
 
 
 def append_op(op: dict) -> None:
@@ -107,25 +132,7 @@ def save_claim(job_id: str, token: str) -> None:
     path = claim_path(job_id)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".claim-", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w") as handle:
-            descriptor = -1
-            os.fchmod(handle.fileno(), 0o600)
-            handle.write(token)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        temporary.unlink(missing_ok=True)
+    atomic_write(path, token, 0o600)
 
 
 def delete_claim(job_id: str) -> None:
