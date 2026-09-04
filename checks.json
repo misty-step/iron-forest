@@ -1,0 +1,1 @@
+{"schema":"forest.checks.v1","revision":"ce4af05c07e43d00b20e271c8988cec951bf5890","results":[{"name":"build","ok":true,"exit":0},{"name":"vet","ok":true,"exit":0},{"name":"test","ok":true,"exit":0}],"time":"2026-09-04T18:54:22Z"}
