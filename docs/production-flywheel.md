@@ -25,7 +25,11 @@ production trace (session id = Forest Run id)
 The bidirectional provenance key is `source_trace_id`. It is recorded on the
 draft dataset item at intake and copied into the promoted case contract, so the
 original production trace stays linked to the eval case and every later replay
-score.
+score. The stable association key between dataset items and promoted contracts
+for report tracking is `source_run_id` (`metadata.run_id` on the item); the
+maintenance report recognizes a case as promoted if either its `source_run_id`
+or `source_trace_id` matches a promoted contract, preventing false draft counts
+when human promotion records a corrected trace ID.
 
 ## Intake
 
