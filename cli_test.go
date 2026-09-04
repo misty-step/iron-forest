@@ -199,6 +199,33 @@ func TestCLIRejectsMalformedLimit(t *testing.T) {
 	}
 }
 
+// --exit filters by the process exit code the Runner records. -1 is legitimate
+// (a child terminated by a signal), but anything outside [-1, 255] can never
+// match a Run and must be refused at the flag boundary.
+func TestCLIExitFlagValidation(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+
+	for _, raw := range []string{"-2", "-10", "256", "999"} {
+		code, _, stderr := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"run", "list", "--exit", raw, "--root", root})
+		})
+		if code != exitInvalidArg {
+			t.Fatalf("--exit %q code=%d, want %d", raw, code, exitInvalidArg)
+		}
+		if !strings.Contains(stderr, "--exit must be an integer between -1 and 255") {
+			t.Fatalf("--exit %q stderr=%q, want range refusal", raw, stderr)
+		}
+	}
+
+	for _, raw := range []string{"-1", "0", "1", "255"} {
+		code, _, _ := decodeEnvelope(t, "run", "list", "--exit", raw, "--json", "--root", root)
+		if code != exitOK {
+			t.Fatalf("--exit %q code=%d, want %d", raw, code, exitOK)
+		}
+	}
+}
+
 // Each command declares the flags it implements, so an unsupported flag is an
 // error rather than a silent no-op.
 func TestCLIRejectsFlagsTheCommandDoesNotImplement(t *testing.T) {
