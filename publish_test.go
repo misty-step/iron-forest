@@ -921,3 +921,17 @@ func TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary(t *testing.T) {
 		t.Fatalf("primary check worktrees survived: %v", leftover)
 	}
 }
+
+func TestPublishVerdictRejectsMismatchedLiveRun(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	checks, verdict := writeEvidencePayloads(t, revision, "changes")
+	seedVerdictRun(t, root, "1-verifier")
+	_, err := publishVerdict(context.Background(), publishVerdictInput{
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "9-verifier",
+	})
+	if err == nil || !strings.Contains(err.Error(), "FOREST_RUN_ID does not match the active Verifier run") {
+		t.Fatalf("error=%v", err)
+	}
+}
