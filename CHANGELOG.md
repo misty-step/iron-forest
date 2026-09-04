@@ -1,3 +1,10 @@
+## [0.0.13](https://github.com/misty-step/iron-forest/compare/v0.0.12...v0.0.13) (2026-09-04)
+
+
+### Bug Fixes
+
+* **cancel:** remove cancellation marker on failed stop ([4ebab98](https://github.com/misty-step/iron-forest/commit/4ebab9850705207c295e465242e5bb674a51b27b))
+
 ## [0.0.12](https://github.com/misty-step/iron-forest/compare/v0.0.11...v0.0.12) (2026-09-04)
 
 
