@@ -321,7 +321,11 @@ func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 		if index+1 >= len(args) || args[index+1] == "" {
 			return "", index, fmt.Errorf("%s requires a value", name)
 		}
-		return args[index+1], index + 1, nil
+		next := args[index+1]
+		if looksLikeFlagToken(next) {
+			return "", index, fmt.Errorf("%s requires a value", name)
+		}
+		return next, index + 1, nil
 	}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
@@ -417,6 +421,18 @@ func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 		flags.root = root
 	}
 	return positional, flags, nil
+}
+
+// looksLikeFlagToken reports whether a token should be refused as a missing
+// value rather than consumed as that value. A negative integer is the only
+// leading-dash token that can be a value here (--exit/--limit range), so any
+// other leading-dash token is another flag.
+func looksLikeFlagToken(token string) bool {
+	if !strings.HasPrefix(token, "-") {
+		return false
+	}
+	rest := strings.TrimPrefix(token, "-")
+	return rest == "" || strings.ContainsFunc(rest, func(r rune) bool { return r < '0' || r > '9' })
 }
 
 type configShowPayload struct {

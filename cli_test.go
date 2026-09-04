@@ -386,6 +386,54 @@ func TestCLIRejectsEmptyFlagValues(t *testing.T) {
 	}
 }
 
+// A value-taking flag must not consume a following flag token as its value, and
+// the refusal belongs in the --json envelope when the caller asked for it.
+func TestCLIValueFlagsRejectFollowingFlag(t *testing.T) {
+	cases := [][]string{
+		{"status", "--root", "--json"},
+		{"config", "show", "-C", "--json"},
+		{"run", "list", "--after", "--json"},
+		{"run", "list", "--limit", "--json"},
+		{"publish", "review-request", "builder", "branch", "payload", "--rejected", "--json"},
+		{"run", "list", "--agent", "--json"},
+		{"run", "list", "--exit", "--json"},
+		{"run", "list", "--since", "--json"},
+	}
+	for _, args := range cases {
+		code, envelope, _ := decodeEnvelope(t, args...)
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d", args, code, exitInvalidArg)
+		}
+		if envelope.Error == nil || !strings.Contains(*envelope.Error, " requires a value") {
+			t.Fatalf("%v error=%v, want a missing-value refusal", args, envelope.Error)
+		}
+	}
+}
+
+// A value-taking flag with no following argument is a missing value, never an
+// empty value or a late command failure.
+func TestCLIValueFlagsRejectAtEndOfArgs(t *testing.T) {
+	cases := [][]string{
+		{"status", "--root"},
+		{"config", "show", "-C"},
+		{"run", "list", "--after"},
+		{"run", "list", "--limit"},
+		{"publish", "review-request", "builder", "branch", "payload", "--rejected"},
+		{"run", "list", "--agent"},
+		{"run", "list", "--exit"},
+		{"run", "list", "--since"},
+	}
+	for _, args := range cases {
+		code, _, stderr := captureCLIOutput(t, func() int { return runSurfaceCommand(args) })
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d (stderr=%q)", args, code, exitInvalidArg, stderr)
+		}
+		if !strings.Contains(stderr, " requires a value") {
+			t.Fatalf("%v stderr=%q, want a missing-value refusal", args, stderr)
+		}
+	}
+}
+
 // selfcheck publishes the paths it resolved, not a constant list of names.
 func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 	t.Setenv("FOREST_DEFAULTS", "")
