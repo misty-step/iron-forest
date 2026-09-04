@@ -1,3 +1,10 @@
+## [0.0.12](https://github.com/misty-step/iron-forest/compare/v0.0.11...v0.0.12) (2026-09-04)
+
+
+### Bug Fixes
+
+* **config:** reject colliding agent slugs ([827e08e](https://github.com/misty-step/iron-forest/commit/827e08ea62be1b43f7e1bbc533eccc2a2a9779eb))
+
 ## [0.0.11](https://github.com/misty-step/iron-forest/compare/v0.0.10...v0.0.11) (2026-09-04)
 
 
