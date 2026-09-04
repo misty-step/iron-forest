@@ -306,6 +306,35 @@ func TestConfigRejectsDurationOverflow(t *testing.T) {
 		})
 	}
 }
+func TestConfigRejectsCollidingAgentSlugs(t *testing.T) {
+	cfg := Config{
+		Repo: "owner/name",
+		Agents: map[string]AgentConfig{
+			"builder.prod": {Poll: "forest poll builder", Interval: 1},
+			"builder-prod": {Poll: "forest poll builder", Interval: 1},
+		},
+		Checks: []Check{{Name: "test", Run: "true"}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "builder-prod") || !strings.Contains(err.Error(), "builder.prod") {
+		t.Fatalf("Validate() error = %v, want colliding agent names", err)
+	}
+}
+
+func TestConfigAcceptsUniqueAgentSlugs(t *testing.T) {
+	cfg := Config{
+		Repo: "owner/name",
+		Agents: map[string]AgentConfig{
+			"builder":  {Poll: "forest poll builder", Interval: 1},
+			"verifier": {Poll: "forest poll verifier", Interval: 1},
+		},
+		Checks: []Check{{Name: "test", Run: "true"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+}
+
 func writeAgentFiles(t *testing.T, root, name, frontmatter, body, task string) {
 	t.Helper()
 	dir := filepath.Join(root, "agents", name)

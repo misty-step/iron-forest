@@ -230,10 +230,20 @@ func (c Config) Validate() error {
 	if len(c.Agents) == 0 {
 		return errors.New("agents must not be empty")
 	}
+	slugs := make(map[string]string, len(c.Agents))
 	for name, agent := range c.Agents {
 		if strings.TrimSpace(name) == "" {
 			return errors.New("agent name must not be empty")
 		}
+		slug := agentSlug(name)
+		if prev, ok := slugs[slug]; ok {
+			first, second := prev, name
+			if second < first {
+				first, second = second, first
+			}
+			return fmt.Errorf("agent %q and %q collide on live-run slug %q", first, second, slug)
+		}
+		slugs[slug] = name
 		if strings.TrimSpace(agent.Poll) == "" {
 			return fmt.Errorf("agent %q poll is required", name)
 		}
