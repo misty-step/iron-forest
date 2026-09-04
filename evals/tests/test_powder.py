@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 POWDER = ROOT / "runtime" / "powder"
+sys.path.insert(0, str(ROOT / "runtime"))
+POWDER_FIXTURE = runpy.run_path(str(POWDER))
 
 
 class PowderIntakeTest(unittest.TestCase):
@@ -164,6 +168,51 @@ class PowderIntakeTest(unittest.TestCase):
             self.assertIsNone(jobs[0]["lease"])
             self.assertNotIn("_claim_hash", jobs[0])
 
+    def test_job_persistence_failure_deletes_new_claim(self) -> None:
+        job = {"id": "if-safe", "lease": None}
+        calls = mock.Mock()
+        calls.save_jobs.side_effect = OSError("disk full")
+        persist = POWDER_FIXTURE["persist_new_claim"]
+        with mock.patch.dict(
+            persist.__globals__,
+            {
+                "save_claim": calls.save_claim,
+                "save_jobs": calls.save_jobs,
+                "delete_claim": calls.delete_claim,
+            },
+        ):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                persist([job], job, "if-safe", "audit", "claim")
+
+        self.assertEqual(
+            calls.method_calls,
+            [
+                mock.call.save_claim("if-safe", "claim"),
+                mock.call.save_jobs([job]),
+                mock.call.delete_claim("if-safe"),
+            ],
+        )
+        self.assertIsNone(job["lease"])
+        self.assertNotIn("_claim_hash", job)
+
+    def test_failed_atomic_replace_preserves_existing_claim(self) -> None:
+        save_claim = POWDER_FIXTURE["save_claim"]
+        stored_claim = POWDER_FIXTURE["stored_claim"]
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": root}):
+                save_claim("if-safe", "existing")
+                with mock.patch.object(
+                    save_claim.__globals__["os"],
+                    "replace",
+                    side_effect=OSError("replace failed"),
+                ):
+                    with self.assertRaisesRegex(OSError, "replace failed"):
+                        save_claim("if-safe", "replacement")
+
+                self.assertEqual(stored_claim("if-safe"), "existing")
+                claim_dir = Path(root) / "powder" / "claims" / "eval-origin"
+                self.assertEqual([path.name for path in claim_dir.iterdir()], ["if-safe"])
+
     def test_claim_symlink_cannot_target_another_job(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             hidden = Path(root) / "hidden"
@@ -234,6 +283,23 @@ class PowderIntakeTest(unittest.TestCase):
             self.assertEqual(held_job["lease"]["agent"], agent)
             self.assertNotIn("claim_token", held_job)
             self.assertNotIn("_claim_hash", held_job)
+
+            duplicate = self.run_powder(
+                hidden,
+                "create",
+                "--id",
+                "if-held",
+                "--title",
+                "Held",
+                "--repo",
+                repo,
+                "--spec",
+                "## Problem\nConcrete need.\n",
+            )
+            self.assertEqual(duplicate.returncode, 0, msg=duplicate.stderr)
+            duplicate_job = json.loads(duplicate.stdout)
+            self.assertNotIn("claim_token", duplicate_job)
+            self.assertNotIn("_claim_hash", duplicate_job)
 
             ready_take = self.run_powder(hidden, "take", "if-ready")
             self.assertEqual(ready_take.returncode, 0, msg=ready_take.stderr)

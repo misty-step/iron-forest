@@ -5,11 +5,10 @@ Status: accepted, 2026-08-19 (review-request note write retired by 0028, 2026-09
 > Retired in part by [0028](0028-review-request-notes-retired.md): the
 > review-request note described below no longer carries request evidence.
 > Request evidence is only the create-only `refs/forest/v1/request/<sha>`
-> commit. Decision text retained as historical record.
->
-> Powder lease authority described below was superseded on 2026-09-04 by
-> private per-job claims. `POWDER_AGENT` is now audit metadata only. A matching
-> locally stored claim, not identity equality, resumes or completes a live job.
+> commit. Historical evidence details remain below; current Powder authority
+> uses private per-job claims. `POWDER_AGENT` is optional audit metadata. A
+> matching locally stored claim, not identity equality, resumes or completes a
+> live job.
 
 Extends [0009](0009-git-coordination-authority.md),
 [0010](0010-agent-owned-effects-and-merge-gate.md), and
@@ -43,26 +42,28 @@ is required because subjects contain hyphens.
 Schema v1 and `forest/<n>-<slug>` are invalid. Leftover hyphen tips are unread
 by Poll. They do not make Verifier or Fixer unhealthy.
 
-Builder Poll lists two programs and asks one question: does this repository
-have an unclaimed Subject?
+Builder Poll lists GitHub Issues and Powder candidates and asks one question:
+does this repository have an unclaimed Subject?
 
 - an open `forest:ready` Issue with no `forest/<n>/*` branch; or
-- a Powder job for `forest.yaml` `repo` that is takeable or held by
-  `POWDER_AGENT`, with no `forest/<id>/*` branch.
+- a takeable Powder job for `forest.yaml` `repo`, or an audit-matched live job
+  whose private local claim succeeds through `powder take`, with no
+  `forest/<id>/*` branch.
 
-Powder listing runs only when `POWDER_AGENT` is set. Origin is `POWDER_URL`
-or `POWDER_API_BASE_URL`. Agent set and origin missing is Poll exit 2.
+New Powder selection runs when `POWDER_AGENT` and an origin are set. Agent set
+and origin missing is Poll exit 2. Kernel reconciliation depends on the
+configured origin and stored per-job claim, not on an audit label.
 
-Builder takes a Powder job before creating its branch. A Fixer confirms or
-idempotently re-takes that same Subject before mutating a rejected branch.
-Agents may release only a failed or unpublished Builder attempt.
+Builder takes a Powder job before creating its branch. A Fixer calls `take` for
+that same Subject before mutating a rejected branch; a live job resumes only
+with its matching private claim. Agents may release only a failed or unpublished
+Builder attempt for which they hold that job's claim.
 
-After an approve Gate, the Kernel owns terminal completion for a request
-with `tracker: powder`. It reads current primary and that Revision's exact
-request and approve refs, then runs `powder show`, an idempotent
-same-identity `take`, and `done --proof <revision>`. It retries at Builder
-Poll and before a later approve. `POWDER_AGENT` is one identity per
-repository Kernel.
+After an approve Gate, the Kernel owns terminal completion for a request with
+`tracker: powder`. It reads current primary and that Revision's exact request
+and approve refs, then runs `powder show`, `take` with the stored private claim,
+and `done --proof <revision>`. It retries at Builder Poll and before a later
+approve. `POWDER_AGENT`, when present, records audit context only.
 
 ## Consequences
 
@@ -72,9 +73,9 @@ tracker-specific. The review-request note records the source actually
 selected as `tracker`. Kernel Powder completion reads that field; it does
 not infer tracker from the Subject id.
 
-Powder's `done` requires the completing identity to hold the live lease. The
-Builder therefore keeps the lease after request publication. Fixer and Kernel
-may re-take only that same Subject under the same repository identity.
+Powder's `done` requires the matching private claim for the live lease. Builder
+therefore retains the local claim after request publication. Fixer and Kernel
+may resume only that same Subject with its matching per-job claim.
 
 Current primary is one bounded pending-completion slot. A later approve cannot
 replace it, and Builder cannot dispatch, until its Powder job is terminal.

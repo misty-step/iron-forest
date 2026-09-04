@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import stat
+import tempfile
 import sys
 from pathlib import Path
 
@@ -106,11 +107,25 @@ def save_claim(job_id: str, token: str) -> None:
     path = claim_path(job_id)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    with os.fdopen(descriptor, "w") as handle:
-        os.fchmod(handle.fileno(), 0o600)
-        handle.write(token)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".claim-", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            descriptor = -1
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(token)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def delete_claim(job_id: str) -> None:
@@ -121,6 +136,20 @@ def claim_matches(job: dict, token: str) -> bool:
     expected = job.get("_claim_hash")
     actual = hashlib.sha256(token.encode()).hexdigest()
     return isinstance(expected, str) and secrets.compare_digest(actual, expected)
+
+def persist_new_claim(jobs: list[dict], job: dict, job_id: str, agent: str, token: str) -> None:
+    job["lease"] = {"agent": agent}
+    job["_claim_hash"] = hashlib.sha256(token.encode()).hexdigest()
+    save_claim(job_id, token)
+    try:
+        save_jobs(jobs)
+    except Exception:
+        try:
+            delete_claim(job_id)
+        finally:
+            job["lease"] = None
+            job.pop("_claim_hash", None)
+        raise
 
 
 def require_claim(job: dict) -> str | None:
@@ -233,14 +262,7 @@ def main() -> int:
                 return 1
         else:
             token = secrets.token_urlsafe(32)
-            job["lease"] = {"agent": agent}
-            job["_claim_hash"] = hashlib.sha256(token.encode()).hexdigest()
-            save_claim(job_id, token)
-            try:
-                save_jobs(jobs)
-            except Exception:
-                delete_claim(job_id)
-                raise
+            persist_new_claim(jobs, job, job_id, agent, token)
         append_op({"op": "take", "id": job_id, "agent": agent})
         emit(job_payload(job))
         return 0

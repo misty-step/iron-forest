@@ -129,8 +129,8 @@ in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.
 
-To consume Powder jobs, put these in the instance environment file. Use one
-`POWDER_AGENT` per Kernel. Do not share it across repositories.
+To consume Powder jobs, configure the origin and API key in the instance
+environment file. `POWDER_AGENT` is optional audit metadata.
 
 ```dotenv
 POWDER_URL=<origin>
