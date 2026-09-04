@@ -505,3 +505,17 @@ func TestCLIHelpSucceeds(t *testing.T) {
 		}
 	}
 }
+
+// Asking for help with extra operands is a usage error, matching the exact-arity
+// contract every other command enforces.
+func TestCLIHelpWithTrailingOperandsRejects(t *testing.T) {
+	for _, args := range [][]string{{"help", "bogus"}, {"--help", "extra"}, {"-h", "extra"}} {
+		code, _, stderr := captureCLIOutput(t, func() int { return runCLI(args) })
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d", args, code, exitInvalidArg)
+		}
+		if !strings.Contains(stderr, "usage: forest") {
+			t.Fatalf("%v printed no usage", args)
+		}
+	}
+}

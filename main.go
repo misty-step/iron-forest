@@ -25,6 +25,10 @@ func runCLI(args []string) int {
 	case "serve", "once", "poll":
 		return runEngineCommand(args[0], args[1:])
 	case "help", "--help", "-h":
+		if len(args) > 1 {
+			printUsage()
+			return exitInvalidArg
+		}
 		// Asking for usage is not a usage error.
 		printUsage()
 		return exitOK
