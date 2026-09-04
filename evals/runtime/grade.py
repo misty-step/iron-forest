@@ -379,11 +379,16 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
             lease = repaired.get("lease") if repaired is not None else None
             require(
                 isinstance(lease, dict) and lease.get("agent") == "forest-iron-forest",
-                "Fixer holds the same Powder Subject during repair",
+                "Fixer records the canonical Powder audit label during repair",
+            )
+            claim_hash = repaired.get("_claim_hash") if repaired is not None else None
+            require(
+                isinstance(claim_hash, str) and len(claim_hash) == 64,
+                "Fixer acquires a private claim for the Powder Subject",
             )
             require(
                 any(op.get("op") == "take" and op.get("id") == "100" for op in powder_ops()),
-                "Fixer confirms or re-acquires the Powder lease",
+                "Fixer takes the Powder Subject before repair",
             )
     elif effect == "fixer_conflict":
         require(master == state["master_before"], "Fixer conflict does not move master")

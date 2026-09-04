@@ -156,16 +156,16 @@ func (p *Poller) currentPowderLanding(ctx context.Context) (powderReconcileResul
 
 func (p *Poller) reconcilePowderPrimary(ctx context.Context) (powderReconcileResult, error) {
 	agent := powderAgent()
-	if agent == "" {
-		return powderReconcileResult{}, nil
-	}
 	if !p.ResolveTools && p.PowderCommand == nil {
 		// An injected tool transport must also inject the state-changing Powder
 		// transport. Production Pollers always resolve both trusted binaries.
 		return powderReconcileResult{}, nil
 	}
 	if !powderOriginSet() {
-		return powderReconcileResult{}, fmt.Errorf("POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty")
+		if agent != "" {
+			return powderReconcileResult{}, fmt.Errorf("POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty")
+		}
+		return powderReconcileResult{}, nil
 	}
 	result, err := p.currentPowderLanding(ctx)
 	if err != nil || result.Subject == "" || result.Tracker != "powder" {
@@ -188,13 +188,19 @@ func (p *Poller) reconcilePowderPrimary(ctx context.Context) (powderReconcileRes
 	if *job.Derived.Terminal {
 		return acceptTerminalPowder(job, result)
 	}
-	if job.Lease != nil && job.Lease.Agent != agent {
-		return result, fmt.Errorf("powder job %s is held by %q, want %q", result.Subject, job.Lease.Agent, agent)
+
+	takeArgs := []string{"take", result.Subject}
+	if agent != "" {
+		takeArgs = append(takeArgs, "--agent", agent)
 	}
-	if _, stderr, err := p.runPowderCommand(ctx, "take", result.Subject, "--agent", agent); err != nil {
+	if _, stderr, err := p.runPowderCommand(ctx, takeArgs...); err != nil {
 		return result, powderCommandFailure("take", result.Subject, stderr, err)
 	}
-	if _, stderr, err := p.runPowderCommand(ctx, "done", result.Subject, "--proof", result.Revision, "--agent", agent); err != nil {
+	doneArgs := []string{"done", result.Subject, "--proof", result.Revision}
+	if agent != "" {
+		doneArgs = append(doneArgs, "--agent", agent)
+	}
+	if _, stderr, err := p.runPowderCommand(ctx, doneArgs...); err != nil {
 		return result, powderCommandFailure("done", result.Subject, stderr, err)
 	}
 	job, exists, err = p.showPowderJob(ctx, result.Subject)

@@ -6,6 +6,10 @@ Status: accepted, 2026-08-19 (review-request note write retired by 0028, 2026-09
 > review-request note described below no longer carries request evidence.
 > Request evidence is only the create-only `refs/forest/v1/request/<sha>`
 > commit. Decision text retained as historical record.
+>
+> Powder lease authority described below was superseded on 2026-09-04 by
+> private per-job claims. `POWDER_AGENT` is now audit metadata only. A matching
+> locally stored claim, not identity equality, resumes or completes a live job.
 
 Extends [0009](0009-git-coordination-authority.md),
 [0010](0010-agent-owned-effects-and-merge-gate.md), and
