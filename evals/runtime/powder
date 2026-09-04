@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import sys
+from pathlib import Path
 
 from hidden import POWDER_JOBS, POWDER_OPS
 
@@ -33,7 +36,7 @@ def emit(value) -> None:
 
 
 def job_payload(job: dict) -> dict:
-    payload = dict(job)
+    payload = {key: value for key, value in job.items() if not key.startswith("_")}
     payload["derived"] = {"terminal": job.get("state") in {"done", "abandoned"}}
     return payload
 
@@ -67,6 +70,44 @@ def current_agent(args: list[str]) -> str:
     return option(args, "--agent") or os.environ.get("POWDER_AGENT") or EVAL_AGENT
 
 
+def claim_path(job_id: str) -> Path:
+    state_root = Path(os.environ.get("XDG_STATE_HOME") or POWDER_JOBS.parent / "claim-state")
+    return state_root / "powder" / "claims" / "eval-origin" / job_id
+
+
+def stored_claim(job_id: str) -> str | None:
+    path = claim_path(job_id)
+    if not path.exists():
+        return None
+    return path.read_text().strip()
+
+
+def save_claim(job_id: str, token: str) -> None:
+    path = claim_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token)
+
+
+def delete_claim(job_id: str) -> None:
+    claim_path(job_id).unlink(missing_ok=True)
+
+
+def claim_matches(job: dict, token: str) -> bool:
+    expected = job.get("_claim_hash")
+    actual = hashlib.sha256(token.encode()).hexdigest()
+    return isinstance(expected, str) and secrets.compare_digest(actual, expected)
+
+
+def require_claim(job: dict) -> str | None:
+    token = stored_claim(job["id"])
+    if token is None:
+        fail("claim_required", f"job {job['id']!r} requires its claim")
+        return None
+    if not claim_matches(job, token):
+        fail("invalid_claim", f"job {job['id']!r} claim is invalid")
+        return None
+    return token
+
 def missing(job_id: str | None) -> None:
     fail("not_found", f"job {job_id!r} not found")
 
@@ -84,7 +125,7 @@ def main() -> int:
         jobs = load_jobs()
         existing = next((job for job in jobs if job["id"] == job_id), None)
         if existing is not None:
-            emit(existing)
+            emit(job_payload(existing))
             return 0
         job = {
             "id": job_id,
@@ -97,7 +138,7 @@ def main() -> int:
         jobs.append(job)
         save_jobs(jobs)
         append_op({"op": "create", "id": job_id, "title": title, "repo": repo, "spec": spec or ""})
-        emit(job)
+        emit(job_payload(job))
         return 0
 
     if command == "note":
@@ -128,7 +169,7 @@ def main() -> int:
                 and job.get("lease") is None
                 and job.get("state") not in {"done", "abandoned"}
             ]
-        emit(jobs)
+        emit([job_payload(job) for job in jobs])
         return 0
 
     if command == "show":
@@ -154,12 +195,17 @@ def main() -> int:
             fail("terminal", f"job {job_id!r} is terminal")
             return 1
         lease = job.get("lease")
-        if lease is not None and lease.get("agent") != agent:
-            fail("already_holding", f"job {job_id!r} is held by {lease.get('agent')!r}")
-            return 1
-        if lease is None:
+        if lease is not None:
+            token = stored_claim(job_id)
+            if token is None or not claim_matches(job, token):
+                fail("held", f"job {job_id!r} is held")
+                return 1
+        else:
+            token = secrets.token_urlsafe(32)
             job["lease"] = {"agent": agent}
+            job["_claim_hash"] = hashlib.sha256(token.encode()).hexdigest()
             save_jobs(jobs)
+            save_claim(job_id, token)
         append_op({"op": "take", "id": job_id, "agent": agent})
         emit(job_payload(job))
         return 0
@@ -171,10 +217,14 @@ def main() -> int:
         if job is None:
             missing(job_id)
             return 1
+        if require_claim(job) is None:
+            return 1
         job["lease"] = None
+        job.pop("_claim_hash", None)
         save_jobs(jobs)
+        delete_claim(job_id)
         append_op({"op": "release", "id": job_id})
-        emit(job)
+        emit(job_payload(job))
         return 0
 
     if command == "ask":
@@ -184,9 +234,15 @@ def main() -> int:
         if job is None:
             missing(job_id)
             return 1
+        if require_claim(job) is None:
+            return 1
         question = option(args, "--question")
+        job["lease"] = None
+        job.pop("_claim_hash", None)
+        save_jobs(jobs)
+        delete_claim(job_id)
         append_op({"op": "ask", "id": job_id, "question": question or ""})
-        emit(job)
+        emit(job_payload(job))
         return 0
 
     if command == "done":
@@ -197,9 +253,7 @@ def main() -> int:
             missing(job_id)
             return 1
         agent = current_agent(args)
-        lease = job.get("lease")
-        if lease is None or lease.get("agent") != agent:
-            fail("not_holder", f"job {job_id!r} is not held by {agent!r}")
+        if require_claim(job) is None:
             return 1
         proof = option(args, "--proof")
         if not proof:
@@ -208,7 +262,9 @@ def main() -> int:
         job["state"] = "done"
         job["proof"] = proof
         job["lease"] = None
+        job.pop("_claim_hash", None)
         save_jobs(jobs)
+        delete_claim(job_id)
         append_op({"op": "done", "id": job_id, "agent": agent, "proof": proof})
         emit(job_payload(job))
         return 0

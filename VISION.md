@@ -111,8 +111,10 @@ slot. Before Builder dispatch or a later approve, the Kernel reads only that
 Revision's exact request and approve refs. It probes Powder only when the
 request records `tracker: powder`. GitHub and undiscriminated historical
 requests never complete a job, even when a Powder id collides. If the bound
-job is non-terminal, the same repository principal re-takes it and calls
-`done` with the Revision as proof. Terminal observation requires that proof
+job is non-terminal, the Kernel resumes it only with the matching private
+per-job claim stored for that origin and job id, then calls `done` with the
+Revision as proof. The repository principal and `POWDER_AGENT` label provide
+audit context, not lease authority. Terminal observation requires that proof
 to equal the landed Revision. Failure blocks later work but never reverses or
 misreports a successful Gate. The Kernel keeps no outbox and performs no
 historical evidence or board scan.
@@ -162,9 +164,10 @@ Kernel substrate seam, and a central trace store are not Iron Forest.
 
 Git remains the coordination authority. Powder is exclusive-work for jobs.
 Agents select and initially take Powder work. The Kernel may list jobs and may
-re-take and complete only the current Git-landed Subject through the bounded
-reconciliation loop above; it does not rank, release, ask about, or otherwise
-manage Powder work.
+resume and complete only the current Git-landed Subject when its matching
+private per-job claim is locally available. It does not derive authority from
+an audit label, and it does not rank, release, ask about, or otherwise manage
+Powder work.
 
 ## Never finished
 

@@ -106,9 +106,7 @@ func TestBuilderPollPowderMatrix(t *testing.T) {
 	}{
 		{name: "takeable", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, want: 0},
 		{name: "takeable claimed", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, branch: sha + " refs/heads/forest/iron-forest-ready/work\n", want: 1},
-		{name: "mine unclaimed", issues: `[]`, takeable: `[]`, mine: `[{"id":"iron-forest-held"}]`, want: 0},
-		{name: "mine published blocks takeable", issues: `[]`, takeable: `[{"id":"other-ready"}]`, mine: `[{"id":"iron-forest-held"}]`, branch: sha + " refs/heads/forest/iron-forest-held/work\n", want: 1},
-		{name: "mine published only", issues: `[]`, takeable: `[]`, mine: `[{"id":"iron-forest-held"}]`, branch: sha + " refs/heads/forest/iron-forest-held/work\n", want: 1},
+		{name: "published audit match does not hide takeable", issues: `[]`, takeable: `[{"id":"other-ready"}]`, mine: `[]`, branch: sha + " refs/heads/forest/iron-forest-held/work\n", want: 0},
 		{name: "github ready empty powder", issues: `[[{"number":4}]]`, takeable: `[]`, mine: `[]`, want: 0},
 		{name: "malformed powder", issues: `[]`, takeable: `not json`, mine: `[]`, want: 2},
 		{name: "bad powder id", issues: `[]`, takeable: `[{"id":"bad id"}]`, mine: `[]`, want: 2},
@@ -142,6 +140,43 @@ func TestBuilderPollPowderMatrix(t *testing.T) {
 				t.Fatalf("poll exit=%d want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestListPowderSubjectsRequiresMatchingClaimForAuditMatches(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "shared-audit-label")
+	t.Setenv("POWDER_URL", "https://powder.example")
+	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
+	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "powder" || !slices.Contains(args, "list") {
+			t.Fatalf("unexpected tool call: %s %v", name, args)
+		}
+		if slices.Contains(args, "--mine") {
+			return []byte(`[{"id":"resumable"},{"id":"inaccessible"}]`), nil
+		}
+		if slices.Contains(args, "--takeable") {
+			return []byte(`[{"id":"independent"}]`), nil
+		}
+		t.Fatalf("unexpected Powder list: %v", args)
+		return nil, nil
+	}
+	p.PowderCommand = func(_ context.Context, args ...string) ([]byte, []byte, error) {
+		if strings.Join(args, " ") == "take resumable --agent shared-audit-label" {
+			return []byte(`{"id":"resumable"}`), nil, nil
+		}
+		if strings.Join(args, " ") == "take inaccessible --agent shared-audit-label" {
+			return nil, []byte(`{"code":"held","error":"job is held"}`), errors.New("exit status 1")
+		}
+		t.Fatalf("unexpected Powder command: %v", args)
+		return nil, nil, nil
+	}
+
+	got, err := p.listPowderSubjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"independent", "resumable"}; !slices.Equal(got, want) {
+		t.Fatalf("subjects=%v want=%v", got, want)
 	}
 }
 

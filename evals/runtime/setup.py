@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -165,11 +167,22 @@ def main() -> None:
     shutil.rmtree(origin, ignore_errors=True)
     for stale in ("state.json", "race.json", "race-triggered", "forest-exit", "candidate-model", "reference-run", "scenario.json", "role", "pr-created.json", "issue-created.json", "powder-jobs.json", "powder-ops.jsonl"):
         (hidden / stale).unlink(missing_ok=True)
+    shutil.rmtree(hidden / "claim-state", ignore_errors=True)
     SCENARIO.write_text(json.dumps(scenario, indent=2, sort_keys=True) + "\n")
     powder_jobs = scenario.get("powder_jobs", [])
     for job in powder_jobs:
         job.setdefault("repo", "local/eval")
         job.setdefault("lease", None)
+        local_claim = job.pop("_local_claim", False)
+        if local_claim:
+            if job["lease"] is None:
+                raise ValueError(f"Powder job {job['id']!r} cannot seed a claim without a live lease")
+            claim = secrets.token_urlsafe(32)
+            job["_claim_hash"] = hashlib.sha256(claim.encode()).hexdigest()
+            claim_file = hidden / "claim-state" / "powder" / "claims" / "eval-origin" / job["id"]
+            claim_file.parent.mkdir(parents=True, exist_ok=True)
+            claim_file.write_text(claim)
+            os.chmod(claim_file, 0o600)
     if powder_jobs:
         POWDER_JOBS.write_text(json.dumps(powder_jobs, indent=2, sort_keys=True) + "\n")
     run(GIT, "init", "--bare", "--initial-branch=master", str(origin))

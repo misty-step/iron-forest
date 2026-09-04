@@ -138,19 +138,22 @@ POWDER_API_KEY=<key>
 POWDER_AGENT=forest-<repo-slug>
 ```
 
-`POWDER_AGENT` is the workload identity and must be unique per Kernel.
-`POWDER_API_KEY` authenticates the HTTP transport. It may be an approved shared
-organization credential; this contract does not require one Powder API key per
-Kernel. Copy approved values into the protected instance environment without
-printing them. A deployment that explicitly requires per-instance API keys
-must own their issuance and rotation path.
+`POWDER_AGENT` is optional audit metadata. Managed workers use the canonical
+repository label; the label does not authorize a lease and does not need to be
+unique per Kernel. `POWDER_API_KEY` authenticates the HTTP transport. It may be
+an approved shared organization credential; this contract does not require one
+Powder API key per Kernel. Copy approved values into the protected instance
+environment without printing them. A deployment that explicitly requires
+per-instance API keys must own their issuance and rotation path.
 
 The job must have a nonempty spec and `repo` equal to `forest.yaml` `repo`.
 Builder takes it and publishes `forest/<id>/<slug>` with review-request v2.
-Fixer re-takes that same Subject before repair when necessary. After approve,
-the Kernel completes the current Git-landed Subject with the approved Revision
-as proof and retries at later Poll/approve boundaries. Unset `POWDER_AGENT`
-keeps GitHub-only selection.
+Fixer calls `take` for that same Subject before repair; only its locally stored
+per-job claim can resume a live lease. After approve, the Kernel uses that claim
+to complete the current Git-landed Subject with the approved Revision as proof
+and retries at later Poll/approve boundaries. Unset `POWDER_AGENT` keeps new
+selection GitHub-only; a configured Powder origin still reconciles the current
+Powder-backed Gate by its stored claim.
 
 ## 3. Add declarations
 

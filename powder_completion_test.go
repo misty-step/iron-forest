@@ -12,7 +12,8 @@ import (
 type fakePowderLifecycle struct {
 	subject               string
 	repo                  string
-	leaseAgent            string
+	auditAgent            string
+	hasClaim              bool
 	terminal              bool
 	proof                 string
 	notFound              bool
@@ -40,8 +41,8 @@ func (f *fakePowderLifecycle) command(_ context.Context, args ...string) ([]byte
 			return nil, []byte(`{"code":"not_found","error":"job not found"}`), errors.New("exit status 1")
 		}
 		lease := any(nil)
-		if f.leaseAgent != "" {
-			lease = map[string]string{"agent": f.leaseAgent}
+		if f.auditAgent != "" {
+			lease = map[string]string{"agent": f.auditAgent}
 		}
 		payload, err := json.Marshal(map[string]any{
 			"id":      f.subject,
@@ -53,17 +54,21 @@ func (f *fakePowderLifecycle) command(_ context.Context, args ...string) ([]byte
 		return payload, nil, err
 	case "take":
 		agent := argumentValue(args, "--agent")
-		if f.leaseAgent != "" && f.leaseAgent != agent {
-			return nil, []byte(`{"code":"already_holding","error":"held by another agent"}`), errors.New("exit status 1")
+		if f.auditAgent != "" && !f.hasClaim {
+			return nil, []byte(`{"code":"held","error":"job is held"}`), errors.New("exit status 1")
 		}
-		f.leaseAgent = agent
+		if f.auditAgent == "" {
+			f.auditAgent = agent
+		}
+		f.hasClaim = true
 		return []byte(`{"id":"` + subject + `"}`), nil, nil
 	case "done":
 		if f.doneResponseLoss > 0 {
 			f.doneResponseLoss--
 			f.proof = argumentValue(args, "--proof")
 			f.terminal = true
-			f.leaseAgent = ""
+			f.auditAgent = ""
+			f.hasClaim = false
 			return nil, []byte(`{"code":"unavailable","error":"response lost"}`), errors.New("exit status 1")
 		}
 		if f.doneFailure > 0 {
@@ -75,7 +80,8 @@ func (f *fakePowderLifecycle) command(_ context.Context, args ...string) ([]byte
 			f.proof = strings.Repeat("c", 40)
 		}
 		f.terminal = true
-		f.leaseAgent = ""
+		f.auditAgent = ""
+		f.hasClaim = false
 		return []byte(`{"id":"` + subject + `"}`), nil, nil
 	default:
 		return nil, nil, fmt.Errorf("unexpected Powder command %q", command)
@@ -127,7 +133,7 @@ func configuredPowderPoller(t *testing.T, root, subject string, lifecycle *fakeP
 func TestReconcilePowderPrimaryCompletesCurrentSubject(t *testing.T) {
 	root, _ := testClone(t)
 	revision := seedApprovedCurrent(t, root, "if-ready")
-	lifecycle := &fakePowderLifecycle{leaseAgent: "forest-owner-name"}
+	lifecycle := &fakePowderLifecycle{auditAgent: "forest-owner-name", hasClaim: true}
 	poller := configuredPowderPoller(t, root, "if-ready", lifecycle)
 
 	result, err := poller.reconcilePowderPrimary(context.Background())
@@ -151,10 +157,35 @@ func TestReconcilePowderPrimaryCompletesCurrentSubject(t *testing.T) {
 	}
 }
 
+func TestReconcilePowderPrimaryWithoutAuditLabel(t *testing.T) {
+	root, _ := testClone(t)
+	revision := seedApprovedCurrent(t, root, "if-ready")
+	lifecycle := &fakePowderLifecycle{auditAgent: "other-audit-label", hasClaim: true}
+	poller := configuredPowderPoller(t, root, "if-ready", lifecycle)
+	t.Setenv("POWDER_AGENT", "")
+
+	result, err := poller.reconcilePowderPrimary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Terminal || lifecycle.proof != revision {
+		t.Fatalf("result=%#v proof=%q", result, lifecycle.proof)
+	}
+	want := []string{
+		"show if-ready",
+		"take if-ready",
+		"done if-ready --proof " + revision,
+		"show if-ready",
+	}
+	if strings.Join(lifecycle.calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls=%v want=%v", lifecycle.calls, want)
+	}
+}
+
 func TestReconcilePowderPrimaryCompletesExplicitDecimalPowderSubject(t *testing.T) {
 	root, _ := testClone(t)
 	revision := seedApprovedCurrentTracker(t, root, "100", "powder")
-	lifecycle := &fakePowderLifecycle{leaseAgent: "forest-owner-name"}
+	lifecycle := &fakePowderLifecycle{auditAgent: "forest-owner-name", hasClaim: true}
 	poller := configuredPowderPoller(t, root, "100", lifecycle)
 	result, err := poller.reconcilePowderPrimary(context.Background())
 	if err != nil {
@@ -270,16 +301,16 @@ func TestReconcilePowderPrimaryRejectsMismatchedProof(t *testing.T) {
 	})
 }
 
-func TestReconcilePowderPrimaryRejectsForeignLease(t *testing.T) {
+func TestReconcilePowderPrimaryRejectsMissingClaim(t *testing.T) {
 	root, _ := testClone(t)
 	seedApprovedCurrent(t, root, "if-held")
-	lifecycle := &fakePowderLifecycle{leaseAgent: "forest-other"}
+	lifecycle := &fakePowderLifecycle{auditAgent: "forest-other"}
 	poller := configuredPowderPoller(t, root, "if-held", lifecycle)
-	if _, err := poller.reconcilePowderPrimary(context.Background()); err == nil || !strings.Contains(err.Error(), `held by "forest-other"`) {
+	if _, err := poller.reconcilePowderPrimary(context.Background()); err == nil || !strings.Contains(err.Error(), "(held)") {
 		t.Fatalf("error=%v", err)
 	}
-	if len(lifecycle.calls) != 1 {
-		t.Fatalf("calls=%v", lifecycle.calls)
+	if got := strings.Join(lifecycle.calls, "\n"); got != "show if-held\ntake if-held --agent forest-owner-name" {
+		t.Fatalf("calls=%q", got)
 	}
 }
 
