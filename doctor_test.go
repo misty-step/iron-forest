@@ -252,6 +252,87 @@ func TestCLIDoctorReportsOpenRouterKeyProbeUnknown(t *testing.T) {
 	}
 }
 
+func TestDoctorOpenRouterKeyRoleScoped(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	bin := doctorToolStubs(t)
+	home := t.TempDir()
+	var probes int
+	auths := map[string]int{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes++
+		auths[r.Header.Get("Authorization")]++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", home)
+	t.Setenv("OPENROUTER_API_BASE", server.URL)
+	t.Setenv("POWDER_AGENT", "")
+	t.Setenv("POWDER_URL", "")
+	t.Setenv("POWDER_API_BASE_URL", "")
+	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY_BUILDER=builder-key\nOPENROUTER_API_KEY_VERIFIER=verifier-key\n")
+
+	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
+	if code != exitOK {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	var payload doctorPayload
+	decodePayload(t, envelope, &payload)
+	if !payload.Healthy {
+		t.Fatalf("healthy=%t, want true (checks=%+v)", payload.Healthy, payload.Checks)
+	}
+	byName := map[string]doctorCheck{}
+	for _, check := range payload.Checks {
+		byName[check.Name] = check
+		if strings.Contains(check.Evidence, "builder-key") || strings.Contains(check.Reason, "builder-key") || strings.Contains(check.Evidence, "verifier-key") || strings.Contains(check.Reason, "verifier-key") {
+			t.Fatalf("doctor leaked credential value in check %q: %+v", check.Name, check)
+		}
+	}
+	check := byName["openrouter_key"]
+	if !check.OK || check.Result != doctorEvidenced {
+		t.Fatalf("openrouter_key check=%+v, want evidenced ok", check)
+	}
+	if probes != 2 {
+		t.Fatalf("openrouter probes=%d, want 2 distinct role keys", probes)
+	}
+	if auths["Bearer builder-key"] != 1 || auths["Bearer verifier-key"] != 1 {
+		t.Fatalf("openrouter probe Authorization=%v, want both role keys once", auths)
+	}
+}
+
+func TestDoctorOpenRouterKeyMissing(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	bin := doctorToolStubs(t)
+	home := t.TempDir()
+	t.Setenv("PATH", bin)
+	t.Setenv("HOME", home)
+	t.Setenv("POWDER_AGENT", "")
+	t.Setenv("POWDER_URL", "")
+	t.Setenv("POWDER_API_BASE_URL", "")
+	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=\nPOWDER_URL=https://powder.example\n")
+
+	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
+	if code != exitError {
+		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitError, stderr)
+	}
+	var payload doctorPayload
+	decodePayload(t, envelope, &payload)
+	if payload.Healthy {
+		t.Fatalf("healthy=%t, want false", payload.Healthy)
+	}
+	byName := map[string]doctorCheck{}
+	for _, check := range payload.Checks {
+		byName[check.Name] = check
+	}
+	check := byName["openrouter_key"]
+	if check.OK || check.Result != doctorObserved || !strings.Contains(check.Evidence, "no OpenRouter key is configured") {
+		t.Fatalf("openrouter_key check=%+v, want observed fail with no key configured", check)
+	}
+}
+
+
 func TestCLIDoctorPowderCheckUsesServiceEnvironment(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
