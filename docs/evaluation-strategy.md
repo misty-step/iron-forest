@@ -258,17 +258,18 @@ Six suites partition evaluation work:
 - **production replay** — production-derived traces replayed through Harbor and
   cataloged in Langfuse.
 
-The current executable core is the regression suite: 20 cases across the
-shipped review roles — eight Builder cases and six each for Verifier and
-Fixer. Builder covers one ready issue, no eligible issue, existing fanout
-notes, a canonical-note race, a branch race, a failed Check, and
-scope-allowlist selection (an in-scope Subject and a held out-of-scope
-Subject). Verifier covers stale flat notes, a planted defect in fanout notes,
-clean approval, a failed Check, a conflicting Verdict, and an approval race.
-Fixer covers one finding, multiple findings, fanout notes, a conflicting
-destination, a branch race, and no rejected Revision. The two draft-only
-Critic and Tester sweeps are tracked separately and do not join the review
-loop.
+The current executable core is the regression suite: 25 cases across the
+shipped default profile — eleven Builder cases, six each for Verifier and
+Fixer, and one each for the draft-only Critic and Tester sweeps. Builder
+covers one ready issue, no eligible issue, existing fanout notes, a
+canonical-note race, a branch race, a failed Check, and scope-allowlist
+selection (an in-scope Subject, a held out-of-scope Subject, a label match, a
+branch-prefix match, and a branch-prefix no-match). Verifier covers stale flat
+notes, a planted defect in fanout notes, clean approval, a failed Check, a
+conflicting Verdict, and an approval race. Fixer covers one finding, multiple
+findings, fanout notes, a conflicting destination, a branch race, and no
+rejected Revision. The draft-only Critic and Tester sweeps file spec-less
+draft jobs and do not join the review loop.
 
 ### Builder
 
