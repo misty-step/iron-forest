@@ -252,6 +252,77 @@ func TestCLIPassingAuditPublishesEmptyViolations(t *testing.T) {
 	}
 }
 
+func TestCLIAuditShowRescan(t *testing.T) {
+	t.Run("rescan on unlocked checkout runs audit and persists state", func(t *testing.T) {
+		root, _ := testClone(t)
+
+		code, stdout, stderr := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"audit", "show", "--rescan", "--root", root})
+		})
+		if code != exitOK {
+			t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("stderr=%q, want empty", stderr)
+		}
+		if !strings.Contains(stdout, "pass") {
+			t.Fatalf("stdout=%q, want pass", stdout)
+		}
+		if _, err := os.Stat(auditStatePath(root)); err != nil {
+			t.Fatalf("audit.json not created: %v", err)
+		}
+
+		code, envelope, stderr := decodeEnvelope(t, "audit", "show", "--rescan", "--json", "--root", root)
+		if code != exitOK {
+			t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("stderr=%q, want empty", stderr)
+		}
+		if envelope.Error != nil {
+			t.Fatalf("envelope error=%q, want nil", *envelope.Error)
+		}
+		keys := payloadKeys(t, envelope)
+		if keys["last_result"] != "pass" {
+			t.Fatalf("last_result=%v, want pass", keys["last_result"])
+		}
+	})
+
+	t.Run("rescan while kernel lock held refuses with conflict", func(t *testing.T) {
+		root, _ := testClone(t)
+		if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		lockFile, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lockFile.Close()
+		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatalf("acquire initial lock: %v", err)
+		}
+		defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+		code, _, stderr := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"audit", "show", "--rescan", "--root", root})
+		})
+		if code != exitConflict {
+			t.Fatalf("code=%d, want %d (exitConflict)", code, exitConflict)
+		}
+		if !strings.Contains(stderr, "a Kernel is running; stop it first") {
+			t.Fatalf("stderr=%q, want lock conflict message", stderr)
+		}
+
+		code, envelope, _ := decodeEnvelope(t, "audit", "show", "--rescan", "--json", "--root", root)
+		if code != exitConflict {
+			t.Fatalf("json code=%d, want %d", code, exitConflict)
+		}
+		if envelope.Error == nil || !strings.Contains(*envelope.Error, "a Kernel is running; stop it first") {
+			t.Fatalf("envelope.Error=%v, want conflict error", envelope.Error)
+		}
+	})
+}
+
 // A declaration without a tools key must publish an empty list, not null.
 func TestCLIDeclarationWithoutToolsPublishesEmptyList(t *testing.T) {
 	root := t.TempDir()
