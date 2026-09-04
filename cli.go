@@ -390,8 +390,8 @@ func parseCLIFlags(args []string) ([]string, cliFlags, error) {
 				return positional, flags, err
 			}
 			code, convErr := strconv.Atoi(raw)
-			if convErr != nil {
-				return positional, flags, fmt.Errorf("--exit must be an integer, got %q", raw)
+			if convErr != nil || code < -1 || code > 255 {
+				return positional, flags, fmt.Errorf("--exit must be an integer between -1 and 255, got %q", raw)
 			}
 			flags.exitCode, flags.exitSet, index = code, true, next
 			flags.seen = append(flags.seen, flagExit)

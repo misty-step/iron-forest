@@ -199,6 +199,30 @@ func TestCLIRejectsMalformedLimit(t *testing.T) {
 	}
 }
 
+func TestCLIExitFlagValidation(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	for _, raw := range []string{"12abc", "-2", "-10", "256", "999", "1.5", "12 34"} {
+		code, _, stderr := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"run", "list", "--exit", raw, "--root", root})
+		})
+		if code != exitInvalidArg {
+			t.Fatalf("--exit %q code=%d, want %d (stderr=%q)", raw, code, exitInvalidArg, stderr)
+		}
+		if !strings.Contains(stderr, "must be an integer between -1 and 255") {
+			t.Fatalf("--exit %q stderr=%q, want range error", raw, stderr)
+		}
+	}
+	for _, valid := range []string{"-1", "0", "1", "2", "124", "130", "255"} {
+		code, _, stderr := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"run", "list", "--exit", valid, "--root", root})
+		})
+		if code != exitOK {
+			t.Fatalf("--exit %q code=%d, want %d (stderr=%q)", valid, code, exitOK, stderr)
+		}
+	}
+}
+
 // Each command declares the flags it implements, so an unsupported flag is an
 // error rather than a silent no-op.
 func TestCLIRejectsFlagsTheCommandDoesNotImplement(t *testing.T) {
