@@ -74,6 +74,20 @@ def note(ref: str, target: str) -> tuple[dict, str] | None:
     actor = git("log", "-1", "--format=%an <%ae>", ref, "--", path)
     return payload, actor
 
+def evidence(target: str, kind: str) -> tuple[dict, str] | None:
+    ref = f"refs/forest/v1/{kind}/{target}"
+    if tip(ref) is None:
+        return None
+    raw = git("show", f"{ref}:{kind}.json", check=False)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    actor = git("log", "-1", "--format=%an <%ae>", ref)
+    return payload, actor
+
 
 def file_at(revision: str, path: str) -> str | None:
     value = git("show", f"{revision}:{path}", check=False)
@@ -321,8 +335,8 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
     elif effect in {"verifier_changes", "verifier_approve"}:
         approve = effect == "verifier_approve"
         require(master == (candidate if approve else state["master_before"]), "Verifier moves master only for approve")
-        observed_checks = note("refs/notes/forest/checks", candidate)
-        observed_verdict = note("refs/notes/forest/verdict", candidate)
+        observed_checks = evidence(candidate, "checks")
+        observed_verdict = evidence(candidate, "verdict")
         require(observed_checks is not None, "Verifier publishes Checks")
         require(observed_verdict is not None, "Verifier publishes Verdict")
         expected_ok = scenario["id"] != "verifier-failed-check"
@@ -351,13 +365,13 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
             require(any(op.get("op") == "done" and op.get("id") == "100" for op in ops), "Kernel records one Powder done transition")
     elif effect == "verifier_conflict":
         require(master == state["master_before"], "conflicting Verdict does not move master")
-        require(note("refs/notes/forest/checks", candidate) is None, "conflicting Verdict rejects the atomic Checks publication")
-        observed = note("refs/notes/forest/verdict", candidate)
+        require(evidence(candidate, "checks") is None, "conflicting Verdict rejects the atomic Checks publication")
+        observed = evidence(candidate, "verdict")
         require(observed is not None and observed[1] == "Iron Forest Race <race@forest.invalid>", "concurrent conflicting Verdict remains authoritative")
     elif effect == "verifier_approve_race":
         require(master == state["competitor"], "concurrent master update wins the approve race")
-        require(note("refs/notes/forest/checks", candidate) is None, "rejected approve publishes no Checks")
-        require(note("refs/notes/forest/verdict", candidate) is None, "rejected approve publishes no Verdict")
+        require(evidence(candidate, "checks") is None, "rejected approve publishes no Checks")
+        require(evidence(candidate, "verdict") is None, "rejected approve publishes no Verdict")
     elif effect == "fixer_publish":
         revision = branches.get(f"refs/heads/{branch}")
         require(master == state["master_before"], "Fixer does not move master")
@@ -372,7 +386,7 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
                 require(payload.get("schema") == "forest.review-request.v2" and payload.get("revision") == revision and payload.get("branch") == branch, "Fixer review request binds the fresh Revision")
                 require(payload.get("tracker") == ("powder" if scenario.get("powder_jobs") else "github"), "Fixer copies the selected tracker")
                 require(actor == "Iron Forest Fixer <fixer@forest.invalid>", "Fixer authors the fresh review request")
-        require(note("refs/notes/forest/verdict", candidate) is not None, "Fixer preserves rejected Verdict evidence")
+        require(evidence(candidate, "verdict") is not None, "Fixer preserves rejected Verdict evidence")
         if scenario.get("powder_jobs"):
             jobs = {job["id"]: job for job in powder_jobs()}
             repaired = jobs.get("100")

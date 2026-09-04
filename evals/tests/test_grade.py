@@ -190,5 +190,30 @@ class PowderSubcommandTest(unittest.TestCase):
         self.assertFalse(grade_module.forbidden_powder_invocation("powder list --takeable", forbidden))
 
 
+class EvidenceReaderTest(unittest.TestCase):
+    @mock.patch.object(grade_module, "tip", return_value=None)
+    def test_missing_ref_returns_none(self, _mock_tip: mock.MagicMock) -> None:
+        self.assertIsNone(grade_module.evidence("cafebabe", "checks"))
+
+    @mock.patch.object(grade_module, "tip", return_value="1234abcd")
+    @mock.patch.object(grade_module, "git")
+    def test_valid_evidence_returns_payload_and_actor(self, mock_git: mock.MagicMock, _mock_tip: mock.MagicMock) -> None:
+        mock_git.side_effect = lambda *args, **kwargs: (
+            '{"schema": "forest.verdict.v1", "verdict": "approve"}'
+            if args[0] == "show"
+            else "Iron Forest Verifier <verifier@forest.invalid>"
+        )
+        observed = grade_module.evidence("cafebabe", "verdict")
+        self.assertIsNotNone(observed)
+        payload, actor = observed
+        self.assertEqual(payload["verdict"], "approve")
+        self.assertEqual(actor, "Iron Forest Verifier <verifier@forest.invalid>")
+
+    @mock.patch.object(grade_module, "tip", return_value="1234abcd")
+    @mock.patch.object(grade_module, "git")
+    def test_invalid_json_returns_none(self, mock_git: mock.MagicMock, _mock_tip: mock.MagicMock) -> None:
+        mock_git.return_value = "not json"
+        self.assertIsNone(grade_module.evidence("cafebabe", "verdict"))
+
 if __name__ == "__main__":
     unittest.main()
