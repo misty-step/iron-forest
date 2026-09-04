@@ -19,11 +19,17 @@ titles, timestamps, and recollection are leads, not findings.
 
 ## Operations
 
-- Adopt merged revisions with `deploy/install-service.sh update <instance>`,
-  the one fenced adoption procedure. It checks a clean tree, stops the service
-  (stops new dispatches and drains live Runs), confirms the instance is
-  inactive, fast-forwards the checkout to the remote primary, rebuilds, runs
-  `./forest selfcheck`, forces a fresh audit with
+- Adopt merged revisions with the fenced update procedure. For the self-host
+  factory checkout run `deploy/install-service.sh update <instance>`. For a
+  sibling managed checkout, the factory owner first adopts the exact factory
+  Revision in this checkout, then the sibling owner runs
+  `deploy/install-service.sh update <instance> <factory-sha>`. The script
+  verifies the factory checkout is clean and exactly at that Revision before
+  it stops the consumer unit, and it never mutates the factory checkout. It
+  checks a clean tree, stops the service (stops new dispatches and drains live
+  Runs), confirms the instance is inactive, fast-forwards the checkout to the
+  remote primary, rebuilds, runs `./forest selfcheck`, verifies the installed
+  binary reports the built `build_sha`, forces a fresh audit with
   `./forest audit show --rescan`, restarts the service, and verifies it is
   active. Never restart-only: the unit runs the checkout-local binary.
 - One Kernel checkout per repository (ADR 0015). Do not start a second.

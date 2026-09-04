@@ -199,14 +199,20 @@ Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
 
 Adopt merged revisions with the fenced update procedure:
 
-    deploy/install-service.sh update <instance>
+    deploy/install-service.sh update <instance>                  # self-host factory checkout
+    deploy/install-service.sh update <instance> <factory-sha>    # sibling managed checkout
 
-It checks that the working tree is clean, stops the service (which stops new
-dispatches and drains live Runs), confirms the instance is inactive,
-fast-forwards the checkout to the remote primary, rebuilds, runs
-`./forest selfcheck`, forces a fresh audit with `./forest audit show --rescan`,
-restarts the service, and verifies it is active. Never restart-only: the unit
-runs the checkout-local binary.
+For the self-host factory checkout, the script checks that the working tree is
+clean, stops the service (which stops new dispatches and drains live Runs),
+confirms the instance is inactive, fast-forwards the checkout to the remote
+primary, rebuilds, runs `./forest selfcheck`, verifies the installed binary
+reports the built `build_sha`, forces a fresh audit with
+`./forest audit show --rescan`, restarts the service, and verifies it is active.
+For a sibling managed checkout, pass the exact factory Revision already adopted
+by the factory owner; the script verifies the factory checkout is clean and
+exactly at that Revision before it stops the consumer unit, then builds that
+Revision into the sibling. It never mutates the factory checkout. Never
+restart-only: the unit runs the checkout-local binary.
 
 Before `serve` or `once` loads trigger health, the Scheduler performs reserved
 garbage collection under the Kernel lock. One 30-second deadline bounds the

@@ -10,6 +10,13 @@
 # Update an installed instance through the fenced adoption procedure:
 #   deploy/install-service.sh update <instance>
 #
+# For a sibling managed checkout (target != factory), the exact factory
+# Revision must be passed and must already be adopted in this checkout:
+#   deploy/install-service.sh update <instance> <factory-sha>
+#
+# The sibling form verifies that Revision before stopping the consumer unit;
+# it never mutates the factory checkout.
+#
 # Each instance runs the selected checkout's forest.yaml.
 set -euo pipefail
 
@@ -32,6 +39,8 @@ cancelled=false
 tree_was_clean=false
 prev_sha=""
 prev_binary=""
+factory_revision=""
+factory_sha=""
 status_json=""
 audit_since_ns=0
 
@@ -94,6 +103,26 @@ audit_ready() {
 	[ "${last_ns:-0}" -ge "${audit_since_ns:-0}" ]
 }
 
+verify_factory_revision() {
+	revision="$1"
+	[ -n "$revision" ] || die "missing factory revision for sibling update"
+	[ -d "$factory/.git" ] || [ -f "$factory/.git" ] || die "no git checkout at $factory"
+
+	if [ -n "$(git -C "$factory" status --porcelain)" ]; then
+		die "factory working tree is not clean at $factory; refusing sibling update"
+	fi
+	if ! factory_sha="$(git -C "$factory" rev-parse "$revision^{commit}" 2>/dev/null)" || [ -z "$factory_sha" ]; then
+		die "factory revision is absent from $factory: $revision"
+	fi
+	factory_head="$(git -C "$factory" rev-parse HEAD)"
+	if [ "$factory_head" != "$factory_sha" ]; then
+		if git -C "$factory" merge-base --is-ancestor "$factory_head" "$factory_sha" >/dev/null 2>&1; then
+			die "factory checkout is behind the requested revision (HEAD=$factory_head, requested=$factory_sha); the factory owner must adopt it first"
+		fi
+		die "factory checkout is not at the requested revision (HEAD=$factory_head, requested=$factory_sha)"
+	fi
+}
+
 update_instance() {
 	# The update subcommand adopts a merged revision into an installed instance.
 	# It preserves the protected environment and refreshes only the self-host
@@ -108,6 +137,13 @@ update_instance() {
 	[ -O "$environment_file" ] || die "service environment file is not owned by the current user: $environment_file"
 	environment_mode="$(stat -c '%a' "$environment_file")"
 	[ "$environment_mode" = 600 ] || die "service environment file must have mode 0600, found $environment_mode: $environment_file"
+
+	# Sibling updates never mutate the factory checkout. The factory revision
+	# is a separate source input and must already be adopted there before the
+	# consumer fence begins.
+	if [ "$target" != "$factory" ]; then
+		verify_factory_revision "$factory_revision"
+	fi
 
 	# Clean-tree precondition (recorded). A dirty tree aborts before the service
 	# is touched, before any fetch, and before any tracked file moves.
@@ -152,9 +188,14 @@ update_instance() {
 	fi
 
 	echo "$(basename "$0"): building Kernel from $factory into $target"
-	stamp="$(git -C "$factory" rev-parse --short HEAD)"
-	sha="$(git -C "$factory" rev-parse HEAD)"
-	commit_time="$(git -C "$factory" show -s --format=%cI HEAD)"
+	if [ "$target" = "$factory" ]; then
+		build_sha="$(git -C "$factory" rev-parse HEAD)"
+	else
+		build_sha="$factory_sha"
+	fi
+	stamp="$(git -C "$factory" rev-parse --short "$build_sha")"
+	sha="$build_sha"
+	commit_time="$(git -C "$factory" show -s --format=%cI "$build_sha")"
 	dirty="false"
 	if [ -n "$(git -C "$factory" status --porcelain)" ]; then
 		dirty="true"
@@ -162,6 +203,15 @@ update_instance() {
 	ldflags="-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty=$dirty"
 	if ! (cd "$factory" && mise exec -- go build -ldflags "$ldflags" -o "$target/forest" .); then
 		die "build failed; rolling back to the prior instance"
+	fi
+
+	echo "$(basename "$0"): verifying installed forest reports build_sha $sha"
+	if ! version_json="$( (cd "$target" && env -u FOREST_DEFAULTS PATH="$service_path" ./forest version --json) 2>&1 )"; then
+		die "forest version --json failed: $version_json"
+	fi
+	installed_sha="$(printf '%s\n' "$version_json" | jq -r '.data.build_sha // empty')"
+	if [ "$installed_sha" != "$sha" ]; then
+		die "installed forest build_sha mismatch (expected $sha, got $installed_sha)"
 	fi
 
 	echo "$(basename "$0"): validating $target with forest selfcheck"
@@ -225,9 +275,17 @@ command="${1:-}"
 case "$command" in
 	update)
 		shift
-		[ "$#" -eq 1 ] || die "usage: $(basename "$0") update <instance>"
+		[ "$#" -ge 1 ] || die "usage: $(basename "$0") update <instance>"
 		name="$1"
 		target="$root/$name"
+		shift
+		if [ "$target" = "$factory" ]; then
+			[ "$#" -eq 0 ] || die "usage: $(basename "$0") update <instance>"
+			factory_revision=""
+		else
+			[ "$#" -eq 1 ] || die "usage: $(basename "$0") update <instance> <factory-sha>"
+			factory_revision="$1"
+		fi
 		update_instance
 		exit 0
 		;;
