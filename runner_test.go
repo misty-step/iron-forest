@@ -266,6 +266,38 @@ exit 0
 	}
 }
 
+func TestRunnerRejectsOpenRouterBudgetAsProviderBudgetExhausted(t *testing.T) {
+	cases := []struct {
+		name    string
+		message string
+	}{
+		{name: "402", message: `402: {"message":"This request requires more credits"}`},
+		{name: "403", message: `403: Key limit exceeded (daily limit)`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := testClone(t)
+			pi := filepath.Join(t.TempDir(), "pi")
+			script := "#!/bin/sh\n" +
+				"printf '%s\\n' '{\"type\":\"turn_end\",\"message\":{\"usage\":{\"input\":1,\"output\":1}}}'\n" +
+				"printf '%s\\n' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"stopReason\":\"error\",\"errorMessage\":\"" + tc.message + "\"}],\"willRetry\":false}'\n" +
+				"exit 0\n"
+			if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runner := NewRunner(root)
+			runner.PiPath = pi
+			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
+			if err == nil || record.Exit != 1 || record.Error != providerBudgetExhausted {
+				t.Fatalf("budget record=%#v err=%v, want %q", record, err, providerBudgetExhausted)
+			}
+			if !strings.Contains(err.Error(), providerBudgetExhausted) {
+				t.Fatalf("budget err=%v, want %q", err, providerBudgetExhausted)
+			}
+		})
+	}
+}
+
 func TestRunnerAcceptsSuccessfulAssistantAfterRetriedPiError(t *testing.T) {
 	root, _ := testClone(t)
 	pi := filepath.Join(t.TempDir(), "pi")
