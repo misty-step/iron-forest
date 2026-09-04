@@ -195,6 +195,50 @@ class PowderIntakeTest(unittest.TestCase):
         self.assertIsNone(job["lease"])
         self.assertNotIn("_claim_hash", job)
 
+    def test_partial_temporary_write_preserves_jobs_snapshot(self) -> None:
+        class PartialWriter:
+            def __init__(self, handle) -> None:
+                self.handle = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info) -> None:
+                self.handle.close()
+
+            def fileno(self) -> int:
+                return self.handle.fileno()
+
+            def write(self, content: str) -> None:
+                self.handle.write(content[: len(content) // 2])
+                self.handle.flush()
+                raise OSError("disk full")
+
+        save_jobs = POWDER_FIXTURE["save_jobs"]
+        real_fdopen = os.fdopen
+        with tempfile.TemporaryDirectory() as root:
+            jobs_path = Path(root) / "powder-jobs.json"
+            original = '[{"id":"existing"}]\n'
+            jobs_path.write_text(original)
+            with (
+                mock.patch.dict(save_jobs.__globals__, {"POWDER_JOBS": jobs_path}),
+                mock.patch.object(
+                    save_jobs.__globals__["os"],
+                    "fdopen",
+                    side_effect=lambda *args, **kwargs: PartialWriter(
+                        real_fdopen(*args, **kwargs)
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    save_jobs([{"id": "replacement"}])
+
+            self.assertEqual(jobs_path.read_text(), original)
+            self.assertEqual(
+                [path.name for path in jobs_path.parent.iterdir()],
+                ["powder-jobs.json"],
+            )
+
     def test_failed_atomic_replace_preserves_existing_claim(self) -> None:
         save_claim = POWDER_FIXTURE["save_claim"]
         stored_claim = POWDER_FIXTURE["stored_claim"]
