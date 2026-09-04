@@ -15,9 +15,9 @@ ORIGIN = "/origin.git"
 TIME = "2026-08-14T00:00:00Z"
 
 
-def run(*args: str, cwd: Path, env: dict[str, str] | None = None) -> str:
+def run(*args: str, cwd: Path, env: dict[str, str] | None = None, input: str | None = None) -> str:
     completed = subprocess.run(
-        list(args), cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        list(args), cwd=cwd, env=env, input=input, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
     )
     if completed.returncode != 0:
         raise RuntimeError(f"race command failed: {' '.join(args)}\n{completed.stderr}")
@@ -117,7 +117,7 @@ def publish_verdict_conflict(cwd: Path, args: list[str]) -> None:
     blob = run(GIT, "hash-object", "-w", "--stdin", cwd=cwd, input=json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
     tree = run(GIT, "mktree", cwd=cwd, input=f"100644 blob {blob}\tverdict.json\n")
     commit = run(GIT, "commit-tree", tree, "-m", f"eval verdict {target}", cwd=cwd, env=race_env())
-    run(GIT, f"--git-dir={ORIGIN}", "update-ref", target_ref, commit, cwd=cwd)
+    run(GIT, "push", "origin", f"{commit}:{target_ref}", cwd=cwd, env=race_env())
 
 
 def main() -> None:

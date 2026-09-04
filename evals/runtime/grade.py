@@ -85,7 +85,7 @@ def evidence(target: str, kind: str) -> tuple[dict, str] | None:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    actor = git("log", "-1", "--format=%an <%ae>", ref)
+    actor = git("log", "-1", "--format=%cn <%ce>", ref)
     return payload, actor
 
 

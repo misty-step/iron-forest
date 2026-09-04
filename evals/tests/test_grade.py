@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -11,6 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runtime"))
 
 from runtime import grade as grade_module
+from runtime import race as race_module
 
 
 def create(id_: str) -> dict:
@@ -214,6 +218,73 @@ class EvidenceReaderTest(unittest.TestCase):
     def test_invalid_json_returns_none(self, mock_git: mock.MagicMock, _mock_tip: mock.MagicMock) -> None:
         mock_git.return_value = "not json"
         self.assertIsNone(grade_module.evidence("cafebabe", "verdict"))
+
+class RaceVerdictConflictTest(unittest.TestCase):
+    def test_publish_verdict_conflict_creates_competing_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as root_str:
+            root = Path(root_str)
+            origin = root / "origin.git"
+            workspace = root / "workspace"
+            subprocess.run(["git", "init", "--bare", str(origin)], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["git", "init", str(workspace)], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.name", "Test User"], check=True)
+            subprocess.run(["git", "-C", str(workspace), "config", "user.email", "test@example.com"], check=True)
+            (workspace / "initial.txt").write_text("initial\n")
+            subprocess.run(["git", "-C", str(workspace), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(workspace), "commit", "-m", "initial"], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["git", "-C", str(workspace), "remote", "add", "origin", str(origin)], check=True)
+            subprocess.run(["git", "-C", str(workspace), "push", "origin", "master"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            with mock.patch.object(race_module, "ORIGIN", str(origin)):
+                args = ["push", "--atomic", "origin", "deadbeef:refs/forest/v1/checks/rev1", "cafebabe:refs/forest/v1/verdict/rev1"]
+                race_module.publish_verdict_conflict(workspace, args)
+
+            verdict_raw = subprocess.run(
+                ["git", f"--git-dir={origin}", "show", "refs/forest/v1/verdict/rev1:verdict.json"],
+                capture_output=True, text=True, check=True,
+            ).stdout
+            payload = json.loads(verdict_raw)
+            self.assertEqual(payload["schema"], "forest.verdict.v1")
+            self.assertEqual(payload["revision"], "rev1")
+            self.assertEqual(payload["verdict"], "approve")
+            self.assertEqual(payload["summary"], "concurrent conflicting verdict")
+
+            committer = subprocess.run(
+                ["git", f"--git-dir={origin}", "log", "-1", "--format=%cn <%ce>", "refs/forest/v1/verdict/rev1"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            self.assertEqual(committer, "Iron Forest Race <race@forest.invalid>")
+
+            # Attempting atomic push of checks + verdict fails because verdict ref already exists on origin
+            blob = subprocess.run(
+                ["git", "-C", str(workspace), "hash-object", "-w", "--stdin"],
+                input='{"schema":"forest.checks.v1","ok":true}\n',
+                text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            tree = subprocess.run(
+                ["git", "-C", str(workspace), "mktree"],
+                input=f"100644 blob {blob}\tchecks.json\n",
+                text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            checks_commit = subprocess.run(
+                ["git", "-C", str(workspace), "commit-tree", tree, "-m", "checks"],
+                text=True, capture_output=True, check=True,
+            ).stdout.strip()
+
+            push_res = subprocess.run(
+                ["git", "-C", str(workspace), "push", "--atomic", "origin",
+                 f"{checks_commit}:refs/forest/v1/checks/rev1",
+                 f"{checks_commit}:refs/forest/v1/verdict/rev1"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(push_res.returncode, 0)
+
+            # Verify checks ref was NOT created on origin due to atomic rollback
+            checks_check = subprocess.run(
+                ["git", f"--git-dir={origin}", "rev-parse", "--verify", "refs/forest/v1/checks/rev1"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(checks_check.returncode, 0)
 
 if __name__ == "__main__":
     unittest.main()
