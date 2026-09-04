@@ -385,8 +385,12 @@ func TestSchedulerOnceRunsBeforeReturn(t *testing.T) {
 
 func TestSchedulerSkipsPollAfterProviderBudget(t *testing.T) {
 	root := t.TempDir()
+	writeCLIConfig(t, root, "poll")
 	writeTestDeclaration(t, root, "builder")
-	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	cfg, err := loadConfig(configPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
 	scheduler := NewScheduler(root, cfg, nil)
 	var polls atomic.Int32
 	scheduler.Poll = func(context.Context, string) PollResult {
@@ -397,15 +401,15 @@ func TestSchedulerSkipsPollAfterProviderBudget(t *testing.T) {
 		return RunRecord{Started: "now", Exit: 1, Error: providerBudgetExhausted}, errors.New("agent builder " + providerBudgetExhausted)
 	}
 	dispatched, err := scheduler.Once(context.Background(), "builder")
-	if err == nil || !dispatched || !isProviderBudgetError(err.Error()) {
+	if err == nil || !dispatched || !strings.Contains(err.Error(), providerBudgetExhausted) {
 		t.Fatalf("budget once dispatched=%v err=%v", dispatched, err)
 	}
 	if polls.Load() != 1 {
 		t.Fatalf("budget once polls=%d, want 1", polls.Load())
 	}
 	health := schedulerHealth(scheduler, "builder")
-	if !isProviderBudgetError(health.RunError) {
-		t.Fatalf("budget run_error=%q", health.RunError)
+	if health.RunError != providerBudgetExhausted {
+		t.Fatalf("budget run_error=%q, want %q", health.RunError, providerBudgetExhausted)
 	}
 
 	dispatched, err = scheduler.Tick(context.Background(), "builder")
@@ -433,10 +437,11 @@ func TestSchedulerSkipsPollAfterProviderBudget(t *testing.T) {
 		t.Fatalf("persisted closed tick polls=%d, want 1", polls.Load())
 	}
 
-	cleared := schedulerHealth(restarted, "builder")
-	cleared.RunError = ""
-	if err := writeTriggerHealth(root, map[string]TriggerHealth{"builder": cleared}); err != nil {
-		t.Fatal(err)
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"trigger", "reset", "builder", "--root", root})
+	})
+	if code != exitOK {
+		t.Fatalf("trigger reset code=%d stderr=%q", code, stderr)
 	}
 	reset := NewScheduler(root, cfg, nil)
 	reset.Poll = func(context.Context, string) PollResult {
@@ -451,6 +456,39 @@ func TestSchedulerSkipsPollAfterProviderBudget(t *testing.T) {
 	dispatched, err = reset.Once(context.Background(), "builder")
 	if err != nil || !dispatched || !ran || polls.Load() != 2 {
 		t.Fatalf("reset once dispatched=%v ran=%v polls=%d err=%v", dispatched, ran, polls.Load(), err)
+	}
+}
+
+func TestSchedulerStillPollsAfterGenericRunError(t *testing.T) {
+	root := t.TempDir()
+	writeTestDeclaration(t, root, "builder")
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	scheduler := NewScheduler(root, cfg, nil)
+	var polls atomic.Int32
+	scheduler.Poll = func(context.Context, string) PollResult {
+		polls.Add(1)
+		return PollResult{Code: 0}
+	}
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
+		return RunRecord{Started: "now", Exit: 1}, errors.New("pi agent ended with error")
+	}
+	dispatched, err := scheduler.Once(context.Background(), "builder")
+	if err == nil || !dispatched {
+		t.Fatalf("generic once dispatched=%v err=%v", dispatched, err)
+	}
+	health := schedulerHealth(scheduler, "builder")
+	if health.RunError != "pi agent ended with error" {
+		t.Fatalf("generic run_error=%q", health.RunError)
+	}
+	if isProviderBudgetError(health.RunError) {
+		t.Fatalf("generic run_error classified as budget")
+	}
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
+		return RunRecord{Started: "later"}, nil
+	}
+	dispatched, err = scheduler.Once(context.Background(), "builder")
+	if err != nil || !dispatched || polls.Load() != 2 {
+		t.Fatalf("generic recovery dispatched=%v polls=%d err=%v", dispatched, polls.Load(), err)
 	}
 }
 

@@ -417,7 +417,7 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest config show` | Print the loaded configuration. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
 | `forest trigger list\|show <agent>` | Print resolved trigger state. |
-| `forest trigger reset <agent>` | Clear one agent's accumulated errors. Refuses while a Kernel runs. |
+| `forest trigger reset <agent>` | Clear one agent's accumulated errors, including provider-budget fail-closed (`run_error=provider budget exhausted`). Refuses while a Kernel runs; resume is stop Kernel, reset, start. |
 | `forest doctor` | Run non-mutating machine-operability checks and report one explicit result per check. |
 | `forest run list` | Page the Ledger, newest first, optionally filtered by agent, exit code, or start time. |
 | `forest run show <run-id>` | Print one Ledger row. |

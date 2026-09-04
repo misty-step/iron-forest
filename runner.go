@@ -857,7 +857,7 @@ var (
 )
 
 func isProviderBudgetError(message string) bool {
-	return strings.Contains(message, providerBudgetExhausted)
+	return message == providerBudgetExhausted
 }
 
 type streamPattern struct {
