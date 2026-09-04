@@ -299,13 +299,6 @@ func syncLedgerDirectory(path string, files ledgerFileOps) error {
 	return errors.Join(syncErr, closeErr)
 }
 
-func ReadLedgerTail(root string, limit int) ([]RunRecord, error) {
-	if limit < 0 {
-		return nil, errors.New("ledger tail limit must be non-negative")
-	}
-	return readLedger(root, limit)
-}
-
 // errLedgerCursorUnknown reports a paging cursor that names no ledger row, so a
 // caller paging with a stale cursor learns it instead of silently restarting.
 var errLedgerCursorUnknown = errors.New("run identity is not in the ledger")
