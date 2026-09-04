@@ -1,0 +1,8 @@
+{
+  "schema": "forest.review-request.v2",
+  "subject": "if-critic-eval-fast-case-count",
+  "branch": "forest/if-critic-eval-fast-case-count/reconcile-case-count",
+  "revision": "61789f6066c411f659ebde463401620cca2ddf42",
+  "time": "2026-09-04T19:54:44Z",
+  "tracker": "powder"
+}
