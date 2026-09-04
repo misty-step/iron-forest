@@ -1,3 +1,10 @@
+## [0.0.11](https://github.com/misty-step/iron-forest/compare/v0.0.10...v0.0.11) (2026-09-04)
+
+
+### Bug Fixes
+
+* **evals:** preserve committed Powder claims ([897241e](https://github.com/misty-step/iron-forest/commit/897241ec439772c8ccf9ee973824c34cf511d318))
+
 ## [0.0.10](https://github.com/misty-step/iron-forest/compare/v0.0.9...v0.0.10) (2026-09-04)
 
 
