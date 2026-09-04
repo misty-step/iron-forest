@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -879,4 +880,74 @@ func TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary(t *testing.T) {
 	if leftover := reservedCheckDirs(primary); len(leftover) != 0 {
 		t.Fatalf("primary check worktrees survived: %v", leftover)
 	}
+}
+
+func TestPublishReviewRequestCLI(t *testing.T) {
+	t.Run("human publish and identical republish", func(t *testing.T) {
+		t.Setenv("FOREST_RUN_ID", "1-builder")
+		root, _ := testClone(t)
+		writePassingChecks(t, root)
+		runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+		revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+		payload := writeReviewPayload(t, root, revision, "forest/1/ready")
+
+		code, stdout, stderr := captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"publish", "review-request", "builder", "forest/1/ready", payload, "--root", root})
+		})
+		if code != exitOK {
+			t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+		}
+		if want := fmt.Sprintf("published review-request %s on %s\n", revision, "forest/1/ready"); stdout != want {
+			t.Fatalf("stdout=%q, want %q", stdout, want)
+		}
+		if stderr != "" {
+			t.Fatalf("stderr=%q, want empty", stderr)
+		}
+
+		code, stdout, stderr = captureCLIOutput(t, func() int {
+			return runSurfaceCommand([]string{"publish", "review-request", "builder", "forest/1/ready", payload, "--root", root})
+		})
+		if code != exitOK {
+			t.Fatalf("republish code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+		}
+		if want := fmt.Sprintf("accepted identical review-request %s on %s\n", revision, "forest/1/ready"); stdout != want {
+			t.Fatalf("republish stdout=%q, want %q", stdout, want)
+		}
+		if stderr != "" {
+			t.Fatalf("republish stderr=%q, want empty", stderr)
+		}
+	})
+
+	t.Run("json envelope publish and identical republish", func(t *testing.T) {
+		t.Setenv("FOREST_RUN_ID", "1-builder")
+		root, _ := testClone(t)
+		writePassingChecks(t, root)
+		runGitDir(t, root, "checkout", "-b", "forest/1/ready")
+		revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+		payload := writeReviewPayload(t, root, revision, "forest/1/ready")
+
+		code, envelope, stderr := decodeEnvelope(t, "publish", "review-request", "builder", "forest/1/ready", payload, "--json", "--root", root)
+		if code != exitOK {
+			t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("stderr=%q, want empty", stderr)
+		}
+		keys := payloadKeys(t, envelope)
+		if keys["status"] != "published" || keys["revision"] != revision || keys["branch"] != "forest/1/ready" {
+			t.Fatalf("payload=%v, want status=published revision=%s branch=forest/1/ready", keys, revision)
+		}
+
+		code, envelope, stderr = decodeEnvelope(t, "publish", "review-request", "builder", "forest/1/ready", payload, "--json", "--root", root)
+		if code != exitOK {
+			t.Fatalf("republish code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("republish stderr=%q, want empty", stderr)
+		}
+		keys = payloadKeys(t, envelope)
+		if keys["status"] != "identical" || keys["revision"] != revision || keys["branch"] != "forest/1/ready" {
+			t.Fatalf("republish payload=%v, want status=identical revision=%s branch=forest/1/ready", keys, revision)
+		}
+	})
 }
