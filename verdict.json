@@ -1,0 +1,7 @@
+{
+  "schema": "forest.verdict.v1",
+  "revision": "9fe35c4edcadbe8e7e1ca7e4ee532cc5ddcbca8f",
+  "verdict": "changes",
+  "summary": "Stale Revision. Observed: origin/master advanced to 10d868f4312c0a4389a63e9563b29f8a0aa1baf2 during review while candidate 9fe35c4edcadbe8e7e1ca7e4ee532cc5ddcbca8f branched from 03bbcc5bba701a23d3015f80874bc9430dd7cfa7; git merge-base --is-ancestor origin/master 9fe35c4edcadbe8e7e1ca7e4ee532cc5ddcbca8f exits 1, so the candidate cannot fast-forward the current primary. Required: rebase the docs/onboarding-managed-repo.md change onto current origin/master and publish a fresh review-request for a new SHA. Evidence: git fetch origin master plus merge-base check during Verifier review; configured checks build/vet/test all exit 0 but do not cure the stale ancestry. No approval Gate attempted.",
+  "time": "2026-09-04T18:36:40Z"
+}
