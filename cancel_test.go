@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,93 @@ func TestRunCancelAlreadyFinishedFromMarker(t *testing.T) {
 	})
 	if code != exitOK || stderr != "" || !strings.Contains(stdout, "already_finished") {
 		t.Fatalf("marker cancel code=%d stderr=%q stdout=%q, want already_finished", code, stderr, stdout)
+	}
+}
+
+func TestRunCancelRemovesMarkerOnStopFailure(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	runID := "run-stop-failure-builder"
+
+	state := t.TempDir()
+	childPID := filepath.Join(state, "child-pid")
+	heartbeat := filepath.Join(state, "heartbeat")
+	t.Setenv("CHILD_PID", childPID)
+	t.Setenv("HEARTBEAT", heartbeat)
+
+	command := exec.Command("/bin/sh", "-c", `#!/bin/sh
+printf '%s\n' "$$" > "$CHILD_PID"
+trap '' TERM
+while :; do
+	printf x >> "$HEARTBEAT"
+	sleep 0.02
+done
+`)
+	command.Env = append(os.Environ(), "FOREST_RUN_ID="+runID, "FOREST_ROOT="+root)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForCLIFile(t, childPID)
+	pidData := mustReadFile(t, childPID)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("live run pid=%q err=%v", pidData, err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = command.Wait()
+	})
+
+	original := stopCancelProcessGroup
+	stopCancelProcessGroup = func(pid int, grace time.Duration) error {
+		return errors.New("synthetic stop failure")
+	}
+	t.Cleanup(func() { stopCancelProcessGroup = original })
+
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "cancel", runID, "--root", root})
+	})
+	if code != exitError {
+		t.Fatalf("failed-stop cancel code=%d, want %d (stderr=%q)", code, exitError, stderr)
+	}
+	if hasRunCancellationMarker(root, runID) {
+		t.Fatalf("cancellation marker remains after failed stop")
+	}
+
+	// Stop the live process so the next cancel reaches the marker check instead
+	// of the process-group path, then prove the removed marker cannot be read as
+	// already_finished.
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	_ = command.Wait()
+	waitForNoLiveRunProcessGroups(t, root, runID)
+	stopCancelProcessGroup = original
+
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "cancel", runID, "--root", root})
+	})
+	if code != exitNotFound {
+		t.Fatalf("second cancel code=%d, want %d (stderr=%q stdout=%q)", code, exitNotFound, stderr, stdout)
+	}
+	if strings.Contains(stdout, "already_finished") {
+		t.Fatalf("second cancel stdout=%q, must not report already_finished", stdout)
+	}
+}
+
+func waitForNoLiveRunProcessGroups(t *testing.T, root, runID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		groups, err := findLiveRunProcessGroups(root, runID)
+		if err == nil && len(groups) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for run %q process group to quiesce", runID)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
