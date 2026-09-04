@@ -148,8 +148,9 @@ func TestPublishVerdictApproveFastForwardsPrimaryBranch(t *testing.T) {
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	pushRequestForRevision(t, root, "if-primary-branch", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	})
 	if err != nil {
 		t.Fatal(err)
