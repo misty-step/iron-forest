@@ -629,3 +629,40 @@ func TestCLIHelpSucceeds(t *testing.T) {
 		}
 	}
 }
+
+func TestCLIPublishVerdictRequiresRunID(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	checks, verdict := writeEvidencePayloads(t, revision, "changes")
+	t.Setenv("FOREST_ROOT", root)
+	t.Setenv("FOREST_RUN_ID", "")
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"publish", "verdict", checks, verdict, "--root", root})
+	})
+	if code != exitError || !strings.Contains(stderr, "FOREST_RUN_ID is required") {
+		t.Fatalf("code=%d stderr=%q", code, stderr)
+	}
+}
+
+func TestCLIPublishVerdictRequiresRunIDBeforeIdentical(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	checks, verdict := writeEvidencePayloads(t, revision, "changes")
+	seedVerdictRun(t, root, "1-verifier")
+	t.Setenv("FOREST_RUN_ID", "1-verifier")
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"publish", "verdict", checks, verdict, "--root", root})
+	})
+	if code != exitOK {
+		t.Fatalf("first publish code=%d stderr=%q", code, stderr)
+	}
+	t.Setenv("FOREST_RUN_ID", "")
+	code, _, stderr = captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"publish", "verdict", checks, verdict, "--root", root})
+	})
+	if code != exitError || !strings.Contains(stderr, "FOREST_RUN_ID is required") {
+		t.Fatalf("identical code=%d stderr=%q", code, stderr)
+	}
+}

@@ -118,7 +118,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		return publishReviewRequestResult{}, err
 	}
 	if existingRequest != "" {
-		got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json")
+		got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json", "refs/forest/private/compare/")
 		if err != nil {
 			return publishReviewRequestResult{}, err
 		}
@@ -187,7 +187,7 @@ func requireFixerRequestContinuity(ctx context.Context, root, rejected string, n
 	if existing == "" {
 		return fmt.Errorf("rejected request evidence is missing")
 	}
-	data, err := evidenceBlob(ctx, root, requestRef, "request.json")
+	data, err := evidenceBlob(ctx, root, requestRef, "request.json", "refs/forest/private/compare/")
 	if err != nil {
 		return fmt.Errorf("read rejected request: %w", err)
 	}

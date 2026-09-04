@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ type publishVerdictInput struct {
 	Root        string
 	ChecksPath  string
 	VerdictPath string
+	RunID       string
 	Powder      *Poller
 }
 
@@ -38,6 +40,7 @@ func runPublishVerdict(rest []string, flags cliFlags) cliOutcome {
 		Root:        flags.root,
 		ChecksPath:  rest[0],
 		VerdictPath: rest[1],
+		RunID:       strings.TrimSpace(os.Getenv("FOREST_RUN_ID")),
 	})
 	if err != nil {
 		if publishConflict(err) {
@@ -74,6 +77,10 @@ func withPowderReconciliation(result publishVerdictResult, reconciliation powder
 }
 
 func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerdictResult, error) {
+	input.RunID = strings.TrimSpace(input.RunID)
+	if err := requireVerdictRun(input); err != nil {
+		return publishVerdictResult{}, err
+	}
 	checksPath, err := filepath.Abs(input.ChecksPath)
 	if err != nil {
 		return publishVerdictResult{}, err
@@ -112,7 +119,7 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err != nil {
 		return publishVerdictResult{}, err
 	}
-	identical, err := identicalEvidence(ctx, input.Root, checksRef, verdictRef, existingChecks, existingVerdict, checksData, verdictData)
+	identical, err := identicalEvidence(ctx, input.Root, checksRef, verdictRef, existingChecks, existingVerdict, checksData, verdictData, input.RunID)
 	if err != nil {
 		return publishVerdictResult{}, err
 	}
@@ -189,6 +196,31 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	return result, nil
 }
 
+func requireVerdictRun(input publishVerdictInput) error {
+	if input.RunID == "" {
+		return fmt.Errorf("FOREST_RUN_ID is required")
+	}
+	root := strings.TrimSpace(os.Getenv("FOREST_ROOT"))
+	if root == "" {
+		root = input.Root
+	}
+	data, err := os.ReadFile(liveRunPath(root, "verifier"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("FOREST_RUN_ID does not match the active Verifier run")
+		}
+		return fmt.Errorf("read live Verifier run: %w", err)
+	}
+	var record liveRunRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return fmt.Errorf("parse live Verifier run: %w", err)
+	}
+	if record.RunID != input.RunID {
+		return fmt.Errorf("FOREST_RUN_ID does not match the active Verifier run")
+	}
+	return nil
+}
+
 func payloadRevision(data []byte) (string, error) {
 	var payload struct {
 		Revision string `json:"revision"`
@@ -258,26 +290,27 @@ func gitCommitTreeAs(ctx context.Context, root, tree, message, author, email str
 	return line, nil
 }
 
-func identicalEvidence(ctx context.Context, root, checksRef, verdictRef, checksOID, verdictOID string, checksData, verdictData []byte) (bool, error) {
+func identicalEvidence(ctx context.Context, root, checksRef, verdictRef, checksOID, verdictOID string, checksData, verdictData []byte, runID string) (bool, error) {
 	if checksOID == "" && verdictOID == "" {
 		return false, nil
 	}
 	if checksOID == "" || verdictOID == "" {
 		return false, nil
 	}
-	gotChecks, err := evidenceBlob(ctx, root, checksRef, "checks.json")
+	prefix := "refs/forest/private/" + runID + "/compare/"
+	gotChecks, err := evidenceBlob(ctx, root, checksRef, "checks.json", prefix)
 	if err != nil {
 		return false, err
 	}
-	gotVerdict, err := evidenceBlob(ctx, root, verdictRef, "verdict.json")
+	gotVerdict, err := evidenceBlob(ctx, root, verdictRef, "verdict.json", prefix)
 	if err != nil {
 		return false, err
 	}
 	return bytes.Equal(gotChecks, checksData) && bytes.Equal(gotVerdict, verdictData), nil
 }
 
-func evidenceBlob(ctx context.Context, root, ref, name string) ([]byte, error) {
-	local, err := newPrivateEvidenceRef("refs/forest/private/compare/")
+func evidenceBlob(ctx context.Context, root, ref, name, privatePrefix string) ([]byte, error) {
+	local, err := newPrivateEvidenceRef(privatePrefix)
 	if err != nil {
 		return nil, err
 	}

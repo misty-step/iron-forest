@@ -30,14 +30,23 @@ func writeEvidencePayloads(t *testing.T, revision, verdict string) (string, stri
 	return checksPath, verdictPath
 }
 
+func seedVerdictRun(t *testing.T, root, runID string) {
+	t.Helper()
+	t.Setenv("FOREST_ROOT", root)
+	if err := writeLiveRun(liveRunPath(root, "verifier"), liveRunRecord{RunID: runID, Agent: "verifier", StartedAt: "2026-08-17T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublishVerdictChangesCreatesEvidenceRefs(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
 	checks, verdict := writeEvidencePayloads(t, revision, "changes")
+	seedVerdictRun(t, root, "1-verifier")
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -61,8 +70,9 @@ func TestPublishVerdictApproveFastForwardsMaster(t *testing.T) {
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,8 +91,9 @@ func TestPublishVerdictSecondPublishConflicts(t *testing.T) {
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	checks, verdict := writeEvidencePayloads(t, revision, "changes")
+	seedVerdictRun(t, root, "1-verifier")
 	if _, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +102,7 @@ func TestPublishVerdictSecondPublishConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: other,
+		Root: root, ChecksPath: checks, VerdictPath: other, RunID: "1-verifier",
 	})
 	if !publishConflict(err) {
 		t.Fatalf("error=%v, want conflict", err)
@@ -103,7 +114,8 @@ func TestPublishVerdictIdenticalIsSuccess(t *testing.T) {
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	checks, verdict := writeEvidencePayloads(t, revision, "changes")
-	input := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict}
+	seedVerdictRun(t, root, "1-verifier")
+	input := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier"}
 	if _, err := publishVerdict(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
@@ -131,8 +143,9 @@ func TestPublishVerdictApproveRejectsNonFastForward(t *testing.T) {
 	side := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	runGit(t, "--git-dir="+origin, "update-ref", "refs/heads/master", side)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	})
 	if err == nil || !publishConflict(err) {
 		t.Fatalf("error=%v, want conflict", err)
@@ -155,8 +168,9 @@ checks:
 	runGitDir(t, root, "commit", "-m", "failing checks")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	})
 	if err == nil || !strings.Contains(err.Error(), `check "test" failed`) {
 		t.Fatalf("error=%v", err)
@@ -177,11 +191,12 @@ func TestPublishVerdictPreservesLandedApproveWhilePowderRetries(t *testing.T) {
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	pushRequestForRevision(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{doneFailure: 1}
 	poller := configuredPowderPoller(t, root, "if-next", lifecycle)
 
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +209,7 @@ func TestPublishVerdictPreservesLandedApproveWhilePowderRetries(t *testing.T) {
 	}
 
 	result, err = publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -211,11 +226,12 @@ func TestPublishVerdictBlocksLaterApproveOnPendingCurrentPowder(t *testing.T) {
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	pushRequestForRevision(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{doneFailure: 1}
 	poller := configuredPowderPoller(t, root, "if-current", lifecycle)
 
 	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
 	})
 	if err == nil || !strings.Contains(err.Error(), "reconcile current Powder Subject before approve") {
 		t.Fatalf("error=%v", err)
@@ -235,11 +251,12 @@ func TestPublishVerdictBlocksLaterApproveOnNotFoundCurrentPowder(t *testing.T) {
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	pushRequestForRevision(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{notFound: true}
 	poller := configuredPowderPoller(t, root, "if-current", lifecycle)
 
 	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
 	})
 	if err == nil || !strings.Contains(err.Error(), "reconcile current Powder Subject before approve") {
 		t.Fatalf("error=%v", err)
@@ -258,11 +275,12 @@ func TestPublishVerdictPreservesLandedApproveWhenPowderNotFound(t *testing.T) {
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	pushRequestForRevision(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{notFound: true}
 	poller := configuredPowderPoller(t, root, "if-next", lifecycle)
 
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, Powder: poller,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
 	})
 	if err != nil {
 		t.Fatal(err)
