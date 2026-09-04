@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from hidden import CANDIDATE_MODEL, POWDER_JOBS, RACE, ROLE, SCENARIO, STATE, en
 
 GIT = "/usr/bin/git"
 TIME = "2026-08-14T00:00:00Z"
+POWDER_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, input: str | None = None) -> str:
@@ -171,6 +173,9 @@ def main() -> None:
     SCENARIO.write_text(json.dumps(scenario, indent=2, sort_keys=True) + "\n")
     powder_jobs = scenario.get("powder_jobs", [])
     for job in powder_jobs:
+        job_id = job.get("id")
+        if not isinstance(job_id, str) or POWDER_JOB_ID.fullmatch(job_id) is None:
+            raise ValueError(f"Powder job id {job_id!r} is not a slug")
         job.setdefault("repo", "local/eval")
         job.setdefault("lease", None)
         local_claim = job.pop("_local_claim", False)
@@ -179,8 +184,12 @@ def main() -> None:
                 raise ValueError(f"Powder job {job['id']!r} cannot seed a claim without a live lease")
             claim = secrets.token_urlsafe(32)
             job["_claim_hash"] = hashlib.sha256(claim.encode()).hexdigest()
-            claim_file = hidden / "claim-state" / "powder" / "claims" / "eval-origin" / job["id"]
-            claim_file.parent.mkdir(parents=True, exist_ok=True)
+            claims_root = (hidden / "claim-state" / "powder" / "claims" / "eval-origin").resolve()
+            claim_file = claims_root / job_id
+            if claim_file.parent != claims_root:
+                raise ValueError(f"Powder claim path escapes its state root: {job_id!r}")
+            claim_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(claim_file.parent, 0o700)
             claim_file.write_text(claim)
             os.chmod(claim_file, 0o600)
     if powder_jobs:

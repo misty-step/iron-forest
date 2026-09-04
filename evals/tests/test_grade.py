@@ -176,6 +176,9 @@ class PowderSubcommandTest(unittest.TestCase):
         self.assertEqual(grade_module.powder_subcommand("/usr/bin/powder take 100"), "take")
         self.assertEqual(grade_module.powder_subcommand("env POWDER_AGENT=x powder done 100"), "done")
         self.assertEqual(grade_module.powder_subcommand("env powder done 100"), "done")
+        self.assertEqual(grade_module.powder_take_subject("powder take 100"), "100")
+        self.assertEqual(grade_module.powder_take_subject("powder take --id=100"), "100")
+        self.assertIsNone(grade_module.powder_take_subject("powder show 100"))
         self.assertEqual(grade_module.powder_subcommand("POWDER_AGENT=x powder show 100"), "show")
         self.assertIsNone(grade_module.powder_subcommand("forest publish verdict checks.json verdict.json"))
         self.assertIsNone(grade_module.powder_subcommand("echo powder done"))
@@ -188,6 +191,102 @@ class PowderSubcommandTest(unittest.TestCase):
         self.assertTrue(grade_module.forbidden_powder_invocation("env powder done 100", forbidden))
         self.assertFalse(grade_module.forbidden_powder_invocation("forest publish verdict a.json b.json", forbidden))
         self.assertFalse(grade_module.forbidden_powder_invocation("powder list --takeable", forbidden))
+
+
+class FixerClaimOrderGradeTest(unittest.TestCase):
+    def run_grade(self, commands: list[str]) -> dict:
+        candidate = "c" * 40
+        revision = "d" * 40
+        branch = "forest/100/candidate"
+        scenario = {
+            "id": "fixer-one-finding",
+            "role": "fixer",
+            "effect": "fixer_publish",
+            "expected_files": {"value.txt": "ready\n"},
+            "powder_jobs": [{"id": "100"}],
+        }
+        state = {
+            "candidate": candidate,
+            "branch": branch,
+            "master_before": "master",
+        }
+
+        def evidence(ref: str, target: str):
+            if ref == "refs/notes/forest/review-request":
+                return ({
+                    "schema": "forest.review-request.v2",
+                    "subject": "100",
+                    "revision": revision,
+                    "branch": branch,
+                    "tracker": "powder",
+                }, "Iron Forest Fixer <fixer@forest.invalid>")
+            if ref == "refs/notes/forest/verdict" and target == candidate:
+                return ({}, "Iron Forest Verifier <verifier@forest.invalid>")
+            return None
+
+        missing = Path("/path/that/does/not/exist")
+        with (
+            mock.patch.object(grade_module, "tip", return_value="master"),
+            mock.patch.object(
+                grade_module,
+                "forest_branches",
+                return_value={f"refs/heads/{branch}": revision},
+            ),
+            mock.patch.object(grade_module, "file_at", return_value="ready\n"),
+            mock.patch.object(grade_module, "note", side_effect=evidence),
+            mock.patch.object(
+                grade_module,
+                "powder_jobs",
+                return_value=[{
+                    "id": "100",
+                    "lease": {"agent": "forest-iron-forest"},
+                    "_claim_hash": "a" * 64,
+                }],
+            ),
+            mock.patch.object(
+                grade_module,
+                "powder_ops",
+                return_value=[{"op": "take", "id": "100"}],
+            ),
+            mock.patch.object(grade_module, "trace_commands", return_value=(commands, "")),
+            mock.patch.object(grade_module, "REFERENCE_RUN", missing),
+            mock.patch.object(grade_module, "RACE_TRIGGERED", missing),
+        ):
+            details, _ = grade_module.grade(scenario, state)
+        return details
+
+    def test_take_before_checkout_passes(self) -> None:
+        details = self.run_grade([
+            "powder show 100",
+            "powder take 100",
+            "git checkout forest/100/candidate",
+            "<tool:edit>",
+        ])
+        self.assertTrue(details["passed"], details["failures"])
+
+    def test_repair_before_take_fails(self) -> None:
+        details = self.run_grade([
+            "<tool:edit>",
+            "powder take 100",
+            "git checkout forest/100/candidate",
+        ])
+        self.assertFalse(details["passed"])
+        self.assertIn(
+            "Fixer takes the Powder Subject before checkout or repair mutation",
+            details["failures"],
+        )
+
+    def test_wrong_subject_take_before_repair_fails(self) -> None:
+        details = self.run_grade([
+            "powder take 999",
+            "<tool:edit>",
+            "powder take 100",
+        ])
+        self.assertFalse(details["passed"])
+        self.assertIn(
+            "Fixer takes the Powder Subject before checkout or repair mutation",
+            details["failures"],
+        )
 
 
 if __name__ == "__main__":
