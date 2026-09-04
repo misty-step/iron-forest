@@ -250,18 +250,19 @@ class ProductionFlywheelTest(unittest.TestCase):
         class PagedResponse:
             def __init__(self, data, page, total_pages):
                 self.data = data
-                self.meta = {"page": page, "total_pages": total_pages}
+                # Test camelCase totalPages attribute variant from SDK
+                self.meta = {"page": page, "totalPages": total_pages}
 
         class PagedDatasetItems:
             def __init__(self):
                 self.requested_pages = []
 
-            def list(self, dataset_name, page=1):
-                self.requested_pages.append(page)
+            def list(self, dataset_name, page=1, limit=100):
+                self.requested_pages.append((page, limit))
                 if page == 1:
-                    return PagedResponse([f"item-{i}" for i in range(50)], page=1, total_pages=2)
+                    return PagedResponse([f"item-{i}" for i in range(100)], page=1, total_pages=2)
                 elif page == 2:
-                    return PagedResponse([f"item-{i}" for i in range(50, 70)], page=2, total_pages=2)
+                    return PagedResponse([f"item-{i}" for i in range(100, 120)], page=2, total_pages=2)
                 return PagedResponse([], page=page, total_pages=2)
 
         class API:
@@ -275,11 +276,10 @@ class ProductionFlywheelTest(unittest.TestCase):
         client_obj = Client()
         sdk_client = flywheel.LangfuseSDKClient(client_obj)
         items = sdk_client.list_dataset_items(flywheel.PRODUCTION_DATASET)
-        self.assertEqual(len(items), 70)
+        self.assertEqual(len(items), 120)
         self.assertEqual(items[0], "item-0")
-        self.assertEqual(items[69], "item-69")
-        self.assertEqual(client_obj.api.dataset_items.requested_pages, [1, 2])
-
+        self.assertEqual(items[119], "item-119")
+        self.assertEqual(client_obj.api.dataset_items.requested_pages, [(1, 100), (2, 100)])
     def test_sdk_list_dataset_items_single_page_without_meta(self):
         class UnpagedResponse:
             def __init__(self, data):
@@ -290,7 +290,7 @@ class ProductionFlywheelTest(unittest.TestCase):
             def __init__(self):
                 self.requested_pages = []
 
-            def list(self, dataset_name, page=1):
+            def list(self, dataset_name, page=1, **kwargs):
                 self.requested_pages.append(page)
                 return UnpagedResponse(["single-1", "single-2"])
 
@@ -317,10 +317,9 @@ class ProductionFlywheelTest(unittest.TestCase):
             def __init__(self):
                 self.requested_pages = []
 
-            def list(self, dataset_name, page=1):
+            def list(self, dataset_name, page=1, **kwargs):
                 self.requested_pages.append(page)
                 return EmptyResponse()
-
         class API:
             def __init__(self):
                 self.dataset_items = EmptyDatasetItems()
