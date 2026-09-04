@@ -155,6 +155,72 @@ func TestCLIPayloadsUseSnakeCaseKeys(t *testing.T) {
 	}
 }
 
+// config show must publish max_duration when configured and omit it when the
+// operator leaves the zero-value default in force.
+func TestCLIConfigShowMaxDuration(t *testing.T) {
+	configured := t.TempDir()
+	configWithDuration := "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder:\n    poll: \"exit 1\"\n    interval: 1\n    max_duration: 90\nchecks:\n  - name: test\n    run: \"true\"\n"
+	if err := os.WriteFile(configPath(configured), []byte(configWithDuration), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, _ := decodeEnvelope(t, "config", "show", "--json", "--root", configured)
+	keys := payloadKeys(t, envelope)
+	agents, ok := keys["agents"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents is not an object: %v", keys["agents"])
+	}
+	builder, ok := agents["builder"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents.builder is not an object: %v", agents)
+	}
+	if got, present := builder["max_duration"]; !present {
+		t.Fatalf("agent payload missing max_duration: %v", builder)
+	} else if got != float64(90) {
+		t.Fatalf("max_duration=%v, want 90", got)
+	}
+
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"config", "show", "--root", configured})
+	})
+	if code != exitOK {
+		t.Fatalf("config show code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	if !strings.Contains(stdout, "max_duration=90s") {
+		t.Fatalf("config show human output missing max_duration=90s: %q", stdout)
+	}
+
+	omitted := t.TempDir()
+	configWithoutDuration := "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder:\n    poll: \"exit 1\"\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
+	if err := os.WriteFile(configPath(omitted), []byte(configWithoutDuration), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, envelope, _ = decodeEnvelope(t, "config", "show", "--json", "--root", omitted)
+	keys = payloadKeys(t, envelope)
+	agents, ok = keys["agents"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents is not an object: %v", keys["agents"])
+	}
+	builder, ok = agents["builder"].(map[string]any)
+	if !ok {
+		t.Fatalf("agents.builder is not an object: %v", agents)
+	}
+	if _, present := builder["max_duration"]; present {
+		t.Fatalf("agent payload retains omitted max_duration: %v", builder)
+	}
+
+	code, stdout, stderr = captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"config", "show", "--root", omitted})
+	})
+	if code != exitOK {
+		t.Fatalf("config show code=%d, want %d (stderr=%q)", code, exitOK, stderr)
+	}
+	if strings.Contains(stdout, "max_duration") {
+		t.Fatalf("config show human output retains omitted max_duration: %q", stdout)
+	}
+}
+
 // A failure under --json must still be one envelope; a consumer never has to
 // sniff stderr to learn why a command failed.
 func TestCLIFailuresEmitOneEnvelopeUnderJSON(t *testing.T) {
