@@ -265,16 +265,16 @@ func openRouterCompletionKey(role string) string {
 	return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
 }
 
-// withOpenRouterCompletionKey replaces every inherited OPENROUTER_API_KEY entry
-// with the single key selected for this Run role, so a Run always uses exactly
-// one completion key and never the ambiguous last-wins duplicate that a raw
-// inherited environment could otherwise hand to exec.
+// withOpenRouterCompletionKey replaces every inherited OPENROUTER_API_KEY and
+// role-scoped OPENROUTER_API_KEY_* entry with the single key selected for this
+// Run role, so a Run always uses exactly one completion key, does not leak
+// sibling role keys, and never hands an ambiguous duplicate to exec.
 func withOpenRouterCompletionKey(environment []string, role string) []string {
 	selected := openRouterCompletionKey(role)
 	filtered := make([]string, 0, len(environment)+1)
 	for _, entry := range environment {
 		key, _, _ := strings.Cut(entry, "=")
-		if key != "OPENROUTER_API_KEY" {
+		if key != "OPENROUTER_API_KEY" && !strings.HasPrefix(key, "OPENROUTER_API_KEY_") {
 			filtered = append(filtered, entry)
 		}
 	}
