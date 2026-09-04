@@ -249,12 +249,13 @@ stops that instance and removes only timestamped legacy `.forest/profiles`
 entries, which may contain credentials copied by an older Kernel. It then runs
 selfcheck with the service's trusted `PATH` and without `FOREST_DEFAULTS`.
 The installed unit reads operator-supplied credentials from
-`%h/.config/iron-forest/%i.env`; protect it as mode `0600`. The current Runner
-accepts `OPENROUTER_API_KEY` as one completion key for the Forest instance.
+`%h/.config/iron-forest/%i.env`; protect it as mode `0600`. The Runner selects
+the OpenRouter completion key for each Run: `OPENROUTER_API_KEY_<ROLE>` wins
+for a role, and the instance-wide `OPENROUTER_API_KEY` is the fallback.
 Never put a management, personal interactive, or evaluation key there. The
 intended production layout uses one completion key per agent role for
 OpenRouter and Langfuse analytics. This is an attribution control, not an
-isolation boundary. The current Runner does not select role-specific keys. Use
+isolation boundary. Use
 a systemd drop-in only when one instance needs a different defaults file. The
 installer stops on any selfcheck error. The Auditor needs a completed agent
 dispatch before it can validate remote Git evidence.

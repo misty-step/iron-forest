@@ -1048,7 +1048,7 @@ func TestRunEnvironmentUsesScratchPiDirectoryAndInheritedCredentials(t *testing.
 	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
 	t.Setenv("GIT_CONFIG_VALUE_0", "ambient")
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'user.name'='ambient' 'user.email'='ambient@example.invalid'")
-	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master", Scope{})
+	environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master", "builder", Scope{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1125,7 +1125,7 @@ func TestRunEnvironmentExportsEffectiveScope(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master", tc.scope)
+			environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-builder", "/tmp/run-pi", "refs/heads/master", "builder", tc.scope)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1147,6 +1147,62 @@ func TestRunEnvironmentExportsEffectiveScope(t *testing.T) {
 				t.Fatalf("FOREST_SCOPE_GITHUB_ONLY=%q, want %q", values["FOREST_SCOPE_GITHUB_ONLY"], tc.wantGitHubOnly)
 			}
 		})
+	}
+}
+
+func TestRunEnvironmentSelectsRoleScopedOpenRouterKey(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OPENROUTER_API_KEY", "instance-key")
+	t.Setenv("OPENROUTER_API_KEY_BUILDER", "builder-key")
+	t.Setenv("OPENROUTER_API_KEY_VERIFIER", "verifier-key")
+	t.Setenv("FOREST_EVAL_JUDGE_API_KEY", "judge-key")
+
+	for _, tc := range []struct {
+		role string
+		want string
+	}{
+		{role: "builder", want: "builder-key"},
+		{role: "fixer", want: "instance-key"},
+		{role: "verifier", want: "verifier-key"},
+		{role: "", want: "instance-key"},
+	} {
+		t.Run(tc.role+" role", func(t *testing.T) {
+			environment, err := runEnvironment(root, "Iron Forest Builder", "builder@forest.invalid", "1-"+tc.role, "/tmp/run-pi", "refs/heads/master", tc.role, Scope{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			value := ""
+			for _, entry := range environment {
+				key, val, _ := strings.Cut(entry, "=")
+				if key == "OPENROUTER_API_KEY" {
+					count++
+					value = val
+				}
+			}
+			if count != 1 {
+				t.Fatalf("OPENROUTER_API_KEY entries=%d, want exactly 1", count)
+			}
+			if value != tc.want {
+				t.Fatalf("OPENROUTER_API_KEY=%q, want %q", value, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenRouterCompletionKeyIgnoresBlankRoleKey(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "instance-key")
+	t.Setenv("OPENROUTER_API_KEY_BUILDER", "  ")
+	if got := openRouterCompletionKey("builder"); got != "instance-key" {
+		t.Fatalf("openRouterCompletionKey=%q, want instance fallback", got)
+	}
+}
+
+func TestOpenRouterCompletionKeyAbsent(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY_BUILDER", "")
+	if got := openRouterCompletionKey("builder"); got != "" {
+		t.Fatalf("openRouterCompletionKey=%q, want empty", got)
 	}
 }
 

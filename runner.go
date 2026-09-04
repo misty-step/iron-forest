@@ -244,9 +244,50 @@ func scopeEnvironment(scope Scope) []string {
 	}
 }
 
+// openRouterRoleKeyName names the instance environment variable that holds the
+// role-scoped OpenRouter completion key for one agent role. The role name is
+// the declaration name, so builder selects OPENROUTER_API_KEY_BUILDER.
+func openRouterRoleKeyName(role string) string {
+	return "OPENROUTER_API_KEY_" + strings.ToUpper(role)
+}
+
+// openRouterCompletionKey selects the OpenRouter completion key a Run receives:
+// the role-scoped key when it is set, otherwise the instance-wide
+// OPENROUTER_API_KEY. Selecting only by environment name keeps the role key out
+// of Kernel state and preserves the existing single-key deployment as the
+// fallback for any role without a dedicated key.
+func openRouterCompletionKey(role string) string {
+	if role != "" {
+		if value := strings.TrimSpace(os.Getenv(openRouterRoleKeyName(role))); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+}
+
+// withOpenRouterCompletionKey replaces every inherited OPENROUTER_API_KEY entry
+// with the single key selected for this Run role, so a Run always uses exactly
+// one completion key and never the ambiguous last-wins duplicate that a raw
+// inherited environment could otherwise hand to exec.
+func withOpenRouterCompletionKey(environment []string, role string) []string {
+	selected := openRouterCompletionKey(role)
+	filtered := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != "OPENROUTER_API_KEY" {
+			filtered = append(filtered, entry)
+		}
+	}
+	if selected != "" {
+		filtered = append(filtered, "OPENROUTER_API_KEY="+selected)
+	}
+	return filtered
+}
+
 // runEnvironment composes the child's inherited service values, trusted PATH,
-// scoped Run Git identity and marker, and fresh writable Pi directory.
-func runEnvironment(root, name, email, runID, piDir, primaryRef string, scope Scope) ([]string, error) {
+// scoped Run Git identity and marker, fresh writable Pi directory, and the
+// role-scoped OpenRouter completion key.
+func runEnvironment(root, name, email, runID, piDir, primaryRef, role string, scope Scope) ([]string, error) {
 	path, err := trustedPath(root)
 	if err != nil {
 		return nil, err
@@ -269,7 +310,7 @@ func runEnvironment(root, name, email, runID, piDir, primaryRef string, scope Sc
 		"PI_CODING_AGENT_DIR="+piDir,
 	)
 	environment = append(environment, scopeEnvironment(scope)...)
-	return environment, nil
+	return withOpenRouterCompletionKey(environment, role), nil
 }
 
 func configurePiSessionAffinity(piDir, runID string, declaration Declaration, repo string) error {
@@ -960,7 +1001,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir, primaryRef, r.Scope)
+	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir, primaryRef, declaration.Name, r.Scope)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
 		return err, false

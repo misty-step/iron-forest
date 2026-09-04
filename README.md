@@ -246,15 +246,22 @@ restart, the installer stops the instance, removes timestamped legacy
 `.forest/profiles` residue, and runs selfcheck with the equivalent
 `$HOME`-expanded environment.
 
-Protect the environment file as mode `0600`. The current Runner accepts one
-OpenRouter completion key for the instance:
+Protect the environment file as mode `0600`. The Runner selects the OpenRouter
+completion key for each Run from the instance environment:
 
 ```dotenv
-OPENROUTER_API_KEY=<dedicated instance key>
+OPENROUTER_API_KEY=<instance fallback key>
+OPENROUTER_API_KEY_BUILDER=<builder key>
+OPENROUTER_API_KEY_VERIFIER=<verifier key>
+OPENROUTER_API_KEY_FIXER=<fixer key>
 POWDER_URL=<origin>
 POWDER_API_KEY=<key>
 POWDER_AGENT=forest-<repo-slug>
 ```
+
+`OPENROUTER_API_KEY_<ROLE>` wins for the declaration whose name matches
+`<ROLE>` (uppercased); the instance-wide `OPENROUTER_API_KEY` is the fallback
+for any role without a dedicated key.
 
 `POWDER_AGENT` opts the Kernel into listing Powder jobs. Omit it for
 GitHub-only selection. Use one agent identity per repository Kernel.
@@ -262,9 +269,8 @@ GitHub-only selection. Use one agent identity per repository Kernel.
 Do not put an OpenRouter management key in this file. Do not reuse a personal
 interactive key or an evaluation key. The intended production layout uses one
 completion key per agent role for OpenRouter and Langfuse cost, latency, and
-failure attribution. It is not a security boundary. The current Runner does not
-select role-specific keys; use the Run ID and agent name in Forest evidence for
-exact attribution until that data path is implemented.
+failure attribution. It is not a security boundary: trusted Runs still share
+the service user and can read the per-instance environment file.
 
 Trusted transport captures keep at most 1 MiB while draining the complete
 output. Output beyond the cap returns an explicit error after the process group
