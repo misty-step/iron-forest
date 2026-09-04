@@ -279,6 +279,7 @@ def report_markdown(client: LangfuseClient, manifest_path: Path = PRODUCTION_MAN
     manifest = load_production_manifest(manifest_path)
     promoted = {case.get("id"): case for case in manifest["cases"]}
     promoted_traces = {case.get("source_trace_id") for case in promoted.values() if case.get("source_trace_id")}
+    promoted_runs = {case.get("source_run_id") for case in promoted.values() if case.get("source_run_id")}
     items = [item for item in client.list_dataset_items(dataset)]
     lines: list[str] = [
         "# Production flywheel maintenance report",
@@ -293,7 +294,18 @@ def report_markdown(client: LangfuseClient, manifest_path: Path = PRODUCTION_MAN
             return metadata["source_trace_id"]
         return getattr(item, "source_trace_id", None)
 
-    drafts = [item for item in items if item_trace(item) not in promoted_traces]
+    def item_run_id(item: Any) -> str | None:
+        metadata = getattr(item, "metadata", None) or {}
+        if isinstance(metadata, dict) and metadata.get("run_id"):
+            return metadata["run_id"]
+        return getattr(item, "run_id", None)
+
+    def is_promoted(item: Any) -> bool:
+        trace = item_trace(item)
+        run_id = item_run_id(item)
+        return (trace is not None and trace in promoted_traces) or (run_id is not None and run_id in promoted_runs)
+
+    drafts = [item for item in items if not is_promoted(item)]
     new_cases = len(drafts)
     total = len(items)
     promoted_count = len(promoted)
