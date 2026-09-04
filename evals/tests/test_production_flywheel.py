@@ -246,6 +246,95 @@ class ProductionFlywheelTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "transport down"):
             client.list_dataset_items(flywheel.PRODUCTION_DATASET)
 
+    def test_sdk_list_dataset_items_pages_through_all_pages(self):
+        class PagedResponse:
+            def __init__(self, data, page, total_pages):
+                self.data = data
+                self.meta = {"page": page, "total_pages": total_pages}
+
+        class PagedDatasetItems:
+            def __init__(self):
+                self.requested_pages = []
+
+            def list(self, dataset_name, page=1):
+                self.requested_pages.append(page)
+                if page == 1:
+                    return PagedResponse([f"item-{i}" for i in range(50)], page=1, total_pages=2)
+                elif page == 2:
+                    return PagedResponse([f"item-{i}" for i in range(50, 70)], page=2, total_pages=2)
+                return PagedResponse([], page=page, total_pages=2)
+
+        class API:
+            def __init__(self):
+                self.dataset_items = PagedDatasetItems()
+
+        class Client:
+            def __init__(self):
+                self.api = API()
+
+        client_obj = Client()
+        sdk_client = flywheel.LangfuseSDKClient(client_obj)
+        items = sdk_client.list_dataset_items(flywheel.PRODUCTION_DATASET)
+        self.assertEqual(len(items), 70)
+        self.assertEqual(items[0], "item-0")
+        self.assertEqual(items[69], "item-69")
+        self.assertEqual(client_obj.api.dataset_items.requested_pages, [1, 2])
+
+    def test_sdk_list_dataset_items_single_page_without_meta(self):
+        class UnpagedResponse:
+            def __init__(self, data):
+                self.data = data
+                self.meta = None
+
+        class UnpagedDatasetItems:
+            def __init__(self):
+                self.requested_pages = []
+
+            def list(self, dataset_name, page=1):
+                self.requested_pages.append(page)
+                return UnpagedResponse(["single-1", "single-2"])
+
+        class API:
+            def __init__(self):
+                self.dataset_items = UnpagedDatasetItems()
+
+        class Client:
+            def __init__(self):
+                self.api = API()
+
+        client_obj = Client()
+        sdk_client = flywheel.LangfuseSDKClient(client_obj)
+        items = sdk_client.list_dataset_items(flywheel.PRODUCTION_DATASET)
+        self.assertEqual(items, ["single-1", "single-2"])
+        self.assertEqual(client_obj.api.dataset_items.requested_pages, [1])
+
+    def test_sdk_list_dataset_items_empty_dataset(self):
+        class EmptyResponse:
+            data = []
+            meta = {"page": 1, "total_pages": 0}
+
+        class EmptyDatasetItems:
+            def __init__(self):
+                self.requested_pages = []
+
+            def list(self, dataset_name, page=1):
+                self.requested_pages.append(page)
+                return EmptyResponse()
+
+        class API:
+            def __init__(self):
+                self.dataset_items = EmptyDatasetItems()
+
+        class Client:
+            def __init__(self):
+                self.api = API()
+
+        client_obj = Client()
+        sdk_client = flywheel.LangfuseSDKClient(client_obj)
+        items = sdk_client.list_dataset_items(flywheel.PRODUCTION_DATASET)
+        self.assertEqual(items, [])
+        self.assertEqual(client_obj.api.dataset_items.requested_pages, [1])
+
 
 if __name__ == "__main__":
     unittest.main()

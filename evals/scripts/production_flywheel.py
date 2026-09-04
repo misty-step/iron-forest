@@ -152,8 +152,22 @@ class LangfuseSDKClient(LangfuseClient):
             source_trace_id=source_trace_id,
         )
     def list_dataset_items(self, dataset_name: str) -> list[Any]:
-        items = self._client.api.dataset_items.list(dataset_name=dataset_name)
-        return list(getattr(items, "data", []) or [])
+        all_items: list[Any] = []
+        page = 1
+        while True:
+            response = self._client.api.dataset_items.list(dataset_name=dataset_name, page=page)
+            data = list(getattr(response, "data", []) or [])
+            if not data:
+                break
+            all_items.extend(data)
+            meta = getattr(response, "meta", None)
+            if meta is None:
+                break
+            total_pages = meta.get("total_pages") if isinstance(meta, dict) else getattr(meta, "total_pages", None)
+            if total_pages is not None and page >= total_pages:
+                break
+            page += 1
+        return all_items
 
     def trace_ids_for_session(self, session_id: str) -> list[str]:
         try:
