@@ -195,6 +195,38 @@ class PowderIntakeTest(unittest.TestCase):
         self.assertIsNone(job["lease"])
         self.assertNotIn("_claim_hash", job)
 
+    def test_postcommit_jobs_sync_failure_keeps_claim_and_lease(self) -> None:
+        job = {"id": "if-safe", "lease": None}
+        persist = POWDER_FIXTURE["persist_new_claim"]
+        sync_error = POWDER_FIXTURE["PostCommitSyncError"]
+        calls = mock.Mock()
+        with tempfile.TemporaryDirectory() as root:
+            jobs_path = Path(root) / "powder-jobs.json"
+            jobs_path.write_text(json.dumps([job]))
+            with (
+                mock.patch.dict(
+                    persist.__globals__,
+                    {
+                        "POWDER_JOBS": jobs_path,
+                        "save_claim": calls.save_claim,
+                        "delete_claim": calls.delete_claim,
+                    },
+                ),
+                mock.patch.object(
+                    persist.__globals__["os"],
+                    "fsync",
+                    side_effect=[None, OSError("directory sync failed")],
+                ),
+            ):
+                with self.assertRaisesRegex(sync_error, "failed to sync"):
+                    persist([job], job, "if-safe", "audit", "claim")
+
+            persisted = json.loads(jobs_path.read_text())[0]
+            self.assertEqual(persisted["lease"], {"agent": "audit"})
+            self.assertEqual(persisted["_claim_hash"], job["_claim_hash"])
+            calls.save_claim.assert_called_once_with("if-safe", "claim")
+            calls.delete_claim.assert_not_called()
+
     def test_partial_temporary_write_preserves_jobs_snapshot(self) -> None:
         class PartialWriter:
             def __init__(self, handle) -> None:
