@@ -1,3 +1,10 @@
+## [0.0.6](https://github.com/misty-step/iron-forest/compare/v0.0.5...v0.0.6) (2026-09-04)
+
+
+### Bug Fixes
+
+* **powder:** enforce per-job claims in factory ([640cd13](https://github.com/misty-step/iron-forest/commit/640cd1319fe26535cc3e92299f2fb40374fdedc6))
+
 ## [0.0.5](https://github.com/misty-step/iron-forest/compare/v0.0.4...v0.0.5) (2026-09-04)
 
 
