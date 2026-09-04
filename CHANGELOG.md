@@ -1,3 +1,10 @@
+## [0.0.10](https://github.com/misty-step/iron-forest/compare/v0.0.9...v0.0.10) (2026-09-04)
+
+
+### Bug Fixes
+
+* **evals:** preserve Powder jobs atomically ([747064c](https://github.com/misty-step/iron-forest/commit/747064cf0b1f6ce7afe4abea7b0f2341f69d989f))
+
 ## [0.0.9](https://github.com/misty-step/iron-forest/compare/v0.0.8...v0.0.9) (2026-09-04)
 
 
