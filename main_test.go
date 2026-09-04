@@ -554,6 +554,83 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 	}
 }
 
+func TestSelfcheckRequiresPowderWhenConfigured(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "forest-owner-name")
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	writeTestDeclaration(t, root, "builder")
+	bin := t.TempDir()
+	for _, name := range []string{"git", "gh", "pi"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	outcome := runSelfcheck(nil, cliFlags{root: root})
+	if outcome.Exit != exitError {
+		t.Fatalf("selfcheck exit=%d, want %d", outcome.Exit, exitError)
+	}
+	if !strings.Contains(outcome.ErrText, "powder unavailable") {
+		t.Fatalf("selfcheck error=%q, want powder unavailable", outcome.ErrText)
+	}
+}
+
+func TestSelfcheckPassesWithoutPowderWhenUnset(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "")
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	writeTestDeclaration(t, root, "builder")
+	bin := t.TempDir()
+	for _, name := range []string{"git", "gh", "pi"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	outcome := runSelfcheck(nil, cliFlags{root: root})
+	if outcome.Exit != exitOK {
+		t.Fatalf("selfcheck exit=%d err=%q, want %d", outcome.Exit, outcome.ErrText, exitOK)
+	}
+	payload, ok := outcome.Data.(selfcheckPayload)
+	if !ok {
+		t.Fatalf("selfcheck data=%T, want selfcheckPayload", outcome.Data)
+	}
+	if len(payload.Tools) != 3 {
+		t.Fatalf("selfcheck tools=%d, want three resolved tools", len(payload.Tools))
+	}
+}
+
+func TestSelfcheckResolvesPowderWhenConfigured(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "forest-owner-name")
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	writeTestDeclaration(t, root, "builder")
+	bin := t.TempDir()
+	for _, name := range []string{"git", "gh", "pi", "powder"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	outcome := runSelfcheck(nil, cliFlags{root: root})
+	if outcome.Exit != exitOK {
+		t.Fatalf("selfcheck exit=%d err=%q, want %d", outcome.Exit, outcome.ErrText, exitOK)
+	}
+	payload, ok := outcome.Data.(selfcheckPayload)
+	if !ok {
+		t.Fatalf("selfcheck data=%T, want selfcheckPayload", outcome.Data)
+	}
+	if len(payload.Tools) != 4 {
+		t.Fatalf("selfcheck tools=%d, want four resolved tools", len(payload.Tools))
+	}
+	if payload.Tools[3].Name != "powder" {
+		t.Fatalf("selfcheck tools=%+v, want powder as the fourth tool", payload.Tools)
+	}
+}
+
 func writeCLIConfig(t *testing.T, root, poll string) {
 	t.Helper()
 	config := "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder:\n    poll: " + poll + "\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
