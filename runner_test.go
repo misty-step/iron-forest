@@ -1205,11 +1205,15 @@ func TestRunEnvironmentSelectsRoleScopedOpenRouterKey(t *testing.T) {
 			}
 			count := 0
 			value := ""
+			var roleKeys []string
 			for _, entry := range environment {
 				key, val, _ := strings.Cut(entry, "=")
 				if key == "OPENROUTER_API_KEY" {
 					count++
 					value = val
+				}
+				if strings.HasPrefix(key, "OPENROUTER_API_KEY_") {
+					roleKeys = append(roleKeys, key)
 				}
 			}
 			if count != 1 {
@@ -1217,6 +1221,9 @@ func TestRunEnvironmentSelectsRoleScopedOpenRouterKey(t *testing.T) {
 			}
 			if value != tc.want {
 				t.Fatalf("OPENROUTER_API_KEY=%q, want %q", value, tc.want)
+			}
+			if len(roleKeys) != 0 {
+				t.Fatalf("child environment contains sibling role keys: %v", roleKeys)
 			}
 		})
 	}
