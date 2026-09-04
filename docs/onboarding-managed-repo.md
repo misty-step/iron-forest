@@ -343,6 +343,37 @@ observable final Git state only. It cannot prove check execution, atomic push
 ordering, or force absence. It detects violations after a completed dispatch
 and does not block or enforce them.
 
+### Coordinating direct human pushes with a live review
+
+[ADR 0026](adr/0026-human-direct-push-audit-policy.md) permits an operator to
+push directly to `master` without Gate evidence. Do not push while a factory
+Revision is in review unless you coordinate with factory cadence.
+
+A live review is staled when the primary branch advances ahead of the
+candidate's base. The Verifier's approve push is an atomic fast-forward of
+`master` from the reviewed Revision's ancestry. If `master` has moved since the
+Builder or Fixer branched, the Gate rejects the stale Revision with a
+`changes` verdict even when every configured Check passed, and the Fixer must
+rebase and publish a fresh Revision.
+
+Before a direct push, check for active work:
+
+```sh
+./forest status
+```
+
+If a live run or in-flight review is present, pause the instance before
+pushing and start it again afterward:
+
+```sh
+systemctl --user stop forest@<instance>
+systemctl --user start forest@<instance>
+```
+
+Or wait for the current run to settle before pushing. The Gate has no force
+flag or override by design; the atomic fast-forward invariant is the only way a
+factory Revision lands on `master`.
+
 ## 7. Change configuration safely
 
 Commit changes to `forest.yaml` or `agents/` through the same review Gate as
