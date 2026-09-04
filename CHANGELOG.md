@@ -1,3 +1,10 @@
+## [0.0.7](https://github.com/misty-step/iron-forest/compare/v0.0.6...v0.0.7) (2026-09-04)
+
+
+### Bug Fixes
+
+* **runner:** strip sibling role-scoped OpenRouter keys from child environment ([9c3d2b6](https://github.com/misty-step/iron-forest/commit/9c3d2b6df9adda04ab0dfd86c960e7e1e7f7bdee))
+
 ## [0.0.6](https://github.com/misty-step/iron-forest/compare/v0.0.5...v0.0.6) (2026-09-04)
 
 
