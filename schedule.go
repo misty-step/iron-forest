@@ -173,6 +173,10 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 		s.mu.Unlock()
 		return Declaration{}, nil, false, nil
 	}
+	if isProviderBudgetError(s.health[agent].RunError) {
+		s.mu.Unlock()
+		return Declaration{}, nil, false, nil
+	}
 	poll := s.Poll
 	if poll == nil {
 		s.mu.Unlock()

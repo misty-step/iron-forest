@@ -842,14 +842,23 @@ func soleExitCode(err error, code int) bool {
 	return leaves == 1 && matching == 1
 }
 
-const agentOutcomePatternLimit = 32
+const (
+	agentOutcomePatternLimit = 32
+	providerBudgetExhausted  = "provider budget exhausted"
+)
 
 var (
 	agentEndPattern          = []byte(`"type":"agent_end"`)
 	agentAssistantPattern    = []byte(`"role":"assistant"`)
 	agentErrorPattern        = []byte(`"stopReason":"error"`)
 	agentErrorMessagePattern = []byte(`"errorMessage":"`)
+	agentBudget402Pattern    = []byte(`"errorMessage":"402`)
+	agentBudget403Pattern    = []byte(`"errorMessage":"403`)
 )
+
+func isProviderBudgetError(message string) bool {
+	return strings.Contains(message, providerBudgetExhausted)
+}
 
 type streamPattern struct {
 	pattern []byte
@@ -894,12 +903,16 @@ type agentOutcomeTracker struct {
 	agentAssistant       streamPattern
 	agentError           streamPattern
 	agentErrorMessage    streamPattern
+	agentBudget402       streamPattern
+	agentBudget403       streamPattern
 	lineActive           bool
 	sawAgentEnd          bool
 	sawAssistant         bool
 	awaitingErrorMessage bool
 	assistantError       bool
+	lineBudget           bool
 	failed               bool
+	budgetFailed         bool
 }
 
 func newAgentOutcomeTracker() *agentOutcomeTracker {
@@ -908,6 +921,8 @@ func newAgentOutcomeTracker() *agentOutcomeTracker {
 	tracker.agentAssistant.init(agentAssistantPattern)
 	tracker.agentError.init(agentErrorPattern)
 	tracker.agentErrorMessage.init(agentErrorMessagePattern)
+	tracker.agentBudget402.init(agentBudget402Pattern)
+	tracker.agentBudget403.init(agentBudget403Pattern)
 	return tracker
 }
 
@@ -931,12 +946,17 @@ func (t *agentOutcomeTracker) Write(data []byte) (int, error) {
 			t.sawAssistant = true
 			t.awaitingErrorMessage = false
 			t.assistantError = false
+			t.lineBudget = false
 		}
 		if t.agentError.advance(value) && t.sawAssistant {
 			t.assistantError = true
 		}
 		if t.agentErrorMessage.advance(value) && t.sawAssistant {
 			t.awaitingErrorMessage = true
+		}
+		if t.sawAssistant && (t.agentBudget402.advance(value) || t.agentBudget403.advance(value)) {
+			t.lineBudget = true
+			t.assistantError = true
 		}
 	}
 	return len(data), nil
@@ -945,21 +965,28 @@ func (t *agentOutcomeTracker) Write(data []byte) (int, error) {
 func (t *agentOutcomeTracker) finishLine() {
 	if t.sawAgentEnd && t.sawAssistant {
 		t.failed = t.assistantError
+		t.budgetFailed = t.lineBudget
 	}
 	t.agentEnd.matched = 0
 	t.agentAssistant.matched = 0
 	t.agentError.matched = 0
 	t.agentErrorMessage.matched = 0
+	t.agentBudget402.matched = 0
+	t.agentBudget403.matched = 0
 	t.lineActive = false
 	t.sawAgentEnd = false
 	t.sawAssistant = false
 	t.awaitingErrorMessage = false
 	t.assistantError = false
+	t.lineBudget = false
 }
 
 func (t *agentOutcomeTracker) Err() error {
 	if t.lineActive {
 		t.finishLine()
+	}
+	if t.budgetFailed {
+		return errors.New(providerBudgetExhausted)
 	}
 	if t.failed {
 		return errors.New("pi agent ended with error")
@@ -1071,7 +1098,11 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		readerCloseErr = reader.Close()
 	}
 
-	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, outcome.Err())
+	outcomeErr := outcome.Err()
+	if outcomeErr != nil && isProviderBudgetError(outcomeErr.Error()) {
+		record.Error = providerBudgetExhausted
+	}
+	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, outcomeErr)
 	if err != nil && record.Exit == 0 {
 		record.Exit = 1
 	}
