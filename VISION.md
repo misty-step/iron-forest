@@ -53,7 +53,7 @@ terms.
 
 ```text
 forest:ready Issue or takeable Powder job
-  → Builder implements and calls forest publish request
+  → Builder implements and calls forest publish review-request
   → Verifier checks, judges, and calls forest publish verdict
   → Kernel reconciles a landed Powder Subject to terminal
   → Fixer repairs a rejected Revision
@@ -97,7 +97,7 @@ digest, publication, and deterministic Powder terminal reconciliation. Two
 commands cover every agent-requested Git Effect:
 
 ```text
-forest publish request <role> <branch> <file> [--rejected <sha>]
+forest publish review-request <role> <branch> <file> [--rejected <sha>]
 forest publish verdict <checks-file> <verdict-file>
 ```
 
