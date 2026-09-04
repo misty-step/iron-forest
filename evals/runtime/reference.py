@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hidden import PR_CREATED, REFERENCE_RUN, STATE
 
-from setup import GIT, TIME, evidence_push, git, identity, note_add, run, write_files
+from setup import GIT, TIME, evidence_commit, evidence_push, git, identity, note_add, run, write_files
 
 WORKSPACE = Path("/workspace")
 ORIGIN = Path("/origin.git")
@@ -120,13 +120,11 @@ def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
     summary = scenario.get("verdict_summary", "The Revision satisfies the review contract." if approve else "The Revision requires changes.")
     checks = checks_payload(revision, check_ok)
     verdict_body = verdict_payload(revision, verdict, summary)
-    checks_private = add_canonical("refs/notes/forest/checks", revision, checks, "verifier")
-    verdict_private = add_canonical("refs/notes/forest/verdict", revision, verdict_body, "verifier")
-    evidence_push(WORKSPACE, "checks", revision, checks, "verifier")
-    evidence_push(WORKSPACE, "verdict", revision, verdict_body, "verifier")
+    checks_commit = evidence_commit(WORKSPACE, "checks", revision, checks, "verifier")
+    verdict_commit = evidence_commit(WORKSPACE, "verdict", revision, verdict_body, "verifier")
     refspecs = [
-        f"{checks_private}:refs/notes/forest/checks",
-        f"{verdict_private}:refs/notes/forest/verdict",
+        f"{checks_commit}:refs/forest/v1/checks/{revision}",
+        f"{verdict_commit}:refs/forest/v1/verdict/{revision}",
     ]
     if approve:
         refspecs.append(f"{revision}:refs/heads/master")
@@ -250,11 +248,9 @@ def main() -> None:
         publish_verifier(scenario, state, approve=True)
     elif effect == "verifier_conflict":
         target = state["candidate"]
-        publish_conflicting_note(
-            "refs/notes/forest/verdict",
-            target,
-            verdict_payload(target, "approve", "concurrent conflicting verdict"),
-        )
+        payload = verdict_payload(target, "approve", "concurrent conflicting verdict")
+        commit = evidence_commit(WORKSPACE, "verdict", target, payload, "race")
+        git(WORKSPACE, "push", "origin", f"{commit}:refs/forest/v1/verdict/{target}")
     elif effect == "verifier_approve_race":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/heads/master", state["competitor"])
     elif effect == "fixer_publish":

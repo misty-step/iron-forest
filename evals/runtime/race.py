@@ -15,9 +15,9 @@ ORIGIN = "/origin.git"
 TIME = "2026-08-14T00:00:00Z"
 
 
-def run(*args: str, cwd: Path, env: dict[str, str] | None = None) -> str:
+def run(*args: str, cwd: Path, env: dict[str, str] | None = None, input: str | None = None) -> str:
     completed = subprocess.run(
-        list(args), cwd=cwd, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        list(args), cwd=cwd, env=env, input=input, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
     )
     if completed.returncode != 0:
         raise RuntimeError(f"race command failed: {' '.join(args)}\n{completed.stderr}")
@@ -86,16 +86,10 @@ def publish_conflict(cwd: Path, args: list[str], canonical: str, schema: str) ->
         run(GIT, "update-ref", temporary, remote.stdout.strip(), cwd=cwd)
     else:
         subprocess.run([GIT, "update-ref", "-d", temporary], cwd=cwd, check=False)
-    if schema == "verdict":
-        payload = {
-            "schema": "forest.verdict.v1", "revision": target, "verdict": "approve",
-            "summary": "concurrent conflicting verdict", "time": TIME,
-        }
-    else:
-        payload = {
-            "schema": "forest.review-request.v2", "subject": "100",
-            "branch": "forest/100/candidate", "revision": target, "time": TIME,
-        }
+    payload = {
+        "schema": "forest.review-request.v2", "subject": "100",
+        "branch": "forest/100/candidate", "revision": target, "time": TIME,
+    }
     with tempfile.NamedTemporaryFile("w", delete=False) as handle:
         json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
         handle.write("\n")
@@ -106,6 +100,24 @@ def publish_conflict(cwd: Path, args: list[str], canonical: str, schema: str) ->
     finally:
         os.unlink(payload_path)
         subprocess.run([GIT, "update-ref", "-d", temporary], cwd=cwd, check=False)
+
+def publish_verdict_conflict(cwd: Path, args: list[str]) -> None:
+    refspec = destination(args, "refs/forest/v1/verdict/")
+    if refspec is None:
+        raise RuntimeError("race could not find refs/forest/v1/verdict/ refspec")
+    _, target_ref = refspec
+    target = target_ref.removeprefix("refs/forest/v1/verdict/")
+    payload = {
+        "schema": "forest.verdict.v1",
+        "revision": target,
+        "verdict": "approve",
+        "summary": "concurrent conflicting verdict",
+        "time": TIME,
+    }
+    blob = run(GIT, "hash-object", "-w", "--stdin", cwd=cwd, input=json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+    tree = run(GIT, "mktree", cwd=cwd, input=f"100644 blob {blob}\tverdict.json\n")
+    commit = run(GIT, "commit-tree", tree, "-m", f"eval verdict {target}", cwd=cwd, env=race_env())
+    run(GIT, "push", "origin", f"{commit}:{target_ref}", cwd=cwd, env=race_env())
 
 
 def main() -> None:
@@ -126,7 +138,7 @@ def main() -> None:
     elif kind == "approve_master":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/heads/master", race["competitor"], cwd=cwd)
     elif kind == "conflicting_verdict":
-        publish_conflict(cwd, args, "refs/notes/forest/verdict", "verdict")
+        publish_verdict_conflict(cwd, args)
     elif kind == "conflicting_review_request":
         publish_conflict(cwd, args, "refs/notes/forest/review-request", "review-request")
     else:

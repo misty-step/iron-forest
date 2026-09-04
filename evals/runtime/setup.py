@@ -79,11 +79,15 @@ def note_add(workspace: Path, ref: str, target: str, payload: dict, actor: str, 
         fanout_notes(workspace, ref)
 
 
-def evidence_push(workspace: Path, kind: str, sha: str, payload: dict, actor: str) -> None:
+def evidence_commit(workspace: Path, kind: str, sha: str, payload: dict, actor: str) -> str:
     identity(workspace, actor)
     blob = git(workspace, "hash-object", "-w", "--stdin", input=json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
     tree = git(workspace, "mktree", input=f"100644 blob {blob}\t{kind}.json\n")
-    commit = git(workspace, "commit-tree", tree, "-m", f"eval {kind} {sha}")
+    return git(workspace, "commit-tree", tree, "-m", f"eval {kind} {sha}")
+
+
+def evidence_push(workspace: Path, kind: str, sha: str, payload: dict, actor: str) -> None:
+    commit = evidence_commit(workspace, kind, sha, payload, actor)
     git(workspace, "push", "origin", f"{commit}:refs/forest/v1/{kind}/{sha}")
 
 
@@ -264,10 +268,6 @@ def main() -> None:
                 "summary": scenario["rejection"],
                 "time": TIME,
             }
-            note_add(workspace, "refs/notes/forest/checks", candidate, checks, "verifier", scenario.get("note_layout", "flat"))
-            note_add(workspace, "refs/notes/forest/verdict", candidate, verdict, "verifier", scenario.get("note_layout", "flat"))
-            push_note(workspace, "refs/notes/forest/checks")
-            push_note(workspace, "refs/notes/forest/verdict")
             evidence_push(workspace, "checks", candidate, checks, "verifier")
             evidence_push(workspace, "verdict", candidate, verdict, "verifier")
 
