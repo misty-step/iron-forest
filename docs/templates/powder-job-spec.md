@@ -1,5 +1,12 @@
 # Powder job spec template
 
+
+> Historical workflow reference. The operator retired backlog-driven Misty Step
+> work on 2026-09-06. Do not configure queue credentials, create jobs, promote
+> readiness labels, or start intake from this document. Work from a current
+> request and report its result and evidence; R90 continues to use Habitat.
+> Preserved commands and examples below describe the retired workflow.
+
 Use this template when filing a Powder job so the spec carries everything a
 Builder and Verifier need. Replace each placeholder and delete optional sections
 rather than leaving placeholders in the filed job. Read the

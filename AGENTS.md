@@ -4,12 +4,12 @@ Headless software factory. One `forest` Kernel serves this repository;
 agents build, review, and merge tracked work. `VISION.md` is the product
 lock; `README.md` is the operator manual; accepted ADRs are contracts.
 
-## Tracker
+## Work selection
 
-Powder is this repository's tracker of record (jobs `if-*`, repo
-`misty-step/iron-forest`). GitHub Issues remain supported by the product
-but are not used here. File work with
-`docs/templates/powder-job-spec.md`.
+Work from the operator's current request. Check current code and overlapping
+work before starting; state ownership and report the result with verification
+evidence. Historical tickets are context, not authorization or a required
+queue. Do not maintain a replacement backlog.
 
 ## Findings
 

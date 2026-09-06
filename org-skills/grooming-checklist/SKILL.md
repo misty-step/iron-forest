@@ -1,8 +1,8 @@
 ---
 name: grooming-checklist
 description: >
-  Groom a Tracker item into a `forest:ready` Subject during an
-  operator-supervised backlog session. Turns a raw idea into machine-checkable
+  Groom a current request into a bounded work brief during an
+  operator-supervised planning session. Turns a raw idea into machine-checkable
   acceptance criteria and a verification path before the factory consumes it.
 ---
 
@@ -18,8 +18,7 @@ A groomed Subject is self-contained: a fresh Builder can select it, implement
 one bounded change, and run a deterministic verification path with no additional
 operator context.
 
-Read the contract first: `docs/forest-ready-contract.md`.
-Use the template: `docs/templates/powder-job-spec.md`.
+Read the current request and current code first.
 
 ## Grooming loop
 
@@ -38,10 +37,7 @@ For each backlog item:
    expected pass result.
 5. **Add a verification path.** State the exact command(s) and expected exit or
    output. The Verifier will run the same path.
-6. **Write it into the Tracker.** For a GitHub Issue, fill the body with the six
-   contract sections. For Powder, put the filled template text into
-   `powder create --id <slug> --title <title> --repo misty-step/iron-forest
-   --spec '<filled spec>'`.
+6. **Return the brief.** Report scope, acceptance criteria, and verification in the session or requested artifact; do not create a ticket.
 7. **Self-check.** Apply the red flags and fix anything that trips one before
    asking the operator to approve.
 
@@ -58,11 +54,10 @@ For each backlog item:
 ## Boundaries
 
 Grooming is human-supervised
-([ADR 0014](../../docs/adr/0014-agent-roster.md)). Do not mark an Issue
-`forest:ready` or create a Powder job without operator approval. Do not implement
+([ADR 0014](../../docs/adr/0014-agent-roster.md)). Work only on a current operator request; do not create speculative tickets. Do not implement
 the Subject in this skill. Do not edit Kernel code or factory declarations here.
 
 ## Output
 
-A ready Subject: one Issue or Powder job with a problem, repro, scope bound,
+A current work brief with a problem, repro, scope bound,
 machine-checkable acceptance criteria, and a verification path.

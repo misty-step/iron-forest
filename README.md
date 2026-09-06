@@ -5,35 +5,24 @@ one repository, on a machine the operator chooses. The Kernel handles
 mechanics. Declarations state what agents think and do. See
 [VISION.md](VISION.md).
 
-
-The shipped review roster has Builder, Verifier, and Fixer. A Builder turns a
-ready GitHub Issue or takeable Powder job into a branch. A Verifier checks and
-reviews the exact Revision. A Fixer repairs a rejected Revision and sends it back
-for review. Critic and Tester are default-profile, non-review, drafts-only
-roles: Critic sweeps the codebase and files Powder drafts; Tester maps
-under-tested observable behaviors into test-work Powder drafts. Neither edits
-code, publishes to Git, promotes backlog jobs, or adds Kernel Effects, and
-neither joins the review loop.
+Misty Step work starts from a current operator request. Automatic backlog
+intake is retired. Old tickets, labels, and timers do not authorize work.
+Direct requests use the ordinary session or PR workflow; no ticket is required.
+R90 deployments continue to use Habitat. The legacy protocol and migration
+records below describe implementation history, not permission to restart old
+queue consumers.
 
 
-## Critic and Tester
+The review roster has Builder, Verifier, and Fixer for explicitly requested
+work. A Verifier checks one exact Revision, and a Fixer repairs a rejected
+Revision. Critic and Tester perform requested read-only sweeps and return
+findings with evidence; they do not create tickets or start implementation.
+Their automatic intake polls are disabled.
 
-Critic and Tester are shipped default-profile roles. Both are non-review and
-drafts-only: they produce attributed spec-less Powder drafts, never edit code,
-never publish to Git, never promote backlog jobs, and never add Kernel
-Effects. Builder, Verifier, and Fixer remain the review and Gate roster.
-
-Promotion evidence:
-
-- `evals/jobs/fast/fast-20260901T224519Z/report.md` is 22/22.
-- Settled Runs `1788301018846047029-critic` and
-  `1788301018844450077-tester` each produced one attributed spec-less draft.
-
-Their Polls skip cleanly (exit 1) when Powder is not configured: `POWDER_AGENT`
-and one of `POWDER_URL` or `POWDER_API_BASE_URL` must both be set, otherwise a
-daily sweep has no durable output and GitHub-only deployments wake no
-investigator Run.
-
+Historical promotion evidence remains in
+`evals/jobs/fast/fast-20260901T224519Z/report.md` and settled Runs
+`1788301018846047029-critic` and `1788301018844450077-tester`. Those results
+predate the retirement of automatic draft intake.
 
 ## Quick start
 
@@ -64,7 +53,7 @@ serves exactly one repository; an external manager coordinates several
 instances through their CLI read surfaces.
 
 Start each declaration with Pi's smallest useful tool set. A role can use an
-installed CLI such as `gh`, `powder`, or a browser driver only when `bash` is
+installed CLI such as `gh` or a browser driver only when `bash` is
 in that declaration's Pi tool allowlist and an explicit skill defines the CLI
 contract. Pi extensions are different: the Runner disables extension discovery,
 and declarations cannot yet select an extension path. Do not add an
@@ -72,10 +61,9 @@ extension-provided tool name until the Runner
 has an explicit, inspectable extension input and the role proves one real
 scenario with it.
 
-The current shipped workflow still contains GitHub and Powder mechanics in the
-Kernel. Tracker-independent profile executables and Habitat composition are
-open architecture work; a custom Poll alone does not yet make the complete
-review and terminal lifecycle tracker-agnostic.
+Legacy tracker validation and reconciliation remain in Kernel code and old
+evaluation fixtures. They are not active work-selection instructions. A profile
+change alone does not remove those historical implementation paths.
 
 Agent Runs have no wall-clock deadline by default. To bound a declaration that
 has wedged before, set the optional `max_duration` key (seconds) under that
@@ -169,10 +157,9 @@ before handoff:
 5. Record the deployment using the registry fields in the
    [ready contract](docs/forest-ready-contract.md#deployment-registry):
    `identity`, `host`, `repo`, and the running revision from `./forest version`.
-6. File every external finding with the
-   [draft-note provenance convention](docs/templates/powder-job-spec.md#external-draft-note):
-   report `filed-by`, `deployment`, and evidence, and never pass `--spec` at
-   filing.
+6. Return external findings in the requested report with source repository,
+   inspected revision, observed behavior, and verification evidence. Do not
+   create speculative tickets.
 7. Confirm observability before rollout with the read surface. After the first
    completed dispatch, run `./forest status` and `./forest audit show`. To force
    a rescan, confirm the service is inactive first:
@@ -181,8 +168,8 @@ before handoff:
    `systemctl --user start forest@<sibling-directory-name>`.
 8. Run `./forest doctor` and resolve every finding before declaring the
    deployment complete. It checks tool presence, `gh` auth, the credential file
-   mode, read-only forge capability, the OpenRouter key, and Powder
-   reachability.
+   mode, read-only forge capability, and the OpenRouter key. Legacy tracker
+   checks are implementation residue and do not authorize configuration.
 
 Build with the pinned toolchain and validate local configuration:
 
@@ -260,17 +247,14 @@ OPENROUTER_API_KEY=<instance fallback key>
 OPENROUTER_API_KEY_BUILDER=<builder key>
 OPENROUTER_API_KEY_VERIFIER=<verifier key>
 OPENROUTER_API_KEY_FIXER=<fixer key>
-POWDER_URL=<origin>
-POWDER_API_KEY=<key>
-POWDER_AGENT=forest-<repo-slug>
 ```
 
 `OPENROUTER_API_KEY_<ROLE>` wins for the declaration whose name matches
 `<ROLE>` (uppercased); the instance-wide `OPENROUTER_API_KEY` is the fallback
 for any role without a dedicated key.
 
-`POWDER_AGENT` opts the Kernel into listing Powder jobs. Omit it for
-GitHub-only selection. Use one agent identity per repository Kernel.
+Do not configure retired queue credentials or enable automatic backlog
+selection. Supply current work through an explicit operator handoff.
 
 Do not put an OpenRouter management key in this file. Do not reuse a personal
 interactive key or an evaluation key. The intended production layout uses one
@@ -297,14 +281,14 @@ the operator chooses.
 
 Git is the coordination authority. Live workflow state is create-only evidence
 under `refs/forest/v1/{request,checks,verdict}/<sha>`, plus `forest/*` branches
-and `master`. GitHub Issues and Powder jobs are the Tracker. Pull requests are disposable
-human Projections, never authority.
+and `master`. This protocol is retained for compatible requests explicitly
+supplied by the operator. A historical queue item does not authorize a Run.
 
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit. Verifier calls `forest publish verdict`.
 The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
-`master` in the same atomic push. It then reconciles the landed Subject to
-terminal Powder state without changing a successful Gate into failure. See
+`master` in the same atomic push. Historical tracker reconciliation remains
+in the implementation. See
 [ADR 0021](docs/adr/0021-kernel-review-request-publication.md),
 [ADR 0022](docs/adr/0022-kernel-verdict-publication.md), and
 [ADR 0023](docs/adr/0023-powder-jobs-and-review-request-v2.md).
@@ -314,25 +298,20 @@ Which identity may create or update which ref is in
 A read-only forge credential breaks every declaration. Branch protection cannot
 see evidence refs. Restrict `master` with a forge ruleset.
 
-Agents own Subject selection, implementation, review judgment, and the initial
-Powder take. The Kernel owns publication and bounded terminal Powder
-reconciliation. See [managed-repository
-onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
+The operator selects current work. Agents own implementation and review
+judgment; the Kernel owns the retained publication protocol. The
+[managed-repository guide](docs/onboarding-managed-repo.md) is a historical
+setup reference, not an instruction to restart retired intake.
 
-## Ready subjects
+## Current requests
 
-A `forest:ready` Issue or takeable Powder job is a self-contained spec: problem,
-repro, scope bound, machine-checkable acceptance criteria, and a verification
-path. Grooming stays human-supervised, and the factory remains a dumb consumer
-of ready Subjects.
+Clarify the selected request with a problem or scenario, scope, observable
+acceptance criteria, and a verification path. Use
+[`org-skills/grooming-checklist/SKILL.md`](org-skills/grooming-checklist/SKILL.md)
+when that brief is useful. No queue entry or readiness label is required.
 
-- [`docs/forest-ready-contract.md`](docs/forest-ready-contract.md) — what ready
-  means and how it is enforced by convention.
-- [`docs/templates/powder-job-spec.md`](docs/templates/powder-job-spec.md) — the
-  template for a ready Powder job spec.
-- [`org-skills/grooming-checklist/SKILL.md`](org-skills/grooming-checklist/SKILL.md) —
-  the supervised grooming checklist skill (not a factory declaration).
-
+The former readiness contract and job template remain historical records. They
+do not govern new Misty Step work.
 
 ## Poll protocol
 
@@ -343,9 +322,8 @@ than 1, timeout, or malformed behavior records an unhealthy trigger. See
 [ADR 0012](docs/adr/0012-poll-trigger-protocol.md) and the
 [onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
 
-Builder Poll also wakes on a takeable or held Powder job for `forest.yaml`
-`repo` when `POWDER_AGENT` is set. Before dispatch it reconciles the current
-Git-landed Subject to terminal Powder state or fails closed.
+The old Builder tracker path remains in the binary for historical compatibility.
+Do not configure or restart it as a source of new work.
 
 Verifier and Fixer Poll `ls-remote` evidence refs for each `forest/*` tip.
 Historical notes are unread. A missing evidence ref is no work.
@@ -499,7 +477,7 @@ read-only external probe, or `unknown` when no answer was obtained — plus
 `ok`, and either `evidence` or a `reason`. It checks `mise`, `go`, and `pi` on
 PATH; `gh auth status`; the instance credential file mode (`0600`); read-only
 forge push capability through `gh api`; the OpenRouter key with a read-only key
-probe; and Powder reachability when `POWDER_AGENT` is set. The forge and key
+probe. Legacy tracker reachability checks remain in code. The forge and key
 probes never write remotely, and evidence/reason never contain credential
 values. Exit is `0` when every check is healthy and `2` otherwise.
 

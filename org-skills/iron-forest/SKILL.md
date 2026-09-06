@@ -40,18 +40,15 @@ Keep the Kernel generic. Configure each role through:
 
 Start with Pi's smallest useful tool set. Add a CLI through `bash` plus an explicit skill when that is sufficient. Add a Pi extension only through an accepted, inspectable declaration input; ambient Pi extensions are disabled. Keep credentials in the instance service environment, never in configuration, prompts, skills, or commits.
 
-The shipped Builder, Verifier, and Fixer are opinionated defaults, not a
-required roster. Critic and Tester are default-profile, non-review,
-drafts-only roles: they produce attributed spec-less Powder drafts and never
-edit code, publish to Git, promote backlog jobs, or add Kernel Effects. A
+Builder, Verifier, and Fixer are optional defaults for explicitly requested
+compatible work. Critic and Tester report requested read-only findings; they
+do not create tickets, edit code, publish Git, or promote findings into work. A
 managed repository may otherwise replace the roster, Polls, prompts, model,
 thinking, tools, and skills without forking the Kernel.
 
-The shipped end-to-end work sources remain GitHub and Powder. A custom Poll
-does not replace the Kernel's current tracker validation and Powder terminal
-reconciliation. Tracker-independent and Habitat profile lifecycles remain open
-architecture work; follow `README.md`, `VISION.md`, and the accepted ADRs until
-that cutover lands.
+Misty Step work starts from current operator requests. Historical tracker
+adapters remain in code but must not be reconfigured or used as a queue. R90
+profiles continue to use Habitat.
 
 Done when `forest selfcheck`, `forest config show`, and every affected `forest declaration show` expose the intended configuration and no ambient resource supplies hidden behavior.
 

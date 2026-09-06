@@ -1,5 +1,12 @@
 # Onboarding a managed repository
 
+
+> Historical workflow reference. The operator retired backlog-driven Misty Step
+> work on 2026-09-06. Do not configure queue credentials, create jobs, promote
+> readiness labels, or start intake from this document. Work from a current
+> request and report its result and evidence; R90 continues to use Habitat.
+> Preserved commands and examples below describe the retired workflow.
+
 Iron Forest runs one Kernel process per repository. The Kernel uses that
 repository's `forest.yaml`, agent declarations, Git refs, and local Ledger.
 Self-host mode uses the factory source checkout as the managed repository.
