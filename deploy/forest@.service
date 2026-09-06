@@ -26,7 +26,7 @@ TimeoutStopSec=infinity
 # from the base directories. Selfcheck fails before ExecStart when a host cannot
 # dispatch.
 Environment=PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
-UnsetEnvironment=FOREST_DEFAULTS
+UnsetEnvironment=FOREST_DEFAULTS POWDER_AGENT POWDER_URL POWDER_API_BASE_URL POWDER_API_KEY
 
 [Install]
 WantedBy=default.target
