@@ -245,6 +245,7 @@ func TestCLIEmptyCollectionsAreArrays(t *testing.T) {
 }
 
 func TestCLISelfcheckEmitsEnvelope(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "")
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")
@@ -513,6 +514,7 @@ func TestCLIRootShorthandRejectsMissingOrEmptyValue(t *testing.T) {
 // selfcheck publishes the paths it resolved, not a constant list of names.
 func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 	t.Setenv("FOREST_DEFAULTS", "")
+	t.Setenv("POWDER_AGENT", "")
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")

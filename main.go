@@ -488,6 +488,19 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 		{name: "gh", resolve: func() (string, error) { return trustedExecutable(flags.root, "gh") }},
 		{name: "pi", resolve: runner.piExecutable},
 	}
+	// Powder is part of the trusted tool contract only when the identity is
+	// configured. The systemd service loads POWDER_AGENT before ExecStartPre, so
+	// selfcheck catches a service PATH that cannot resolve powder before any Run
+	// dispatches.
+	if powderAgent() != "" {
+		tools = append(tools, struct {
+			name    string
+			resolve func() (string, error)
+		}{
+			name:    "powder",
+			resolve: func() (string, error) { return trustedExecutable(flags.root, "powder") },
+		})
+	}
 	resolved := make([]toolPath, 0, len(tools))
 	for _, tool := range tools {
 		path, err := tool.resolve()
