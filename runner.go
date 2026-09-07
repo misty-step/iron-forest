@@ -24,6 +24,7 @@ type Runner struct {
 	PiPath     string
 	PrimaryRef string
 	Repo       string
+	Scope      Scope
 }
 
 const (
@@ -204,6 +205,7 @@ func pathInside(root, path string) (bool, error) {
 
 var overriddenChildEnvNames = []string{
 	"PATH", "FOREST_RUN_ID", "FOREST_ROOT", "FOREST_PRIMARY_REF", "PI_CODING_AGENT_DIR",
+	"FOREST_SCOPE_LABEL", "FOREST_SCOPE_BRANCH_PREFIX", "FOREST_SCOPE_SUBJECTS", "FOREST_SCOPE_GITHUB_ONLY",
 	"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
 	"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
 	"GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
@@ -221,9 +223,71 @@ func childEnvironment() []string {
 	return environment
 }
 
+// scopeEnvironment exports the effective selection scope as Run environment
+// values. The zero Scope exports the default label and empty remaining modes,
+// which matches the Poller's default GitHub label and unrestricted selection.
+// A configured label scope is exported as an explicit GitHub-only signal so
+// the Builder never has to infer it from the label value (a label scope is
+// GitHub-only even when the label equals the default forest:ready).
+func scopeEnvironment(scope Scope) []string {
+	label := defaultReadyLabel
+	githubOnly := "0"
+	if scope.Label != "" {
+		label = scope.Label
+		githubOnly = "1"
+	}
+	return []string{
+		"FOREST_SCOPE_LABEL=" + label,
+		"FOREST_SCOPE_BRANCH_PREFIX=" + scope.BranchPrefix,
+		"FOREST_SCOPE_SUBJECTS=" + strings.Join(scope.Subjects, ","),
+		"FOREST_SCOPE_GITHUB_ONLY=" + githubOnly,
+	}
+}
+
+// openRouterRoleKeyName names the instance environment variable that holds the
+// role-scoped OpenRouter completion key for one agent role. The role name is
+// the declaration name, so builder selects OPENROUTER_API_KEY_BUILDER.
+func openRouterRoleKeyName(role string) string {
+	return "OPENROUTER_API_KEY_" + strings.ToUpper(role)
+}
+
+// openRouterCompletionKey selects the OpenRouter completion key a Run receives:
+// the role-scoped key when it is set, otherwise the instance-wide
+// OPENROUTER_API_KEY. Selecting only by environment name keeps the role key out
+// of Kernel state and preserves the existing single-key deployment as the
+// fallback for any role without a dedicated key.
+func openRouterCompletionKey(role string) string {
+	if role != "" {
+		if value := strings.TrimSpace(os.Getenv(openRouterRoleKeyName(role))); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+}
+
+// withOpenRouterCompletionKey replaces every inherited OPENROUTER_API_KEY and
+// role-scoped OPENROUTER_API_KEY_* entry with the single key selected for this
+// Run role, so a Run always uses exactly one completion key, does not leak
+// sibling role keys, and never hands an ambiguous duplicate to exec.
+func withOpenRouterCompletionKey(environment []string, role string) []string {
+	selected := openRouterCompletionKey(role)
+	filtered := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != "OPENROUTER_API_KEY" && !strings.HasPrefix(key, "OPENROUTER_API_KEY_") {
+			filtered = append(filtered, entry)
+		}
+	}
+	if selected != "" {
+		filtered = append(filtered, "OPENROUTER_API_KEY="+selected)
+	}
+	return filtered
+}
+
 // runEnvironment composes the child's inherited service values, trusted PATH,
-// scoped Run Git identity and marker, and fresh writable Pi directory.
-func runEnvironment(root, name, email, runID, piDir, primaryRef string) ([]string, error) {
+// scoped Run Git identity and marker, fresh writable Pi directory, and the
+// role-scoped OpenRouter completion key.
+func runEnvironment(root, name, email, runID, piDir, primaryRef, role string, scope Scope) ([]string, error) {
 	path, err := trustedPath(root)
 	if err != nil {
 		return nil, err
@@ -245,7 +309,8 @@ func runEnvironment(root, name, email, runID, piDir, primaryRef string) ([]strin
 		"FOREST_PRIMARY_REF="+primaryRef,
 		"PI_CODING_AGENT_DIR="+piDir,
 	)
-	return environment, nil
+	environment = append(environment, scopeEnvironment(scope)...)
+	return withOpenRouterCompletionKey(environment, role), nil
 }
 
 func configurePiSessionAffinity(piDir, runID string, declaration Declaration, repo string) error {
@@ -640,7 +705,6 @@ const (
 	cleanupRemoveExecutionTimeout     = 2 * time.Second
 	cleanupFilesystemExecutionTimeout = time.Second
 	cleanupPruneExecutionTimeout      = time.Second
-	runnerPrivateNotesPrefix          = "refs/notes/forest/private/"
 )
 
 func (r *Runner) cleanupWorktree(path, runID string) error {
@@ -657,10 +721,6 @@ func (r *Runner) cleanupFilesystem(path string) error {
 
 func (r *Runner) removeWorktree(ctx context.Context, path, runID string) error {
 	removeCtx, cancelRemove := context.WithTimeout(ctx, cleanupRemoveExecutionTimeout)
-	privateErr := r.cleanupPrivateRefs(removeCtx, runID)
-	if privateErr != nil {
-		privateErr = fmt.Errorf("delete private notes refs: %w", privateErr)
-	}
 	_, removeErr := r.git(removeCtx, r.Root, "worktree", "remove", "--force", path)
 	cancelRemove()
 	if removeErr != nil {
@@ -678,34 +738,7 @@ func (r *Runner) removeWorktree(ctx context.Context, path, runID string) error {
 	if pruneErr != nil {
 		pruneErr = fmt.Errorf("git worktree prune: %w", pruneErr)
 	}
-	return errors.Join(privateErr, removeErr, filesystemErr, pruneErr)
-}
-
-func (r *Runner) cleanupPrivateRefs(ctx context.Context, runID string) error {
-	prefix := runnerPrivateNotesPrefix + runID + "/"
-	output, listErr := r.git(ctx, r.Root, "for-each-ref", "--format=%(refname)", prefix)
-	if listErr != nil {
-		listErr = fmt.Errorf("enumerate: %w", listErr)
-	}
-	var commands strings.Builder
-	var invalidErr error
-	for _, ref := range strings.Fields(string(output)) {
-		if !strings.HasPrefix(ref, prefix) {
-			invalidErr = errors.Join(invalidErr, fmt.Errorf("ref outside run prefix: %s", ref))
-			continue
-		}
-		commands.WriteString("delete ")
-		commands.WriteString(ref)
-		commands.WriteByte('\n')
-	}
-	var deleteErr error
-	if commands.Len() > 0 {
-		_, deleteErr = r.gitInput(ctx, r.Root, strings.NewReader(commands.String()), "update-ref", "--no-deref", "--stdin")
-		if deleteErr != nil {
-			deleteErr = fmt.Errorf("delete: %w", deleteErr)
-		}
-	}
-	return errors.Join(listErr, invalidErr, deleteErr)
+	return errors.Join(removeErr, filesystemErr, pruneErr)
 }
 
 func (r *Runner) removeFilesystem(ctx context.Context, path string) error {
@@ -809,14 +842,23 @@ func soleExitCode(err error, code int) bool {
 	return leaves == 1 && matching == 1
 }
 
-const agentOutcomePatternLimit = 32
+const (
+	agentOutcomePatternLimit = 32
+	providerBudgetExhausted  = "provider budget exhausted"
+)
 
 var (
 	agentEndPattern          = []byte(`"type":"agent_end"`)
 	agentAssistantPattern    = []byte(`"role":"assistant"`)
 	agentErrorPattern        = []byte(`"stopReason":"error"`)
 	agentErrorMessagePattern = []byte(`"errorMessage":"`)
+	agentBudget402Pattern    = []byte(`"errorMessage":"402`)
+	agentBudget403Pattern    = []byte(`"errorMessage":"403`)
 )
+
+func isProviderBudgetError(message string) bool {
+	return message == providerBudgetExhausted
+}
 
 type streamPattern struct {
 	pattern []byte
@@ -861,12 +903,16 @@ type agentOutcomeTracker struct {
 	agentAssistant       streamPattern
 	agentError           streamPattern
 	agentErrorMessage    streamPattern
+	agentBudget402       streamPattern
+	agentBudget403       streamPattern
 	lineActive           bool
 	sawAgentEnd          bool
 	sawAssistant         bool
 	awaitingErrorMessage bool
 	assistantError       bool
+	lineBudget           bool
 	failed               bool
+	budgetFailed         bool
 }
 
 func newAgentOutcomeTracker() *agentOutcomeTracker {
@@ -875,6 +921,8 @@ func newAgentOutcomeTracker() *agentOutcomeTracker {
 	tracker.agentAssistant.init(agentAssistantPattern)
 	tracker.agentError.init(agentErrorPattern)
 	tracker.agentErrorMessage.init(agentErrorMessagePattern)
+	tracker.agentBudget402.init(agentBudget402Pattern)
+	tracker.agentBudget403.init(agentBudget403Pattern)
 	return tracker
 }
 
@@ -898,12 +946,17 @@ func (t *agentOutcomeTracker) Write(data []byte) (int, error) {
 			t.sawAssistant = true
 			t.awaitingErrorMessage = false
 			t.assistantError = false
+			t.lineBudget = false
 		}
 		if t.agentError.advance(value) && t.sawAssistant {
 			t.assistantError = true
 		}
 		if t.agentErrorMessage.advance(value) && t.sawAssistant {
 			t.awaitingErrorMessage = true
+		}
+		if t.sawAssistant && (t.agentBudget402.advance(value) || t.agentBudget403.advance(value)) {
+			t.lineBudget = true
+			t.assistantError = true
 		}
 	}
 	return len(data), nil
@@ -912,21 +965,28 @@ func (t *agentOutcomeTracker) Write(data []byte) (int, error) {
 func (t *agentOutcomeTracker) finishLine() {
 	if t.sawAgentEnd && t.sawAssistant {
 		t.failed = t.assistantError
+		t.budgetFailed = t.lineBudget
 	}
 	t.agentEnd.matched = 0
 	t.agentAssistant.matched = 0
 	t.agentError.matched = 0
 	t.agentErrorMessage.matched = 0
+	t.agentBudget402.matched = 0
+	t.agentBudget403.matched = 0
 	t.lineActive = false
 	t.sawAgentEnd = false
 	t.sawAssistant = false
 	t.awaitingErrorMessage = false
 	t.assistantError = false
+	t.lineBudget = false
 }
 
 func (t *agentOutcomeTracker) Err() error {
 	if t.lineActive {
 		t.finishLine()
+	}
+	if t.budgetFailed {
+		return errors.New(providerBudgetExhausted)
 	}
 	if t.failed {
 		return errors.New("pi agent ended with error")
@@ -968,7 +1028,7 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	name := "Iron Forest " + strings.ToUpper(declaration.Name[:1]) + declaration.Name[1:]
 	email := declaration.Name + "@forest.invalid"
-	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir, primaryRef)
+	command.Env, err = runEnvironment(r.Root, name, email, record.RunID, piDir, primaryRef, declaration.Name, r.Scope)
 	if err != nil {
 		record.Exit = harnessUnavailableExit
 		return err, false
@@ -1038,7 +1098,11 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		readerCloseErr = reader.Close()
 	}
 
-	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, outcome.Err())
+	outcomeErr := outcome.Err()
+	if outcomeErr != nil && isProviderBudgetError(outcomeErr.Error()) {
+		record.Error = providerBudgetExhausted
+	}
+	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, outcomeErr)
 	if err != nil && record.Exit == 0 {
 		record.Exit = 1
 	}

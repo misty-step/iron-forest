@@ -217,20 +217,21 @@ func (p *Poller) listPowderSubjects(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A held job wins over every takeable job. If it has no branch, the Builder
-	// Poll continues it. If it already has a branch, the Revision is published
-	// and its Powder lease must stay with the same POWDER_AGENT until the
-	// Kernel reconciles the landed Subject to terminal; report only the held job
-	// so the Poll does not dispatch a Builder to take different work and release
-	// that lease.
+	subjects := make([]string, 0, len(mine))
+	seen := make(map[string]struct{}, len(mine))
 	for _, id := range mine {
 		if !validSubject(id) {
 			return nil, fmt.Errorf("malformed powder job id %q", id)
 		}
-	}
-	if len(mine) > 0 {
-		sort.Strings(mine)
-		return mine, nil
+		args := []string{"take", id, "--agent", agent}
+		if _, stderr, err := p.runPowderCommand(ctx, args...); err != nil {
+			if payload, ok := decodePowderError(stderr); ok && (payload.Code == "held" || payload.Code == "terminal") {
+				continue
+			}
+			return nil, powderCommandFailure("take", id, stderr, err)
+		}
+		subjects = append(subjects, id)
+		seen[id] = struct{}{}
 	}
 	takeable, err := p.listPowder(ctx, "--takeable", "--repo", p.Repo)
 	if err != nil {
@@ -240,9 +241,12 @@ func (p *Poller) listPowderSubjects(ctx context.Context) ([]string, error) {
 		if !validSubject(id) {
 			return nil, fmt.Errorf("malformed powder job id %q", id)
 		}
+		if _, exists := seen[id]; !exists {
+			subjects = append(subjects, id)
+		}
 	}
-	sort.Strings(takeable)
-	return takeable, nil
+	sort.Strings(subjects)
+	return subjects, nil
 }
 
 func (p *Poller) listPowder(ctx context.Context, args ...string) ([]string, error) {

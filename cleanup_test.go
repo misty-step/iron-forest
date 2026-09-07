@@ -21,7 +21,6 @@ func TestReservedGarbageCollectionRemovesRealResidue(t *testing.T) {
 	runGitDir(t, root, "worktree", "add", "--detach", worktree, "HEAD")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	reservedRefs := []string{
-		"refs/notes/forest/private/" + runID + "/builder/review-request/residue",
 		"refs/notes/forest-poll/snapshot/verdict",
 		"refs/notes/forest-audit/snapshot/checks",
 		"refs/heads/forest-audit/snapshot",
@@ -122,9 +121,9 @@ func TestReservedGarbageCollectionPreservesForeignState(t *testing.T) {
 	runGitDir(t, root, "worktree", "add", "--detach", manualWorktree, "HEAD")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	foreignRefs := []string{
-		reviewRequestNoteRef,
-		checksNoteRef,
-		verdictNoteRef,
+		"refs/notes/forest/review-request",
+		"refs/notes/forest/checks",
+		"refs/notes/forest/verdict",
 		"refs/notes/forest/privateish/keep",
 		"refs/notes/forest-pollish/keep",
 		"refs/notes/forest-auditish/keep",

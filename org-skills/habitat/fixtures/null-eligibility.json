@@ -1,0 +1,26 @@
+{
+  "scenario": "null-eligibility",
+  "command": "habitat get IRON-NULL --json",
+  "exit": 0,
+  "stdout": {
+    "external_id": "IRON-NULL",
+    "revision": 3,
+    "title": "Redacted null-eligibility fixture",
+    "status": "refining",
+    "priority": "p2",
+    "size": "M",
+    "type": "task",
+    "owner": "redacted-agent",
+    "module": "fixture-module",
+    "tags": [],
+    "pr_url": null,
+    "branch": null,
+    "head_sha": null,
+    "blocked_by": []
+  },
+  "stderr": "",
+  "profile": {
+    "repository": "misty-step/iron-forest",
+    "eligibility": null
+  }
+}

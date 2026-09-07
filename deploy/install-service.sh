@@ -10,6 +10,13 @@
 # Update an installed instance through the fenced adoption procedure:
 #   deploy/install-service.sh update <instance>
 #
+# For a sibling managed checkout (target != factory), the exact factory
+# Revision must be passed and must already be adopted in this checkout:
+#   deploy/install-service.sh update <instance> <factory-sha>
+#
+# The sibling form verifies that Revision before stopping the consumer unit;
+# it never mutates the factory checkout.
+#
 # Each instance runs the selected checkout's forest.yaml.
 set -euo pipefail
 
@@ -17,6 +24,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 factory="$(cd "$here/.." && pwd)"
 root="$(dirname "$factory")"
 unit="$HOME/.config/systemd/user/forest@.service"
+flywheel_service="$HOME/.config/systemd/user/forest-eval-flywheel@.service"
+flywheel_timer="$HOME/.config/systemd/user/forest-eval-flywheel@.timer"
 service_path="$HOME/.local/bin:$HOME/bin:$HOME/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin"
 
 # Bounded waits used only by `update`. The drain itself has no wall-clock
@@ -30,6 +39,8 @@ cancelled=false
 tree_was_clean=false
 prev_sha=""
 prev_binary=""
+factory_revision=""
+factory_sha=""
 status_json=""
 audit_since_ns=0
 
@@ -92,10 +103,30 @@ audit_ready() {
 	[ "${last_ns:-0}" -ge "${audit_since_ns:-0}" ]
 }
 
+verify_factory_revision() {
+	revision="$1"
+	[ -n "$revision" ] || die "missing factory revision for sibling update"
+	[ -d "$factory/.git" ] || [ -f "$factory/.git" ] || die "no git checkout at $factory"
+
+	if [ -n "$(git -C "$factory" status --porcelain)" ]; then
+		die "factory working tree is not clean at $factory; refusing sibling update"
+	fi
+	if ! factory_sha="$(git -C "$factory" rev-parse "$revision^{commit}" 2>/dev/null)" || [ -z "$factory_sha" ]; then
+		die "factory revision is absent from $factory: $revision"
+	fi
+	factory_head="$(git -C "$factory" rev-parse HEAD)"
+	if [ "$factory_head" != "$factory_sha" ]; then
+		if git -C "$factory" merge-base --is-ancestor "$factory_head" "$factory_sha" >/dev/null 2>&1; then
+			die "factory checkout is behind the requested revision (HEAD=$factory_head, requested=$factory_sha); the factory owner must adopt it first"
+		fi
+		die "factory checkout is not at the requested revision (HEAD=$factory_head, requested=$factory_sha)"
+	fi
+}
+
 update_instance() {
-	# The update subcommand adopts a merged revision into an instance already
-	# installed by the no-argument or one-argument installer. It never refits the
-	# unit or writes the protected environment file.
+	# The update subcommand adopts a merged revision into an installed instance.
+	# It preserves the protected environment and refreshes only the self-host
+	# evaluation timer because that timer ships with this factory checkout.
 	command -v jq >/dev/null 2>&1 || die "jq is required for update"
 	[ -d "$target/.git" ] || [ -f "$target/.git" ] || die "no git checkout at $target"
 	[ -f "$target/forest.yaml" ] || die "no forest.yaml at $target; a managed repository declares its own factory"
@@ -106,6 +137,13 @@ update_instance() {
 	[ -O "$environment_file" ] || die "service environment file is not owned by the current user: $environment_file"
 	environment_mode="$(stat -c '%a' "$environment_file")"
 	[ "$environment_mode" = 600 ] || die "service environment file must have mode 0600, found $environment_mode: $environment_file"
+
+	# Sibling updates never mutate the factory checkout. The factory revision
+	# is a separate source input and must already be adopted there before the
+	# consumer fence begins.
+	if [ "$target" != "$factory" ]; then
+		verify_factory_revision "$factory_revision"
+	fi
 
 	# Clean-tree precondition (recorded). A dirty tree aborts before the service
 	# is touched, before any fetch, and before any tracked file moves.
@@ -150,9 +188,14 @@ update_instance() {
 	fi
 
 	echo "$(basename "$0"): building Kernel from $factory into $target"
-	stamp="$(git -C "$factory" rev-parse --short HEAD)"
-	sha="$(git -C "$factory" rev-parse HEAD)"
-	commit_time="$(git -C "$factory" show -s --format=%cI HEAD)"
+	if [ "$target" = "$factory" ]; then
+		build_sha="$(git -C "$factory" rev-parse HEAD)"
+	else
+		build_sha="$factory_sha"
+	fi
+	stamp="$(git -C "$factory" rev-parse --short "$build_sha")"
+	sha="$build_sha"
+	commit_time="$(git -C "$factory" show -s --format=%cI "$build_sha")"
 	dirty="false"
 	if [ -n "$(git -C "$factory" status --porcelain)" ]; then
 		dirty="true"
@@ -160,6 +203,15 @@ update_instance() {
 	ldflags="-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty=$dirty"
 	if ! (cd "$factory" && mise exec -- go build -ldflags "$ldflags" -o "$target/forest" .); then
 		die "build failed; rolling back to the prior instance"
+	fi
+
+	echo "$(basename "$0"): verifying installed forest reports build_sha $sha"
+	if ! version_json="$( (cd "$target" && env -u FOREST_DEFAULTS PATH="$service_path" ./forest version --json) 2>&1 )"; then
+		die "forest version --json failed: $version_json"
+	fi
+	installed_sha="$(printf '%s\n' "$version_json" | jq -r '.data.build_sha // empty')"
+	if [ "$installed_sha" != "$sha" ]; then
+		die "installed forest build_sha mismatch (expected $sha, got $installed_sha)"
 	fi
 
 	echo "$(basename "$0"): validating $target with forest selfcheck"
@@ -203,6 +255,16 @@ update_instance() {
 	fi
 
 	update_success=true
+	if [ "$target" = "$factory" ] && [ "$name" = "$(basename "$factory")" ]; then
+		echo "$(basename "$0"): refreshing the self-host evaluation flywheel timer"
+		mkdir -p "$(dirname "$flywheel_service")"
+		sed -e "s|@FOREST_ROOT@|$root|g" \
+			"$target/deploy/forest-eval-flywheel@.service" > "$flywheel_service"
+		cp "$target/deploy/forest-eval-flywheel@.timer" "$flywheel_timer"
+		systemctl --user daemon-reload
+		systemctl --user enable "forest-eval-flywheel@$name.timer" >/dev/null
+		systemctl --user start "forest-eval-flywheel@$name.timer"
+	fi
 	echo "$(basename "$0"): updated forest@$name"
 	echo "  instance: forest@$name -> $target (mode: update; source: $factory at $stamp)"
 	echo "  status:   systemctl --user status 'forest@*'"
@@ -213,9 +275,17 @@ command="${1:-}"
 case "$command" in
 	update)
 		shift
-		[ "$#" -eq 1 ] || die "usage: $(basename "$0") update <instance>"
+		[ "$#" -ge 1 ] || die "usage: $(basename "$0") update <instance>"
 		name="$1"
 		target="$root/$name"
+		shift
+		if [ "$target" = "$factory" ]; then
+			[ "$#" -eq 0 ] || die "usage: $(basename "$0") update <instance>"
+			factory_revision=""
+		else
+			[ "$#" -eq 1 ] || die "usage: $(basename "$0") update <instance> <factory-sha>"
+			factory_revision="$1"
+		fi
 		update_instance
 		exit 0
 		;;
@@ -288,6 +358,11 @@ fi
 mkdir -p "$(dirname "$unit")"
 sed -e "s|@FOREST_ROOT@|$root|g" \
 	"$here/forest@.service" > "$unit"
+if [ "$mode" = self-host ]; then
+	sed -e "s|@FOREST_ROOT@|$root|g" \
+		"$here/forest-eval-flywheel@.service" > "$flywheel_service"
+	cp "$here/forest-eval-flywheel@.timer" "$flywheel_timer"
+fi
 
 # Build the Kernel from the factory source into the selected target. Build
 # metadata is stamped at link time so `forest version` reports the exact
@@ -308,8 +383,15 @@ ldflags="-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty
 
 systemctl --user daemon-reload
 systemctl --user enable "forest@$name" >/dev/null
+if [ "$mode" = self-host ]; then
+	systemctl --user enable "forest-eval-flywheel@$name.timer" >/dev/null
+	systemctl --user start "forest-eval-flywheel@$name.timer"
+fi
 systemctl --user restart "forest@$name"
 echo "$(basename "$0"): installed $unit"
 echo "  instance: forest@$name -> $target (mode: $mode; source: $factory at $stamp)"
+if [ "$mode" = self-host ]; then
+	echo "  evals:    systemctl --user status 'forest-eval-flywheel@*'"
+fi
 echo "  status:   systemctl --user status 'forest@*'"
 echo "  logs:     journalctl --user -u 'forest@*' -f"

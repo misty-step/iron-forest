@@ -1,5 +1,12 @@
 # Onboarding a managed repository
 
+
+> Historical workflow reference. The operator retired backlog-driven Misty Step
+> work on 2026-09-06. Do not configure queue credentials, create jobs, promote
+> readiness labels, or start intake from this document. Work from a current
+> request and report its result and evidence; R90 continues to use Habitat.
+> Preserved commands and examples below describe the retired workflow.
+
 Iron Forest runs one Kernel process per repository. The Kernel uses that
 repository's `forest.yaml`, agent declarations, Git refs, and local Ledger.
 Self-host mode uses the factory source checkout as the managed repository.
@@ -48,7 +55,7 @@ must create Checks and Verdict evidence and, on approve, fast-forward `master`.
 
 | Actor | Command | May create | May update |
 | --- | --- | --- | --- |
-| Builder / Fixer | `forest publish review-request` | `refs/heads/forest/<subject>/*`, `refs/forest/v1/request/<sha>`, `refs/notes/forest/review-request` | nothing else |
+| Builder / Fixer | `forest publish review-request` | `refs/heads/forest/<subject>/*`, `refs/forest/v1/request/<sha>` | nothing else |
 | Verifier | `forest publish verdict` | `refs/forest/v1/checks/<sha>`, `refs/forest/v1/verdict/<sha>` | `refs/heads/master` on approve only, fast-forward |
 | Operator | forge ruleset | — | restrict who may update `master` |
 
@@ -59,7 +66,7 @@ not forge logins. The forge account is the host credential that performs the
 push.
 
 GitHub branch protection matches `refs/heads/*` only. It cannot allow or deny
-`refs/forest/v1/*` or `refs/notes/forest/*`. Create-only evidence refs are
+`refs/forest/v1/*`. Create-only evidence refs are
 enforced by the Kernel (`--force-with-lease` against an empty expected OID),
 not by the forge.
 
@@ -129,8 +136,8 @@ in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.
 
-To consume Powder jobs, put these in the instance environment file. Use one
-`POWDER_AGENT` per Kernel. Do not share it across repositories.
+To consume Powder jobs, configure the origin and API key in the instance
+environment file. `POWDER_AGENT` is optional audit metadata.
 
 ```dotenv
 POWDER_URL=<origin>
@@ -138,12 +145,22 @@ POWDER_API_KEY=<key>
 POWDER_AGENT=forest-<repo-slug>
 ```
 
+`POWDER_AGENT` is optional audit metadata. Managed workers use the canonical
+repository label; the label does not authorize a lease and does not need to be
+unique per Kernel. `POWDER_API_KEY` authenticates the HTTP transport. It may be
+an approved shared organization credential; this contract does not require one
+Powder API key per Kernel. Copy approved values into the protected instance
+environment without printing them. A deployment that explicitly requires
+per-instance API keys must own their issuance and rotation path.
+
 The job must have a nonempty spec and `repo` equal to `forest.yaml` `repo`.
 Builder takes it and publishes `forest/<id>/<slug>` with review-request v2.
-Fixer re-takes that same Subject before repair when necessary. After approve,
-the Kernel completes the current Git-landed Subject with the approved Revision
-as proof and retries at later Poll/approve boundaries. Unset `POWDER_AGENT`
-keeps GitHub-only selection.
+Fixer calls `take` for that same Subject before repair; only its locally stored
+per-job claim can resume a live lease. After approve, the Kernel uses that claim
+to complete the current Git-landed Subject with the approved Revision as proof
+and retries at later Poll/approve boundaries. Unset `POWDER_AGENT` keeps new
+selection GitHub-only; a configured Powder origin still reconciles the current
+Powder-backed Gate by its stored claim.
 
 ## 3. Add declarations
 
@@ -164,18 +181,22 @@ agents/
   fixer/
     agent.md
     task.md
+  critic/
+    agent.md
+    task.md
+    skills/
+  tester/
+    agent.md
+    task.md
+    skills/
 ```
 
-Critic and Tester are EXPERIMENTAL and local-canary-only. They are enabled
-only in the self-host Iron Forest checkout for canary observation. Do not copy
-`agents/critic/` or `agents/tester/` into a managed deployment, and do not
-enable their agents in a second-party `forest.yaml`. Their rollout exit gate
-closes only when the blocking repair jobs are merged
-(`if-investigator-provenance-contract`, `if-eval-powder-mutations`,
-`if-tester-eval-observable-surface`, `if-eval-draft-note-binding`, and
-`if-investigator-powder-availability`), the corrected deterministic evals
-pass, and one post-fix live sweep per role produces attributable spec-less
-drafts.
+Critic and Tester are default-profile, non-review, drafts-only roles. They
+produce attributed spec-less Powder drafts, never edit code, never publish to
+Git, never promote backlog jobs, and never add Kernel Effects. Builder,
+Verifier, and Fixer remain the review and Gate roster. A second-party profile
+may add or omit Critic and Tester like any other declaration; their Polls skip
+cleanly when Powder is not configured.
 
 `agent.md` starts with YAML frontmatter containing optional `model`, `tools`,
 and `thinking`, then the system prompt. `task.md` is the standing user prompt.
@@ -238,12 +259,13 @@ stops that instance and removes only timestamped legacy `.forest/profiles`
 entries, which may contain credentials copied by an older Kernel. It then runs
 selfcheck with the service's trusted `PATH` and without `FOREST_DEFAULTS`.
 The installed unit reads operator-supplied credentials from
-`%h/.config/iron-forest/%i.env`; protect it as mode `0600`. The current Runner
-accepts `OPENROUTER_API_KEY` as one completion key for the Forest instance.
+`%h/.config/iron-forest/%i.env`; protect it as mode `0600`. The Runner selects
+the OpenRouter completion key for each Run: `OPENROUTER_API_KEY_<ROLE>` wins
+for a role, and the instance-wide `OPENROUTER_API_KEY` is the fallback.
 Never put a management, personal interactive, or evaluation key there. The
 intended production layout uses one completion key per agent role for
 OpenRouter and Langfuse analytics. This is an attribution control, not an
-isolation boundary. The current Runner does not select role-specific keys. Use
+isolation boundary. Use
 a systemd drop-in only when one instance needs a different defaults file. The
 installer stops on any selfcheck error. The Auditor needs a completed agent
 dispatch before it can validate remote Git evidence.
@@ -271,10 +293,10 @@ Run clears only its Run error. A successful Audit clears only its Audit error.
 The Auditor runs after a completed dispatch, not at startup or after an idle
 Poll skip.
 
-Verifier and Fixer Poll enumeration is bounded at 500 entries per canonical
-notes tree. A larger tree or a note-enumeration transport-output overflow is a
+Verifier and Fixer Poll enumeration is bounded at 500 entries per evidence
+snapshot. A larger snapshot or an enumeration transport-output overflow is a
 healthy exit-1 skip with an explicit log line. It does not mark the trigger
-unhealthy; the Auditor reports durable note growth as a bounded policy
+unhealthy; the Auditor reports durable evidence growth as a bounded policy
 violation.
 
 Poll once and conditionally dispatch one declaration:
@@ -293,42 +315,35 @@ Poll exits 0. A healthy Poll skip exits 1 without an agent Run.
 After an Issue receives `forest:ready`, or a takeable Powder job exists for this
 repository, the Builder selects it and creates `forest/<subject>/<slug>`.
 It writes a review-request payload and calls
-`forest publish review-request`, which publishes the branch and note with one
-normal atomic push. A canonical note race permits at most three total atomic
-attempts; a branch race stops. The Builder may open a pull request as a human
-Projection.
+`forest publish review-request`, which publishes the branch and request
+evidence ref with one atomic push. A branch race stops. The Builder may open a
+pull request as a human Projection.
 
 The Verifier selects that branch and runs every configured Check. For `changes`,
-it publishes Checks and Verdict together. A canonical note race permits at most
-three total atomic attempts. For `approve`, the Verifier makes exactly one
-non-retryable atomic attempt carrying Checks, Verdict, and the exact reviewed
-Revision's fast-forward `master` update. The Gate also requires the existing
-valid Builder-or-Fixer review-request for that Revision; the approve push does
-not republish it. No standalone master push is valid. If the Verdict is
-`changes`, the Fixer owns the branch, creates a new Revision, and publishes a
-fresh review request atomically. That note is the reject handoff back to the
-Verifier.
+it publishes Checks and Verdict evidence together in one atomic push. For
+`approve`, the Verifier makes exactly one non-retryable atomic attempt carrying
+Checks, Verdict, and the exact reviewed Revision's fast-forward `master`
+update. The Gate also requires the existing valid Builder-or-Fixer
+review-request for that Revision; the approve push does not republish it. No
+standalone master push is valid. If the Verdict is `changes`, the Fixer owns
+the branch, creates a new Revision, and publishes a fresh review request
+atomically. That request evidence is the reject handoff back to the Verifier.
 
-From the managed checkout, use status and Git notes as the evidence surface:
+From the managed checkout, use status and evidence refs as the evidence surface:
 
 ```sh
 ./forest status
 git log --oneline --decorate --all
-git fetch origin \
-  refs/notes/forest/review-request:refs/notes/forest/review-request \
-  refs/notes/forest/checks:refs/notes/forest/checks \
-  refs/notes/forest/verdict:refs/notes/forest/verdict
-git notes --ref=refs/notes/forest/review-request show <revision>
-git notes --ref=refs/notes/forest/checks show <revision>
-git notes --ref=refs/notes/forest/verdict show <revision>
+git fetch origin refs/forest/v1/request/<sha>
+git show FETCH_HEAD:request.json
 ```
 
 Pull requests and other forge artifacts are Projections. Git branches, commits,
-and notes remain authoritative. The first observed remote `master` tip becomes
+and evidence refs remain authoritative. The first observed remote `master` tip becomes
 a trusted baseline and is not Gate-checked. In each bounded stable snapshot,
 Auditor ancestry and Gate checks target only the final observed remote
 `master` tip. Schema and actor checks cover each snapshotted
-`refs/notes/forest/*` entry within a 500-entry-per-ref capacity bound. Remote
+`refs/forest/v1/*` evidence ref. Remote
 history cannot reveal a tip that advanced again between audits; such
 intermediate tips are not independently Gate-checked. The Auditor checks
 observable final Git state only. It cannot prove check execution, atomic push
@@ -344,5 +359,7 @@ startup and idle Poll skips do not audit. Keep `checks:` and
 `.github/workflows/ci.yml` aligned.
 
 Each `.forest/runs.jsonl` Ledger row records `run_id`, `agent`, `started`,
-`duration`, `exit`, `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
-`reasoning`. It never records or computes money.
+`duration`, `exit`, and exactly five retained token classes — `tokens_in`,
+`tokens_out`, `cache_read`, `cache_write`, and `reasoning` — as operational
+observability, not accounting. The Ledger never records a cost, price, spend,
+or currency field and never computes money.

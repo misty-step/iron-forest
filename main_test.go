@@ -297,6 +297,9 @@ audit violation: policy-8
 audit violation: policy-9
 recent runs (oldest first, at most 10):
   exit=0 duration=1.250s agent=builder run=status-run
+ledger: runs=1 pass_rate=1.000
+  builder runs=1 pass_rate=1.000 duration_p50=1.250s duration_p95=1.250s tokens_in=0 tokens_out=0 cache_read=0 cache_write=0 reasoning=0
+recent failures: none
 `
 	if stdout != want {
 		t.Fatalf("status stdout:\n%s\nwant:\n%s", stdout, want)
@@ -326,8 +329,14 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
+	// Only the recent-runs section counts: the newer recent-failures section also
+	// names runs, but it is a separate roll-up with a different order.
+	recentSection := stdout
+	if index := strings.Index(recentSection, "ledger:"); index >= 0 {
+		recentSection = recentSection[:index]
+	}
 	var runLines []string
-	for _, line := range strings.Split(stdout, "\n") {
+	for _, line := range strings.Split(recentSection, "\n") {
 		if strings.Contains(line, " run=status-run-") {
 			runLines = append(runLines, line)
 		}

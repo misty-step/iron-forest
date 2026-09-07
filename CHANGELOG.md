@@ -1,3 +1,79 @@
+## [0.0.13](https://github.com/misty-step/iron-forest/compare/v0.0.12...v0.0.13) (2026-09-04)
+
+
+### Bug Fixes
+
+* **cancel:** remove cancellation marker on failed stop ([4ebab98](https://github.com/misty-step/iron-forest/commit/4ebab9850705207c295e465242e5bb674a51b27b))
+
+## [0.0.12](https://github.com/misty-step/iron-forest/compare/v0.0.11...v0.0.12) (2026-09-04)
+
+
+### Bug Fixes
+
+* **config:** reject colliding agent slugs ([827e08e](https://github.com/misty-step/iron-forest/commit/827e08ea62be1b43f7e1bbc533eccc2a2a9779eb))
+
+## [0.0.11](https://github.com/misty-step/iron-forest/compare/v0.0.10...v0.0.11) (2026-09-04)
+
+
+### Bug Fixes
+
+* **evals:** preserve committed Powder claims ([897241e](https://github.com/misty-step/iron-forest/commit/897241ec439772c8ccf9ee973824c34cf511d318))
+
+## [0.0.10](https://github.com/misty-step/iron-forest/compare/v0.0.9...v0.0.10) (2026-09-04)
+
+
+### Bug Fixes
+
+* **evals:** preserve Powder jobs atomically ([747064c](https://github.com/misty-step/iron-forest/commit/747064cf0b1f6ce7afe4abea7b0f2341f69d989f))
+
+## [0.0.9](https://github.com/misty-step/iron-forest/compare/v0.0.8...v0.0.9) (2026-09-04)
+
+
+### Bug Fixes
+
+* **evals:** persist Powder claims atomically ([1f3c41b](https://github.com/misty-step/iron-forest/commit/1f3c41b6c98c30cdd9f12033ab58b093a6fa84e0))
+
+## [0.0.8](https://github.com/misty-step/iron-forest/compare/v0.0.7...v0.0.8) (2026-09-04)
+
+
+### Bug Fixes
+
+* **doctor:** accept role-scoped OpenRouter keys without instance fallback ([80e3111](https://github.com/misty-step/iron-forest/commit/80e31112019855b2304d7be09d24214d2ed572f6))
+* **evals:** harden Powder claim state ([29b8e97](https://github.com/misty-step/iron-forest/commit/29b8e970bdaa61b184b7c5e1a6d23025fcc5baf5))
+
+## [0.0.7](https://github.com/misty-step/iron-forest/compare/v0.0.6...v0.0.7) (2026-09-04)
+
+
+### Bug Fixes
+
+* **runner:** strip sibling role-scoped OpenRouter keys from child environment ([9c3d2b6](https://github.com/misty-step/iron-forest/commit/9c3d2b6df9adda04ab0dfd86c960e7e1e7f7bdee))
+
+## [0.0.6](https://github.com/misty-step/iron-forest/compare/v0.0.5...v0.0.6) (2026-09-04)
+
+
+### Bug Fixes
+
+* **powder:** enforce per-job claims in factory ([640cd13](https://github.com/misty-step/iron-forest/commit/640cd1319fe26535cc3e92299f2fb40374fdedc6))
+
+## [0.0.5](https://github.com/misty-step/iron-forest/compare/v0.0.4...v0.0.5) (2026-09-04)
+
+
+### Bug Fixes
+
+* **builder:** gate held and takeable Powder selection on GitHub-only scope ([2f0e610](https://github.com/misty-step/iron-forest/commit/2f0e610229a0d4b2fe7ff0684ffd52329eef13ed))
+* doctor redacts powder failure; status recent is [] ([55f214e](https://github.com/misty-step/iron-forest/commit/55f214ed3fea88c5e7cb448343533fd4e1dd5f53))
+* **evals:** allow model/thinking promotion quality wins ([0400e37](https://github.com/misty-step/iron-forest/commit/0400e370d473552c0373e123168cfedea173fd35))
+* **evals:** bind experiment fingerprints to tier ([c36aa91](https://github.com/misty-step/iron-forest/commit/c36aa91e399ba84dfbe9287b67ad9a4839362bf8))
+* **evals:** bind production source digest and correct workflow docs ([6854920](https://github.com/misty-step/iron-forest/commit/6854920618fd706539fbea0b8ebbb46f7011a997))
+* **evals:** gate experiment reports on planned case coverage ([5cfd77f](https://github.com/misty-step/iron-forest/commit/5cfd77f39d0bda74b69195cbd513575816a284a2))
+* **evals:** gate monthly model eval to first Monday ([aa2160b](https://github.com/misty-step/iron-forest/commit/aa2160bdde8d93ff4c84f6d0e23b5c0e03b260eb))
+* **evals:** restrict live-model workflow to schedule and manual dispatch ([8de942b](https://github.com/misty-step/iron-forest/commit/8de942b3283023ea2a999c88784519b983306650))
+* export explicit GitHub-only label scope signal ([97fa2f7](https://github.com/misty-step/iron-forest/commit/97fa2f73dcb7497642cdc7e6f7096c93fa8cc2cb))
+* **powder:** adopt per-job claim protocol ([61ea233](https://github.com/misty-step/iron-forest/commit/61ea233bc65049ff4541c0afd7780672e22a00b2))
+* **publish:** keep remote policy rejection distinct from branch race ([5111fcf](https://github.com/misty-step/iron-forest/commit/5111fcfc54c15a4f5ccdd9caccfc7f1911882632))
+* **runner:** fail closed on OpenRouter 402 until trigger reset ([6470eb4](https://github.com/misty-step/iron-forest/commit/6470eb420ab53138d0df3c47dbce4ce33daa237d))
+* **runner:** persist exact provider-budget classification and verify CLI reset ([af4b022](https://github.com/misty-step/iron-forest/commit/af4b02215fb0f7b9091a5eeb3a711b33af2011ae))
+
 ## [0.0.4](https://github.com/misty-step/iron-forest/compare/v0.0.3...v0.0.4) (2026-09-01)
 
 
@@ -90,6 +166,11 @@
 
 # Changelog
 
+- 2026-09-02: Critic and Tester are promoted into the default profile as
+  non-review, drafts-only roles. Promotion evidence:
+  `evals/jobs/fast/fast-20260901T224519Z/report.md` is 22/22, and settled
+  Runs `1788301018846047029-critic` and `1788301018844450077-tester` each
+  produced one attributed spec-less draft.
 - 2026-08-22: Critic and Tester are EXPERIMENTAL and local-canary-only.
   They stay enabled only in the self-host Iron Forest checkout for canary
   observation; external operators must not copy or enable them until the

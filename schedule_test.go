@@ -383,6 +383,115 @@ func TestSchedulerOnceRunsBeforeReturn(t *testing.T) {
 	}
 }
 
+func TestSchedulerSkipsPollAfterProviderBudget(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "poll")
+	writeTestDeclaration(t, root, "builder")
+	cfg, err := loadConfig(configPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewScheduler(root, cfg, nil)
+	var polls atomic.Int32
+	scheduler.Poll = func(context.Context, string) PollResult {
+		polls.Add(1)
+		return PollResult{Code: 0}
+	}
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
+		return RunRecord{Started: "now", Exit: 1, Error: providerBudgetExhausted}, errors.New("agent builder " + providerBudgetExhausted)
+	}
+	dispatched, err := scheduler.Once(context.Background(), "builder")
+	if err == nil || !dispatched || !strings.Contains(err.Error(), providerBudgetExhausted) {
+		t.Fatalf("budget once dispatched=%v err=%v", dispatched, err)
+	}
+	if polls.Load() != 1 {
+		t.Fatalf("budget once polls=%d, want 1", polls.Load())
+	}
+	health := schedulerHealth(scheduler, "builder")
+	if health.RunError != providerBudgetExhausted {
+		t.Fatalf("budget run_error=%q, want %q", health.RunError, providerBudgetExhausted)
+	}
+
+	dispatched, err = scheduler.Tick(context.Background(), "builder")
+	if err != nil || dispatched {
+		t.Fatalf("closed tick dispatched=%v err=%v", dispatched, err)
+	}
+	if polls.Load() != 1 {
+		t.Fatalf("closed tick polls=%d, want 1", polls.Load())
+	}
+
+	restarted := NewScheduler(root, cfg, nil)
+	restarted.Poll = func(context.Context, string) PollResult {
+		polls.Add(1)
+		return PollResult{Code: 0}
+	}
+	restarted.Run = func(context.Context, Declaration) (RunRecord, error) {
+		t.Fatal("dispatch after persisted budget error")
+		return RunRecord{}, nil
+	}
+	dispatched, err = restarted.Tick(context.Background(), "builder")
+	if err != nil || dispatched {
+		t.Fatalf("persisted closed tick dispatched=%v err=%v", dispatched, err)
+	}
+	if polls.Load() != 1 {
+		t.Fatalf("persisted closed tick polls=%d, want 1", polls.Load())
+	}
+
+	code, _, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"trigger", "reset", "builder", "--root", root})
+	})
+	if code != exitOK {
+		t.Fatalf("trigger reset code=%d stderr=%q", code, stderr)
+	}
+	reset := NewScheduler(root, cfg, nil)
+	reset.Poll = func(context.Context, string) PollResult {
+		polls.Add(1)
+		return PollResult{Code: 0}
+	}
+	var ran bool
+	reset.Run = func(context.Context, Declaration) (RunRecord, error) {
+		ran = true
+		return RunRecord{Started: "later"}, nil
+	}
+	dispatched, err = reset.Once(context.Background(), "builder")
+	if err != nil || !dispatched || !ran || polls.Load() != 2 {
+		t.Fatalf("reset once dispatched=%v ran=%v polls=%d err=%v", dispatched, ran, polls.Load(), err)
+	}
+}
+
+func TestSchedulerStillPollsAfterGenericRunError(t *testing.T) {
+	root := t.TempDir()
+	writeTestDeclaration(t, root, "builder")
+	cfg := Config{Repo: "owner/name", Agents: map[string]AgentConfig{"builder": {Poll: "poll", Interval: 1}}, Checks: []Check{{Name: "test", Run: "true"}}}
+	scheduler := NewScheduler(root, cfg, nil)
+	var polls atomic.Int32
+	scheduler.Poll = func(context.Context, string) PollResult {
+		polls.Add(1)
+		return PollResult{Code: 0}
+	}
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
+		return RunRecord{Started: "now", Exit: 1}, errors.New("pi agent ended with error")
+	}
+	dispatched, err := scheduler.Once(context.Background(), "builder")
+	if err == nil || !dispatched {
+		t.Fatalf("generic once dispatched=%v err=%v", dispatched, err)
+	}
+	health := schedulerHealth(scheduler, "builder")
+	if health.RunError != "pi agent ended with error" {
+		t.Fatalf("generic run_error=%q", health.RunError)
+	}
+	if isProviderBudgetError(health.RunError) {
+		t.Fatalf("generic run_error classified as budget")
+	}
+	scheduler.Run = func(context.Context, Declaration) (RunRecord, error) {
+		return RunRecord{Started: "later"}, nil
+	}
+	dispatched, err = scheduler.Once(context.Background(), "builder")
+	if err != nil || !dispatched || polls.Load() != 2 {
+		t.Fatalf("generic recovery dispatched=%v polls=%d err=%v", dispatched, polls.Load(), err)
+	}
+}
+
 func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 	root, origin := testClone(t)
 	writeTestDeclaration(t, root, "builder")

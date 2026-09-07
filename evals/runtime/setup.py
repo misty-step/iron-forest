@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +19,7 @@ from hidden import CANDIDATE_MODEL, POWDER_JOBS, RACE, ROLE, SCENARIO, STATE, en
 
 GIT = "/usr/bin/git"
 TIME = "2026-08-14T00:00:00Z"
+POWDER_JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, input: str | None = None) -> str:
@@ -117,20 +121,44 @@ def prepare_object(workspace: Path, oid: str) -> None:
     git(workspace, "push", "origin", f":{temporary}")
 
 
-def configure_model(agent_file: Path, model: str) -> None:
+def configure_declaration(
+    agent_file: Path,
+    *,
+    model: str | None,
+    thinking: str | None,
+    tools: str | None,
+    prompt_append: str | None,
+) -> None:
+    replacements = {
+        "model": model,
+        "thinking": thinking,
+        "tools": tools,
+    }
     lines = agent_file.read_text().splitlines()
+    found: set[str] = set()
     for index, line in enumerate(lines):
-        if line.startswith("model:"):
-            lines[index] = f"model: {model}"
-            agent_file.write_text("\n".join(lines) + "\n")
-            return
-    raise RuntimeError(f"declaration has no model field: {agent_file}")
+        name, separator, _ = line.partition(":")
+        if separator and name in replacements and replacements[name] is not None:
+            lines[index] = f"{name}: {replacements[name]}"
+            found.add(name)
+    missing = {name for name, value in replacements.items() if value is not None and name not in found}
+    if missing:
+        raise RuntimeError(f"declaration has no fields: {', '.join(sorted(missing))}")
+    text = "\n".join(lines) + "\n"
+    if prompt_append:
+        text += prompt_append
+        if not text.endswith("\n"):
+            text += "\n"
+    agent_file.write_text(text)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", type=Path)
     parser.add_argument("--model")
+    parser.add_argument("--thinking")
+    parser.add_argument("--tools")
+    parser.add_argument("--prompt-append")
     args = parser.parse_args()
     scenario = json.loads(args.scenario.read_text())
 
@@ -141,11 +169,29 @@ def main() -> None:
     shutil.rmtree(origin, ignore_errors=True)
     for stale in ("state.json", "race.json", "race-triggered", "forest-exit", "candidate-model", "reference-run", "scenario.json", "role", "pr-created.json", "issue-created.json", "powder-jobs.json", "powder-ops.jsonl"):
         (hidden / stale).unlink(missing_ok=True)
+    shutil.rmtree(hidden / "claim-state", ignore_errors=True)
     SCENARIO.write_text(json.dumps(scenario, indent=2, sort_keys=True) + "\n")
     powder_jobs = scenario.get("powder_jobs", [])
     for job in powder_jobs:
+        job_id = job.get("id")
+        if not isinstance(job_id, str) or POWDER_JOB_ID.fullmatch(job_id) is None:
+            raise ValueError(f"Powder job id {job_id!r} is not a slug")
         job.setdefault("repo", "local/eval")
         job.setdefault("lease", None)
+        local_claim = job.pop("_local_claim", False)
+        if local_claim:
+            if job["lease"] is None:
+                raise ValueError(f"Powder job {job['id']!r} cannot seed a claim without a live lease")
+            claim = secrets.token_urlsafe(32)
+            job["_claim_hash"] = hashlib.sha256(claim.encode()).hexdigest()
+            claims_root = (hidden / "claim-state" / "powder" / "claims" / "eval-origin").resolve()
+            claim_file = claims_root / job_id
+            if claim_file.parent != claims_root:
+                raise ValueError(f"Powder claim path escapes its state root: {job_id!r}")
+            claim_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(claim_file.parent, 0o700)
+            claim_file.write_text(claim)
+            os.chmod(claim_file, 0o600)
     if powder_jobs:
         POWDER_JOBS.write_text(json.dumps(powder_jobs, indent=2, sort_keys=True) + "\n")
     run(GIT, "init", "--bare", "--initial-branch=master", str(origin))
@@ -154,8 +200,14 @@ def main() -> None:
     identity(workspace, "builder")
 
     shutil.copytree("/opt/iron-forest/agents", workspace / "agents")
-    if args.model:
-        configure_model(workspace / "agents" / scenario["role"] / "agent.md", args.model)
+    if args.model or args.thinking or args.tools or args.prompt_append:
+        configure_declaration(
+            workspace / "agents" / scenario["role"] / "agent.md",
+            model=args.model,
+            thinking=args.thinking,
+            tools=args.tools,
+            prompt_append=args.prompt_append,
+        )
     declaration_model = next(
         line.split(":", 1)[1].strip()
         for line in (workspace / "agents" / scenario["role"] / "agent.md").read_text().splitlines()

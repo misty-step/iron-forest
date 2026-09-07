@@ -386,6 +386,130 @@ func TestCLIRejectsEmptyFlagValues(t *testing.T) {
 	}
 }
 
+// A value-taking flag must not consume a following flag token as its value, and
+// the refusal belongs in the --json envelope when the caller asked for it.
+func TestCLIValueFlagsRejectFollowingFlag(t *testing.T) {
+	cases := [][]string{
+		{"status", "--root", "--json"},
+		{"config", "show", "-C", "--json"},
+		{"run", "list", "--after", "--json"},
+		{"run", "list", "--limit", "--json"},
+		{"publish", "review-request", "builder", "branch", "payload", "--rejected", "--json"},
+		{"run", "list", "--agent", "--json"},
+		{"run", "list", "--exit", "--json"},
+		{"run", "list", "--since", "--json"},
+	}
+	for _, args := range cases {
+		code, envelope, _ := decodeEnvelope(t, args...)
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d", args, code, exitInvalidArg)
+		}
+		if envelope.Error == nil || !strings.Contains(*envelope.Error, " requires a value") {
+			t.Fatalf("%v error=%v, want a missing-value refusal", args, envelope.Error)
+		}
+	}
+}
+
+// A value-taking flag with no following argument is a missing value, never an
+// empty value or a late command failure.
+func TestCLIValueFlagsRejectAtEndOfArgs(t *testing.T) {
+	cases := [][]string{
+		{"status", "--root"},
+		{"config", "show", "-C"},
+		{"run", "list", "--after"},
+		{"run", "list", "--limit"},
+		{"publish", "review-request", "builder", "branch", "payload", "--rejected"},
+		{"run", "list", "--agent"},
+		{"run", "list", "--exit"},
+		{"run", "list", "--since"},
+	}
+	for _, args := range cases {
+		code, _, stderr := captureCLIOutput(t, func() int { return runSurfaceCommand(args) })
+		if code != exitInvalidArg {
+			t.Fatalf("%v code=%d, want %d (stderr=%q)", args, code, exitInvalidArg, stderr)
+		}
+		if !strings.Contains(stderr, " requires a value") {
+			t.Fatalf("%v stderr=%q, want a missing-value refusal", args, stderr)
+		}
+	}
+}
+
+// -C is the one parsing alias for --root, so it must resolve the same checkout
+// rather than being a separate spelling with its own behavior.
+func TestCLIRootShorthandMatchesLongForm(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+
+	commands := [][]string{
+		{"status"},
+		{"config", "show"},
+	}
+	for _, mode := range []struct {
+		name  string
+		flags []string
+	}{
+		{name: "human"},
+		{name: "json", flags: []string{"--json"}},
+	} {
+		for _, command := range commands {
+			name := strings.Join(command, " ") + " " + mode.name
+			t.Run(name, func(t *testing.T) {
+				base := append(append([]string{}, command...), mode.flags...)
+				longArgs := append(append([]string{}, base...), "--root", root)
+				shortArgs := append(append([]string{}, base...), "-C", root)
+				longCode, longOut, longErr := captureCLIOutput(t, func() int { return runSurfaceCommand(longArgs) })
+				shortCode, shortOut, shortErr := captureCLIOutput(t, func() int { return runSurfaceCommand(shortArgs) })
+				if longCode != exitOK || shortCode != exitOK {
+					t.Fatalf("--root code=%d, -C code=%d (--root stderr=%q, -C stderr=%q)",
+						longCode, shortCode, longErr, shortErr)
+				}
+				if longOut != shortOut {
+					t.Fatalf("-C output differs from --root:\n--root=%q\n-C=%q", longOut, shortOut)
+				}
+				if longErr != shortErr {
+					t.Fatalf("-C stderr differs from --root: --root=%q, -C=%q", longErr, shortErr)
+				}
+			})
+		}
+	}
+}
+
+// -C must fail the same value grammar as --root: an empty value is a missing
+// value, and under --json the refusal still arrives as one envelope.
+func TestCLIRootShorthandRejectsMissingOrEmptyValue(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		json bool
+	}{
+		{name: "empty value text", args: []string{"status", "-C", ""}},
+		{name: "empty value json", args: []string{"status", "-C", "", "--json"}, json: true},
+		{name: "missing value text", args: []string{"config", "show", "-C"}},
+		{name: "missing value json", args: []string{"config", "show", "-C", "--json"}, json: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := captureCLIOutput(t, func() int { return runSurfaceCommand(tc.args) })
+			if code != exitInvalidArg {
+				t.Fatalf("code=%d, want %d", code, exitInvalidArg)
+			}
+			if tc.json {
+				var envelope cliEnvelope
+				if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+					t.Fatalf("no envelope: %v (stdout=%q)", err, stdout)
+				}
+				if envelope.Error == nil || !strings.Contains(*envelope.Error, "-C requires a value") {
+					t.Fatalf("error=%v, want -C requires a value", envelope.Error)
+				}
+				return
+			}
+			if !strings.Contains(stderr, "-C requires a value") {
+				t.Fatalf("stderr=%q, want -C requires a value", stderr)
+			}
+		})
+	}
+}
+
 // selfcheck publishes the paths it resolved, not a constant list of names.
 func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
 	t.Setenv("FOREST_DEFAULTS", "")

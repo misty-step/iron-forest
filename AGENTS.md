@@ -4,12 +4,12 @@ Headless software factory. One `forest` Kernel serves this repository;
 agents build, review, and merge tracked work. `VISION.md` is the product
 lock; `README.md` is the operator manual; accepted ADRs are contracts.
 
-## Tracker
+## Work selection
 
-Powder is this repository's tracker of record (jobs `if-*`, repo
-`misty-step/iron-forest`). GitHub Issues remain supported by the product
-but are not used here. File work with
-`docs/templates/powder-job-spec.md`.
+Work from the operator's current request. Check current code and overlapping
+work before starting; state ownership and report the result with verification
+evidence. Historical tickets are context, not authorization or a required
+queue. Do not maintain a replacement backlog.
 
 ## Findings
 
@@ -19,11 +19,19 @@ titles, timestamps, and recollection are leads, not findings.
 
 ## Operations
 
-- Adopt merged revisions through the fence procedure: clean-tree check ->
-  stop service (stops new dispatches and drains live Runs) -> confirm
-  inactive -> pull -> rebuild -> selfcheck -> start -> verify active ->
-  observe an audit pass. Never restart-only: the unit runs the
-  checkout-local binary.
+- Adopt merged revisions with the fenced update procedure. For the self-host
+  factory checkout run `deploy/install-service.sh update <instance>`. For a
+  sibling managed checkout, the factory owner first adopts the exact factory
+  Revision in this checkout, then the sibling owner runs
+  `deploy/install-service.sh update <instance> <factory-sha>`. The script
+  verifies the factory checkout is clean and exactly at that Revision before
+  it stops the consumer unit, and it never mutates the factory checkout. It
+  checks a clean tree, stops the service (stops new dispatches and drains live
+  Runs), confirms the instance is inactive, fast-forwards the checkout to the
+  remote primary, rebuilds, runs `./forest selfcheck`, verifies the installed
+  binary reports the built `build_sha`, forces a fresh audit with
+  `./forest audit show --rescan`, restarts the service, and verifies it is
+  active. Never restart-only: the unit runs the checkout-local binary.
 - One Kernel checkout per repository (ADR 0015). Do not start a second.
 - The Iron Forest manager for this checkout owns only repo
   `misty-step/iron-forest`, root

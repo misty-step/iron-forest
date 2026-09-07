@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule Iron Forest evaluation flywheel for %i
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+Unit=forest-eval-flywheel@%i.service
+
+[Install]
+WantedBy=timers.target

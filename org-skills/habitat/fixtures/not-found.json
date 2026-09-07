@@ -1,0 +1,8 @@
+{
+  "scenario": "not-found",
+  "command": "habitat get IRON-999 --json",
+  "exit": 1,
+  "stdout": "",
+  "stderr": "Error: Work item 'IRON-999' not found.\n",
+  "profile": null
+}

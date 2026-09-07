@@ -13,10 +13,11 @@ import langfuse_export as exporter  # noqa: E402
 
 
 class FakeRunItem:
-    def __init__(self, dataset_item_id: str, trace_id: str | None, dataset_run_id: str):
+    def __init__(self, dataset_item_id: str, trace_id: str | None, dataset_run_id: str, metadata: dict):
         self.dataset_item_id = dataset_item_id
         self.trace_id = trace_id
         self.dataset_run_id = dataset_run_id
+        self.metadata = metadata
 
 
 class FakeRun:
@@ -55,7 +56,7 @@ class FakeLangfuseClient(exporter.LangfuseClient):
         if run is None:
             run = FakeRun(f"run-{run_name}", run_name)
             self.runs[run_name] = run
-        item = FakeRunItem(dataset_item_id, trace_id, run.id)
+        item = FakeRunItem(dataset_item_id, trace_id, run.id, metadata)
         run.dataset_run_items.append(item)
         self.created_run_items.append(item)
         return item
@@ -188,6 +189,75 @@ class LangfuseExportTest(unittest.TestCase):
             self.assertEqual(first_run_item.dataset_item_id, "builder-ready")
             self.assertEqual(first_run_item.trace_id, "trace-openrouter-1")
             self.assertIn("deterministic", client.scores["model-job-0-builder-ready-deterministic"]["name"])
+
+    def test_provider_failure_without_forest_trace_is_still_cataloged(self):
+        with tempfile.TemporaryDirectory() as root:
+            job_dir = Path(root) / "model-job"
+            self.write_trial(
+                job_dir,
+                "builder-ready",
+                0,
+                "2026-08-24T00:00:00Z",
+                None,
+                exception="ProviderUnavailable",
+            )
+            (job_dir / "experiment.json").write_text(json.dumps({
+                "experiment_fingerprint": "fingerprint-1",
+                "cohort": "contender",
+                "configurations": [{"configuration_fingerprint": "config-1"}],
+            }))
+            client = FakeLangfuseClient()
+
+            report = exporter.export_job(job_dir, client, self.manifest)
+
+            self.assertEqual(report["dataset_runs"], 1)
+            item = client.created_run_items[0]
+            self.assertIsNone(item.trace_id)
+            self.assertEqual(item.metadata["experiment"]["experiment_fingerprint"], "fingerprint-1")
+
+    def test_report_status_and_duration_are_exported(self):
+        with tempfile.TemporaryDirectory() as root:
+            job_dir = self.build_job(Path(root), ["builder-ready"], 1)
+            (job_dir / "report.json").write_text(json.dumps({
+                "cases": {
+                    "builder-ready": {
+                        "attempts": [
+                            {"trial": "builder-ready-0", "status": "incomplete"}
+                        ]
+                    }
+                }
+            }))
+            client = FakeLangfuseClient()
+            exporter.export_job(job_dir, client, self.manifest)
+
+            metadata = client.created_run_items[0].metadata
+            self.assertEqual(metadata["status"], "incomplete")
+            self.assertEqual(metadata["duration_seconds"], 0.0)
+
+    def test_retry_exports_clears_only_successful_outboxes(self):
+        with tempfile.TemporaryDirectory() as root:
+            job_dir = self.build_job(Path(root), ["builder-ready"], 1)
+            outbox = job_dir / exporter.OUTBOX_DIR_NAME
+            outbox.mkdir()
+            (outbox / "queued.json").write_text("{}\n")
+            client = FakeLangfuseClient()
+
+            report = exporter.retry_exports(Path(root), client, self.manifest)
+
+            self.assertEqual(report, {"retried": ["model-job"], "failed": []})
+            self.assertFalse(outbox.exists())
+
+    def test_export_failure_outbox_is_timestamped_and_retryable(self):
+        with tempfile.TemporaryDirectory() as root:
+            job_dir = Path(root) / "model-job"
+            job_dir.mkdir()
+
+            outbox = exporter.write_outbox(job_dir, "transport unavailable")
+
+            payload = json.loads(outbox.read_text())
+            self.assertEqual(payload["job"], "model-job")
+            self.assertEqual(payload["error"], "transport unavailable")
+            self.assertTrue(payload["time"].endswith("+00:00"))
 
 
 if __name__ == "__main__":

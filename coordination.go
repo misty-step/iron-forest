@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-const (
-	reviewRequestNoteRef = "refs/notes/forest/review-request"
-	checksNoteRef        = "refs/notes/forest/checks"
-	verdictNoteRef       = "refs/notes/forest/verdict"
-)
-
 type noteEntry struct {
 	Ref      string
 	Revision string

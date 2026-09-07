@@ -68,15 +68,14 @@ environment. The installed service reads that environment from
 `%h/.config/iron-forest/%i.env`; the Runner does not write credential values to
 the Pi scratch directory or Run evidence.
 
-The current deployment supplies one completion key to all roles in one Forest
-instance. This is not a containment boundary. The intended production layout
-uses one completion key for each agent role so OpenRouter usage and Broadcast
-destinations such as Langfuse can group cost, latency, and failures by role.
-That separation is an attribution control only: trusted Runs still share the
-service user and can read the per-instance environment file. Until the Runner
-selects a role key, exact attribution uses the Run ID and agent name in Forest
-evidence. Do not reuse an interactive operator key or an evaluation key.
-Management credentials never enter the service environment.
+The Runner selects one completion key per Run. `OPENROUTER_API_KEY_<ROLE>`
+wins for the declaration whose name matches `<ROLE>` (uppercased); the
+instance-wide `OPENROUTER_API_KEY` is the fallback for any role without a
+dedicated key. This is not a containment boundary: trusted Runs still share
+the service user and can read the per-instance environment file. OpenRouter
+usage and Broadcast destinations such as Langfuse therefore group cost,
+latency, and failures by role. Do not reuse an interactive operator key or an
+evaluation key. Management credentials never enter the service environment.
 
 The model resolves through the declaration, then instance defaults, then the
 built-in `openrouter/deepseek/deepseek-v4-pro-0813`. `thinking` resolves

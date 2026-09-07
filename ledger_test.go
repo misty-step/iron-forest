@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+func readLedgerTail(root string, limit int) ([]RunRecord, error) {
+	if limit < 0 {
+		return nil, errors.New("ledger tail limit must be non-negative")
+	}
+	return readLedger(root, limit)
+}
+
 func TestLedgerAppendAndParseDurably(t *testing.T) {
 	root := t.TempDir()
 	files := defaultLedgerFileOps()
@@ -293,7 +300,7 @@ func TestLedgerLargeHistoryPreservesPrefixAndBoundsTail(t *testing.T) {
 	if got := string(raw[prefix.Len():]); got != wantSuffix {
 		t.Fatalf("appended suffix=%q, want literal row %q", got, wantSuffix)
 	}
-	tail, err := ReadLedgerTail(root, 10)
+	tail, err := readLedgerTail(root, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,8 +362,8 @@ func TestReadLedgerTailValidatesRowsOutsideTail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := ReadLedgerTail(root, 10); err == nil || !strings.Contains(err.Error(), "parse ledger row 1") {
-		t.Fatalf("ReadLedgerTail() error=%v, want validation failure outside retained tail", err)
+	if _, err := readLedgerTail(root, 10); err == nil || !strings.Contains(err.Error(), "parse ledger row 1") {
+		t.Fatalf("readLedgerTail() error=%v, want validation failure outside retained tail", err)
 	}
 }
 

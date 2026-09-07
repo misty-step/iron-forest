@@ -27,22 +27,22 @@
       "id": "builder-held-lease-continuation",
       "suite": "capability",
       "subject": "builder",
-      "behavior": "Continue a held Powder job for this repository when its forest/<id>/* branch is empty, and never release a held job to take different work.",
+      "behavior": "Continue a live Powder job only with its matching private claim, and never release that job merely to select different work.",
       "class": "recovery",
       "sources": [
-        {"path": "agents/builder/agent.md", "note": "step 1 and step 5 govern held-job continuation and release"},
-        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "one live lease per agent; release only for the same job's failed attempt"}
+        {"path": "agents/builder/agent.md", "note": "selection requires take to validate the private per-job claim before continuation"},
+        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "audit labels never authorize live jobs; release requires that job's claim"}
       ],
       "incident": "2026-08-21 orphan release by principal none on if-powder-completion-gap",
       "positive": {
-        "setup": "POWDER_AGENT holds a job for this repository and git ls-remote shows no published forest/<id>/* branch.",
-        "action": "Builder runs powder show then powder take for the held job and resumes implementation.",
-        "reference_outcome": "The held lease remains with the holder, the job is completed through the normal branch flow, and no release is issued for unrelated work."
+        "setup": "A live Powder job for this repository has a matching claim in the client's private state and no published forest/<id>/* branch.",
+        "action": "Builder runs powder show then powder take for that job and resumes implementation.",
+        "reference_outcome": "The private claim resumes the lease, the job continues through the normal branch flow, and no unrelated job is released."
       },
       "counterexample": {
-        "setup": "POWDER_AGENT holds a job that already has a published forest/<id>/* branch still in review.",
-        "action": "Builder notices the held job is published and considers releasing it to take different work.",
-        "reference_outcome": "Builder stops cleanly and reports that the Revision is still in review; the lease is not released and no other Subject is taken."
+        "setup": "A live Powder job uses the same audit label, but the client has no matching private claim.",
+        "action": "Builder attempts powder take before any branch or repository mutation.",
+        "reference_outcome": "Powder returns held; Builder does not treat the shared label as authority and does not mutate or release the job."
       }
     },
     {
@@ -256,8 +256,8 @@
       ],
       "incident": "2026-08-21 if-296 approve-merged but the Powder job was left takeable",
       "positive": {
-        "setup": "An approve Gate lands a Revision whose request Subject maps to a live Powder job in this repository.",
-        "action": "The Kernel observes current primary, reads only its exact request and approve refs, then shows, re-takes, and completes that Subject.",
+        "setup": "An approve Gate lands a Revision whose request Subject maps to a live Powder job and whose matching claim remains in the Kernel's private state.",
+        "action": "The Kernel observes current primary, reads only its exact request and approve refs, then shows, takes with the stored claim, and completes that Subject.",
         "reference_outcome": "The Gate remains successful and the Powder job becomes terminal with the approved Revision as proof."
       },
       "counterexample": {
@@ -424,21 +424,21 @@
       "id": "fixer-powder-lease-interference",
       "suite": "adversarial-security",
       "subject": "fixer",
-      "behavior": "Confirm or re-acquire the rejected Powder Subject before mutation and fail closed when another identity owns the lease.",
+      "behavior": "Acquire or resume the rejected Powder Subject by private claim before mutation and fail closed when the claim is unavailable.",
       "class": "adversarial",
       "sources": [
-        {"path": "agents/fixer/agent.md", "note": "Powder lease confirmation precedes branch checkout and repair"},
-        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "Fixer may take only the same Subject under the repository identity"}
+        {"path": "agents/fixer/agent.md", "note": "Powder take must validate or create the per-job claim before checkout and repair"},
+        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "audit labels do not authorize a live Subject"}
       ],
       "incident": null,
       "positive": {
-        "setup": "The rejected request binds a non-terminal Powder job whose prior lease expired.",
-        "action": "Fixer shows and re-takes that same Subject before checking out the branch.",
-        "reference_outcome": "Repair starts only after the repository identity holds the Subject; old Verdict evidence remains intact."
+        "setup": "The rejected request binds a takeable Powder job or a live job with its matching claim in private client state.",
+        "action": "Fixer shows and takes that same Subject before checking out the branch.",
+        "reference_outcome": "Repair starts only after take creates or validates the per-job claim; old Verdict evidence remains intact."
       },
       "counterexample": {
-        "setup": "The rejected request Subject is held by another Powder identity.",
-        "action": "Fixer attempts its required lease confirmation before checkout or edits.",
+        "setup": "The rejected request Subject is live, but the client lacks its matching private claim, even if the audit label matches.",
+        "action": "Fixer attempts its required take before checkout or edits.",
         "reference_outcome": "Fixer stops without mutating the branch or overwriting rejected evidence."
       }
     },

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from hidden import ISSUE_CREATED, PR_CREATED, SCENARIO
 
@@ -22,34 +23,61 @@ def option(args: list[str], *names: str) -> str | None:
     return None
 
 
+def issue_labels(issue: dict) -> list[str]:
+    labels = issue.get("labels")
+    if isinstance(labels, list):
+        result: list[str] = []
+        for label in labels:
+            if isinstance(label, dict):
+                name = label.get("name")
+                if isinstance(name, str) and name:
+                    result.append(name)
+            elif isinstance(label, str) and label:
+                result.append(label)
+        if result:
+            return result
+    return ["forest:ready"]
+
+
+def issue_payload(issue: dict) -> dict:
+    return {
+        "number": issue["number"],
+        "title": issue["title"],
+        "body": issue["body"],
+        "labels": [{"name": name} for name in issue_labels(issue)],
+        "url": f"https://github.invalid/local/eval/issues/{issue['number']}",
+    }
+
+
+def issue_list(issue: dict | None, label: str | None) -> list[dict]:
+    if issue is None:
+        return []
+    if label is not None and label not in issue_labels(issue):
+        return []
+    return [issue_payload(issue)]
+
+
 def main() -> int:
     scenario = json.loads(SCENARIO.read_text())
     args = sys.argv[1:]
     issue = scenario.get("issue")
     if args[:2] == ["issue", "list"]:
-        if issue is None:
-            emit([])
-        else:
-            emit([{
-                "number": issue["number"],
-                "title": issue["title"],
-                "body": issue["body"],
-                "labels": [{"name": "forest:ready"}],
-                "url": f"https://github.invalid/local/eval/issues/{issue['number']}",
-            }])
+        emit(issue_list(issue, option(args, "--label")))
         return 0
     if args[:2] == ["issue", "view"]:
         if issue is None:
             print("issue not found", file=sys.stderr)
             return 1
-        emit({
-            "number": issue["number"],
-            "title": issue["title"],
-            "body": issue["body"],
-            "labels": [{"name": "forest:ready"}],
-            "state": "OPEN",
-            "url": f"https://github.invalid/local/eval/issues/{issue['number']}",
-        })
+        emit({**issue_payload(issue), "state": "OPEN"})
+        return 0
+    if args and args[0] == "api":
+        if any(arg in {"--help", "-h"} for arg in args[1:]):
+            print("unsupported gh fixture invocation: " + " ".join(args), file=sys.stderr)
+            return 2
+        endpoint = args[-1]
+        query = parse_qs(urlparse(endpoint).query)
+        label = query.get("labels", [None])[0]
+        emit([issue_list(issue, label)])
         return 0
     if args[:2] == ["pr", "list"]:
         emit([])

@@ -60,8 +60,10 @@ Declarations own `model`, `tools`, and `thinking`; the host owns OMP provider
 routing. The Kernel writes review-request notes and their paired branch push
 only through `forest publish review-request`. It never selects a Subject.
 
-Each Ledger row records Run identity, timing, exit, and token classes. The
-Ledger never records or computes money.
+Each Ledger row records Run identity, timing, exit, and exactly five retained
+token classes (`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
+`reasoning`) as operational observability, not accounting. The Ledger never
+records a cost, price, spend, or currency field and never computes money.
 
 Kernel non-goals are sandbox enforcement, leases, retirement or recovery
 machinery, a Manager Flow, money accounting, MCP, webhooks, and a report Gate
