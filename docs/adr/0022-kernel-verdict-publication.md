@@ -10,7 +10,7 @@ Status: accepted, 2026-08-17
 Extends [0010](0010-agent-owned-effects-and-merge-gate.md),
 [0017](0017-eval-driven-design.md), and
 [0021](0021-kernel-review-request-publication.md). Destination store:
-[VISION.md](../../VISION.md).
+[README.md](../../README.md#git-coordination).
 
 ## Context
 

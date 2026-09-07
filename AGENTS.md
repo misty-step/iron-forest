@@ -1,52 +1,43 @@
 # Iron Forest
 
-Headless software factory. One `forest` Kernel serves this repository;
-agents build, review, and merge tracked work. `VISION.md` is the product
-lock; `README.md` is the operator manual; accepted ADRs are contracts.
+Headless software factory. One `forest` Kernel serves this checkout.
+`README.md` is the current operator entrypoint and accepted ADRs state
+technical contracts.
 
 ## Work selection
 
-Work from the operator's current request. Check current code and overlapping
-work before starting; state ownership and report the result with verification
-evidence. Historical tickets are context, not authorization or a required
-queue. Do not maintain a replacement backlog.
+Work from the operator's current request. Check current code and existing work
+before starting, state ownership when agents overlap, and report the result
+with verification evidence. Old tickets and factory records are context, not
+authorization to start work. Do not maintain a replacement backlog.
+Linear owns current non-R90 work and selected unresolved opportunities; it is
+not an automatic intake queue. Do not duplicate it in repo task lists. R90
+continues to use Habitat.
 
-## Findings
+## Evidence
 
-Defect reports cite primary records: the evidence-ref payload, Ledger
-row, Run id with its log line, or command output actually read. Commit
-titles, timestamps, and recollection are leads, not findings.
+Anchor defects to the evidence-ref payload, Ledger row, Run id and log line, or
+command output actually read. Commit titles, timestamps, and recollection are
+leads only.
 
 ## Operations
 
-- Adopt merged revisions with the fenced update procedure. For the self-host
-  factory checkout run `deploy/install-service.sh update <instance>`. For a
-  sibling managed checkout, the factory owner first adopts the exact factory
-  Revision in this checkout, then the sibling owner runs
-  `deploy/install-service.sh update <instance> <factory-sha>`. The script
-  verifies the factory checkout is clean and exactly at that Revision before
-  it stops the consumer unit, and it never mutates the factory checkout. It
-  checks a clean tree, stops the service (stops new dispatches and drains live
-  Runs), confirms the instance is inactive, fast-forwards the checkout to the
-  remote primary, rebuilds, runs `./forest selfcheck`, verifies the installed
-  binary reports the built `build_sha`, forces a fresh audit with
-  `./forest audit show --rescan`, restarts the service, and verifies it is
-  active. Never restart-only: the unit runs the checkout-local binary.
-- One Kernel checkout per repository (ADR 0015). Do not start a second.
-- The Iron Forest manager for this checkout owns only repo
-  `misty-step/iron-forest`, root
+- Adopt a merged revision with
+  `deploy/install-service.sh update <instance>`. For a sibling checkout, the
+  factory owner adopts the exact factory revision here first, then the sibling
+  owner runs `deploy/install-service.sh update <instance> <factory-sha>`.
+  The script requires a clean, exact factory revision before stopping the
+  consumer unit, drains live Runs, fast-forwards and rebuilds the selected
+  checkout, runs `./forest selfcheck`, verifies `build_sha`, forces
+  `./forest audit show --rescan`, restarts, and verifies the unit is active.
+  The factory checkout is never mutated; a restart alone is not an update.
+- Keep exactly one Kernel checkout per repository (ADR 0015).
+- This manager owns only repo `misty-step/iron-forest`, root
   `/home/phaedrus/Development/misty-step/iron-forest`, and unit
-  `forest@iron-forest`. Other repositories and `forest@*` units are
-  consumer-owned. Accept field reports and inspect cited artifacts only;
-  never run their binaries/status, operate systemd, cancel Runs, alter
-  leases, deploy, or mutate their checkouts without an explicit request
-  from that repository's owner.
-- Fleet product design may aggregate read-only reported metadata; it does
-  not transfer operational ownership.
-- Judgment calls inside the operations mandate are executed and
-  reported, not escalated. Escalate scope, spend, or risk changes.
-
-## Commands
-
-    mise exec -- go build ./... && mise exec -- go vet ./... && mise exec -- go test ./...
-    ./evals/run-fast.sh   # before touching any declaration
+  `forest@iron-forest`. Other repositories and `forest@*` units belong to their
+  owners. Accept their field reports and inspect cited artifacts; their
+  binaries, status, systemd units, Runs, leases, deployments, and checkouts
+  stay under their owners' control.
+- Fleet design may aggregate read-only reported metadata without transferring
+  operational ownership. Execute judgment calls inside this mandate and report
+  them; escalate scope, spend, or risk changes.

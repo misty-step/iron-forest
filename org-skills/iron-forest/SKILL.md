@@ -13,7 +13,7 @@ coordinate multiple repository instances.
 
 ## Orient
 
-Resolve the managed repository and read `VISION.md`, `forest.yaml`, and the relevant declaration under `agents/<name>/`. Run the CLI read surfaces before inferring state:
+Resolve the managed repository and read `README.md`, `forest.yaml`, and the relevant declaration under `agents/<name>/`. Run the CLI read surfaces before inferring state:
 
 ```sh
 forest version --json
@@ -34,8 +34,8 @@ Keep the Kernel generic. Configure each role through:
 - `forest.yaml`: arbitrary declaration name, executable Poll, interval, optional `max_duration`;
 - `agents/<name>/agent.md`: system prompt plus model, thinking, and Pi tool allowlist;
 - `agents/<name>/task.md`: standing task;
-- `agents/_shared/skills/`: skills every declaration receives;
-- `agents/<name>/skills/`: skills only that declaration receives;
+- `agents/_shared/skills/`: skills every declaration receives when present;
+- `agents/<name>/skills/`: skills only that declaration receives when present;
 - `checks:`: deterministic exact-revision gates.
 
 Start with Pi's smallest useful tool set. Add a CLI through `bash` plus an explicit skill when that is sufficient. Add a Pi extension only through an accepted, inspectable declaration input; ambient Pi extensions are disabled. Keep credentials in the instance service environment, never in configuration, prompts, skills, or commits.

@@ -2,8 +2,8 @@
 
 Iron Forest is a headless software factory. Exactly one live Kernel serves
 one repository, on a machine the operator chooses. The Kernel handles
-mechanics. Declarations state what agents think and do. See
-[VISION.md](VISION.md).
+mechanics. Declarations state what agents think and do. This README is the
+current operating entrypoint. Accepted ADRs state technical contracts.
 
 Misty Step work starts from a current operator request. Automatic backlog
 intake is retired. Old tickets, labels, and timers do not authorize work.
@@ -11,18 +11,19 @@ Direct requests use the ordinary session or PR workflow; no ticket is required.
 R90 deployments continue to use Habitat. The legacy protocol and migration
 records below describe implementation history, not permission to restart old
 queue consumers.
-
+Linear owns current non-R90 work, prioritization, and selected unresolved
+opportunities. It is not automatic intake, and a ticket is not permission to
+start a Run. Repositories retain versioned contracts, accepted ADRs, and
+curated eval fixtures; Git evidence, the Ledger, and Run logs retain their
+native runtime authority. Store raw or sensitive eval output in approved
+retained artifact storage and link summaries rather than copying it into work
+records.
 
 The review roster has Builder, Verifier, and Fixer for explicitly requested
 work. A Verifier checks one exact Revision, and a Fixer repairs a rejected
 Revision. Critic and Tester perform requested read-only sweeps and return
 findings with evidence; they do not create tickets or start implementation.
 Their automatic intake polls are disabled.
-
-Historical promotion evidence remains in
-`evals/jobs/fast/fast-20260901T224519Z/report.md` and settled Runs
-`1788301018846047029-critic` and `1788301018844450077-tester`. Those results
-predate the retirement of automatic draft intake.
 
 ## Quick start
 
@@ -42,6 +43,11 @@ checks:
   - name: test
     run: mise exec -- go test ./...
 ```
+
+The Poll declarations above describe the retained profile protocol, not an
+active queue setup. Do not enable the legacy Builder tracker Poll for new
+work; use a current operator handoff. This guide does not authorize installing
+services or starting schedules.
 
 ### Repository-owned composition
 
@@ -79,13 +85,13 @@ exceeds the bound using the same supported cancel path as `forest run cancel`,
 records the cancellation in the Ledger, and returns the trigger to a clean
 not-running state.
 
-Declare each agent with two prompt files. Skills live only in the shared
-directory and, when a role needs private skills, its own directory:
+Declare each agent with two prompt files. Skills live only in an existing
+shared directory and, when a role needs private skills, its own directory:
 
 ```text
 agents/<name>/agent.md
 agents/<name>/task.md
-agents/_shared/skills/          # every declaration
+agents/_shared/skills/          # optional; every declaration
 agents/<name>/skills/           # optional; this declaration only
 ```
 
@@ -123,12 +129,10 @@ Ledger and `.forest/runs/<run-id>.log`.
 
 Credentials come only from the service environment inherited by the Run.
 Declaration frontmatter has no `env` field; unknown metadata fails validation.
-Credentials do not belong in prompts, skills, defaults, or commits. The shared
-skills verify claims and debug failures. Verifier also receives the deep
-correctness and code-quality review skills under `agents/verifier/skills/`;
-Builder and Fixer receive only the shared skills. Each role's always-on
-engineering rules live directly in `agent.md`, alongside the exact Git-note
-protocol.
+Credentials do not belong in prompts, skills, defaults, or commits. Role
+engineering, selection, and publication rules live in each `agent.md`.
+Factory Runs receive only existing shared or role skill directories; unused
+generic packages are omitted rather than left as empty layers.
 
 This quick start uses self-host mode: the factory source checkout is also the
 managed repository. For a separate sibling managed checkout, use the
@@ -147,16 +151,19 @@ before handoff:
    `mise exec -- go build -o forest . && ./forest selfcheck`.
 3. Install the service with `deploy/install-service.sh <sibling-directory-name>`
    (no argument in self-host mode).
-   Self-host mode also enables `forest-eval-flywheel@iron-forest.timer`. It
-   ingests retained production Runs and emits a coverage report every day when
-   the protected `~/.config/iron-forest/evals.env` exists. Sibling installs do
-   not receive this Iron Forest manager timer.
+   The retained self-host installer also enables
+   `forest-eval-flywheel@iron-forest.timer`; that side effect is not approval to
+   restart retired intake. Do not run that installation path as a current-work
+   setup step without an explicitly approved operational change. Sibling
+   installs do not receive the manager timer. The
+   [flywheel record](docs/production-flywheel.md) is historical, not setup policy.
 4. Verify the installed service is active without starting a second Kernel:
    `systemctl --user is-active forest@<sibling-directory-name>` (expect
    `active`) and, from the managed checkout, `./forest status`.
-5. Record the deployment using the registry fields in the
-   [ready contract](docs/forest-ready-contract.md#deployment-registry):
-   `identity`, `host`, `repo`, and the running revision from `./forest version`.
+5. Record the deployment in the operator-owned inventory (Estate for Misty
+   Step), with `identity`, `host`, `repo`, and the running revision from
+   `./forest version`. Do not maintain a deployment registry in a retired
+   readiness document.
 6. Return external findings in the requested report with source repository,
    inspected revision, observed behavior, and verification evidence. Do not
    create speculative tickets.
@@ -309,6 +316,10 @@ Clarify the selected request with a problem or scenario, scope, observable
 acceptance criteria, and a verification path. Use
 [`org-skills/grooming-checklist/SKILL.md`](org-skills/grooming-checklist/SKILL.md)
 when that brief is useful. No queue entry or readiness label is required.
+
+If the request needs durable work tracking, use Linear for non-R90 work.
+Capture only selected opportunities with source pointers and proposal status;
+do not import historical queues or create issues automatically.
 
 The former readiness contract and job template remain historical records. They
 do not govern new Misty Step work.
@@ -577,6 +588,19 @@ The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
 token classes — `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
 `reasoning` — as operational observability, not accounting. The Ledger never
 records a cost, price, spend, or currency field and never computes money.
+
+## Historical promotion evidence
+
+Historical promotion evidence remains in
+`evals/jobs/fast/fast-20260901T224519Z/report.md` and settled Runs
+`1788301018846047029-critic` and `1788301018844450077-tester`. Those results
+predate the retirement of automatic draft intake.
+
+The local ignored report path is an original locator, not proof of shared or
+durable artifact retention. Preserve the receipt and Run identities; when
+citing them outside this checkout, use an approved retained artifact locator
+with the relevant revision or digest. Do not treat the old promotion result as
+current readiness or permission to restart draft intake.
 
 ## License
 

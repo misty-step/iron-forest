@@ -8,8 +8,8 @@ Kernel: `333f07b` (prompt-only `8ad7a5a` was already on `origin/master`).
 
 - Outcome: a non-compiling Revision on a repository that is not iron-forest
   is not merged. Failing Checks and a `changes` Verdict bind that Revision.
-- Authority: #127 (2026-08-17 oracle) and `VISION.md` (one Kernel per
-  repository; disposable host, not Cantrip).
+- Authority: #127 (2026-08-17 oracle) and the then-current product lock
+  (one Kernel per repository; disposable host, not Cantrip).
 - Accepted: new private repo `misty-step/forest-gate-127`; sibling checkout;
   one `forest once verifier`; no systemd unit.
 - Rejected: Cantrip; serving two repos from `forest@iron-forest`; a standing

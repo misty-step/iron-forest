@@ -45,7 +45,7 @@ credentials in `forest.yaml`, defaults, declarations, prompts, skills, or
 commits. Runs inherit credentials only from the service environment. A trusted
 declaration has those credentials plus filesystem and network access. Worktree
 separation is not a security sandbox. Stronger containment belongs to the
-host the operator chooses. See [VISION.md](../VISION.md).
+host the operator chooses. See [ADR 0016](adr/0016-isolation-posture.md).
 
 ## Forge identities and references
 
@@ -206,7 +206,7 @@ defaults; `model` alone has a built-in final value. Defaults contain only
 instructions in the system prompts. Agents use native `git`; no wrapper is
 required.
 
-The only skill sources are `agents/_shared/skills` and, when present,
+The only skill sources are existing `agents/_shared/skills` and, when present,
 `agents/<name>/skills`. Their published paths are repository-relative and Pi
 resolves them from the Run worktree. The Runner gives each Run a new writable
 `PI_CODING_AGENT_DIR` without operator Pi state. For an OpenRouter model, it
