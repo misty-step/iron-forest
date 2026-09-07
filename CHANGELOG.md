@@ -266,9 +266,7 @@
   Polls use explicit exit semantics, and one Kernel serves each repository.
   Evals remain the instrument for actor-boundary changes.
 
-
-Current behavior is defined by `VISION.md`, `README.md`, the shipped
+Current behavior is defined by `README.md`, the shipped
 declarations, and the accepted ADRs.
-
 
 Historical pre-reforge entries remain in repository history before 2026-08-10.

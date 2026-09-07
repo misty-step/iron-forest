@@ -13,7 +13,7 @@ Status: accepted, 2026-08-19 (review-request note write retired by 0028, 2026-09
 Extends [0009](0009-git-coordination-authority.md),
 [0010](0010-agent-owned-effects-and-merge-gate.md), and
 [0012](0012-poll-trigger-protocol.md). Destination store:
-[VISION.md](../../VISION.md).
+[README.md](../../README.md#git-coordination).
 
 ## Context
 

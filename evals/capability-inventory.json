@@ -24,6 +24,7 @@
       }
     },
     {
+
       "id": "builder-scope-allowlist",
       "suite": "capability",
       "subject": "builder",
@@ -228,7 +229,7 @@
       "behavior": "Reconcile the current Git-landed Powder Subject to terminal with the approved Revision as proof, without changing a successful Gate into failure.",
       "class": "recovery",
       "sources": [
-        {"path": "VISION.md", "note": "current primary is the bounded pending reconciliation slot"},
+        {"path": "docs/adr/0023-powder-jobs-and-review-request-v2.md", "note": "current primary is the bounded pending reconciliation slot"},
         {"path": "powder_completion.go", "note": "Kernel reads exact current evidence and owns show, take, and done"},
         {"path": "agents/verifier/agent.md", "note": "Verifier does not own or retry Powder completion"}
       ],
@@ -274,7 +275,7 @@
       "class": "negative",
       "sources": [
         {"path": "agents/verifier/agent.md", "note": "publication forbids force, retry, or a different SHA"},
-        {"path": "VISION.md", "note": "the Gate fast-forwards master; a forge ruleset is deployment policy"}
+        {"path": "README.md", "note": "the Gate fast-forwards master; a forge ruleset is deployment policy"}
       ],
       "incident": null,
       "positive": {
@@ -399,6 +400,7 @@
       }
     },
     {
+
       "id": "fixer-stale-branch",
       "suite": "capability",
       "subject": "fixer",
@@ -669,7 +671,7 @@
       "behavior": "A ready Subject flows through Builder implementation, Verifier approval, and an atomic fast-forward of master without operator action.",
       "class": "positive",
       "sources": [
-        {"path": "VISION.md", "note": "the factory implements, reviews, and merges a Subject"},
+        {"path": "README.md", "note": "the factory implements, reviews, and merges a Subject"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 1"}
       ],
       "incident": null,
@@ -691,7 +693,7 @@
       "behavior": "A defective Revision flows through Builder, Verifier changes, Fixer repair, and a second Verifier approval.",
       "class": "positive",
       "sources": [
-        {"path": "VISION.md", "note": "Builder, Verifier, Fixer review loop"},
+        {"path": "README.md", "note": "Builder, Verifier, Fixer review loop"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 2"}
       ],
       "incident": null,
@@ -713,7 +715,7 @@
       "behavior": "Concurrent independent role Runs are serialized per declaration; at most one live Run exists per role.",
       "class": "boundary",
       "sources": [
-        {"path": "VISION.md", "note": "at most one live Run per declaration"},
+        {"path": "README.md", "note": "at most one live Run per declaration"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 3"}
       ],
       "incident": null,
@@ -757,7 +759,7 @@
       "behavior": "Remote master or branch movement during a role Effect fails closed without force, retry, or a different SHA.",
       "class": "negative",
       "sources": [
-        {"path": "VISION.md", "note": "create-only evidence refs and no force"},
+        {"path": "README.md", "note": "create-only evidence refs and no force"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 5"}
       ],
       "incident": null,
@@ -779,7 +781,7 @@
       "behavior": "Malformed or hostile coordination state is recovered fail-closed without improvising over missing or unexpected Git refs.",
       "class": "adversarial",
       "sources": [
-        {"path": "VISION.md", "note": "Git holds durable facts; conflicts stop"},
+        {"path": "README.md", "note": "Git holds durable facts; conflicts stop"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 7"}
       ],
       "incident": null,

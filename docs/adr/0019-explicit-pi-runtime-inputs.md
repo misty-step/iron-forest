@@ -39,7 +39,7 @@ pi -p --mode json --no-session --session-id <run-id> --approve \
 `--no-skills` disables skill discovery; it does not replace the repeated,
 explicit `--skill` arguments. The only skill sources are:
 
-1. `agents/_shared/skills`, for every declaration;
+1. `agents/_shared/skills`, when that shared directory exists;
 2. `agents/<name>/skills`, when that role-specific directory exists.
 
 Skill source directory paths are repository-relative and Pi resolves them from
@@ -93,7 +93,7 @@ containment belongs to the host the operator chooses.
 
 ## Consequences
 
-- Builder and Fixer receive the shared skills. Verifier receives those plus the
+- Builder and Fixer receive any shared skills. Verifier receives those plus any
   skills under `agents/verifier/skills`.
 - Installing an MCP extension or other Pi resource on the host cannot alter a
   Run unless the explicit process contract changes.

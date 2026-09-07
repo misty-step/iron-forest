@@ -5,7 +5,7 @@ Status: accepted, 2026-09-01
 Extends [0021](0021-kernel-review-request-publication.md),
 [0022](0022-kernel-verdict-publication.md), and
 [0023](0023-powder-jobs-and-review-request-v2.md). Destination store:
-[VISION.md](../../VISION.md).
+[README.md](../../README.md#git-coordination).
 
 ## Context
 

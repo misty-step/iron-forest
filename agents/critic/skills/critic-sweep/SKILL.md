@@ -10,16 +10,16 @@ not infer an assignment from a timer or historical queue entry.
 
 ## 1. Orient
 
-Read `VISION.md`, the accepted ADRs under `docs/adr/`, and the repository
+Read the accepted contract(s) affected by the request and repository
 conventions (`README.md`, `forest.yaml`, and any repository-level `AGENTS.md`
-when present). Record the product lock and the shipped roster before judging
-drift.
+when present). Identify the current contracts and shipped roster before judging
+drift. Do not treat a retired vision file as a lock or as proof of a defect.
 
 ## 2. Sweep
 
 Inspect the codebase for:
 
-- architecture drift vs `VISION.md` and accepted ADRs
+- architecture drift from accepted ADRs and current versioned contracts
 - dead weight: unused exported surface, orphaned paths, stale docs that
   contradict shipped behavior
 - complecting: one component owning unrelated responsibilities
