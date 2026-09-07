@@ -1,3 +1,13 @@
+## [0.0.14](https://github.com/misty-step/iron-forest/compare/v0.0.13...v0.0.14) (2026-09-07)
+
+
+### Bug Fixes
+
+* enforce verdict gate preconditions ([899727f](https://github.com/misty-step/iron-forest/commit/899727fc0b2db9befdf1d4f90f1f47eb977e62ba))
+* **gate:** integrate snapshot evidence OID ([ae20131](https://github.com/misty-step/iron-forest/commit/ae20131f46e7ec3c72d047cdd813fab6897023f9))
+* **gate:** preserve configured check order ([e81e126](https://github.com/misty-step/iron-forest/commit/e81e12633ed2b8ea20d33f6a58549206ae651979))
+* **publish:** enforce complete Gate and live Verifier context ([2e80040](https://github.com/misty-step/iron-forest/commit/2e800401aa78e383602f9fde6baf792166c8d99f)), closes [#339](https://github.com/misty-step/iron-forest/issues/339) [#380](https://github.com/misty-step/iron-forest/issues/380)
+
 ## [0.0.13](https://github.com/misty-step/iron-forest/compare/v0.0.12...v0.0.13) (2026-09-04)
 
 
