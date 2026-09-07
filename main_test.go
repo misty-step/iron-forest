@@ -629,3 +629,30 @@ func TestPollCommandReportsWhyItFailed(t *testing.T) {
 		}
 	}
 }
+
+func TestCLIServeLockConflict(t *testing.T) {
+	root := t.TempDir()
+	writeCLIConfig(t, root, "exit 1")
+	writeTestDeclaration(t, root, "builder")
+	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockFile, err := os.OpenFile(forestPath(root, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("acquire initial lock: %v", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	t.Chdir(root)
+	code, _, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"serve"}) })
+	if code != exitConflict {
+		t.Fatalf("serve code=%d, want %d (exitConflict)", code, exitConflict)
+	}
+	if !strings.Contains(stderr, "a Kernel is running; stop it first") {
+		t.Fatalf("serve stderr=%q, want %q", stderr, "a Kernel is running; stop it first")
+	}
+}
