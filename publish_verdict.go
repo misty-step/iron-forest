@@ -78,7 +78,14 @@ func withPowderReconciliation(result publishVerdictResult, reconciliation powder
 
 func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerdictResult, error) {
 	input.RunID = strings.TrimSpace(input.RunID)
-	if err := requireVerdictRun(input); err != nil {
+	if input.RunID == "" || strings.ContainsAny(input.RunID, "/\\ \t\r\n") {
+		return publishVerdictResult{}, fmt.Errorf("FOREST_RUN_ID must identify a valid Verifier run")
+	}
+	runRoot, err := primaryCheckout(ctx, input.Root)
+	if err != nil {
+		return publishVerdictResult{}, fmt.Errorf("resolve publication checkout: %w", err)
+	}
+	if err := requireVerdictRun(runRoot, input.RunID); err != nil {
 		return publishVerdictResult{}, err
 	}
 	checksPath, err := filepath.Abs(input.ChecksPath)
@@ -202,6 +209,11 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		requestRef := evidenceRequestRefPrefix + revision
 		args = append(args, requestOID+":"+requestRef, revision+":"+primaryRef)
 	}
+	// Checks can outlive their owning Run. Never publish after that owner ends
+	// or is replaced, even if every candidate check passed.
+	if err := requireVerdictRun(runRoot, input.RunID); err != nil {
+		return publishVerdictResult{}, err
+	}
 	if err := gitRun(ctx, input.Root, args...); err != nil {
 		return publishVerdictResult{}, classifyVerdictPush(err)
 	}
@@ -222,14 +234,7 @@ func requirePassingApprovalChecks(checks checksNote) error {
 	return nil
 }
 
-func requireVerdictRun(input publishVerdictInput) error {
-	if input.RunID == "" {
-		return fmt.Errorf("FOREST_RUN_ID is required")
-	}
-	root := strings.TrimSpace(os.Getenv("FOREST_ROOT"))
-	if root == "" {
-		root = input.Root
-	}
+func requireVerdictRun(root, runID string) error {
 	data, err := os.ReadFile(liveRunPath(root, "verifier"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -241,8 +246,8 @@ func requireVerdictRun(input publishVerdictInput) error {
 	if err := json.Unmarshal(data, &record); err != nil {
 		return fmt.Errorf("parse live Verifier run: %w", err)
 	}
-	if record.RunID != input.RunID {
-		return fmt.Errorf("FOREST_RUN_ID does not match the active Verifier run")
+	if record.RunID != runID || record.Agent != "verifier" || !validNoteTime(record.StartedAt) {
+		return fmt.Errorf("FOREST_RUN_ID does not match a valid active Verifier run")
 	}
 	return nil
 }

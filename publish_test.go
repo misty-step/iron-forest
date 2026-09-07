@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -922,16 +923,200 @@ func TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary(t *testing.T) {
 	}
 }
 
-func TestPublishVerdictRejectsMismatchedLiveRun(t *testing.T) {
-	root, _ := testClone(t)
-	writePassingChecks(t, root)
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	checks, verdict := writeEvidencePayloads(t, revision, "changes")
-	seedVerdictRun(t, root, "1-verifier")
-	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "9-verifier",
-	})
-	if err == nil || !strings.Contains(err.Error(), "FOREST_RUN_ID does not match the active Verifier run") {
-		t.Fatalf("error=%v", err)
+func TestPublishVerdictRequiresOwnedVerifierRun(t *testing.T) {
+	for _, invalidContext := range []string{"ended", "foreign_root", "wrong_agent", "missing_agent", "malformed"} {
+		t.Run(invalidContext, func(t *testing.T) {
+			root, origin := testClone(t)
+			writePassingChecks(t, root)
+			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			request := reviewRequestJSON("1", revision, "github")
+			pushEvidence(t, root, "request", revision, request, "Iron Forest Builder", "builder@forest.invalid")
+			runGitDir(t, root, "push", "origin", revision+":refs/heads/forest/1/work")
+			checks, verdict := writeEvidencePayloads(t, revision, "approve")
+			input := publishVerdictInput{
+				Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
+			}
+
+			var foreign string
+			if invalidContext == "foreign_root" {
+				foreign, _ = testClone(t)
+				seedVerdictRun(t, foreign, "1-verifier")
+			}
+			seedVerdictRun(t, root, "1-verifier")
+			invalidate := func() {
+				path := liveRunPath(root, "verifier")
+				switch invalidContext {
+				case "ended", "foreign_root":
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+					if foreign != "" {
+						t.Setenv("FOREST_ROOT", foreign)
+					}
+				case "wrong_agent", "missing_agent":
+					var record liveRunRecord
+					if err := json.Unmarshal(mustRead(t, path), &record); err != nil {
+						t.Fatal(err)
+					}
+					record.Agent = "builder"
+					if invalidContext == "missing_agent" {
+						record.Agent = ""
+					}
+					if err := writeLiveRun(path, record); err != nil {
+						t.Fatal(err)
+					}
+				case "malformed":
+					if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			before := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)"))
+			invalidate()
+			if _, err := publishVerdict(context.Background(), input); err == nil || publishConflict(err) {
+				t.Fatalf("first publish error=%v, want context refusal rather than a publication conflict", err)
+			}
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)")); got != before {
+				t.Fatalf("unauthorized publish changed remote refs:\nbefore:\n%safter:\n%s", before, got)
+			}
+
+			seedVerdictRun(t, root, "1-verifier")
+			result, err := publishVerdict(context.Background(), input)
+			if err != nil || result.Status != "published" {
+				t.Fatalf("valid publish result=%#v error=%v", result, err)
+			}
+			if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != revision {
+				t.Fatalf("valid publish primary=%s, want %s", got, revision)
+			}
+			if got := fetchEvidenceFile(t, root, "checks", revision, "checks.json"); !bytes.Equal(got, mustRead(t, checks)) {
+				t.Fatalf("published checks=%q", got)
+			}
+			if got := fetchEvidenceFile(t, root, "verdict", revision, "verdict.json"); !bytes.Equal(got, mustRead(t, verdict)) {
+				t.Fatalf("published verdict=%q", got)
+			}
+			published := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)"))
+
+			invalidate()
+			if _, err := publishVerdict(context.Background(), input); err == nil || publishConflict(err) {
+				t.Fatalf("identical retry error=%v, want context refusal before idempotency", err)
+			}
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)")); got != published {
+				t.Fatalf("unauthorized retry changed remote refs:\nbefore:\n%safter:\n%s", published, got)
+			}
+		})
+	}
+}
+
+func TestCLIPublishVerdictFromOwnedLinkedWorktree(t *testing.T) {
+	primary, origin := testClone(t)
+	writePassingChecks(t, primary)
+	revision := strings.TrimSpace(string(runGitDir(t, primary, "rev-parse", "HEAD")))
+	request := reviewRequestJSON("1", revision, "github")
+	pushEvidence(t, primary, "request", revision, request, "Iron Forest Builder", "builder@forest.invalid")
+	runGitDir(t, primary, "push", "origin", revision+":refs/heads/forest/1/work")
+	requestBefore := string(runGit(t, "--git-dir="+origin, "rev-parse", evidenceRequestRefPrefix+revision))
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	linked := filepath.Join(t.TempDir(), "1-verifier")
+	runGitDir(t, primary, "worktree", "add", "--detach", linked, revision)
+
+	foreign, _ := testClone(t)
+	seedVerdictRun(t, foreign, "9-verifier")
+	seedVerdictRun(t, primary, "1-verifier")
+	t.Setenv("FOREST_ROOT", foreign)
+	t.Setenv("FOREST_RUN_ID", "1-verifier")
+	code, envelope, stderr := decodeEnvelope(t, "publish", "verdict", checks, verdict, "--root", linked, "--json")
+	if code != exitOK {
+		t.Fatalf("owned linked-worktree publish code=%d stderr=%q", code, stderr)
+	}
+	var result publishVerdictResult
+	decodePayload(t, envelope, &result)
+	if result.Status != "published" || result.Revision != revision || result.Verdict != "approve" {
+		t.Fatalf("linked-worktree publish result=%#v", result)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != revision {
+		t.Fatalf("primary=%s, want %s", got, revision)
+	}
+	if got := string(runGit(t, "--git-dir="+origin, "rev-parse", evidenceRequestRefPrefix+revision)); got != requestBefore {
+		t.Fatalf("request evidence changed from %s to %s", requestBefore, got)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/forest/1/work"))); got != revision {
+		t.Fatalf("request branch=%s, want %s", got, revision)
+	}
+	if got := fetchEvidenceFile(t, primary, "checks", revision, "checks.json"); !bytes.Equal(got, mustRead(t, checks)) {
+		t.Fatalf("published checks=%q", got)
+	}
+	if got := fetchEvidenceFile(t, primary, "verdict", revision, "verdict.json"); !bytes.Equal(got, mustRead(t, verdict)) {
+		t.Fatalf("published verdict=%q", got)
+	}
+}
+
+func TestPublishVerdictRechecksRunOwnershipAfterConfiguredChecks(t *testing.T) {
+	for _, transition := range []struct {
+		name      string
+		nextRunID string
+		nextAgent string
+	}{
+		{name: "ended"},
+		{name: "replaced", nextRunID: "2-verifier", nextAgent: "verifier"},
+		{name: "reattributed", nextRunID: "1-verifier", nextAgent: "builder"},
+	} {
+		t.Run(transition.name, func(t *testing.T) {
+			root, origin := testClone(t)
+			livePath := liveRunPath(root, "verifier")
+			completed := filepath.Join(t.TempDir(), "check-completed")
+			t.Setenv("FOREST_TEST_LIVE_RUN", livePath)
+			t.Setenv("FOREST_TEST_CHECK_COMPLETE", completed)
+			command := `rm "$FOREST_TEST_LIVE_RUN"`
+			if transition.nextRunID != "" {
+				seedVerdictRun(t, root, transition.nextRunID)
+				var replacement liveRunRecord
+				if err := json.Unmarshal(mustRead(t, livePath), &replacement); err != nil {
+					t.Fatal(err)
+				}
+				replacement.Agent = transition.nextAgent
+				replacementPath := filepath.Join(t.TempDir(), "next-run.json")
+				if err := writeLiveRun(replacementPath, replacement); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("FOREST_TEST_NEXT_RUN", replacementPath)
+				command = `cp "$FOREST_TEST_NEXT_RUN" "$FOREST_TEST_LIVE_RUN"`
+			}
+			seedVerdictRun(t, root, "1-verifier")
+			config := `repo: owner/name
+primary: refs/heads/master
+agents:
+  builder: {poll: "true", interval: 1}
+checks:
+  - name: test
+    run: |
+      set -e
+      ` + command + `
+      printf complete > "$FOREST_TEST_CHECK_COMPLETE"
+`
+			if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGitDir(t, root, "commit", "-am", "change Run ownership during checks")
+			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			request := reviewRequestJSON("1", revision, "github")
+			pushEvidence(t, root, "request", revision, request, "Iron Forest Builder", "builder@forest.invalid")
+			runGitDir(t, root, "push", "origin", revision+":refs/heads/forest/1/work")
+			checks, verdict := writeEvidencePayloads(t, revision, "approve")
+			before := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)"))
+
+			_, err := publishVerdict(context.Background(), publishVerdictInput{
+				Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
+			})
+			if err == nil || publishConflict(err) {
+				t.Fatalf("publish error=%v, want context refusal after checks", err)
+			}
+			if got := string(mustRead(t, completed)); got != "complete" {
+				t.Fatalf("configured check completion=%q", got)
+			}
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)")); got != before {
+				t.Fatalf("ended or changed Run published remote refs:\nbefore:\n%safter:\n%s", before, got)
+			}
+		})
 	}
 }

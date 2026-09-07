@@ -234,15 +234,6 @@ func runConfiguredChecksWithAttestation(ctx context.Context, root, revision stri
 	defer func() {
 		err = errors.Join(err, removePublishWorktree(root, dir))
 	}()
-	// The credential scan is a Kernel-owned preflight, not a candidate-defined
-	// check: it runs unconditionally before any configured check and never
-	// compiles or executes candidate code. The scanner executable is resolved
-	// against the managed primary checkout, so a candidate cannot place a
-	// trufflehog on the path and have it trusted.
-	findings, scanErr := scanSecretsTreeRoot(ctx, primary, dir)
-	if checkErr := scanSecretsCheckError(findings, scanErr); checkErr != nil {
-		return fmt.Errorf("secrets scan: %w", checkErr)
-	}
 	cfg, loadErr := loadConfig(configPath(dir))
 	if loadErr != nil {
 		return loadErr
@@ -252,14 +243,24 @@ func runConfiguredChecksWithAttestation(ctx context.Context, root, revision stri
 			return matchErr
 		}
 	}
+	// The credential scan is a Kernel-owned preflight, not a candidate-defined
+	// check: it runs unconditionally before any configured check and never
+	// compiles or executes candidate code. The scanner executable is resolved
+	// against the managed primary checkout, so a candidate cannot place a
+	// trufflehog on the path and have it trusted.
+	findings, scanErr := scanSecretsTreeRoot(ctx, primary, dir)
+	if checkErr := scanSecretsCheckError(findings, scanErr); checkErr != nil {
+		return fmt.Errorf("secrets scan: %w", checkErr)
+	}
 	path, pathErr := trustedPath(root)
 	if pathErr != nil {
 		return pathErr
 	}
+	environment := checkEnvironment(path)
 	for _, check := range cfg.Checks {
 		command := exec.CommandContext(ctx, shell, "-c", check.Run)
 		command.Dir = dir
-		command.Env = checkEnvironment(path)
+		command.Env = environment
 		var stderr bytes.Buffer
 		command.Stderr = &stderr
 		output, runErr := processGroupOutput(ctx, command)
@@ -271,20 +272,13 @@ func runConfiguredChecksWithAttestation(ctx context.Context, root, revision stri
 }
 
 func requireMatchingCheckNames(configured []Check, attested []checkResult) error {
-	configuredNames := make([]string, len(configured))
+	if len(configured) != len(attested) {
+		return fmt.Errorf("submitted Checks names do not match configured names: got %d results, want %d", len(attested), len(configured))
+	}
 	for index, check := range configured {
-		configuredNames[index] = check.Name
-	}
-	attestedNames := make([]string, len(attested))
-	match := len(configured) == len(attested)
-	for index, result := range attested {
-		attestedNames[index] = result.Name
-		if index >= len(configured) || result.Name != configured[index].Name {
-			match = false
+		if attested[index].Name != check.Name {
+			return fmt.Errorf("submitted Checks names do not match configured names: result %d is %q, want %q", index+1, attested[index].Name, check.Name)
 		}
-	}
-	if !match {
-		return fmt.Errorf("submitted Checks names %v do not match configured names %v", attestedNames, configuredNames)
 	}
 	return nil
 }

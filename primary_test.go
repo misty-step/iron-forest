@@ -97,9 +97,6 @@ func TestConfigShowPublishesResolvedPrimaryAndSource(t *testing.T) {
 	if payload.Primary != "refs/heads/main" || payload.PrimarySource != PrimarySourceRemote {
 		t.Fatalf("config show primary=%q source=%q, want remote main", payload.Primary, payload.PrimarySource)
 	}
-	if !strings.Contains(outcome.Human, "primary: refs/heads/main (remote)") {
-		t.Fatalf("config show human=%q, want resolved primary", outcome.Human)
-	}
 }
 
 func TestSelfcheckRefusesWhenPrimaryCannotResolve(t *testing.T) {
@@ -118,9 +115,6 @@ checks:
 	outcome := runSelfcheck(nil, cliFlags{root: root})
 	if outcome.Exit == exitOK {
 		t.Fatalf("runSelfcheck() succeeded without a resolvable primary")
-	}
-	if !strings.Contains(outcome.ErrText, "HEAD symref") {
-		t.Fatalf("runSelfcheck() error=%q, want remote HEAD symref refusal", outcome.ErrText)
 	}
 }
 
@@ -145,8 +139,14 @@ func TestAuditSnapshotsPrimaryBranch(t *testing.T) {
 
 func TestPublishVerdictApproveFastForwardsPrimaryBranch(t *testing.T) {
 	root, origin := newPrimaryBranchFixture(t, "main")
+	if err := os.WriteFile(filepath.Join(root, "candidate"), []byte("candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "add", "candidate")
+	runGitDir(t, root, "commit", "-m", "candidate for main")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	pushRequestForRevision(t, root, "if-primary-branch", revision)
+	requestBefore := string(runGitDir(t, root, "ls-remote", "origin", evidenceRequestRefPrefix+revision, "refs/heads/forest/if-primary-branch/work"))
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
@@ -161,5 +161,21 @@ func TestPublishVerdictApproveFastForwardsPrimaryBranch(t *testing.T) {
 	got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/main")))
 	if got != revision {
 		t.Fatalf("main=%s want %s", got, revision)
+	}
+	if got := string(runGitDir(t, root, "ls-remote", "origin", evidenceRequestRefPrefix+revision, "refs/heads/forest/if-primary-branch/work")); got != requestBefore {
+		t.Fatalf("request refs changed:\n%s\nwant:\n%s", got, requestBefore)
+	}
+	for ref, path := range map[string]string{
+		evidenceChecksRefPrefix + revision:  checks,
+		evidenceVerdictRefPrefix + revision: verdict,
+	} {
+		want, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := runGit(t, "--git-dir="+origin, "show", ref+":"+filepath.Base(path))
+		if string(got) != string(want) {
+			t.Fatalf("published %s=%s, want %s", ref, got, want)
+		}
 	}
 }

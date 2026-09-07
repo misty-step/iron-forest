@@ -631,38 +631,96 @@ func TestCLIHelpSucceeds(t *testing.T) {
 }
 
 func TestCLIPublishVerdictRequiresRunID(t *testing.T) {
-	root, _ := testClone(t)
-	writePassingChecks(t, root)
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	checks, verdict := writeEvidencePayloads(t, revision, "changes")
-	t.Setenv("FOREST_ROOT", root)
-	t.Setenv("FOREST_RUN_ID", "")
-	code, _, stderr := captureCLIOutput(t, func() int {
-		return runSurfaceCommand([]string{"publish", "verdict", checks, verdict, "--root", root})
-	})
-	if code != exitError || !strings.Contains(stderr, "FOREST_RUN_ID is required") {
-		t.Fatalf("code=%d stderr=%q", code, stderr)
+	for _, test := range []struct {
+		name  string
+		runID string
+	}{
+		{name: "missing"},
+		{name: "mismatched", runID: "9-verifier"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, origin := testClone(t)
+			writePassingChecks(t, root)
+			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			checks, verdict := writeEvidencePayloads(t, revision, "changes")
+			seedVerdictRun(t, root, "1-verifier")
+			before := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)"))
+			t.Setenv("FOREST_RUN_ID", test.runID)
+			code, _, stderr := decodeEnvelope(t, "publish", "verdict", checks, verdict, "--root", root, "--json")
+			if code != exitError {
+				t.Fatalf("unauthorized publish code=%d, want %d (stderr=%q)", code, exitError, stderr)
+			}
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)")); got != before {
+				t.Fatalf("unauthorized publish changed remote refs:\nbefore:\n%safter:\n%s", before, got)
+			}
+
+			t.Setenv("FOREST_RUN_ID", "1-verifier")
+			code, envelope, stderr := decodeEnvelope(t, "publish", "verdict", checks, verdict, "--root", root, "--json")
+			if code != exitOK {
+				t.Fatalf("valid publish code=%d stderr=%q", code, stderr)
+			}
+			var result publishVerdictResult
+			decodePayload(t, envelope, &result)
+			if result.Status != "published" {
+				t.Fatalf("valid publish result=%#v", result)
+			}
+			if got := string(fetchEvidenceFile(t, root, "checks", revision, "checks.json")); got != string(mustRead(t, checks)) {
+				t.Fatalf("published checks=%q", got)
+			}
+			if got := string(fetchEvidenceFile(t, root, "verdict", revision, "verdict.json")); got != string(mustRead(t, verdict)) {
+				t.Fatalf("published verdict=%q", got)
+			}
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")); got != before {
+				t.Fatalf("changes verdict moved primary:\nbefore:\n%safter:\n%s", before, got)
+			}
+			requireMissingRemoteRef(t, root, evidenceRequestRefPrefix+revision)
+		})
 	}
 }
 
 func TestCLIPublishVerdictRequiresRunIDBeforeIdentical(t *testing.T) {
-	root, _ := testClone(t)
-	writePassingChecks(t, root)
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	checks, verdict := writeEvidencePayloads(t, revision, "changes")
-	seedVerdictRun(t, root, "1-verifier")
-	t.Setenv("FOREST_RUN_ID", "1-verifier")
-	code, _, stderr := captureCLIOutput(t, func() int {
-		return runSurfaceCommand([]string{"publish", "verdict", checks, verdict, "--root", root})
-	})
-	if code != exitOK {
-		t.Fatalf("first publish code=%d stderr=%q", code, stderr)
-	}
-	t.Setenv("FOREST_RUN_ID", "")
-	code, _, stderr = captureCLIOutput(t, func() int {
-		return runSurfaceCommand([]string{"publish", "verdict", checks, verdict, "--root", root})
-	})
-	if code != exitError || !strings.Contains(stderr, "FOREST_RUN_ID is required") {
-		t.Fatalf("identical code=%d stderr=%q", code, stderr)
+	for _, test := range []struct {
+		name  string
+		runID string
+	}{
+		{name: "missing"},
+		{name: "mismatched", runID: "9-verifier"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, origin := testClone(t)
+			writePassingChecks(t, root)
+			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			checks, verdict := writeEvidencePayloads(t, revision, "changes")
+			seedVerdictRun(t, root, "1-verifier")
+			t.Setenv("FOREST_RUN_ID", "1-verifier")
+			code, _, stderr := decodeEnvelope(t, "publish", "verdict", checks, verdict, "--root", root, "--json")
+			if code != exitOK {
+				t.Fatalf("first publish code=%d stderr=%q", code, stderr)
+			}
+			before := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)"))
+
+			t.Setenv("FOREST_RUN_ID", test.runID)
+			code, _, stderr = decodeEnvelope(t, "publish", "verdict", checks, verdict, "--root", root, "--json")
+			if code != exitError {
+				t.Fatalf("unauthorized identical retry code=%d, want %d (stderr=%q)", code, exitError, stderr)
+			}
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)")); got != before {
+				t.Fatalf("unauthorized retry changed remote refs:\nbefore:\n%safter:\n%s", before, got)
+			}
+
+			t.Setenv("FOREST_RUN_ID", "1-verifier")
+			code, envelope, stderr := decodeEnvelope(t, "publish", "verdict", checks, verdict, "--root", root, "--json")
+			if code != exitOK {
+				t.Fatalf("valid identical retry code=%d stderr=%q", code, stderr)
+			}
+			var result publishVerdictResult
+			decodePayload(t, envelope, &result)
+			if result.Status != "identical" {
+				t.Fatalf("valid identical retry result=%#v", result)
+			}
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)")); got != before {
+				t.Fatalf("identical retry changed remote refs:\nbefore:\n%safter:\n%s", before, got)
+			}
+		})
 	}
 }
