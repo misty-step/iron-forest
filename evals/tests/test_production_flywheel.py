@@ -231,6 +231,41 @@ class ProductionFlywheelTest(unittest.TestCase):
             self.assertIn("- New draft cases awaiting verification: 0", report)
             self.assertIn("- Saturation: 1/1", report)
 
+
+    def test_report_links_promoted_cases_by_source_run_id_when_trace_corrected(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / "production-cases.json"
+            manifest.write_text(json.dumps({
+                "schema": "forest.production-cases.v1",
+                "cases": [
+                    {
+                        "id": "prod-builder-branch-race",
+                        "role": "builder",
+                        "summary": "x",
+                        "effect": "builder_publish",
+                        "source_trace_id": "trace-corrected-real",
+                        "source_run_id": "run-1",
+                        "expected_files": {"value.txt": "ready\n"},
+                    }
+                ],
+            }) + "\n")
+            client = FakeLangfuseClient()
+            # Ingest used run-1 fallback as source_trace_id, but recorded run_id="run-1" in metadata
+            client.items["prod-run-1"] = FakeItem(
+                "prod-run-1",
+                {"role": "builder", "status": "draft", "run_id": "run-1", "source_trace_id": "run-1"},
+            )
+            report = flywheel.report_markdown(client, manifest)
+            self.assertIn("- New draft cases awaiting verification: 0", report)
+            self.assertIn("- Saturation: 1/1", report)
+
+            # Adding an unpromoted item counts as a new draft awaiting verification
+            client.items["prod-run-2"] = FakeItem(
+                "prod-run-2",
+                {"role": "builder", "status": "draft", "run_id": "run-2", "source_trace_id": "trace-2"},
+            )
+            report2 = flywheel.report_markdown(client, manifest)
+            self.assertIn("- New draft cases awaiting verification: 1", report2)
     def test_sdk_report_listing_exposes_transport_failure(self):
         class BrokenItems:
             def list(self, **kwargs):
