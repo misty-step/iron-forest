@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -89,6 +90,24 @@ def write_environment_metadata() -> None:
     )
 
 
+def write_repository_state() -> None:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["/usr/bin/git", "-c", f"safe.directory={WORKSPACE}", "-C", str(WORKSPACE), *args],
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()
+
+    payload = {
+        "commit_oids": sorted(
+            line.split()[0]
+            for line in git("cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)").splitlines()
+            if line.endswith(" commit")
+        ),
+        "worktree_status": git("status", "--porcelain"),
+    }
+    (BUNDLE / "repository-state.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -128,11 +147,13 @@ def main() -> int:
 
     copy_path(WORKSPACE / "forest.yaml", BUNDLE / "forest.yaml")
     copy_path(WORKSPACE / ".forest" / "runs", BUNDLE / "workspace" / ".forest" / "runs")
+    copy_path(WORKSPACE / ".forest" / "runs.jsonl", BUNDLE / "workspace" / ".forest" / "runs.jsonl")
     copy_path(AGENT_LOGS, BUNDLE / "agent")
     copy_path(ORIGIN, BUNDLE / "origin.git")
 
     try:
         write_environment_metadata()
+        write_repository_state()
         write_manifest()
     except Exception as error:  # noqa: BLE001 - collector must report and exit
         return fail(f"bundle finalization failed: {error}")

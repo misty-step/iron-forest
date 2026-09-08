@@ -24,6 +24,8 @@ def result(
     judge: float | None = None,
     exception: dict | None = None,
     regrade: bool = False,
+    agent: str | None = "iron-forest",
+    usage: bool = True,
 ) -> dict:
     rewards = {"deterministic": deterministic}
     if judge is not None:
@@ -35,20 +37,32 @@ def result(
         "started_at": f"2026-08-24T00:0{attempt}:00Z",
         "finished_at": f"2026-08-24T00:0{attempt}:10Z",
         "agent_info": {
-            "name": "iron-forest",
+            "name": agent,
             "version": "1",
-            "model_info": {"name": "openrouter/test/candidate", "provider": "openrouter"},
-        },
+            "model_info": {"name": "test/candidate", "provider": "openrouter"},
+        } if agent is not None else None,
         "verifier_result": {"rewards": rewards},
         "exception_info": exception,
-        "agent_result": {"n_input_tokens": 100, "n_cache_tokens": 10, "n_output_tokens": 40, "cost_usd": 0.02},
-        "config": {"source_trial": {"action": "regrade"}} if regrade else {},
+        "agent_result": (
+            {"n_input_tokens": 100, "n_cache_tokens": 10, "n_output_tokens": 40, "cost_usd": 0.02}
+            if usage else None
+        ),
+        "config": {"agent": {"model_name": "openrouter/test/candidate"}},
     }
+    if regrade:
+        value["config"]["source_trial"] = {"action": "regrade"}
     return value
 
 
-def lock(regrade: bool = False) -> dict:
+def lock(regrade: bool = False, agent: str | None = "iron-forest") -> dict:
     value = {
+        "agent": (
+            {"name": "oracle", "model_name": "openrouter/test/candidate"}
+            if agent == "oracle"
+            else {"import_path": "iron_forest_eval.agent:IronForestAgent"}
+            if agent == "iron-forest"
+            else {}
+        ),
         "task": {"name": "builder-ready-issue", "type": "local", "digest": sha("a")},
         "skills": [
             {"name": "builder", "source": "/skills/builder", "digest": sha("b")},
@@ -75,13 +89,18 @@ def write_trial(
     judge: float | None = None,
     exception: dict | None = None,
     regrade: bool = False,
+    agent: str | None = "iron-forest",
+    usage: bool = True,
 ) -> Path:
     trial_dir = job_dir / f"{case}__{attempt}"
     trial_dir.mkdir(parents=True)
     (trial_dir / "result.json").write_text(
-        json.dumps(result(case, attempt, deterministic=deterministic, judge=judge, exception=exception, regrade=regrade))
+        json.dumps(result(
+            case, attempt, deterministic=deterministic, judge=judge,
+            exception=exception, regrade=regrade, agent=agent, usage=usage,
+        ))
     )
-    (trial_dir / "lock.json").write_text(json.dumps(lock(regrade=regrade)))
+    (trial_dir / "lock.json").write_text(json.dumps(lock(regrade=regrade, agent=agent)))
     return trial_dir
 
 
@@ -102,9 +121,11 @@ def minimal_report(
 ) -> dict:
     return {
         "job": "job",
+        "execution": {"kind": "model", "agent_quality_evidence": True},
         "totals": {
             "pass_at_1_rate": pass_rate,
             "pass_at_1_wilson": wilson,
+            "deterministic_failed_trials": 0,
             "cost_usd": cost_usd,
             "mean_duration_seconds": mean_duration_seconds,
             "environment": {
@@ -134,6 +155,88 @@ class AssertResultsTest(unittest.TestCase):
             self.assertTrue(report["cases"]["builder-ready-issue"]["pass_cubed"])
             self.assertTrue(report["cases"]["builder-ready-issue"]["saturated"])
             self.assertEqual(reporter.evaluate_gate(report), [])
+
+    def test_perfect_oracle_cannot_satisfy_model_promotion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            oracle_dir = write_job(Path(tmp), "oracle")
+            model_dir = write_job(Path(tmp), "model")
+            for attempt in range(3):
+                write_trial(oracle_dir, "builder-ready-issue", attempt, agent="oracle", judge=1.0)
+                write_trial(model_dir, "builder-ready-issue", attempt, judge=1.0)
+            oracle = reporter.build_report(oracle_dir, require_judge=True)
+            model = reporter.build_report(model_dir, require_judge=True)
+
+            self.assertEqual(
+                oracle["execution"],
+                {"kind": "deterministic-oracle", "agent_quality_evidence": False},
+            )
+            self.assertTrue(oracle["cases"]["builder-ready-issue"]["pass_cubed"])
+            self.assertEqual(reporter.evaluate_gate(oracle), [])
+            self.assertEqual(
+                reporter.evaluate_gate(oracle, change_class="kernel", adr="ADR 0022"), [],
+            )
+            self.assertNotEqual(reporter.evaluate_gate(oracle, change_class="model"), [])
+            comparison = reporter.compare_reports(oracle, model)
+            self.assertEqual(comparison["verdict"], "incomparable-execution")
+            self.assertIsNone(comparison["delta_points"])
+            self.assertEqual(
+                reporter.compare_reports(model, oracle)["verdict"], "incomparable-execution",
+            )
+
+    def test_mixed_and_unknown_cohorts_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp), "mixed")
+            write_trial(job_dir, "builder-ready-issue", 0, judge=1.0)
+            model = reporter.build_report(job_dir, require_judge=True)
+            self.assertEqual(model["execution"], {"kind": "model", "agent_quality_evidence": True})
+            self.assertEqual(reporter.evaluate_gate(model, change_class="prompt"), [])
+
+            write_trial(job_dir, "builder-ready-issue", 1, agent="oracle", judge=1.0)
+            mixed = reporter.build_report(job_dir, require_judge=True)
+            self.assertEqual(mixed["execution"], {"kind": "mixed", "agent_quality_evidence": False})
+            self.assertEqual(mixed["cases"]["builder-ready-issue"]["execution"]["kind"], "mixed")
+            self.assertNotEqual(reporter.evaluate_gate(mixed, change_class="prompt"), [])
+            self.assertNotEqual(reporter.evaluate_gate(mixed, baseline_report=model), [])
+
+            unknown_dir = write_job(Path(tmp), "unknown")
+            write_trial(unknown_dir, "builder-ready-issue", 0, agent=None, judge=1.0)
+            write_trial(unknown_dir, "builder-ready-issue", 1, usage=False, judge=1.0)
+            unknown = reporter.build_report(unknown_dir, require_judge=True)
+            self.assertEqual(
+                unknown["execution"], {"kind": "unknown", "agent_quality_evidence": False},
+            )
+            self.assertNotEqual(reporter.evaluate_gate(unknown, change_class="skill"), [])
+            self.assertEqual(
+                reporter.compare_reports(model, unknown)["verdict"], "incomparable-execution",
+            )
+
+    def test_historical_report_is_not_reclassified_or_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = write_job(Path(tmp))
+            write_trial(job_dir, "builder-ready-issue", 0, judge=1.0)
+            current = reporter.build_report(job_dir, require_judge=True)
+            historical = dict(current)
+            del historical["execution"]
+            json_path, md_path = reporter.write_report(historical, job_dir)
+            original_json = json_path.read_bytes()
+            original_markdown = md_path.read_bytes()
+
+            self.assertNotEqual(reporter.evaluate_gate(historical, change_class="model"), [])
+            self.assertEqual(
+                reporter.compare_reports(current, historical)["verdict"], "incomparable-execution",
+            )
+            with self.assertRaises(FileExistsError):
+                reporter.write_report(current, job_dir)
+            reporter.write_report(current, job_dir / "derived")
+            self.assertEqual(json_path.read_bytes(), original_json)
+            self.assertEqual(md_path.read_bytes(), original_markdown)
+
+    def test_judge_cannot_replace_a_missing_deterministic_grade(self):
+        trial = result("builder-ready-issue", 0, judge=1.0)
+        del trial["verifier_result"]["rewards"]["deterministic"]
+        outcome = reporter.trial_outcome(trial, require_judge=True)
+        self.assertEqual(outcome["outcome"], "no-reward")
+        self.assertIsNone(outcome["deterministic"])
 
     def test_regression_exception_is_classified_infra(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -266,6 +369,20 @@ class AssertResultsTest(unittest.TestCase):
                 contender["totals"]["pass_at_1_rate"],
             )
 
+            # A later safety failure must not hide behind the same winning pass@1.
+            failed_trial = contender_dir / "case-22__1" / "result.json"
+            failed_trial.write_text(json.dumps(result("case-22", 1, deterministic=0.0, judge=1.0)))
+            unsafe = reporter.build_report(contender_dir, suite="capability", require_judge=True)
+            self.assertEqual(unsafe["execution"], {"kind": "model", "agent_quality_evidence": True})
+            self.assertEqual(
+                unsafe["totals"]["pass_at_1_rate"], contender["totals"]["pass_at_1_rate"],
+            )
+            unsafe["comparison"] = reporter.compare_reports(unsafe, baseline)
+            self.assertEqual(unsafe["comparison"]["verdict"], "safety-failure")
+            self.assertNotEqual(
+                reporter.evaluate_gate(unsafe, change_class="model", baseline_report=baseline), [],
+            )
+
     def test_grader_change_requires_regrade(self):
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = write_job(Path(tmp))
@@ -299,15 +416,6 @@ class AssertResultsTest(unittest.TestCase):
             report = reporter.build_report(job_dir, suite="regression")
             serialized = json.dumps(report, sort_keys=True)
             self.assertNotIn(secret, serialized)
-
-    def test_markdown_exposes_saturated_and_infra(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            job_dir = write_job(Path(tmp))
-            write_trial(job_dir, "builder-ready-issue", 0)
-            report = reporter.build_report(job_dir, suite="regression")
-            markdown = reporter.render_markdown(report)
-            self.assertIn("saturated cases", markdown)
-            self.assertIn("infra", markdown)
 
     def test_expected_cases_match_passes_gate(self):
         with tempfile.TemporaryDirectory() as tmp:

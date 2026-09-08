@@ -5,17 +5,18 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
+import re
 from pathlib import Path
 from hidden import RACE, RACE_TRIGGERED
 
 
 GIT = "/usr/bin/git"
 ORIGIN = "/origin.git"
-TIME = "2026-08-14T00:00:00Z"
 
 
 def run(*args: str, cwd: Path, env: dict[str, str] | None = None, input: str | None = None) -> str:
+    if args[0] == GIT:
+        args = (GIT, "-c", f"safe.directory={cwd}", "-c", f"safe.directory={ORIGIN}", *args[1:])
     completed = subprocess.run(
         list(args), cwd=cwd, env=env, input=input, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
     )
@@ -45,79 +46,49 @@ def race_env() -> dict[str, str]:
 
 def destination(args: list[str], prefix: str) -> tuple[str, str] | None:
     for arg in args:
-        if ":" not in arg:
+        if arg.startswith("-") or ":" not in arg:
             continue
         source, target = arg.rsplit(":", 1)
         if target.startswith(prefix):
-            return source, target
+            return source.removeprefix("+"), target
     return None
 
 
-def canonical_targets(cwd: Path, ref: str) -> set[str]:
-    completed = subprocess.run(
-        [GIT, f"--git-dir={ORIGIN}", "ls-tree", "-r", "--name-only", ref],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
-    )
-    if completed.returncode != 0:
-        return set()
-    return {line.replace("/", "") for line in completed.stdout.splitlines() if line}
-
-
-def publish_conflict(cwd: Path, args: list[str], canonical: str, schema: str) -> None:
-    refspec = destination(args, canonical)
+def publish_conflict(cwd: Path, args: list[str], kind: str) -> None:
+    prefix = f"refs/forest/v1/{kind}/"
+    refspec = destination(args, prefix)
     if refspec is None:
-        raise RuntimeError(f"race could not find {canonical} refspec")
-    source, _ = refspec
-    private_targets = {
-        line.split()[-1]
-        for line in run(GIT, "notes", f"--ref={source}", "list", cwd=cwd).splitlines()
-        if line.strip()
-    }
-    targets = private_targets - canonical_targets(cwd, canonical)
-    if len(targets) != 1:
-        raise RuntimeError(f"race expected one new note target, got {sorted(targets)}")
-    target = next(iter(targets))
-    temporary = "refs/notes/forest/race-conflict"
-    remote = subprocess.run(
-        [GIT, f"--git-dir={ORIGIN}", "rev-parse", "--verify", canonical],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
-    )
-    if remote.returncode == 0:
-        run(GIT, "update-ref", temporary, remote.stdout.strip(), cwd=cwd)
+        raise RuntimeError(f"race could not find {prefix} refspec")
+    source, target_ref = refspec
+    revision = target_ref.removeprefix(prefix)
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise RuntimeError("race requires a full revision-scoped evidence ref")
+    payload = json.loads(run(GIT, "show", f"{source}:{kind}.json", cwd=cwd))
+    if not isinstance(payload, dict) or payload.get("revision") != revision:
+        raise RuntimeError("race evidence does not bind the publication revision")
+    if kind == "verdict":
+        payload["verdict"] = "approve" if payload.get("verdict") == "changes" else "changes"
+        payload["summary"] = "Concurrent writer publishes a different decision."
+    elif kind == "request":
+        # Keep the exact request binding but make its bytes differ, so neither
+        # a lease retry nor the CLI's identical-publication path can accept it.
+        time = "2026-08-14T00:00:00Z"
+        payload["time"] = "2026-08-14T00:00:01Z" if payload.get("time") == time else time
     else:
-        subprocess.run([GIT, "update-ref", "-d", temporary], cwd=cwd, check=False)
-    payload = {
-        "schema": "forest.review-request.v2", "subject": "100",
-        "branch": "forest/100/candidate", "revision": target, "time": TIME,
-    }
-    with tempfile.NamedTemporaryFile("w", delete=False) as handle:
-        json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
-        handle.write("\n")
-        payload_path = handle.name
-    try:
-        run(GIT, "notes", f"--ref={temporary}", "add", "-F", payload_path, target, cwd=cwd, env=race_env())
-        run(GIT, "push", "origin", f"{temporary}:{canonical}", cwd=cwd)
-    finally:
-        os.unlink(payload_path)
-        subprocess.run([GIT, "update-ref", "-d", temporary], cwd=cwd, check=False)
-
-def publish_verdict_conflict(cwd: Path, args: list[str]) -> None:
-    refspec = destination(args, "refs/forest/v1/verdict/")
-    if refspec is None:
-        raise RuntimeError("race could not find refs/forest/v1/verdict/ refspec")
-    _, target_ref = refspec
-    target = target_ref.removeprefix("refs/forest/v1/verdict/")
-    payload = {
-        "schema": "forest.verdict.v1",
-        "revision": target,
-        "verdict": "approve",
-        "summary": "concurrent conflicting verdict",
-        "time": TIME,
-    }
-    blob = run(GIT, "hash-object", "-w", "--stdin", cwd=cwd, input=json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
-    tree = run(GIT, "mktree", cwd=cwd, input=f"100644 blob {blob}\tverdict.json\n")
-    commit = run(GIT, "commit-tree", tree, "-m", f"eval verdict {target}", cwd=cwd, env=race_env())
-    run(GIT, "push", "origin", f"{commit}:{target_ref}", cwd=cwd, env=race_env())
+        raise RuntimeError(f"unsupported conflicting evidence kind: {kind}")
+    origin_git = (GIT, f"--git-dir={ORIGIN}")
+    blob = run(
+        *origin_git, "hash-object", "-w", "--stdin", cwd=cwd,
+        input=json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n",
+    )
+    tree = run(*origin_git, "mktree", cwd=cwd, input=f"100644 blob {blob}\t{kind}.json\n")
+    commit = run(
+        *origin_git, "commit-tree", tree, "-m", f"eval concurrent {kind} {revision}",
+        cwd=cwd, env=race_env(),
+    )
+    run(
+        *origin_git, "update-ref", target_ref, commit, "0" * 40, cwd=cwd,
+    )
 
 
 def main() -> None:
@@ -127,8 +98,15 @@ def main() -> None:
     args = json.loads(sys.argv[2])
     race = json.loads(RACE.read_text())
     kind = race["type"]
-    if kind == "canonical_note":
-        run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/notes/forest/review-request", race["race_note_tip"], cwd=cwd)
+    if kind == "unrelated_evidence":
+        refspec = destination(args, "refs/forest/v1/request/")
+        target = f"refs/forest/v1/request/{race['base']}"
+        if refspec is None or refspec[1] == target:
+            raise RuntimeError("unrelated evidence must not target the candidate request")
+        run(
+            GIT, f"--git-dir={ORIGIN}", "update-ref", target,
+            race["race_request_commit"], "0" * 40, cwd=cwd,
+        )
     elif kind == "branch":
         refspec = destination(args, "refs/heads/")
         if refspec is None:
@@ -138,9 +116,9 @@ def main() -> None:
     elif kind == "approve_master":
         run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/heads/master", race["competitor"], cwd=cwd)
     elif kind == "conflicting_verdict":
-        publish_verdict_conflict(cwd, args)
+        publish_conflict(cwd, args, "verdict")
     elif kind == "conflicting_review_request":
-        publish_conflict(cwd, args, "refs/notes/forest/review-request", "review-request")
+        publish_conflict(cwd, args, "request")
     else:
         raise RuntimeError(f"unknown race: {kind}")
     restore_origin_owner()

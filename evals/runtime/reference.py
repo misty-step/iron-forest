@@ -2,280 +2,122 @@
 from __future__ import annotations
 
 import json
+import os
+import pwd
+import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
-from hidden import PR_CREATED, REFERENCE_RUN, STATE
-
-from setup import GIT, TIME, evidence_commit, evidence_push, git, identity, note_add, run, write_files
+from hidden import FOREST_EXIT, REFERENCE_RUN, SCENARIO, STATE
+from setup import TIME
 
 WORKSPACE = Path("/workspace")
-ORIGIN = Path("/origin.git")
+ORACLE = Path("/run/forest-eval/oracle")
 
 
-def remote_tip(ref: str) -> str | None:
-    value = git(WORKSPACE, "ls-remote", "origin", ref)
-    return value.split()[0] if value else None
+def run_reference(scenario: dict, state: dict) -> subprocess.CompletedProcess[str]:
+    """Run a deterministic, model-free oracle through the production Runner and Pi."""
+    if os.geteuid() != 0:
+        raise PermissionError("reference orchestration must run as root; the Run executes as forest")
+    role = scenario["role"]
+    if role not in {"builder", "fixer", "verifier", "critic", "tester"}:
+        raise ValueError(f"unsupported reference role: {role}")
+    if "request" not in state:
+        raise ValueError("setup must resolve state.request, including an explicit null for no authorization")
+    forest = pwd.getpwnam("forest")
+    runtime = Path(__file__).resolve().parent
+    # The protected fixture/grade tree stays root-only. Only the oracle's necessary
+    # inputs and entrypoints become readable, outside the managed checkout, for
+    # this invocation. An existing directory is not silently removed mid-Run.
+    ORACLE.mkdir(mode=0o755)
+    previous_handlers = {}
+    try:
+        (ORACLE / "bin").mkdir(mode=0o755)
+        (ORACLE / "results").mkdir(mode=0o700)
+        os.chown(ORACLE / "results", forest.pw_uid, forest.pw_gid)
+        for source, destination in (
+            ("oracle.py", "oracle.py"),
+            ("oracle-extension.ts", "oracle-extension.ts"),
+            ("oracle-pi.py", "bin/pi"),
+        ):
+            target = ORACLE / destination
+            shutil.copyfile(runtime / source, target)
+            target.chmod(0o555 if destination == "bin/pi" else 0o444)
+        data = {
+            "role": role,
+            "effect": scenario["effect"],
+            "request": state["request"],
+            "base": state["master_before"],
+            "time": TIME,
+            "files": scenario.get("attempt_files", scenario.get("expected_files")),
+            "inspection_paths": list(scenario.get("planted_files", {})),
+            "failing_example": scenario.get("failing_example"),
+            "verdict_summary": scenario.get("verdict_summary"),
+            "semantic_contract": scenario.get("semantic_contract"),
+            "pause_before_publication": scenario.get("pause_before_publication"),
+        }
+        data_path = ORACLE / "input.json"
+        data_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        data_path.chmod(0o444)
+        request_path = ORACLE.parent / "request.json"
+        request_path.write_text(json.dumps(state["request"], indent=2, sort_keys=True) + "\n")
+        request_path.chmod(0o444)
+        environment = {str(key): str(value) for key, value in scenario.get("agent_env", {}).items()}
+        # No inherited provider credentials or operator Pi state enter the oracle.
+        if any("KEY" in key or "TOKEN" in key or "SECRET" in key for key in environment):
+            raise ValueError("oracle agent_env must not supply credentials")
+        environment.update({
+            "HOME": forest.pw_dir,
+            "USER": forest.pw_name,
+            "LOGNAME": forest.pw_name,
+            "LANG": "C.UTF-8",
+            "PATH": f"{ORACLE / 'bin'}:/usr/local/bin:/usr/bin:/bin",
+            "FOREST_EVAL_ORACLE_DATA": str(data_path),
+            "FOREST_EVAL_ORACLE_RESULT": str(ORACLE / "results" / "input-hook.json"),
+        })
+        # Do not supply a Run ID, worktree, identity, or live marker. Runner owns
+        # all of them, including cleanup on failed publication and no-work paths.
+        with subprocess.Popen(
+            ["/usr/local/bin/forest", "once", role],
+            cwd=WORKSPACE,
+            env=environment,
+            user=forest.pw_uid,
+            group=forest.pw_gid,
+            extra_groups=[],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as child:
+            def forward_signal(signum, _frame):
+                # The child shares this process group; forwarding also covers a
+                # caller that signals only the orchestrator. Keep waiting so
+                # Runner can cancel its separate Pi group and clean live state.
+                child.send_signal(signum)
+
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                previous_handlers[signum] = signal.signal(signum, forward_signal)
+            stdout, stderr = child.communicate()
+            return subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+    finally:
+        try:
+            shutil.rmtree(ORACLE)
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
 
 
-def prepare_private(canonical: str, private: str) -> None:
-    tip = remote_tip(canonical)
-    if tip:
-        git(WORKSPACE, "update-ref", private, tip)
-    else:
-        subprocess.run([GIT, "update-ref", "-d", private], cwd=WORKSPACE, check=False)
-
-
-def add_canonical(canonical: str, target: str, payload: dict, actor: str) -> str:
-    private = canonical + "-reference"
-    prepare_private(canonical, private)
-    note_add(WORKSPACE, private, target, payload, actor)
-    return private
-
-
-def review_payload(subject: str, branch: str, revision: str, tracker: str) -> dict:
-    return {
-        "schema": "forest.review-request.v2",
-        "subject": subject,
-        "branch": branch,
-        "revision": revision,
-        "time": TIME,
-        "tracker": tracker,
-    }
-
-
-def checks_payload(revision: str, ok: bool) -> dict:
-    return {
-        "schema": "forest.checks.v1",
-        "revision": revision,
-        "results": [{"name": "scenario", "ok": ok, "exit": 0 if ok else 1}],
-        "time": TIME,
-    }
-
-
-def verdict_payload(revision: str, verdict: str, summary: str) -> dict:
-    return {
-        "schema": "forest.verdict.v1",
-        "revision": revision,
-        "verdict": verdict,
-        "summary": summary,
-        "time": TIME,
-    }
-
-
-def commit_files(start: str, branch: str, files: dict[str, str], actor: str, message: str) -> str:
-    git(WORKSPACE, "checkout", "--detach", start)
-    git(WORKSPACE, "checkout", "-B", branch)
-    write_files(WORKSPACE, files)
-    git(WORKSPACE, "add", ".")
-    identity(WORKSPACE, actor)
-    git(WORKSPACE, "commit", "-m", message)
-    return git(WORKSPACE, "rev-parse", "HEAD")
-
-
-def publish_builder(scenario: dict, state: dict) -> None:
-    subject = str(scenario["issue"]["number"])
-    publish_builder_subject(scenario, state, subject)
-
-
-def publish_builder_subject(scenario: dict, state: dict, subject: str) -> None:
-    branch = f"forest/{subject}/eval"
-    revision = commit_files(state["master_before"], branch, scenario["expected_files"], "builder", "eval: reference implementation")
-    if scenario.get("race") == "canonical_note":
-        run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/notes/forest/review-request", state["race_note_tip"])
-    payload = review_payload(subject, branch, revision, "powder" if powder_job_exists(scenario, subject) else "github")
-    private = add_canonical("refs/notes/forest/review-request", revision, payload, "builder")
-    evidence_push(WORKSPACE, "request", revision, payload, "builder")
-    git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
-    PR_CREATED.write_text(json.dumps({"head": branch, "base": "master"}) + "\n")
-
-def powder_job_exists(scenario: dict, subject: str) -> bool:
-    return any(job.get("id") == subject for job in scenario.get("powder_jobs", []))
-
-
-def powder_take(subject: str) -> None:
-    powder_script = Path(__file__).resolve().parent / "powder"
-    run("/usr/bin/python3", str(powder_script), "take", subject, "--agent", "forest-iron-forest")
-
-
-def powder_done(subject: str, revision: str) -> None:
-    powder_script = Path(__file__).resolve().parent / "powder"
-    run(
-        "/usr/bin/python3",
-        str(powder_script),
-        "done",
-        subject,
-        "--proof",
-        revision,
-        "--agent",
-        "forest-iron-forest",
-    )
-
-
-def publish_verifier(scenario: dict, state: dict, approve: bool) -> None:
-    revision = state["candidate"]
-    check_ok = scenario["id"] != "verifier-failed-check"
-    verdict = "approve" if approve else "changes"
-    summary = scenario.get("verdict_summary", "The Revision satisfies the review contract." if approve else "The Revision requires changes.")
-    checks = checks_payload(revision, check_ok)
-    verdict_body = verdict_payload(revision, verdict, summary)
-    checks_commit = evidence_commit(WORKSPACE, "checks", revision, checks, "verifier")
-    verdict_commit = evidence_commit(WORKSPACE, "verdict", revision, verdict_body, "verifier")
-    refspecs = [
-        f"{checks_commit}:refs/forest/v1/checks/{revision}",
-        f"{verdict_commit}:refs/forest/v1/verdict/{revision}",
-    ]
-    if approve:
-        refspecs.append(f"{revision}:refs/heads/master")
-    git(WORKSPACE, "push", "--atomic", "origin", *refspecs)
-    if approve and powder_job_exists(scenario, "100"):
-        powder_take("100")
-        powder_done("100", revision)
-
-
-
-def publish_fixer(scenario: dict, state: dict) -> str:
-    branch = state["branch"]
-    revision = commit_files(state["candidate"], branch, scenario["expected_files"], "fixer", "eval: reference repair")
-    payload = review_payload("100", branch, revision, "powder" if powder_job_exists(scenario, "100") else "github")
-    private = add_canonical("refs/notes/forest/review-request", revision, payload, "fixer")
-    evidence_push(WORKSPACE, "request", revision, payload, "fixer")
-    git(WORKSPACE, "push", "--atomic", "origin", f"{private}:refs/notes/forest/review-request", f"{revision}:refs/heads/{branch}")
-    return revision
-
-
-
-def publish_conflicting_note(canonical: str, target: str, payload: dict) -> None:
-    private = add_canonical(canonical, target, payload, "race")
-    identity(WORKSPACE, "race")
-    git(WORKSPACE, "push", "origin", f"{private}:{canonical}")
-
-
-def publish_critic_drafts(scenario: dict) -> None:
-    repo = "local/eval"
-    forest_yaml = WORKSPACE / "forest.yaml"
-    if forest_yaml.exists():
-        for line in forest_yaml.read_text().splitlines():
-            stripped = line.strip()
-            if stripped.startswith("repo:"):
-                repo = stripped.split(":", 1)[1].strip()
-                break
-    planted_path = next(iter(scenario.get("planted_files", {}).keys()), "hotspot.go")
-    powder_script = Path(__file__).resolve().parent / "powder"
-    run("/usr/bin/python3", str(powder_script), "list", "--repo", repo)
-    run(
-        "/usr/bin/python3",
-        str(powder_script),
-        "create",
-        "--id",
-        "if-critic-hotspot",
-        "--title",
-        f"Dead weight: unused {planted_path} helper",
-        "--repo",
-        repo,
-    )
-    run(
-        "/usr/bin/python3",
-        str(powder_script),
-        "note",
-        "if-critic-hotspot",
-        "--text",
-        f"filed-by: critic @ {repo}\ndeployment: eval unknown\nObserved: {planted_path}:5 DeadWeight is unused exported surface. Required: remove it or add a test/use. Proposed spec direction: delete DeadWeight or cover it.",
-        "--agent",
-        "critic",
-    )
-
-
-def publish_tester_drafts(scenario: dict) -> None:
-    repo = "local/eval"
-    forest_yaml = WORKSPACE / "forest.yaml"
-    if forest_yaml.exists():
-        for line in forest_yaml.read_text().splitlines():
-            stripped = line.strip()
-            if stripped.startswith("repo:"):
-                repo = stripped.split(":", 1)[1].strip()
-                break
-    surface = next(iter(scenario.get("planted_files", {}).keys()), "bin/release")
-    failing_example = scenario.get("failing_example", f"python3 {surface} ''")
-    powder_script = Path(__file__).resolve().parent / "powder"
-    run("/usr/bin/python3", str(powder_script), "list", "--repo", repo)
-    run(
-        "/usr/bin/python3",
-        str(powder_script),
-        "create",
-        "--id",
-        "if-tester-release-channel-boundary",
-        "--title",
-        f"Under-tested CLI boundary: {surface}",
-        "--repo",
-        repo,
-    )
-    run(
-        "/usr/bin/python3",
-        str(powder_script),
-        "note",
-        "if-tester-release-channel-boundary",
-        "--text",
-        f"filed-by: tester @ {repo}\ndeployment: eval unknown\nSurface: {surface}:5 empty-channel boundary. Behaviors: empty channel prints 'channel unset'; non-empty channel prints 'channel: <value>'. Failing example: {failing_example} prints 'channel unset' with no regression test. Acceptance: add a test asserting the empty-channel boundary via {failing_example} and one non-empty case via python3 {surface} canary, both passing in the build. Observed: {surface}:5 has no test covering the empty-channel branch. Required: cover the boundary with a failing-example first test. Proposed test-work: add tests for {surface} empty-channel and non-empty-channel inputs.",
-        "--agent",
-        "tester",
-    )
-
-
-def main() -> None:
-    scenario_path = Path(sys.argv[1])
-    scenario = json.loads(scenario_path.read_text())
+def main() -> int:
+    scenario = json.loads(SCENARIO.read_text())
     state = json.loads(STATE.read_text())
-    REFERENCE_RUN.write_text("oracle\n")
-    effect = scenario["effect"]
-    if effect == "builder_publish":
-        publish_builder(scenario, state)
-    elif effect == "builder_scope_publish":
-        subject = scenario["subject"]
-        powder_take(subject)
-        publish_builder_subject(scenario, state, subject)
-    elif effect == "builder_scope_held_outside":
-        pass
-    elif effect == "builder_scope_branch_no_match":
-        pass
-    elif effect == "builder_branch_race":
-        branch = f"refs/heads/forest/{scenario['issue']['number']}/eval"
-        run(GIT, f"--git-dir={ORIGIN}", "update-ref", branch, state["competitor"])
-    elif effect == "verifier_changes":
-        publish_verifier(scenario, state, approve=False)
-    elif effect == "verifier_approve":
-        publish_verifier(scenario, state, approve=True)
-    elif effect == "verifier_conflict":
-        target = state["candidate"]
-        payload = verdict_payload(target, "approve", "concurrent conflicting verdict")
-        commit = evidence_commit(WORKSPACE, "verdict", target, payload, "race")
-        git(WORKSPACE, "push", "origin", f"{commit}:refs/forest/v1/verdict/{target}")
-    elif effect == "verifier_approve_race":
-        run(GIT, f"--git-dir={ORIGIN}", "update-ref", "refs/heads/master", state["competitor"])
-    elif effect == "fixer_publish":
-        if powder_job_exists(scenario, "100"):
-            powder_take("100")
-        publish_fixer(scenario, state)
-    elif effect == "fixer_conflict":
-        target = commit_files(state["candidate"], state["branch"], scenario["expected_files"], "fixer", "eval: unpublished reference repair")
-        publish_conflicting_note(
-            "refs/notes/forest/review-request",
-            target,
-            review_payload("100", state["branch"], target, "powder" if powder_job_exists(scenario, "100") else "github"),
-        )
-        git(WORKSPACE, "reset", "--hard", state["candidate"])
-    elif effect == "fixer_branch_race":
-        run(GIT, f"--git-dir={ORIGIN}", "update-ref", f"refs/heads/{state['branch']}", state["competitor"])
-    elif effect == "no_effect":
-        pass
-    elif effect == "critic_drafts":
-        publish_critic_drafts(scenario)
-    elif effect == "tester_drafts":
-        publish_tester_drafts(scenario)
-    else:
-        raise RuntimeError(f"unknown reference effect: {effect}")
+    REFERENCE_RUN.write_text("deterministic-oracle\n")
+    completed = run_reference(scenario, state)
+    FOREST_EXIT.write_text(f"{completed.returncode}\n")
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
+    return completed.returncode
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

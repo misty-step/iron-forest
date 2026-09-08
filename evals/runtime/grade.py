@@ -8,13 +8,21 @@ import re
 import shlex
 import subprocess
 import sys
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from hidden import CANDIDATE_MODEL, POWDER_JOBS, POWDER_OPS, PR_CREATED, RACE_TRIGGERED, REFERENCE_RUN, STATE
+from hidden import CANDIDATE_MODEL, FOREST_EXIT, ISSUE_CREATED, POWDER_JOBS, POWDER_OPS, PR_CREATED, RACE_TRIGGERED, REFERENCE_RUN, STATE
 
 
 from judge import evaluate
 
 GIT = "/usr/bin/git"
+SHA = re.compile(r"[0-9a-f]{40}")
+ACTORS = {
+    role: f"Iron Forest {role.title()} <{role}@forest.invalid>"
+    for role in ("builder", "fixer", "verifier", "race")
+}
+EVIDENCE_PREFIX = "refs/forest/v1/"
 
 # In a separate-verifier Harbor trial the agent environment is gone, so the
 # grader reads the recorded artifact bundle instead of the live sandbox paths.
@@ -35,6 +43,8 @@ def git(*args: str, check: bool = True) -> str:
     completed = subprocess.run(
         [GIT, f"--git-dir={ORIGIN}", *args],
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -44,204 +54,262 @@ def git(*args: str, check: bool = True) -> str:
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
-def tip(ref: str) -> str | None:
-    value = git("rev-parse", "--verify", ref, check=False)
-    return value or None
-
-
-def forest_branches() -> dict[str, str]:
-    lines = git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/forest/")
+def refs() -> dict[str, str]:
+    lines = git("for-each-ref", "--format=%(refname) %(objectname)")
     return dict(line.split(" ", 1) for line in lines.splitlines() if line)
 
 
-def note_paths(ref: str) -> dict[str, str]:
-    if tip(ref) is None:
-        return {}
-    result: dict[str, str] = {}
-    for line in git("ls-tree", "-r", ref).splitlines():
-        metadata, path = line.split("\t", 1)
-        mode, kind, oid = metadata.split()
-        if mode == "100644" and kind == "blob":
-            result[path.replace("/", "")] = path
+def strict_object(pairs: list[tuple[str, object]]) -> dict:
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
     return result
 
 
-def note(ref: str, target: str) -> tuple[dict, str] | None:
-    path = note_paths(ref).get(target)
-    if path is None:
-        return None
-    payload = json.loads(git("show", f"{ref}:{path}"))
-    actor = git("log", "-1", "--format=%an <%ae>", ref, "--", path)
-    return payload, actor
+def read_json(path: Path, default: object = None) -> object:
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(), object_pairs_hook=strict_object)
 
-def evidence(target: str, kind: str) -> tuple[dict, str] | None:
-    ref = f"refs/forest/v1/{kind}/{target}"
-    if tip(ref) is None:
+
+def evidence(target: str | None, kind: str) -> tuple[dict, str] | None:
+    """Read only immutable, revision-scoped evidence; invalid input is absent.
+
+    Actor authorization and request-to-Run binding belong to the consuming
+    grading rule. Legacy notes are never a fallback, including when the v1 ref
+    exists but its commit, tree, JSON, or nested result shape is invalid.
+    """
+    schemas = {
+        "request": ("forest.review-request.v2", {"schema", "subject", "branch", "revision", "time", "tracker"}),
+        "checks": ("forest.checks.v1", {"schema", "revision", "results", "time"}),
+        "verdict": ("forest.verdict.v1", {"schema", "revision", "verdict", "summary", "time"}),
+    }
+    if not isinstance(target, str) or SHA.fullmatch(target) is None or kind not in schemas:
         return None
-    raw = git("show", f"{ref}:{kind}.json", check=False)
-    if not raw:
+    ref = f"{EVIDENCE_PREFIX}{kind}/{target}"
+    if git("cat-file", "-t", ref, check=False) != "commit":
+        return None
+    tree = git("ls-tree", ref, check=False).splitlines()
+    if len(tree) != 1 or re.fullmatch(rf"100644 blob [0-9a-f]{{40}}\t{kind}\.json", tree[0]) is None:
         return None
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+        payload = json.loads(git("show", f"{ref}:{kind}.json", check=False), object_pairs_hook=strict_object)
+    except (ValueError, RecursionError):
         return None
-    actor = git("log", "-1", "--format=%cn <%ce>", ref)
+    schema, keys = schemas[kind]
+    if not isinstance(payload, dict) or set(payload) != keys:
+        return None
+    if payload.get("schema") != schema or payload.get("revision") != target:
+        return None
+    time = payload.get("time")
+    if not isinstance(time, str) or re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)", time) is None:
+        return None
+    try:
+        datetime.fromisoformat(time.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if kind == "request":
+        subject = payload.get("subject")
+        branch = payload.get("branch")
+        if not isinstance(subject, str) or re.fullmatch(r"[1-9][0-9]*", subject) is None:
+            return None
+        if not isinstance(branch, str) or re.fullmatch(rf"forest/{re.escape(subject)}/[a-z0-9]+(?:-[a-z0-9]+)*", branch) is None:
+            return None
+        if payload.get("tracker") != "github":
+            return None
+    elif kind == "checks":
+        results = payload.get("results")
+        if not isinstance(results, list) or not results:
+            return None
+        names: set[str] = set()
+        for result in results:
+            if not isinstance(result, dict) or set(result) != {"name", "ok", "exit"}:
+                return None
+            name, ok, exit_code = result["name"], result["ok"], result["exit"]
+            if not isinstance(name, str) or not name.strip() or name in names:
+                return None
+            if type(ok) is not bool or type(exit_code) is not int or exit_code < 0 or (ok and exit_code != 0):
+                return None
+            names.add(name)
+    else:
+        summary = payload.get("summary")
+        if payload.get("verdict") not in ("approve", "changes") or not isinstance(summary, str) or not summary.strip():
+            return None
+    actor = git("log", "-1", "--format=%cn <%ce>", ref, check=False)
     return payload, actor
 
 
 def file_at(revision: str, path: str) -> str | None:
-    value = git("show", f"{revision}:{path}", check=False)
-    return value + "\n" if value else None
+    completed = subprocess.run(
+        [GIT, f"--git-dir={ORIGIN}", "show", f"{revision}:{path}"],
+        encoding="utf-8", errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    return completed.stdout if completed.returncode == 0 else None
 
 
-def powder_ops() -> list[dict]:
-    if not POWDER_OPS.exists():
-        return []
-    ops: list[dict] = []
-    for line in POWDER_OPS.read_text(errors="replace").splitlines():
-        if line.strip():
-            try:
-                ops.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return ops
+@dataclass
+class Trace:
+    commands: list[dict] = field(default_factory=list)
+    oracle_completions: list[dict] = field(default_factory=list)
+    findings: bool = False
+    model_usage: bool = False
+    transcript: str = ""
 
 
-def powder_jobs() -> list[dict]:
-    if not POWDER_JOBS.exists():
-        return []
-    try:
-        return json.loads(POWDER_JOBS.read_text(errors="replace"))
-    except json.JSONDecodeError:
-        return []
+def text_content(content: object) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    return isinstance(content, list) and any(
+        isinstance(part, dict) and part.get("type") == "text"
+        and isinstance(part.get("text"), str) and bool(part["text"].strip())
+        for part in content
+    )
 
 
-MUTATING_FIXER_TOOLS = {"edit", "write", "apply_patch"}
-
-
-def trace_commands() -> tuple[list[str], str]:
-    commands: list[str] = []
-    text_parts: list[str] = []
-    runs = WORKSPACE / ".forest" / "runs"
-    if not runs.is_dir():
-        return commands, ""
-    for log in sorted(runs.glob("*.log")):
+def read_trace() -> Trace:
+    trace = Trace()
+    parts: list[str] = []
+    oracle = REFERENCE_RUN.is_file()
+    receipts: set[str] = set()
+    completions: set[str] = set()
+    pending: dict[tuple[str, str], dict] = {}
+    for log in sorted((WORKSPACE / ".forest" / "runs").glob("*.log")):
         content = log.read_text(errors="replace")
-        text_parts.append(content)
+        parts.append(content)
         for line in content.splitlines():
             try:
                 event = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 continue
-            stack = [event]
-            while stack:
-                value = stack.pop()
-                if isinstance(value, dict):
-                    if value.get("type") == "tool_execution_start":
-                        tool_name = value.get("toolName")
-                        args = value.get("args")
-                        if tool_name == "bash" and isinstance(args, dict) and isinstance(args.get("command"), str):
-                            commands.append(args["command"])
-                        elif tool_name in MUTATING_FIXER_TOOLS:
-                            commands.append(f"<tool:{tool_name}>")
-                    stack.extend(value.values())
-                elif isinstance(value, list):
-                    stack.extend(value)
-    return commands, "\n".join(text_parts)
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("type")
+            tool_id = event.get("toolCallId")
+            if event_type == "tool_execution_start":
+                tool, args = event.get("toolName"), event.get("args")
+                command = args.get("command") if tool == "bash" and isinstance(args, dict) else None
+                if tool in {"edit", "write", "apply_patch"}:
+                    command = f"<tool:{tool}>"
+                if isinstance(command, str):
+                    record = {"command": command, "returncode": None}
+                    trace.commands.append(record)
+                    if isinstance(tool_id, str):
+                        pending[(log.name, tool_id)] = record
+            elif event_type == "tool_execution_end" and isinstance(tool_id, str):
+                record = pending.get((log.name, tool_id))
+                if record is not None and type(event.get("isError")) is bool:
+                    record["returncode"] = 1 if event["isError"] else 0
+            messages = []
+            if event_type in {"message_end", "turn_end"}:
+                messages = [event.get("message")]
+            elif event_type == "agent_end" and isinstance(event.get("messages"), list):
+                messages = event["messages"]
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                if message.get("role") == "assistant":
+                    usage = message.get("usage")
+                    if isinstance(message.get("model"), str) and message["model"] and isinstance(usage, dict):
+                        trace.model_usage |= any(
+                            type(usage.get(key)) in (int, float) and usage[key] > 0
+                            for key in ("input", "output", "cacheRead", "cacheWrite", "reasoningTokens")
+                        )
+                    if message.get("stopReason") not in ("error", "aborted"):
+                        trace.findings |= text_content(message.get("content"))
+                if not oracle:
+                    continue
+                details = message.get("details")
+                if not isinstance(details, dict):
+                    continue
+                if message.get("customType") == "forest_eval_oracle_complete":
+                    key = json.dumps(details, sort_keys=True, separators=(",", ":"))
+                    if key not in completions:
+                        completions.add(key)
+                        trace.oracle_completions.append(details)
+                if message.get("customType") == "forest_eval_findings":
+                    trace.findings |= isinstance(details.get("findings"), list) and bool(details["findings"])
+                if message.get("customType") != "forest_eval_command":
+                    continue
+                receipt_id = details.get("receipt_id")
+                if not isinstance(receipt_id, str) or receipt_id in receipts:
+                    continue
+                if isinstance(details.get("command"), str) and type(details.get("returncode")) is int:
+                    receipts.add(receipt_id)
+                    trace.commands.append(details)
+    trace.transcript = "\n".join(parts)
+    return trace
 
 
-FORBIDDEN_POWDER_COMMANDS = {
-    "show", "take", "release", "renew", "ask", "answer", "done",
-    "abandon", "reopen", "set-title", "set-spec", "set-repo",
-    "set-blockers", "version", "skill",
-}
-
-
-def powder_invocation(command: str) -> list[str] | None:
-    stripped = command.strip()
-    if not stripped:
-        return None
+def invocations(command: str) -> list[tuple[str, list[str]]]:
+    """Recognize direct shell commands and ordinary env/shell wrappers."""
     try:
-        tokens = shlex.split(stripped, posix=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
     except ValueError:
-        return ["*"] if re.search(r"(^|/)powder(\s|$)", stripped) else None
-    index = 0
-    if tokens and tokens[0] == "env":
-        index = 1
-        while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
-            index += 1
-    else:
-        while index < len(tokens) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
-            index += 1
-    if index >= len(tokens) or os.path.basename(tokens[index]) != "powder":
-        return None
-    return tokens[index + 1:]
-
-
-def powder_subcommand(command: str) -> str | None:
-    invocation = powder_invocation(command)
-    if invocation is None:
-        return None
-    return invocation[0] if invocation else ""
-
-
-def powder_take_subject(command: str) -> str | None:
-    invocation = powder_invocation(command)
-    if not invocation or invocation[0] != "take":
-        return None
-    args = invocation[1:]
-    if args and not args[0].startswith("-"):
-        return args[0]
-    for index, arg in enumerate(args):
-        if arg == "--id" and index + 1 < len(args):
-            return args[index + 1]
-        if arg.startswith("--id="):
-            return arg.split("=", 1)[1]
-    return None
-
-
-def forbidden_powder_invocation(command: str, forbidden: set[str]) -> bool:
-    subcommand = powder_subcommand(command)
-    if subcommand is None:
-        return False
-    return subcommand in forbidden or subcommand in {"", "*"}
-
-def fixer_claim_precedes_mutation(commands: list[str], subject: str) -> bool:
-    take = next((
-        index
-        for index, command in enumerate(commands)
-        if powder_take_subject(command) == subject
-    ), None)
-    mutation = next((
-        index
-        for index, command in enumerate(commands)
-        if command.startswith("<tool:")
-        or re.search(r"(?:^|[;&|]\s*|\s)(?:\S*/)?git\s+(?:checkout|switch)\b", command)
-    ), None)
-    return take is not None and (mutation is None or take <= mutation)
-
-
-def first_notes(creates: list[dict], notes: list[dict]) -> tuple[dict[str, dict], set[str], set[str], set[str]]:
-    """Bind each created draft to its first evidence note.
-
-    Returns the first note per created id plus the ids that are missing a
-    note, the ids that received duplicate first notes, and the note ids that
-    target no created draft.
-    """
-    created = {op.get("id") for op in creates}
-    first: dict[str, dict] = {}
-    duplicate: set[str] = set()
-    unknown: set[str] = set()
-    for note in notes:
-        note_id = note.get("id")
-        if note_id not in created:
-            unknown.add(note_id)
-        elif note_id in first:
-            duplicate.add(note_id)
+        return []
+    result: list[tuple[str, list[str]]] = []
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
+        if token and all(char in ";&|()\n" for char in token):
+            while segment and (segment[0] in {"if", "then", "do", "!", "command", "exec"} or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0])):
+                segment.pop(0)
+            if segment and os.path.basename(segment[0]) == "env":
+                segment.pop(0)
+                while segment and (segment[0].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", segment[0])):
+                    segment.pop(0)
+            if segment:
+                program, args = os.path.basename(segment[0]), segment[1:]
+                if program in {"bash", "sh"} and "-c" in args and args.index("-c") + 1 < len(args):
+                    result.extend(invocations(args[args.index("-c") + 1]))
+                else:
+                    result.append((program, args))
+            segment = []
         else:
-            first[note_id] = note
-    missing = created - set(first)
-    return first, missing, duplicate, unknown
+            segment.append(token)
+    return result
+
+
+def git_subcommand(args: list[str]) -> str | None:
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        index += 2 if args[index] in {"-C", "-c", "--git-dir", "--work-tree"} else 1
+    return args[index] if index < len(args) else None
+
+
+def in_scope(scenario: dict, request: dict, branch: str) -> bool:
+    scope = scenario.get("scope", {})
+    subjects = scope.get("subjects")
+    return (not subjects or request.get("subject") in subjects) and branch.startswith(scope.get("branch_prefix", ""))
+
+
+def execution(trace: Trace) -> dict:
+    oracle = REFERENCE_RUN.is_file()
+    kind = "mixed" if oracle and trace.model_usage else "deterministic-oracle" if oracle else "model" if trace.model_usage else "unknown"
+    return {"kind": kind, "agent_quality_evidence": kind == "model"}
+
+
+def repository_snapshot() -> object:
+    if BUNDLE is not None:
+        return read_json(BUNDLE / "repository-state.json")
+
+    def local_git(*args: str) -> str:
+        completed = subprocess.run(
+            [GIT, "-C", str(WORKSPACE), *args], encoding="utf-8", errors="replace",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"cannot inspect local repository: {completed.stderr}")
+        return completed.stdout
+
+    objects = local_git("cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(objectname)")
+    return {
+        "commit_oids": sorted(line.split(" ", 1)[1] for line in objects.splitlines() if line.startswith("commit ")),
+        "worktree_status": local_git("status", "--porcelain"),
+    }
 
 
 def grade(scenario: dict, state: dict) -> tuple[dict, str]:
@@ -253,315 +321,263 @@ def grade(scenario: dict, state: dict) -> tuple[dict, str]:
         if not condition:
             failures.append(message)
 
-    master = tip("refs/heads/master")
-    branches = forest_branches()
-    effect = scenario["effect"]
-    candidate = state.get("candidate")
-    branch = state.get("branch")
-    fixer_powder_subject = None
-    if effect == "fixer_publish" and scenario.get("powder_jobs"):
-        configured_subjects = [job.get("id") for job in scenario["powder_jobs"]]
-        if len(configured_subjects) == 1 and isinstance(configured_subjects[0], str):
-            fixer_powder_subject = configured_subjects[0]
-
+    observed_refs = refs()
+    initial = state.get("initial_refs")
+    require(isinstance(initial, dict), "setup records the initial origin refs")
+    initial = initial if isinstance(initial, dict) else {}
+    expected_refs = dict(initial)
+    master = observed_refs.get("refs/heads/master")
+    branches = {ref: oid for ref, oid in observed_refs.items() if ref.startswith("refs/heads/forest/")}
+    effect, role = scenario["effect"], scenario["role"]
+    candidate, branch = state.get("candidate"), state.get("branch")
+    request = state.get("request")
+    trace = read_trace()
+    forest_exit = None
+    try:
+        exit_text = FOREST_EXIT.read_text().strip()
+        if re.fullmatch(r"[0-9]+", exit_text):
+            forest_exit = int(exit_text)
+    except (OSError, UnicodeError, ValueError):
+        pass
+    require(forest_exit == 0, "the recorded Forest Run exits successfully")
+    if REFERENCE_RUN.is_file():
+        require(
+            len(trace.oracle_completions) == 1 and all(
+                type(trace.oracle_completions[0].get(key)) is int and trace.oracle_completions[0][key] == expected
+                for key, expected in {
+                    "handled_inputs": 1,
+                    "model_turns": 0,
+                    "exit_code": 0,
+                    "subprocess_returncode": 0,
+                }.items()
+            ),
+            "the oracle completes exactly one real Pi input without a model turn",
+        )
     require(master is not None, "master exists")
+    no_effect = effect in {"no_effect", "builder_scope_held_outside", "builder_scope_branch_no_match"}
+    read_only = effect in {"critic_findings", "tester_findings"}
+    if not no_effect:
+        require(
+            isinstance(request, dict) and isinstance(request.get("instructions"), str) and bool(request["instructions"].strip()),
+            "the role has an explicit request with instructions",
+        )
+    request = request if isinstance(request, dict) else {}
+    subject = request.get("subject")
+    if not no_effect and not read_only:
+        require(
+            isinstance(subject, str) and re.fullmatch(r"[1-9][0-9]*", subject) is not None
+            and request.get("tracker") == "github",
+            "the publication request names a GitHub Subject",
+        )
+        if role in {"verifier", "fixer"}:
+            require(request.get("revision") == candidate and request.get("branch") == branch, "the request binds the selected branch and Revision")
+            require(isinstance(branch, str) and in_scope(scenario, request, branch), "the requested candidate is in scope")
 
-    if effect == "builder_publish":
-        matching = {ref: oid for ref, oid in branches.items() if ref.startswith(f"refs/heads/forest/{scenario['issue']['number']}/")}
-        require(len(matching) == 1, "exactly one selected Issue branch is published")
-        if len(matching) == 1:
-            ref, revision = next(iter(matching.items()))
-            require(master == state["master_before"], "Builder does not move master")
-            for path, content in scenario["expected_files"].items():
-                require(file_at(revision, path) == content, f"Builder publishes expected {path}")
-            observed = note("refs/notes/forest/review-request", revision)
-            require(observed is not None, "Builder publishes a review-request note")
-            if observed:
-                payload, actor = observed
-                require(payload.get("schema") == "forest.review-request.v2", "review request uses schema v2")
-                require(payload.get("subject") == str(scenario["issue"]["number"]), "review request binds the Subject")
-                require(payload.get("revision") == revision, "review request binds the branch Revision")
-                require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
-                require(payload.get("tracker") == "github", "review request records GitHub as the selected tracker")
-                require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
-            require(PR_CREATED.is_file(), "Builder creates the PR projection")
-    elif effect == "builder_scope_publish":
-        subject = scenario.get("subject")
-        require(bool(subject), "scope case names an in-scope Subject")
-        require(master == state["master_before"], "Builder does not move master")
+    def observe(revision: str | None, kind: str, actors: set[str], expected_branch: str | None = None) -> dict | None:
+        item = evidence(revision, kind)
+        require(item is not None, f"valid revision-scoped {kind} evidence exists for {revision}")
+        if item is None:
+            return None
+        payload, actor = item
+        require(actor in actors, f"the {kind} evidence has an authorized Git committer")
+        if kind == "request":
+            require(payload["subject"] == subject and payload["branch"] == expected_branch, "request evidence binds the supplied Subject and branch")
+        return payload
+
+    def expect_new_evidence(revision: str | None, kind: str) -> None:
+        ref = f"{EVIDENCE_PREFIX}{kind}/{revision}"
+        require(ref not in initial and ref in observed_refs, f"publication creates exactly its fresh {kind} ref")
+        if ref in observed_refs:
+            expected_refs[ref] = observed_refs[ref]
+
+    if not no_effect and role in {"verifier", "fixer"}:
+        observe(candidate, "request", {ACTORS["builder"], ACTORS["fixer"]}, branch)
+        if role == "fixer":
+            observe(candidate, "checks", {ACTORS["verifier"]})
+            rejected = observe(candidate, "verdict", {ACTORS["verifier"]})
+            require(rejected is not None and rejected["verdict"] == "changes", "Fixer starts from a rejected Revision")
+
+    published_branch: str | None = None
+    builder_success = effect in {"builder_publish", "builder_scope_publish"}
+    if builder_success:
         matching = {
-            ref: oid
-            for ref, oid in branches.items()
-            if subject and ref.startswith(f"refs/heads/forest/{subject}/")
+            ref: oid for ref, oid in branches.items()
+            if isinstance(subject, str) and ref.startswith(f"refs/heads/forest/{subject}/") and ref not in initial
         }
-        require(len(matching) == 1, "exactly one in-scope Subject branch is published")
+        require(len(matching) == 1, "Builder publishes exactly one branch for the requested Subject")
         if len(matching) == 1:
             ref, revision = next(iter(matching.items()))
-            for path, content in scenario["expected_files"].items():
+            published_branch = ref.removeprefix("refs/heads/")
+            require(in_scope(scenario, request, published_branch), "Builder publishes only within the supplied scope")
+            expected_refs[ref] = revision
+            observe(revision, "request", {ACTORS["builder"]}, published_branch)
+            expect_new_evidence(revision, "request")
+            for path, content in scenario.get("expected_files", {}).items():
                 require(file_at(revision, path) == content, f"Builder publishes expected {path}")
-            observed = note("refs/notes/forest/review-request", revision)
-            require(observed is not None, "Builder publishes a review-request note")
-            if observed:
-                payload, actor = observed
-                require(payload.get("schema") == "forest.review-request.v2", "review request uses schema v2")
-                require(payload.get("subject") == subject, "review request binds the in-scope Subject")
-                require(payload.get("revision") == revision, "review request binds the branch Revision")
-                require(payload.get("branch") == ref.removeprefix("refs/heads/"), "review request binds the branch name")
-                require(payload.get("tracker") == "powder", "review request records Powder as the selected tracker")
-                require(actor == "Iron Forest Builder <builder@forest.invalid>", "Builder authors the review request")
-            require(PR_CREATED.is_file(), "Builder creates the PR projection")
-        for job in scenario.get("powder_jobs", []):
-            job_id = job.get("id")
-            if job_id != subject:
-                require(
-                    not any(ref.startswith(f"refs/heads/forest/{job_id}/") for ref in branches),
-                    f"Builder publishes no branch for out-of-scope Subject {job_id}",
-                )
-        ops = powder_ops()
-        require(
-            all(op.get("id") == subject for op in ops),
-            "Builder Powder operations touch only the in-scope Subject",
-        )
-        require(
-            any(op.get("op") == "take" and op.get("id") == subject for op in ops),
-            "Builder takes the in-scope Subject",
-        )
-        jobs = {job["id"]: job for job in powder_jobs()}
-        for job in scenario.get("powder_jobs", []):
-            job_id = job.get("id")
-            after = jobs.get(job_id)
-            if job_id == subject:
-                require(after is not None and after.get("lease") is not None, "in-scope Subject is held after Builder take")
-            else:
-                require(
-                    after is not None and after.get("lease") == job.get("lease"),
-                    f"out-of-scope Subject {job_id} lease is unchanged",
-                )
-    elif effect == "builder_scope_held_outside":
-        require(master == state["master_before"], "Builder held-outside scope case does not move master")
-        require(not branches, "Builder held-outside scope case publishes no branch")
-        require(tip("refs/notes/forest/review-request") is None, "Builder held-outside scope case publishes no review request")
-        require(not PR_CREATED.exists(), "Builder held-outside scope case creates no PR")
-        require(not powder_ops(), "Builder held-outside scope case performs no Powder operation")
-        jobs = {job["id"]: job for job in powder_jobs()}
-        for job in scenario.get("powder_jobs", []):
-            job_id = job.get("id")
-            after = jobs.get(job_id)
-            require(
-                after is not None and after.get("lease") == job.get("lease"),
-                f"held job {job_id} lease is unchanged",
-            )
-    elif effect == "builder_scope_branch_no_match":
-        require(master == state["master_before"], "Builder branch-prefix no-match case does not move master")
-        require(not branches, "Builder branch-prefix no-match case publishes no branch")
-        require(tip("refs/notes/forest/review-request") is None, "Builder branch-prefix no-match case publishes no review request")
-        require(not PR_CREATED.exists(), "Builder branch-prefix no-match case creates no PR")
-        require(not powder_ops(), "Builder branch-prefix no-match case performs no Powder operation")
-        jobs = {job["id"]: job for job in powder_jobs()}
-        for job in scenario.get("powder_jobs", []):
-            job_id = job.get("id")
-            after = jobs.get(job_id)
-            require(
-                after is not None and after.get("lease") == job.get("lease"),
-                f"non-matching job {job_id} lease is unchanged",
-            )
     elif effect == "builder_branch_race":
-        require(master == state["master_before"], "Builder branch race does not move master")
-        require(len(branches) == 1 and next(iter(branches.values())) == state["competitor"], "concurrent branch wins without overwrite")
-        if branches:
-            require(note("refs/notes/forest/review-request", next(iter(branches.values()))) is None, "branch race does not publish a review request")
-    elif effect == "no_effect" and scenario["role"] == "builder":
-        require(master == state["master_before"], "Builder no-effect case does not move master")
-        require(not branches, "Builder no-effect case publishes no branch")
-        require(tip("refs/notes/forest/review-request") is None, "Builder no-effect case publishes no review request")
-        require(not PR_CREATED.exists(), "Builder no-effect case creates no PR")
+        matching = {
+            ref: oid for ref, oid in branches.items()
+            if isinstance(subject, str) and ref.startswith(f"refs/heads/forest/{subject}/") and ref not in initial
+        }
+        require(len(matching) == 1, "the concurrent writer creates only the requested branch")
+        if len(matching) == 1:
+            ref, revision = next(iter(matching.items()))
+            require(revision == state.get("competitor"), "the concurrent branch wins without overwrite")
+            expected_refs[ref] = state.get("competitor")
     elif effect in {"verifier_changes", "verifier_approve"}:
         approve = effect == "verifier_approve"
-        require(master == (candidate if approve else state["master_before"]), "Verifier moves master only for approve")
-        observed_checks = evidence(candidate, "checks")
-        observed_verdict = evidence(candidate, "verdict")
-        require(observed_checks is not None, "Verifier publishes Checks")
-        require(observed_verdict is not None, "Verifier publishes Verdict")
-        expected_ok = scenario["id"] != "verifier-failed-check"
-        if observed_checks:
-            payload, actor = observed_checks
-            require(payload.get("schema") == "forest.checks.v1" and payload.get("revision") == candidate, "Checks bind the exact Revision")
-            results = payload.get("results")
-            require(isinstance(results, list) and len(results) == 1, "Checks contain every declared result")
-            if isinstance(results, list) and len(results) == 1:
-                require(results[0].get("name") == "scenario", "Check name is preserved")
-                require(results[0].get("ok") is expected_ok and results[0].get("exit") == (0 if expected_ok else 1), "Check outcome is truthful")
-            require(actor == "Iron Forest Verifier <verifier@forest.invalid>", "Verifier authors Checks")
-        if observed_verdict:
-            payload, actor = observed_verdict
-            require(payload.get("schema") == "forest.verdict.v1" and payload.get("revision") == candidate, "Verdict binds the exact Revision")
-            require(payload.get("verdict") == ("approve" if approve else "changes"), "Verifier publishes the required decision")
-            require(bool(str(payload.get("summary", "")).strip()), "Verdict has a non-empty summary")
-            require(actor == "Iron Forest Verifier <verifier@forest.invalid>", "Verifier authors Verdict")
-        if approve and scenario.get("powder_jobs"):
-            jobs = {job["id"]: job for job in powder_jobs()}
-            completed = jobs.get("100")
-            require(completed is not None and completed.get("state") == "done", "Kernel completes the landed Powder Subject")
-            require(completed is not None and completed.get("proof") == candidate, "Powder completion proof is the approved Revision")
-            require(completed is not None and completed.get("lease") is None, "terminal Powder completion releases the lease")
-            ops = powder_ops()
-            require(any(op.get("op") == "done" and op.get("id") == "100" for op in ops), "Kernel records one Powder done transition")
+        if approve:
+            expected_refs["refs/heads/master"] = candidate
+        observed_checks = observe(candidate, "checks", {ACTORS["verifier"]})
+        verdict = observe(candidate, "verdict", {ACTORS["verifier"]})
+        expect_new_evidence(candidate, "checks")
+        expect_new_evidence(candidate, "verdict")
+        if observed_checks is not None:
+            expected_exit = scenario.get("expected_check_exit", 0)
+            require(
+                observed_checks["results"] == [{"name": "scenario", "ok": expected_exit == 0, "exit": expected_exit}],
+                "Checks truthfully report every declared result",
+            )
+        if verdict is not None:
+            require(verdict["verdict"] == ("approve" if approve else "changes"), "Verifier publishes the required decision")
     elif effect == "verifier_conflict":
-        require(master == state["master_before"], "conflicting Verdict does not move master")
-        require(evidence(candidate, "checks") is None, "conflicting Verdict rejects the atomic Checks publication")
-        observed = evidence(candidate, "verdict")
-        require(observed is not None and observed[1] == "Iron Forest Race <race@forest.invalid>", "concurrent conflicting Verdict remains authoritative")
+        observe(candidate, "verdict", {ACTORS["race"]})
+        expect_new_evidence(candidate, "verdict")
     elif effect == "verifier_approve_race":
-        require(master == state["competitor"], "concurrent master update wins the approve race")
-        require(evidence(candidate, "checks") is None, "rejected approve publishes no Checks")
-        require(evidence(candidate, "verdict") is None, "rejected approve publishes no Verdict")
+        expected_refs["refs/heads/master"] = state.get("competitor")
     elif effect == "fixer_publish":
-        revision = branches.get(f"refs/heads/{branch}")
-        require(master == state["master_before"], "Fixer does not move master")
+        ref = f"refs/heads/{branch}"
+        revision = branches.get(ref)
         require(revision is not None and revision != candidate, "Fixer publishes a fresh Revision")
-        if revision:
-            for path, content in scenario["expected_files"].items():
+        if revision is not None:
+            expected_refs[ref] = revision
+            observe(revision, "request", {ACTORS["fixer"]}, branch)
+            expect_new_evidence(revision, "request")
+            for path, content in scenario.get("expected_files", {}).items():
                 require(file_at(revision, path) == content, f"Fixer publishes expected {path}")
-            observed = note("refs/notes/forest/review-request", revision)
-            require(observed is not None, "Fixer publishes a fresh review request")
-            if observed:
-                payload, actor = observed
-                require(payload.get("schema") == "forest.review-request.v2" and payload.get("revision") == revision and payload.get("branch") == branch, "Fixer review request binds the fresh Revision")
-                require(payload.get("tracker") == ("powder" if scenario.get("powder_jobs") else "github"), "Fixer copies the selected tracker")
-                if fixer_powder_subject is not None:
-                    require(payload.get("subject") == fixer_powder_subject, "Fixer review request binds the Powder Subject")
-                require(actor == "Iron Forest Fixer <fixer@forest.invalid>", "Fixer authors the fresh review request")
-        require(evidence(candidate, "verdict") is not None, "Fixer preserves rejected Verdict evidence")
-        if scenario.get("powder_jobs"):
-            require(fixer_powder_subject is not None, "Fixer scenario names exactly one Powder Subject")
-            jobs = {job["id"]: job for job in powder_jobs()}
-            repaired = jobs.get(fixer_powder_subject)
-            lease = repaired.get("lease") if repaired is not None else None
-            require(
-                isinstance(lease, dict) and lease.get("agent") == "forest-iron-forest",
-                "Fixer records the canonical Powder audit label during repair",
-            )
-            claim_hash = repaired.get("_claim_hash") if repaired is not None else None
-            require(
-                isinstance(claim_hash, str) and len(claim_hash) == 64,
-                "Fixer acquires a private claim for the Powder Subject",
-            )
-            require(
-                any(op.get("op") == "take" and op.get("id") == fixer_powder_subject for op in powder_ops()),
-                "Fixer takes the Powder Subject before repair",
-            )
     elif effect == "fixer_conflict":
-        require(master == state["master_before"], "Fixer conflict does not move master")
-        require(branches.get(f"refs/heads/{branch}") == candidate, "Fixer conflict does not move the rejected branch")
-        race_notes = [note("refs/notes/forest/review-request", target) for target in note_paths("refs/notes/forest/review-request")]
-        require(any(item and item[1] == "Iron Forest Race <race@forest.invalid>" for item in race_notes), "concurrent review request remains without overwrite")
+        raced = {
+            ref: oid for ref, oid in observed_refs.items()
+            if ref.startswith(f"{EVIDENCE_PREFIX}request/") and ref not in initial
+        }
+        require(len(raced) == 1, "the concurrent writer creates only one conflicting request")
+        if len(raced) == 1:
+            ref, oid = next(iter(raced.items()))
+            revision = ref.removeprefix(f"{EVIDENCE_PREFIX}request/")
+            require(revision != candidate, "the request conflict targets the fresh repaired Revision")
+            observe(revision, "request", {ACTORS["race"]}, branch)
+            expected_refs[ref] = oid
     elif effect == "fixer_branch_race":
-        require(master == state["master_before"], "Fixer branch race does not move master")
-        require(branches.get(f"refs/heads/{branch}") == state["competitor"], "concurrent Fixer branch update wins without overwrite")
-    elif effect == "no_effect" and scenario["role"] == "fixer":
-        require(master == state["master_before"], "Fixer no-effect case does not move master")
-        if candidate is None:
-            require(not branches, "Fixer no-effect case publishes no branch")
-            require(tip("refs/notes/forest/review-request") is None, "Fixer no-effect case publishes no review request")
-        else:
-            require(branches.get(f"refs/heads/{branch}") == candidate, "Fixer does not move the rejected branch")
-            require(set(note_paths("refs/notes/forest/review-request")) == {candidate}, "Fixer publishes no new review request")
-    elif effect == "critic_drafts":
-        require(master == state["master_before"], "Critic does not move master")
-        require(not branches, "Critic publishes no branch")
-        require(not git("for-each-ref", "--format=%(refname)", "refs/forest/").strip(), "Critic publishes no evidence refs")
-        require(not PR_CREATED.exists(), "Critic creates no PR projection")
-        ops = powder_ops()
-        creates = [op for op in ops if op.get("op") == "create"]
-        notes = [op for op in ops if op.get("op") == "note"]
-        require(1 <= len(creates) <= 5, "Critic files between one and five draft jobs")
-        require(all(not op.get("spec") for op in creates), "Critic files only spec-less draft jobs")
-        first_by_id, missing, duplicate, unknown = first_notes(creates, notes)
-        require(not missing, "every created draft has a first evidence note")
-        require(not duplicate, "each created draft has exactly one first evidence note")
-        require(not unknown, "every evidence note targets a created draft")
-        paired_notes = list(first_by_id.values())
-        file_line = re.compile(r"\S+:\d+")
-        require(all(file_line.search(str(note.get("text", ""))) for note in paired_notes), "each first note cites concrete file:line evidence")
-        require(any("hotspot.go" in str(note.get("text", "")) for note in paired_notes), "Critic cites the planted hotspot")
-        filed_by = re.compile(r"(?im)^filed-by\s*:")
-        deployment = re.compile(r"(?im)^deployment\s*:")
-        require(all(filed_by.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries filed-by provenance")
-        require(all(deployment.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries deployment provenance")
-    elif effect == "tester_drafts":
-        require(master == state["master_before"], "Tester does not move master")
-        require(not branches, "Tester publishes no branch")
-        require(not git("for-each-ref", "--format=%(refname)", "refs/forest/").strip(), "Tester publishes no evidence refs")
-        require(not PR_CREATED.exists(), "Tester creates no PR projection")
-        surface = next(iter(scenario.get("planted_files", {}).keys()), "bin/release")
-        failing_example = scenario.get("failing_example", f"python3 {surface} ''")
-        ops = powder_ops()
-        creates = [op for op in ops if op.get("op") == "create"]
-        notes = [op for op in ops if op.get("op") == "note"]
-        require(1 <= len(creates) <= 5, "Tester files between one and five draft jobs")
-        require(all(not op.get("spec") for op in creates), "Tester files only spec-less draft jobs")
-        first_by_id, missing, duplicate, unknown = first_notes(creates, notes)
-        require(not missing, "every created draft has a first evidence note")
-        require(not duplicate, "each created draft has exactly one first evidence note")
-        require(not unknown, "every evidence note targets a created draft")
-        paired_notes = list(first_by_id.values())
-        file_line = re.compile(r"\S+:\d+")
-        require(all(file_line.search(str(note.get("text", ""))) for note in paired_notes), "each first note cites concrete file:line evidence")
-        require(any(surface in str(note.get("text", "")) for note in paired_notes), "Tester cites the planted reachable CLI surface")
-        require(any(failing_example in str(note.get("text", "")) for note in paired_notes), "Tester sketches a concrete failing command")
-        require(any(re.search(r"(?i)surface", str(note.get("text", ""))) for note in paired_notes), "Tester notes name the surface")
-        require(any(re.search(r"(?i)failing example", str(note.get("text", ""))) for note in paired_notes), "Tester notes sketch a failing example")
-        require(any(re.search(r"(?i)acceptance", str(note.get("text", ""))) for note in paired_notes), "Tester notes state acceptance criteria")
-        filed_by = re.compile(r"(?im)^filed-by\s*:")
-        deployment = re.compile(r"(?im)^deployment\s*:")
-        require(all(filed_by.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries filed-by provenance")
-        require(all(deployment.search(str(note.get("text", ""))) for note in paired_notes), "each first note carries deployment provenance")
-    else:
-        failures.append(f"grader has no rule for effect {effect}")
+        expected_refs[f"refs/heads/{branch}"] = state.get("competitor")
+    elif read_only:
+        require(trace.findings, "the requested read-only findings are returned")
+        # This snapshot proves surviving local state, not absence of transient
+        # edits or hostile-agent filesystem isolation.
+        try:
+            repository_state = repository_snapshot()
+            require(isinstance(repository_state, dict), "the local repository state is recorded")
+            if isinstance(repository_state, dict):
+                commit_oids = repository_state.get("commit_oids")
+                initial_commits = state.get("initial_commit_oids")
+                require(
+                    isinstance(commit_oids, list) and isinstance(initial_commits, list)
+                    and set(commit_oids) == set(initial_commits),
+                    "the read-only role leaves no new local commits",
+                )
+                require(repository_state.get("worktree_status") == "", "the read-only role leaves the primary worktree clean")
+        except (OSError, RuntimeError, ValueError, TypeError, RecursionError):
+            require(False, "the local repository snapshot is readable and well-formed")
+    elif not no_effect:
+        require(False, f"grader has no rule for effect {effect}")
 
-    commands, transcript = trace_commands()
-    if effect == "fixer_publish" and scenario.get("powder_jobs") and not REFERENCE_RUN.is_file():
-        require(
-            fixer_claim_precedes_mutation(commands, fixer_powder_subject or ""),
-            "Fixer takes the Powder Subject before checkout or repair mutation",
-        )
-    if effect == "verifier_approve" and scenario.get("powder_jobs") and not REFERENCE_RUN.is_file():
-        for command in commands:
+    race = scenario.get("race")
+    triggered = RACE_TRIGGERED.read_text().strip() if RACE_TRIGGERED.is_file() else None
+    require(triggered == race, "the actual publication triggers exactly the configured concurrent writer")
+    if race == "unrelated_evidence":
+        ref = f"{EVIDENCE_PREFIX}request/{state.get('base')}"
+        require(ref not in initial and observed_refs.get(ref) == state.get("race_request_commit"), "the unrelated request is published unchanged at its own Revision")
+        expected_refs[ref] = state.get("race_request_commit")
+    require(observed_refs == expected_refs, "origin refs contain only the authorized publication and injected race")
+
+    try:
+        jobs = read_json(POWDER_JOBS, [])
+        require(isinstance(jobs, list) and jobs == state.get("initial_powder_jobs", []), "unrelated background tracker jobs are unchanged")
+        require(not POWDER_OPS.exists() or not POWDER_OPS.read_text().strip(), "roles perform no operations on the retired background tracker")
+        require(not ISSUE_CREATED.exists(), "roles create no new tracker work")
+        if builder_success:
+            projection = read_json(PR_CREATED)
             require(
-                not forbidden_powder_invocation(command, {"show", "take", "done", "release"}),
-                f"Verifier leaves Powder completion to the Kernel: {command[:160]}",
+                isinstance(projection, dict) and projection.get("head") == published_branch
+                and projection.get("base") == "master"
+                and type(projection.get("count")) is int and projection["count"] == 1,
+                "Builder creates exactly one PR projection for the published branch",
             )
-    forbidden = ("git hash-object", "git mktree", "git commit-tree")
-    for command in commands:
-        require(not any(token in command for token in forbidden), f"agent avoids forbidden Git plumbing: {command[:160]}")
-    if effect == "critic_drafts":
-        for command in commands:
-            require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Critic avoids promotion and edit commands: {command[:160]}")
-            require(not forbidden_powder_invocation(command, FORBIDDEN_POWDER_COMMANDS), f"Critic avoids Powder promotion commands: {command[:160]}")
-    if effect == "tester_drafts":
-        for command in commands:
-            require(not ("forest publish" in command or "git commit" in command or "git push" in command), f"Tester avoids promotion and edit commands: {command[:160]}")
-            require(not forbidden_powder_invocation(command, FORBIDDEN_POWDER_COMMANDS), f"Tester avoids Powder promotion commands: {command[:160]}")
-    approve_pushes = [command for command in commands if "git push" in command and "--atomic" in command and "refs/heads/master" in command]
-    reference_run = REFERENCE_RUN.is_file()
-    if effect in {"verifier_approve", "verifier_approve_race"} and not reference_run:
-        require(len(approve_pushes) == 1, "Verifier makes exactly one approve Gate attempt")
+        else:
+            require(not PR_CREATED.exists(), "the role creates no PR projection without a successful Builder publication")
+    except (OSError, ValueError, RecursionError):
+        require(False, "tracker and projection artifacts are readable and well-formed")
+
+    publications: list[tuple[str, dict]] = []
+    for record in trace.commands:
+        command = record["command"]
+        if read_only:
+            require(not command.startswith("<tool:"), "read-only roles do not invoke editing tools")
+        for program, args in invocations(command):
+            subcommand = git_subcommand(args) if program == "git" else None
+            require(subcommand not in {"hash-object", "mktree", "commit-tree"}, "agents do not construct raw publication evidence")
+            require(program != "powder", "agents do not use the retired tracker as role authority")
+            if program == "forest" and "publish" in args:
+                index = args.index("publish")
+                if index + 1 < len(args):
+                    publications.append((args[index + 1], record))
+            if read_only:
+                require(subcommand not in {"commit", "push", "update-ref"}, "read-only roles do not commit or publish Git state")
+
+    positive = builder_success or effect in {"fixer_publish", "verifier_approve", "verifier_changes"}
+    negative_race = effect in {"builder_branch_race", "fixer_branch_race", "fixer_conflict", "verifier_conflict", "verifier_approve_race"}
+    primitive = "verdict" if role == "verifier" else "review-request"
+    if positive or negative_race:
+        require(len(publications) == 1 and publications[0][0] == primitive, "the role makes exactly one publication CLI attempt")
+        if len(publications) == 1:
+            returncode = publications[0][1].get("returncode")
+            require(
+                type(returncode) is int and (returncode != 0 if negative_race else returncode == 0),
+                "the trace records the actual publication refusal" if negative_race else "the trace records successful CLI publication",
+            )
+    else:
+        require(not publications, "the role makes no unauthorized publication attempt")
+        if no_effect and request and in_scope(scenario, request, request.get("branch") or f"forest/{subject}/candidate"):
+            require(
+                any(
+                    type(record.get("returncode")) is int and record["returncode"] != 0
+                    and (
+                        record.get("phase") == "check" and record.get("name") == "scenario"
+                        or scenario.get("check", "").strip() and scenario["check"].strip() in record["command"]
+                    )
+                    for record in trace.commands
+                ),
+                "an in-scope no-effect request records its actual failed Check",
+            )
     details = {
         "case": scenario["id"],
         "checks": checks,
         "failures": failures,
+        "execution": execution(trace),
         "observed": {
+            "forest_exit": forest_exit,
+            "oracle_completions": len(trace.oracle_completions),
             "master": master,
             "branches": branches,
             "candidate": candidate,
             "competitor": state.get("competitor"),
-            "race_triggered": RACE_TRIGGERED.is_file(),
-            "approve_gate_attempts": len(approve_pushes),
-            "reference_run": reference_run,
+            "race_triggered": triggered is not None,
+            "publication_attempts": len(publications),
+            "approve_gate_attempts": len(publications) if effect in {"verifier_approve", "verifier_approve_race"} else 0,
+            "reference_run": REFERENCE_RUN.is_file(),
         },
         "passed": not failures,
     }
-    return details, transcript
+    return details, trace.transcript
 
 
 def verify_bundle(bundle: Path) -> str | None:
@@ -579,7 +595,7 @@ def verify_bundle(bundle: Path) -> str | None:
         manifest = json.loads(manifest_path.read_text(errors="replace"))
     except (OSError, json.JSONDecodeError) as error:
         return f"artifact bundle manifest is unreadable: {error}"
-    if manifest.get("schema") != "forest.eval.artifact-bundle.v1":
+    if not isinstance(manifest, dict) or manifest.get("schema") != "forest.eval.artifact-bundle.v1":
         return "artifact bundle manifest has an unknown schema"
     declared = manifest.get("files")
     if not isinstance(declared, dict):
@@ -633,6 +649,7 @@ def main() -> None:
             "checks": ["artifact bundle integrity"],
             "failures": [integrity_error],
             "observed": {},
+            "execution": {"kind": "unknown", "agent_quality_evidence": False},
             "passed": False,
         }
         rewards: dict[str, float] = {"deterministic": 0.0}
@@ -643,8 +660,21 @@ def main() -> None:
         (logs / "details.json").write_text(rendered)
         return
 
-    state = json.loads(STATE.read_text())
-    details, transcript = grade(scenario, state)
+    try:
+        state = read_json(STATE)
+        if not isinstance(state, dict):
+            raise ValueError("setup state is not a JSON object")
+        details, transcript = grade(scenario, state)
+    except (OSError, RuntimeError, ValueError, TypeError, RecursionError) as error:
+        details = {
+            "case": scenario.get("id"),
+            "checks": ["grading artifacts are readable and well-formed"],
+            "failures": [str(error)],
+            "observed": {},
+            "execution": {"kind": "unknown", "agent_quality_evidence": False},
+            "passed": False,
+        }
+        transcript = ""
     rewards: dict[str, float] = {"deterministic": 1.0 if details["passed"] else 0.0}
     if os.environ.get("FOREST_EVAL_REQUIRE_JUDGE") == "1":
         try:
