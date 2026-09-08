@@ -1,0 +1,14 @@
+**
+!go.mod
+!go.sum
+!*.go
+!agents/
+!agents/**
+!evals/
+!evals/runtime/
+!evals/runtime/**
+!evals/image/
+!evals/image/Dockerfile
+!evals/image/Dockerfile.dockerignore
+**/__pycache__
+**/.env*

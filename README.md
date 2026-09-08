@@ -536,21 +536,35 @@ mise exec -- go vet ./...
 mise exec -- go test ./...
 ```
 
-Run the deterministic Harbor role regressions before changing an agent
+Run the deterministic production-protocol checks before changing an agent
 declaration, prompt, skill, or publication contract:
 
 ```sh
 ./evals/run-fast.sh
 ```
+This command runs the Python checks, builds the pinned evaluation image, runs
+every Harbor oracle case, and exercises an explicit-request delivery journey.
+The oracle uses the real Pi process, `forest once`, and publication CLI, with a
+trusted input hook supplying deterministic actions instead of a model. It
+removes candidate/Judge credentials; a pass is **not agent-quality evidence**.
 
-The live model path always runs the production incumbent and one allowlisted
+The journey covers implementation, rejection, repair, `forest run cancel`,
+fresh-Run review, delivery, and an identical publication retry. Its standalone
+container uses Docker `--init` so cancellation can reap orphaned descendants.
+Inspect `report.json`, `report.md`, and `journey.json` under the new
+`evals/jobs/fast/<job>/` directory. Reports identify oracle/model/unknown/mixed
+execution; model, prompt, and skill promotion cannot use oracle or unknown
+provenance. See [evaluation strategy](docs/evaluation-strategy.md) for the
+coverage boundary and preserved historical evidence.
+
+Separately authorized live-model experiments run the production incumbent and one allowlisted
 contender over identical frozen cases. `evals/run-experiment.sh` accepts
 `FOREST_EVAL_TIER=nightly|weekly|monthly|manual` and an optional
 `FOREST_EVAL_VARIANT` from `evals/experiment-space.json`. With no variant, a
 bounded planner selects a unique contender from historical results. The
 independent Judge defaults to `openrouter/google/gemini-3.7-flash`.
 
-Local runs load separate candidate and Judge completion keys from
+Live-model runs load separate candidate and Judge completion keys from
 `$HOME/.config/iron-forest/evals.env` by default. The file must be owned by the
 current user, have mode `0600`, and contain only:
 
@@ -575,7 +589,7 @@ FOREST_EVAL_TIER=nightly FOREST_EVAL_VARIANT=qwen-3.7-high ./evals/run-experimen
 ./evals/run-model.sh # paired monthly pass^3 certification
 ```
 
-The `ci` workflow runs the fast deterministic agent regression
+The `ci` workflow runs the same deterministic production-protocol command
 (`./evals/run-fast.sh`) on every pull request. The `model evals` workflow runs
 a rotating nightly tier Tuesday through Saturday, a weekly full `pass@1` tier,
 and a monthly full `pass^3` tier. Manual dispatch preserves tier and

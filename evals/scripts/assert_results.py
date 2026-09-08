@@ -98,6 +98,8 @@ CHANGE_CLASS_POLICY: dict[str, GatePolicy] = {
 }
 
 MODEL_CHANGE_CLASSES = {"model", "thinking"}
+AGENT_QUALITY_CHANGE_CLASSES = {"prompt", "skill", *MODEL_CHANGE_CLASSES}
+EXECUTION_KINDS = {"deterministic-oracle", "model", "unknown", "mixed"}
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -170,7 +172,7 @@ def deterministic_reward(result: dict[str, Any]) -> Any:
     values = rewards(result)
     if "deterministic" in values:
         return values["deterministic"]
-    if len(values) == 1:
+    if len(values) == 1 and "judge" not in values:
         return next(iter(values.values()))
     return None
 
@@ -313,6 +315,54 @@ def model_info(result: dict[str, Any]) -> dict[str, Any]:
         "model": model.get("name"),
         "provider": model.get("provider"),
     }
+
+
+def trial_execution(
+    result: dict[str, Any], lock: dict[str, Any], usage: dict[str, Any]
+) -> dict[str, Any]:
+    """Classify recorded execution, never a reward or requested candidate model.
+
+    Harbor emits agent_info before execution, so model identity alone is not
+    evidence of a model call. The Forest adapter recovers usage from Pi Run
+    logs. Oracle identity takes precedence even if --model was supplied.
+    """
+    info = model_info(result)
+    configured_agent = (result.get("config") or {}).get("agent") or {}
+    locked_agent = lock.get("agent") or {}
+    if "oracle" in (info["agent"], configured_agent.get("name"), locked_agent.get("name")):
+        kind = "deterministic-oracle"
+    elif (
+        info["agent"] == "iron-forest"
+        and isinstance(info["model"], str)
+        and info["model"].strip()
+        and any(
+            type(value) in (int, float) and math.isfinite(value) and value > 0
+            for value in usage.values()
+        )
+    ):
+        kind = "model"
+    else:
+        kind = "unknown"
+    return {"kind": kind, "agent_quality_evidence": kind == "model"}
+
+
+def report_execution(report: dict[str, Any]) -> dict[str, Any]:
+    """Read explicit provenance; never backfill historical reports from scores."""
+    execution = report.get("execution")
+    kind = execution.get("kind") if isinstance(execution, dict) else None
+    if (
+        not isinstance(kind, str)
+        or kind not in EXECUTION_KINDS
+        or execution.get("agent_quality_evidence") is not (kind == "model")
+    ):
+        kind = "unknown"
+    return {"kind": kind, "agent_quality_evidence": kind == "model"}
+
+
+def cohort_execution(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    kinds = {report_execution(attempt)["kind"] for attempt in attempts}
+    kind = next(iter(kinds)) if len(kinds) == 1 else "mixed" if kinds else "unknown"
+    return {"kind": kind, "agent_quality_evidence": kind == "model"}
 
 
 def duration_seconds(result: dict[str, Any]) -> float | None:
@@ -468,6 +518,7 @@ def build_report(
         for index, (path, result, lock) in enumerate(entries):
             outcome = trial_outcome(result, require_judge)
             info = model_info(result)
+            usage = token_totals(result)
             digest = task_digest(result, lock)
             resources = resource_profile(lock)
             if info.get("model") is not None:
@@ -493,6 +544,7 @@ def build_report(
                 "exception_type": outcome["exception_type"],
                 "exception_class": outcome["exception_class"],
                 "model": info,
+                "execution": trial_execution(result, lock, usage),
                 "task_digest": digest,
                 "skill_digests": skill_digests(lock),
                 "resources": resources,
@@ -501,7 +553,7 @@ def build_report(
                     "finished_at": result.get("finished_at"),
                     "duration_seconds": duration_seconds(result),
                 },
-                "tokens": token_totals(result),
+                "tokens": usage,
                 "is_regrade": trial_is_regrade(result, lock),
             }
             attempts.append(attempt)
@@ -521,6 +573,7 @@ def build_report(
             "role": case_info.get("role"),
             "summary": case_info.get("summary"),
             "attempts": attempts,
+            "execution": cohort_execution(attempts),
             "total_attempts": total,
             "passed_attempts": passed,
             "pass_rate": round(passed / total, 4) if total else None,
@@ -538,6 +591,10 @@ def build_report(
     passed_trials = sum(1 for attempt in all_attempts if attempt["outcome"] == "pass")
     infra_exceptions = sum(1 for attempt in all_attempts if attempt["exception_class"] == "infra")
     agent_exceptions = sum(1 for attempt in all_attempts if attempt["exception_class"] == "agent")
+    deterministic_failed_trials = sum(
+        1 for attempt in all_attempts
+        if attempt["deterministic"] != 1 or attempt["outcome"] == "exception"
+    )
     case_count = len(case_reports)
     pass_at_1_cases = sum(1 for case in case_reports.values() if case["pass_at_1"])
     pass_cubed_cases = sum(1 for case in case_reports.values() if case["pass_cubed"])
@@ -562,6 +619,7 @@ def build_report(
         "job": job_dir.name,
         "suite": suite,
         "require_judge": require_judge,
+        "execution": cohort_execution(all_attempts),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "is_regrade": total_trials > 0 and all(attempt["is_regrade"] for attempt in all_attempts),
         "totals": {
@@ -570,6 +628,7 @@ def build_report(
             "passed_trials": passed_trials,
             "failed_trials": failed_trials,
             "exception_trials": exception_trials,
+            "deterministic_failed_trials": deterministic_failed_trials,
             "infra_exceptions": infra_exceptions,
             "agent_exceptions": agent_exceptions,
             "status_counts": dict(sorted(status_counts.items())),
@@ -624,6 +683,16 @@ def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[s
     current_latency = current_totals.get("mean_duration_seconds")
     baseline_latency = baseline_totals.get("mean_duration_seconds")
     infra_matched = resource_signature(current) == resource_signature(baseline)
+    current_execution = report_execution(current)
+    baseline_execution = report_execution(baseline)
+    quality_comparable = (
+        current_execution["agent_quality_evidence"]
+        and baseline_execution["agent_quality_evidence"]
+    )
+    safety_passed = (
+        current_totals.get("deterministic_failed_trials") == 0
+        and baseline_totals.get("deterministic_failed_trials") == 0
+    )
     delta_points = (
         round((current_rate - baseline_rate) * 100.0, 2)
         if current_rate is not None and baseline_rate is not None
@@ -643,7 +712,18 @@ def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[s
         (cost_ratio is not None and cost_ratio <= 0.9)
         or (latency_ratio is not None and latency_ratio <= 0.9)
     )
-    if delta_points is None or not infra_matched:
+    reason = None
+    if not quality_comparable:
+        verdict = "incomparable-execution"
+        reason = (
+            "Quality comparison requires two recorded model cohorts with usage evidence "
+            f"(current={current_execution['kind']}, baseline={baseline_execution['kind']})."
+        )
+        delta_points = cost_ratio = latency_ratio = None
+    elif not safety_passed:
+        verdict = "safety-failure"
+        reason = "Quality comparison requires complete deterministic safety passes in both cohorts."
+    elif delta_points is None or not infra_matched:
         verdict = "inconclusive"
     elif delta_points < 0:
         verdict = "regression"
@@ -659,6 +739,9 @@ def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[s
     return {
         "current_job": current["job"],
         "baseline_job": baseline["job"],
+        "current_execution": current_execution,
+        "baseline_execution": baseline_execution,
+        "safety_passed": safety_passed,
         "current_pass_at_1_rate": current_rate,
         "baseline_pass_at_1_rate": baseline_rate,
         "delta_points": delta_points,
@@ -666,6 +749,7 @@ def compare_reports(current: dict[str, Any], baseline: dict[str, Any]) -> dict[s
         "latency_ratio": latency_ratio,
         "infra_matched": infra_matched,
         "verdict": verdict,
+        "reason": reason,
     }
 
 
@@ -689,25 +773,28 @@ def evaluate_gate(
         if baseline_report is not None:
             failures.extend(case_coverage_failures(baseline_report, expected_cases))
 
-    if report["suite"] == SUITE_REGRESSION:
-        for case_id, case in report["cases"].items():
-            for attempt in case["attempts"]:
-                if attempt["outcome"] == "exception":
-                    failures.append(
-                        f"{case_id}: attempt {attempt['attempt']} raised "
-                        f"{attempt['exception_type']} ({attempt['exception_class']})"
-                    )
-                elif attempt["outcome"] != "pass":
-                    failures.append(
-                        f"{case_id}: attempt {attempt['attempt']} outcome {attempt['outcome']}"
-                    )
-            if min_attempts is not None and case["total_attempts"] < min_attempts:
+    for case_id, case in report["cases"].items():
+        for attempt in case["attempts"]:
+            if attempt["outcome"] == "exception":
                 failures.append(
-                    f"{case_id}: has {case['total_attempts']} attempts, "
-                    f"fewer than required {min_attempts}"
+                    f"{case_id}: attempt {attempt['attempt']} raised "
+                    f"{attempt['exception_type']} ({attempt['exception_class']})"
                 )
+            elif attempt["deterministic"] != 1:
+                failures.append(
+                    f"{case_id}: attempt {attempt['attempt']} failed deterministic safety"
+                )
+            elif report["suite"] == SUITE_REGRESSION and attempt["outcome"] != "pass":
+                failures.append(
+                    f"{case_id}: attempt {attempt['attempt']} outcome {attempt['outcome']}"
+                )
+        if report["suite"] == SUITE_REGRESSION and min_attempts is not None and case["total_attempts"] < min_attempts:
+            failures.append(
+                f"{case_id}: has {case['total_attempts']} attempts, "
+                f"fewer than required {min_attempts}"
+            )
 
-    if change_class is not None:
+    if policy is not None:
         if policy.requires_judge and not report["require_judge"]:
             failures.append(f"change class {change_class} requires --require-judge")
         if policy.requires_regrade and not report["is_regrade"]:
@@ -718,11 +805,27 @@ def evaluate_gate(
         if policy.requires_adr and not adr.strip():
             failures.append(f"change class {change_class} requires an ADR (--adr)")
 
+    quality_reports = []
+    if baseline_report is not None:
+        quality_reports = [("current", report), ("baseline", baseline_report)]
+    elif change_class in AGENT_QUALITY_CHANGE_CLASSES:
+        quality_reports = [("current", report)]
+    for label, quality_report in quality_reports:
+        execution = report_execution(quality_report)
+        if not execution["agent_quality_evidence"]:
+            failures.append(
+                f"{label} execution is {execution['kind']}; agent-quality evidence requires "
+                "recorded model trials with usage, not oracle fixtures or configured models"
+            )
+
+    if baseline_report is not None:
+        comparison = compare_reports(report, baseline_report)
+        if comparison["verdict"] == "safety-failure":
+            failures.append(comparison["reason"])
     if baseline_report is not None and change_class in MODEL_CHANGE_CLASSES:
-        comparison = report.get("comparison")
-        if comparison is None:
+        if "comparison" not in report:
             failures.append("model change has a baseline but no comparison was produced")
-        elif comparison["verdict"] not in {"win", "efficiency-win"}:
+        elif comparison["verdict"] not in {"win", "efficiency-win", "incomparable-execution", "safety-failure"}:
             failures.append(
                 f"model change is not a supported win: {comparison['verdict']} "
                 f"(delta {comparison['delta_points']} points, "
@@ -735,20 +838,31 @@ def evaluate_gate(
 def render_markdown(report: dict[str, Any]) -> str:
     """Render the report as a compact human-readable Markdown document."""
     totals = report["totals"]
+    execution = report_execution(report)
+    execution_label = execution["kind"].replace("-", " ")
     lines = [
         f"# Forest eval report: {report['job']}",
         "",
         f"- suite: `{report['suite']}`",
+        f"- execution: **{execution_label}** (`{execution['kind']}`)",
+        f"- agent-quality evidence: **{'yes' if execution['agent_quality_evidence'] else 'no'}**",
         f"- judge required: `{report['require_judge']}`",
         f"- regrade run: `{report['is_regrade']}`",
         f"- generated: `{report['generated_at']}`",
+        "",
+        (
+            "Model provenance is not a pass; deterministic failures still block promotion."
+            if execution["agent_quality_evidence"]
+            else "Check results are not agent-quality evidence. Model/prompt/skill promotion needs a recorded model cohort."
+        ),
         "",
         "## Totals",
         "",
         f"- cases: {totals['cases']}",
         f"- trials: {totals['trials']}",
-        f"- passed: {totals['passed_trials']}",
+        f"- checks passed: {totals['passed_trials']}",
         f"- failed: {totals['failed_trials']}",
+        f"- deterministic safety failures: {totals.get('deterministic_failed_trials', 'unknown')}",
         f"- exceptions: {totals['exception_trials']} "
         f"(infra {totals['infra_exceptions']}, agent {totals['agent_exceptions']})",
         f"- pass@1 cases: {totals['pass_at_1_cases']}/{totals['cases']} "
@@ -769,12 +883,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Cases",
         "",
-        "| case | role | attempts | pass | pass@1 | pass^3 | rate | Wilson | infra | agent | saturated |",
-        "| --- | --- | ---: | ---: | --- | --- | ---: | --- | ---: | ---: | --- |",
+        "| case | role | execution | attempts | pass | pass@1 | pass^3 | rate | Wilson | infra | agent | saturated |",
+        "| --- | --- | --- | ---: | ---: | --- | --- | ---: | --- | ---: | ---: | --- |",
     ]
     for case_id, case in report["cases"].items():
         lines.append(
-            f"| {case_id} | {case['role'] or '-'} | {case['total_attempts']} "
+            f"| {case_id} | {case['role'] or '-'} | {report_execution(case)['kind']} | {case['total_attempts']} "
             f"| {case['passed_attempts']} | {'yes' if case['pass_at_1'] else 'no'} "
             f"| {'yes' if case['pass_cubed'] else 'no'} | {case['pass_rate']} "
             f"| {case['wilson']} | {case['infra_exceptions']} | {case['agent_exceptions']} "
@@ -788,11 +902,15 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "## Comparison",
                 "",
                 f"- baseline: `{comparison['baseline_job']}`",
+                f"- execution: current `{comparison['current_execution']['kind']}`, "
+                f"baseline `{comparison['baseline_execution']['kind']}`",
                 f"- pass@1 delta: {comparison['delta_points']} points",
                 f"- infra matched: `{comparison['infra_matched']}`",
                 f"- verdict: `{comparison['verdict']}`",
             ]
         )
+        if comparison.get("reason"):
+            lines.append(f"- action: {comparison['reason']}")
     return "\n".join(lines) + "\n"
 
 
@@ -800,6 +918,13 @@ def write_report(report: dict[str, Any], report_dir: Path) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     json_path = report_dir / REPORT_JSON
     md_path = report_dir / REPORT_MD
+    if (
+        json_path.is_file() and "execution" not in read_json(json_path)
+        or md_path.is_file() and not json_path.exists()
+    ):
+        raise FileExistsError(
+            f"preserving historical report in {report_dir}; use --report-dir for a new derived report"
+        )
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     md_path.write_text(render_markdown(report))
     return json_path, md_path
@@ -897,7 +1022,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     report_dir = args.report_dir or args.job_dir
-    json_path, md_path = write_report(report, report_dir)
+    try:
+        json_path, md_path = write_report(report, report_dir)
+    except (OSError, ValueError) as error:
+        print(f"assert_results: {error}", file=sys.stderr)
+        return 2
 
     if failures:
         print(
@@ -911,7 +1040,9 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"validated {report['totals']['trials']} Harbor trials across "
         f"{report['totals']['cases']} cases; pass@1 {report['totals']['pass_at_1_rate']}; "
-        f"pass^3 {report['totals']['pass_cubed_cases']}"
+        f"pass^3 {report['totals']['pass_cubed_cases']}; "
+        f"execution {report['execution']['kind']}; "
+        f"agent-quality evidence {'yes' if report['execution']['agent_quality_evidence'] else 'no'}"
     )
     print(f"report: {json_path}")
     print(f"report: {md_path}")

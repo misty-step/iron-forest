@@ -65,7 +65,7 @@ def main() -> int:
         emit(issue_list(issue, option(args, "--label")))
         return 0
     if args[:2] == ["issue", "view"]:
-        if issue is None:
+        if issue is None or len(args) < 3 or args[2].rstrip("/").rsplit("/", 1)[-1] != str(issue["number"]):
             print("issue not found", file=sys.stderr)
             return 1
         emit({**issue_payload(issue), "state": "OPEN"})
@@ -80,13 +80,27 @@ def main() -> int:
         emit([issue_list(issue, label)])
         return 0
     if args[:2] == ["pr", "list"]:
-        emit([])
+        projection = json.loads(PR_CREATED.read_text()) if PR_CREATED.exists() else None
+        requested_head = option(args, "--head")
+        if projection is None or (requested_head and requested_head != projection["head"]):
+            emit([])
+        else:
+            emit([{
+                "number": 1,
+                "headRefName": projection["head"],
+                "baseRefName": projection["base"],
+                "title": projection["title"],
+                "body": projection["body"],
+                "state": "OPEN",
+            }])
         return 0
     if args[:2] == ["pr", "create"]:
         if any(arg in {"--help", "-h"} for arg in args[2:]):
             print("unsupported gh fixture invocation: " + " ".join(args), file=sys.stderr)
             return 2
+        previous = json.loads(PR_CREATED.read_text()) if PR_CREATED.exists() else {}
         record = {
+            "count": previous.get("count", 0) + 1,
             "head": option(args, "--head"),
             "base": option(args, "--base") or "master",
             "title": option(args, "--title"),
