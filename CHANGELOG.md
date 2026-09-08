@@ -1,3 +1,12 @@
+## [0.0.15](https://github.com/misty-step/iron-forest/compare/v0.0.14...v0.0.15) (2026-09-08)
+
+
+### Bug Fixes
+
+* **evals:** migrate verifier checks and verdict grading to refs/forest/v1 ([d4e3f32](https://github.com/misty-step/iron-forest/commit/d4e3f3259741c937755067a12e29f4011bf18e4e))
+* **evals:** prove current publication and Run recovery ([b2f95e3](https://github.com/misty-step/iron-forest/commit/b2f95e3a62e0c0c6d0855e26403c4e700686b3da))
+* **evals:** push verdict conflict to origin and use committer identity ([a5953c6](https://github.com/misty-step/iron-forest/commit/a5953c6deae85255b543c8fbbe5bc006a93d5596))
+
 ## [0.0.14](https://github.com/misty-step/iron-forest/compare/v0.0.13...v0.0.14) (2026-09-07)
 
 
