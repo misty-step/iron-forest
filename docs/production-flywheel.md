@@ -1,5 +1,12 @@
 # Production flywheel
 
+
+> Historical workflow reference. The operator retired backlog-driven Misty Step
+> work on 2026-09-06. Do not configure queue credentials, create jobs, promote
+> readiness labels, or start intake from this document. Work from a current
+> request and report its result and evidence; R90 continues to use Habitat.
+> Preserved commands and examples below describe the retired workflow.
+
 The production flywheel turns observed production failures and field reports
 into maintainable eval cases. It implements the production replay pipeline
 named in [ADR 0025](adr/0025-harbor-langfuse-outcome-first-evals.md) and the

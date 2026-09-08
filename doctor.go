@@ -177,25 +177,29 @@ func doctorOpenRouterKeyCheck(ctx context.Context, root string) doctorCheck {
 	if err != nil {
 		return doctorCheck{Name: "openrouter_key", Result: doctorUnknown, OK: false, Reason: err.Error()}
 	}
-	value, present, err := envFileVariable(path, "OPENROUTER_API_KEY")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return doctorCheck{Name: "openrouter_key", Result: doctorObserved, OK: false, Evidence: "missing " + path}
 		}
 		return doctorCheck{Name: "openrouter_key", Result: doctorUnknown, OK: false, Reason: fmt.Sprintf("read %s: %v", path, err)}
 	}
-	if !present || strings.TrimSpace(value) == "" {
-		return doctorCheck{Name: "openrouter_key", Result: doctorObserved, OK: false, Evidence: "OPENROUTER_API_KEY is not set in " + path}
+	keys := envFileOpenRouterKeys(data)
+	if len(keys) == 0 {
+		return doctorCheck{Name: "openrouter_key", Result: doctorObserved, OK: false, Evidence: "no OpenRouter key is configured in " + path}
 	}
-	err = probeOpenRouterKey(ctx, value)
-	switch {
-	case err == nil:
-		return doctorCheck{Name: "openrouter_key", Result: doctorEvidenced, OK: true, Evidence: "OpenRouter key valid"}
-	case errors.Is(err, errOpenRouterKeyRejected):
-		return doctorCheck{Name: "openrouter_key", Result: doctorEvidenced, OK: false, Evidence: "OpenRouter rejected the key"}
-	default:
-		return doctorCheck{Name: "openrouter_key", Result: doctorUnknown, OK: false, Reason: "OpenRouter key probe failed: " + oneLine(err.Error())}
+	for _, value := range keys {
+		err = probeOpenRouterKey(ctx, value)
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, errOpenRouterKeyRejected):
+			return doctorCheck{Name: "openrouter_key", Result: doctorEvidenced, OK: false, Evidence: "OpenRouter rejected the key"}
+		default:
+			return doctorCheck{Name: "openrouter_key", Result: doctorUnknown, OK: false, Reason: "OpenRouter key probe failed: " + oneLine(err.Error())}
+		}
 	}
+	return doctorCheck{Name: "openrouter_key", Result: doctorEvidenced, OK: true, Evidence: "OpenRouter key valid"}
 }
 
 // probeOpenRouterKey performs a read-only key-info request against OpenRouter.
@@ -317,20 +321,8 @@ func serviceEnvPath(root string) (string, error) {
 	return filepath.Join(home, ".config", "iron-forest", name+".env"), nil
 }
 
-// envFileVariable reads one variable from a dotenv-shaped file without
-// returning any other variable. Values are never logged by callers.
-func envFileVariable(path, name string) (string, bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", false, err
-	}
-	value, present := envFileVariableValue(data, name)
-	return value, present, nil
-}
-
-// envFileVariableValue parses one variable from dotenv-shaped file data. It is
-// the read-less core of envFileVariable so a check can read the service
-// environment file once and inspect several variables.
+// envFileVariableValue parses one variable from dotenv-shaped file data so a
+// check can read the service environment file once and inspect several variables.
 func envFileVariableValue(data []byte, name string) (string, bool) {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -353,6 +345,43 @@ func envFileVariableValue(data []byte, name string) (string, bool) {
 		return value, true
 	}
 	return "", false
+}
+
+// envFileOpenRouterKeys returns the distinct non-empty OpenRouter completion
+// keys configured in a service environment file: OPENROUTER_API_KEY and any
+// OPENROUTER_API_KEY_<ROLE> entries. Values are never logged by callers.
+func envFileOpenRouterKeys(data []byte) []string {
+	seen := make(map[string]struct{})
+	var keys []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name != "OPENROUTER_API_KEY" && !strings.HasPrefix(name, "OPENROUTER_API_KEY_") {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		if value == "" {
+			continue
+		}
+		if _, dup := seen[value]; dup {
+			continue
+		}
+		seen[value] = struct{}{}
+		keys = append(keys, value)
+	}
+	return keys
 }
 
 func firstLine(text string) string {

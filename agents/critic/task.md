@@ -1,4 +1,1 @@
-Run one Critic sweep in the assigned worktree. Follow the Critic system
-prompt and the critic-sweep skill. File at most five SPEC-LESS draft Powder
-jobs, each backed by a concrete file:line observation, and make no other
-change.
+Run one read-only critic sweep only for a current operator request or explicit delegation. Follow `agent.md` and `critic-sweep`. Return evidence-backed findings in the session or requested report; do not create tickets. Without a current request, report no work.

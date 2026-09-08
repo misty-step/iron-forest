@@ -1,5 +1,12 @@
 # Onboarding a managed repository
 
+
+> Historical workflow reference. The operator retired backlog-driven Misty Step
+> work on 2026-09-06. Do not configure queue credentials, create jobs, promote
+> readiness labels, or start intake from this document. Work from a current
+> request and report its result and evidence; R90 continues to use Habitat.
+> Preserved commands and examples below describe the retired workflow.
+
 Iron Forest runs one Kernel process per repository. The Kernel uses that
 repository's `forest.yaml`, agent declarations, Git refs, and local Ledger.
 Self-host mode uses the factory source checkout as the managed repository.
@@ -38,7 +45,7 @@ credentials in `forest.yaml`, defaults, declarations, prompts, skills, or
 commits. Runs inherit credentials only from the service environment. A trusted
 declaration has those credentials plus filesystem and network access. Worktree
 separation is not a security sandbox. Stronger containment belongs to the
-host the operator chooses. See [VISION.md](../VISION.md).
+host the operator chooses. See [ADR 0016](adr/0016-isolation-posture.md).
 
 ## Forge identities and references
 
@@ -129,8 +136,8 @@ in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.
 
-To consume Powder jobs, put these in the instance environment file. Use one
-`POWDER_AGENT` per Kernel. Do not share it across repositories.
+To consume Powder jobs, configure the origin and API key in the instance
+environment file. `POWDER_AGENT` is optional audit metadata.
 
 ```dotenv
 POWDER_URL=<origin>
@@ -138,19 +145,22 @@ POWDER_API_KEY=<key>
 POWDER_AGENT=forest-<repo-slug>
 ```
 
-`POWDER_AGENT` is the workload identity and must be unique per Kernel.
-`POWDER_API_KEY` authenticates the HTTP transport. It may be an approved shared
-organization credential; this contract does not require one Powder API key per
-Kernel. Copy approved values into the protected instance environment without
-printing them. A deployment that explicitly requires per-instance API keys
-must own their issuance and rotation path.
+`POWDER_AGENT` is optional audit metadata. Managed workers use the canonical
+repository label; the label does not authorize a lease and does not need to be
+unique per Kernel. `POWDER_API_KEY` authenticates the HTTP transport. It may be
+an approved shared organization credential; this contract does not require one
+Powder API key per Kernel. Copy approved values into the protected instance
+environment without printing them. A deployment that explicitly requires
+per-instance API keys must own their issuance and rotation path.
 
 The job must have a nonempty spec and `repo` equal to `forest.yaml` `repo`.
 Builder takes it and publishes `forest/<id>/<slug>` with review-request v2.
-Fixer re-takes that same Subject before repair when necessary. After approve,
-the Kernel completes the current Git-landed Subject with the approved Revision
-as proof and retries at later Poll/approve boundaries. Unset `POWDER_AGENT`
-keeps GitHub-only selection.
+Fixer calls `take` for that same Subject before repair; only its locally stored
+per-job claim can resume a live lease. After approve, the Kernel uses that claim
+to complete the current Git-landed Subject with the approved Revision as proof
+and retries at later Poll/approve boundaries. Unset `POWDER_AGENT` keeps new
+selection GitHub-only; a configured Powder origin still reconciles the current
+Powder-backed Gate by its stored claim.
 
 ## 3. Add declarations
 
@@ -196,7 +206,7 @@ defaults; `model` alone has a built-in final value. Defaults contain only
 instructions in the system prompts. Agents use native `git`; no wrapper is
 required.
 
-The only skill sources are `agents/_shared/skills` and, when present,
+The only skill sources are existing `agents/_shared/skills` and, when present,
 `agents/<name>/skills`. Their published paths are repository-relative and Pi
 resolves them from the Run worktree. The Runner gives each Run a new writable
 `PI_CODING_AGENT_DIR` without operator Pi state. For an OpenRouter model, it

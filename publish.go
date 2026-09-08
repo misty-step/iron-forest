@@ -118,7 +118,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		return publishReviewRequestResult{}, err
 	}
 	if existingRequest != "" {
-		got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json")
+		got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json", "refs/forest/private/compare/")
 		if err != nil {
 			return publishReviewRequestResult{}, err
 		}
@@ -187,7 +187,7 @@ func requireFixerRequestContinuity(ctx context.Context, root, rejected string, n
 	if existing == "" {
 		return fmt.Errorf("rejected request evidence is missing")
 	}
-	data, err := evidenceBlob(ctx, root, requestRef, "request.json")
+	data, err := evidenceBlob(ctx, root, requestRef, "request.json", "refs/forest/private/compare/")
 	if err != nil {
 		return fmt.Errorf("read rejected request: %w", err)
 	}
@@ -211,7 +211,11 @@ func requireFixerRequestContinuity(ctx context.Context, root, rejected string, n
 	return nil
 }
 
-func runConfiguredChecks(ctx context.Context, root, revision string) (err error) {
+func runConfiguredChecks(ctx context.Context, root, revision string) error {
+	return runConfiguredChecksWithAttestation(ctx, root, revision, nil)
+}
+
+func runConfiguredChecksWithAttestation(ctx context.Context, root, revision string, attested []checkResult) (err error) {
 	shell, err := trustedExecutable(root, "sh")
 	if err != nil {
 		return err
@@ -230,6 +234,15 @@ func runConfiguredChecks(ctx context.Context, root, revision string) (err error)
 	defer func() {
 		err = errors.Join(err, removePublishWorktree(root, dir))
 	}()
+	cfg, loadErr := loadConfig(configPath(dir))
+	if loadErr != nil {
+		return loadErr
+	}
+	if attested != nil {
+		if matchErr := requireMatchingCheckNames(cfg.Checks, attested); matchErr != nil {
+			return matchErr
+		}
+	}
 	// The credential scan is a Kernel-owned preflight, not a candidate-defined
 	// check: it runs unconditionally before any configured check and never
 	// compiles or executes candidate code. The scanner executable is resolved
@@ -239,23 +252,32 @@ func runConfiguredChecks(ctx context.Context, root, revision string) (err error)
 	if checkErr := scanSecretsCheckError(findings, scanErr); checkErr != nil {
 		return fmt.Errorf("secrets scan: %w", checkErr)
 	}
-	cfg, loadErr := loadConfig(configPath(dir))
-	if loadErr != nil {
-		return loadErr
-	}
 	path, pathErr := trustedPath(root)
 	if pathErr != nil {
 		return pathErr
 	}
+	environment := checkEnvironment(path)
 	for _, check := range cfg.Checks {
 		command := exec.CommandContext(ctx, shell, "-c", check.Run)
 		command.Dir = dir
-		command.Env = checkEnvironment(path)
+		command.Env = environment
 		var stderr bytes.Buffer
 		command.Stderr = &stderr
 		output, runErr := processGroupOutput(ctx, command)
 		if runErr != nil {
 			return fmt.Errorf("check %q failed: %w\n%s%s", check.Name, runErr, output, stderr.Bytes())
+		}
+	}
+	return nil
+}
+
+func requireMatchingCheckNames(configured []Check, attested []checkResult) error {
+	if len(configured) != len(attested) {
+		return fmt.Errorf("submitted Checks names do not match configured names: got %d results, want %d", len(attested), len(configured))
+	}
+	for index, check := range configured {
+		if attested[index].Name != check.Name {
+			return fmt.Errorf("submitted Checks names do not match configured names: result %d is %q, want %q", index+1, attested[index].Name, check.Name)
 		}
 	}
 	return nil

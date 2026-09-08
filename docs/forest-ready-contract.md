@@ -1,5 +1,12 @@
 # `forest:ready` contract
 
+
+> Historical workflow reference. The operator retired backlog-driven Misty Step
+> work on 2026-09-06. Do not configure queue credentials, create jobs, promote
+> readiness labels, or start intake from this document. Work from a current
+> request and report its result and evidence; R90 continues to use Habitat.
+> Preserved commands and examples below describe the retired workflow.
+
 Status: convention for the Tracker backlog. Human-supervised grooming enforces it
 during backlog sessions; the Kernel does not lint or reject a weak spec.
 

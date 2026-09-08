@@ -1,8 +1,3 @@
 #!/bin/sh
-# Tester files spec-less Powder test-work drafts; without a configured Powder
-# origin and agent there is no durable output. Report a healthy skip instead of
-# waking a daily sweep that cannot file anything.
-if [ -n "${POWDER_AGENT:-}" ] && { [ -n "${POWDER_URL:-}" ] || [ -n "${POWDER_API_BASE_URL:-}" ]; }; then
-	exit 0
-fi
+# Work starts from a current request. Automatic draft intake is retired.
 exit 1

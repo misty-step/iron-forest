@@ -173,6 +173,10 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 		s.mu.Unlock()
 		return Declaration{}, nil, false, nil
 	}
+	if isProviderBudgetError(s.health[agent].RunError) {
+		s.mu.Unlock()
+		return Declaration{}, nil, false, nil
+	}
 	poll := s.Poll
 	if poll == nil {
 		s.mu.Unlock()
@@ -268,7 +272,9 @@ func (s *Scheduler) completeRun(agent string, record RunRecord, runErr error) er
 	health.Agent = agent
 	health.Running = false
 	health.LastRun = record.Started
-	if runErr != nil {
+	if record.Error != "" {
+		health.RunError = record.Error
+	} else if runErr != nil {
 		health.RunError = runErr.Error()
 	} else {
 		health.RunError = ""

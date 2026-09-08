@@ -42,6 +42,15 @@ func writeRunCancellationMarker(root, runID string) error {
 	return os.WriteFile(path, []byte(runCancelledError+"\n"), 0o644)
 }
 
+func removeRunCancellationMarker(root, runID string) error {
+	return os.Remove(runCancellationMarkerPath(root, runID))
+}
+
+// stopCancelProcessGroup is the process-group stop seam used by runRunCancel.
+// It defaults to stopResidualProcessGroup and is a variable so the failed-stop
+// cleanup path can be exercised deterministically in tests.
+var stopCancelProcessGroup = stopResidualProcessGroup
+
 // canonicalRoot resolves the checkout identity for comparing a live process's
 // FOREST_ROOT marker with the checkout the operator asked to act on. Symlinks
 // are followed so two spellings of one checkout do not read as two.
@@ -157,11 +166,14 @@ func runRunCancel(rest []string, flags cliFlags) cliOutcome {
 	}
 	var stopErr error
 	for _, pgid := range groups {
-		if err := stopResidualProcessGroup(pgid, processStopGrace); err != nil {
+		if err := stopCancelProcessGroup(pgid, processStopGrace); err != nil {
 			stopErr = errors.Join(stopErr, err)
 		}
 	}
 	if stopErr != nil {
+		if err := removeRunCancellationMarker(flags.root, runID); err != nil {
+			stopErr = errors.Join(stopErr, err)
+		}
 		return failure(exitError, "%s", stopErr)
 	}
 	return cancelRunOutcome(runID, "cancelled")

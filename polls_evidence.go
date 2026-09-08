@@ -43,22 +43,31 @@ func evidenceFileName(kind string) string {
 }
 
 func (p *Poller) evidencePayload(ctx context.Context, kind, sha string, roles ...string) ([]byte, error) {
+	payload, _, err := p.evidencePayloadAndOID(ctx, kind, sha, roles...)
+	return payload, err
+}
+
+func (p *Poller) evidencePayloadAndOID(ctx context.Context, kind, sha string, roles ...string) ([]byte, string, error) {
 	ref := evidenceKindRef(kind, sha)
 	if ref == "" || !isSHA(sha) {
-		return nil, fmt.Errorf("invalid evidence identity")
+		return nil, "", fmt.Errorf("invalid evidence identity")
 	}
 	output, err := p.git(ctx, "ls-remote", "origin", ref)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	oid, err := parseSingleRemoteOID(output, ref)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if oid == "" {
-		return nil, pollMissingNote
+		return nil, "", pollMissingNote
 	}
-	return p.fetchEvidencePayload(ctx, kind, sha, oid, roles...)
+	payload, err := p.fetchEvidencePayload(ctx, kind, sha, oid, roles...)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, oid, nil
 }
 
 func (p *Poller) fetchEvidencePayload(ctx context.Context, kind, sha, oid string, roles ...string) ([]byte, error) {

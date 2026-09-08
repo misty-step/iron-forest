@@ -8,7 +8,7 @@ Status: superseded, 2026-08-29
 > replacement contract is recorded in
 > [0015](0015-one-kernel-per-repository.md),
 > [0023](0023-powder-jobs-and-review-request-v2.md), and
-> [VISION.md](../../VISION.md). This document is retained as historical
+> [README.md](../../README.md). This document is retained as historical
 > rationale only. The if-233 design slice `b361e2c` that introduced this
 > document is preserved only as a historical design slice, not as
 > implementation proof. The `forest publish claim`, `claim-release`, and

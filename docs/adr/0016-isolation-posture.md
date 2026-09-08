@@ -26,9 +26,8 @@ credential, or network containment beyond worktree separation.
 Stronger process and credential isolation belongs to the host the operator
 chooses. The Kernel has no host-vendor API and no per-Run sandbox. Isolation
 is exactly one live Kernel per repository, on an operator-chosen machine.
-See [VISION.md](../../VISION.md).
-
-
+See [ADR 0015](0015-one-kernel-per-repository.md) and
+[README.md](../../README.md).
 
 ## Consequences
 

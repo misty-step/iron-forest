@@ -24,28 +24,7 @@
       }
     },
     {
-      "id": "builder-held-lease-continuation",
-      "suite": "capability",
-      "subject": "builder",
-      "behavior": "Continue a held Powder job for this repository when its forest/<id>/* branch is empty, and never release a held job to take different work.",
-      "class": "recovery",
-      "sources": [
-        {"path": "agents/builder/agent.md", "note": "step 1 and step 5 govern held-job continuation and release"},
-        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "one live lease per agent; release only for the same job's failed attempt"}
-      ],
-      "incident": "2026-08-21 orphan release by principal none on if-powder-completion-gap",
-      "positive": {
-        "setup": "POWDER_AGENT holds a job for this repository and git ls-remote shows no published forest/<id>/* branch.",
-        "action": "Builder runs powder show then powder take for the held job and resumes implementation.",
-        "reference_outcome": "The held lease remains with the holder, the job is completed through the normal branch flow, and no release is issued for unrelated work."
-      },
-      "counterexample": {
-        "setup": "POWDER_AGENT holds a job that already has a published forest/<id>/* branch still in review.",
-        "action": "Builder notices the held job is published and considers releasing it to take different work.",
-        "reference_outcome": "Builder stops cleanly and reports that the Revision is still in review; the lease is not released and no other Subject is taken."
-      }
-    },
-    {
+
       "id": "builder-scope-allowlist",
       "suite": "capability",
       "subject": "builder",
@@ -250,14 +229,14 @@
       "behavior": "Reconcile the current Git-landed Powder Subject to terminal with the approved Revision as proof, without changing a successful Gate into failure.",
       "class": "recovery",
       "sources": [
-        {"path": "VISION.md", "note": "current primary is the bounded pending reconciliation slot"},
+        {"path": "docs/adr/0023-powder-jobs-and-review-request-v2.md", "note": "current primary is the bounded pending reconciliation slot"},
         {"path": "powder_completion.go", "note": "Kernel reads exact current evidence and owns show, take, and done"},
         {"path": "agents/verifier/agent.md", "note": "Verifier does not own or retry Powder completion"}
       ],
       "incident": "2026-08-21 if-296 approve-merged but the Powder job was left takeable",
       "positive": {
-        "setup": "An approve Gate lands a Revision whose request Subject maps to a live Powder job in this repository.",
-        "action": "The Kernel observes current primary, reads only its exact request and approve refs, then shows, re-takes, and completes that Subject.",
+        "setup": "An approve Gate lands a Revision whose request Subject maps to a live Powder job and whose matching claim remains in the Kernel's private state.",
+        "action": "The Kernel observes current primary, reads only its exact request and approve refs, then shows, takes with the stored claim, and completes that Subject.",
         "reference_outcome": "The Gate remains successful and the Powder job becomes terminal with the approved Revision as proof."
       },
       "counterexample": {
@@ -296,7 +275,7 @@
       "class": "negative",
       "sources": [
         {"path": "agents/verifier/agent.md", "note": "publication forbids force, retry, or a different SHA"},
-        {"path": "VISION.md", "note": "the Gate fast-forwards master; a forge ruleset is deployment policy"}
+        {"path": "README.md", "note": "the Gate fast-forwards master; a forge ruleset is deployment policy"}
       ],
       "incident": null,
       "positive": {
@@ -421,28 +400,7 @@
       }
     },
     {
-      "id": "fixer-powder-lease-interference",
-      "suite": "adversarial-security",
-      "subject": "fixer",
-      "behavior": "Confirm or re-acquire the rejected Powder Subject before mutation and fail closed when another identity owns the lease.",
-      "class": "adversarial",
-      "sources": [
-        {"path": "agents/fixer/agent.md", "note": "Powder lease confirmation precedes branch checkout and repair"},
-        {"path": "agents/_shared/skills/powder/SKILL.md", "note": "Fixer may take only the same Subject under the repository identity"}
-      ],
-      "incident": null,
-      "positive": {
-        "setup": "The rejected request binds a non-terminal Powder job whose prior lease expired.",
-        "action": "Fixer shows and re-takes that same Subject before checking out the branch.",
-        "reference_outcome": "Repair starts only after the repository identity holds the Subject; old Verdict evidence remains intact."
-      },
-      "counterexample": {
-        "setup": "The rejected request Subject is held by another Powder identity.",
-        "action": "Fixer attempts its required lease confirmation before checkout or edits.",
-        "reference_outcome": "Fixer stops without mutating the branch or overwriting rejected evidence."
-      }
-    },
-    {
+
       "id": "fixer-stale-branch",
       "suite": "capability",
       "subject": "fixer",
@@ -713,7 +671,7 @@
       "behavior": "A ready Subject flows through Builder implementation, Verifier approval, and an atomic fast-forward of master without operator action.",
       "class": "positive",
       "sources": [
-        {"path": "VISION.md", "note": "the factory implements, reviews, and merges a Subject"},
+        {"path": "README.md", "note": "the factory implements, reviews, and merges a Subject"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 1"}
       ],
       "incident": null,
@@ -735,7 +693,7 @@
       "behavior": "A defective Revision flows through Builder, Verifier changes, Fixer repair, and a second Verifier approval.",
       "class": "positive",
       "sources": [
-        {"path": "VISION.md", "note": "Builder, Verifier, Fixer review loop"},
+        {"path": "README.md", "note": "Builder, Verifier, Fixer review loop"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 2"}
       ],
       "incident": null,
@@ -757,7 +715,7 @@
       "behavior": "Concurrent independent role Runs are serialized per declaration; at most one live Run exists per role.",
       "class": "boundary",
       "sources": [
-        {"path": "VISION.md", "note": "at most one live Run per declaration"},
+        {"path": "README.md", "note": "at most one live Run per declaration"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 3"}
       ],
       "incident": null,
@@ -801,7 +759,7 @@
       "behavior": "Remote master or branch movement during a role Effect fails closed without force, retry, or a different SHA.",
       "class": "negative",
       "sources": [
-        {"path": "VISION.md", "note": "create-only evidence refs and no force"},
+        {"path": "README.md", "note": "create-only evidence refs and no force"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 5"}
       ],
       "incident": null,
@@ -823,7 +781,7 @@
       "behavior": "Malformed or hostile coordination state is recovered fail-closed without improvising over missing or unexpected Git refs.",
       "class": "adversarial",
       "sources": [
-        {"path": "VISION.md", "note": "Git holds durable facts; conflicts stop"},
+        {"path": "README.md", "note": "Git holds durable facts; conflicts stop"},
         {"path": "docs/evaluation-strategy.md", "note": "whole-Forest scenario 7"}
       ],
       "incident": null,

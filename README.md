@@ -2,38 +2,28 @@
 
 Iron Forest is a headless software factory. Exactly one live Kernel serves
 one repository, on a machine the operator chooses. The Kernel handles
-mechanics. Declarations state what agents think and do. See
-[VISION.md](VISION.md).
+mechanics. Declarations state what agents think and do. This README is the
+current operating entrypoint. Accepted ADRs state technical contracts.
 
+Misty Step work starts from a current operator request. Automatic backlog
+intake is retired. Old tickets, labels, and timers do not authorize work.
+Direct requests use the ordinary session or PR workflow; no ticket is required.
+R90 deployments continue to use Habitat. The legacy protocol and migration
+records below describe implementation history, not permission to restart old
+queue consumers.
+Linear owns current non-R90 work, prioritization, and selected unresolved
+opportunities. It is not automatic intake, and a ticket is not permission to
+start a Run. Repositories retain versioned contracts, accepted ADRs, and
+curated eval fixtures; Git evidence, the Ledger, and Run logs retain their
+native runtime authority. Store raw or sensitive eval output in approved
+retained artifact storage and link summaries rather than copying it into work
+records.
 
-The shipped review roster has Builder, Verifier, and Fixer. A Builder turns a
-ready GitHub Issue or takeable Powder job into a branch. A Verifier checks and
-reviews the exact Revision. A Fixer repairs a rejected Revision and sends it back
-for review. Critic and Tester are default-profile, non-review, drafts-only
-roles: Critic sweeps the codebase and files Powder drafts; Tester maps
-under-tested observable behaviors into test-work Powder drafts. Neither edits
-code, publishes to Git, promotes backlog jobs, or adds Kernel Effects, and
-neither joins the review loop.
-
-
-## Critic and Tester
-
-Critic and Tester are shipped default-profile roles. Both are non-review and
-drafts-only: they produce attributed spec-less Powder drafts, never edit code,
-never publish to Git, never promote backlog jobs, and never add Kernel
-Effects. Builder, Verifier, and Fixer remain the review and Gate roster.
-
-Promotion evidence:
-
-- `evals/jobs/fast/fast-20260901T224519Z/report.md` is 22/22.
-- Settled Runs `1788301018846047029-critic` and
-  `1788301018844450077-tester` each produced one attributed spec-less draft.
-
-Their Polls skip cleanly (exit 1) when Powder is not configured: `POWDER_AGENT`
-and one of `POWDER_URL` or `POWDER_API_BASE_URL` must both be set, otherwise a
-daily sweep has no durable output and GitHub-only deployments wake no
-investigator Run.
-
+The review roster has Builder, Verifier, and Fixer for explicitly requested
+work. A Verifier checks one exact Revision, and a Fixer repairs a rejected
+Revision. Critic and Tester perform requested read-only sweeps and return
+findings with evidence; they do not create tickets or start implementation.
+Their automatic intake polls are disabled.
 
 ## Quick start
 
@@ -54,6 +44,11 @@ checks:
     run: mise exec -- go test ./...
 ```
 
+The Poll declarations above describe the retained profile protocol, not an
+active queue setup. Do not enable the legacy Builder tracker Poll for new
+work; use a current operator handoff. This guide does not authorize installing
+services or starting schedules.
+
 ### Repository-owned composition
 
 `forest.yaml` accepts arbitrary declaration names. The roster above is the
@@ -64,7 +59,7 @@ serves exactly one repository; an external manager coordinates several
 instances through their CLI read surfaces.
 
 Start each declaration with Pi's smallest useful tool set. A role can use an
-installed CLI such as `gh`, `powder`, or a browser driver only when `bash` is
+installed CLI such as `gh` or a browser driver only when `bash` is
 in that declaration's Pi tool allowlist and an explicit skill defines the CLI
 contract. Pi extensions are different: the Runner disables extension discovery,
 and declarations cannot yet select an extension path. Do not add an
@@ -72,10 +67,9 @@ extension-provided tool name until the Runner
 has an explicit, inspectable extension input and the role proves one real
 scenario with it.
 
-The current shipped workflow still contains GitHub and Powder mechanics in the
-Kernel. Tracker-independent profile executables and Habitat composition are
-open architecture work; a custom Poll alone does not yet make the complete
-review and terminal lifecycle tracker-agnostic.
+Legacy tracker validation and reconciliation remain in Kernel code and old
+evaluation fixtures. They are not active work-selection instructions. A profile
+change alone does not remove those historical implementation paths.
 
 Agent Runs have no wall-clock deadline by default. To bound a declaration that
 has wedged before, set the optional `max_duration` key (seconds) under that
@@ -91,13 +85,13 @@ exceeds the bound using the same supported cancel path as `forest run cancel`,
 records the cancellation in the Ledger, and returns the trigger to a clean
 not-running state.
 
-Declare each agent with two prompt files. Skills live only in the shared
-directory and, when a role needs private skills, its own directory:
+Declare each agent with two prompt files. Skills live only in an existing
+shared directory and, when a role needs private skills, its own directory:
 
 ```text
 agents/<name>/agent.md
 agents/<name>/task.md
-agents/_shared/skills/          # every declaration
+agents/_shared/skills/          # optional; every declaration
 agents/<name>/skills/           # optional; this declaration only
 ```
 
@@ -135,12 +129,10 @@ Ledger and `.forest/runs/<run-id>.log`.
 
 Credentials come only from the service environment inherited by the Run.
 Declaration frontmatter has no `env` field; unknown metadata fails validation.
-Credentials do not belong in prompts, skills, defaults, or commits. The shared
-skills verify claims and debug failures. Verifier also receives the deep
-correctness and code-quality review skills under `agents/verifier/skills/`;
-Builder and Fixer receive only the shared skills. Each role's always-on
-engineering rules live directly in `agent.md`, alongside the exact Git-note
-protocol.
+Credentials do not belong in prompts, skills, defaults, or commits. Role
+engineering, selection, and publication rules live in each `agent.md`.
+Factory Runs receive only existing shared or role skill directories; unused
+generic packages are omitted rather than left as empty layers.
 
 This quick start uses self-host mode: the factory source checkout is also the
 managed repository. For a separate sibling managed checkout, use the
@@ -159,20 +151,22 @@ before handoff:
    `mise exec -- go build -o forest . && ./forest selfcheck`.
 3. Install the service with `deploy/install-service.sh <sibling-directory-name>`
    (no argument in self-host mode).
-   Self-host mode also enables `forest-eval-flywheel@iron-forest.timer`. It
-   ingests retained production Runs and emits a coverage report every day when
-   the protected `~/.config/iron-forest/evals.env` exists. Sibling installs do
-   not receive this Iron Forest manager timer.
+   The retained self-host installer also enables
+   `forest-eval-flywheel@iron-forest.timer`; that side effect is not approval to
+   restart retired intake. Do not run that installation path as a current-work
+   setup step without an explicitly approved operational change. Sibling
+   installs do not receive the manager timer. The
+   [flywheel record](docs/production-flywheel.md) is historical, not setup policy.
 4. Verify the installed service is active without starting a second Kernel:
    `systemctl --user is-active forest@<sibling-directory-name>` (expect
    `active`) and, from the managed checkout, `./forest status`.
-5. Record the deployment using the registry fields in the
-   [ready contract](docs/forest-ready-contract.md#deployment-registry):
-   `identity`, `host`, `repo`, and the running revision from `./forest version`.
-6. File every external finding with the
-   [draft-note provenance convention](docs/templates/powder-job-spec.md#external-draft-note):
-   report `filed-by`, `deployment`, and evidence, and never pass `--spec` at
-   filing.
+5. Record the deployment in the operator-owned inventory (Estate for Misty
+   Step), with `identity`, `host`, `repo`, and the running revision from
+   `./forest version`. Do not maintain a deployment registry in a retired
+   readiness document.
+6. Return external findings in the requested report with source repository,
+   inspected revision, observed behavior, and verification evidence. Do not
+   create speculative tickets.
 7. Confirm observability before rollout with the read surface. After the first
    completed dispatch, run `./forest status` and `./forest audit show`. To force
    a rescan, confirm the service is inactive first:
@@ -181,8 +175,8 @@ before handoff:
    `systemctl --user start forest@<sibling-directory-name>`.
 8. Run `./forest doctor` and resolve every finding before declaring the
    deployment complete. It checks tool presence, `gh` auth, the credential file
-   mode, read-only forge capability, the OpenRouter key, and Powder
-   reachability.
+   mode, read-only forge capability, and the OpenRouter key. Legacy tracker
+   checks are implementation residue and do not authorize configuration.
 
 Build with the pinned toolchain and validate local configuration:
 
@@ -260,17 +254,14 @@ OPENROUTER_API_KEY=<instance fallback key>
 OPENROUTER_API_KEY_BUILDER=<builder key>
 OPENROUTER_API_KEY_VERIFIER=<verifier key>
 OPENROUTER_API_KEY_FIXER=<fixer key>
-POWDER_URL=<origin>
-POWDER_API_KEY=<key>
-POWDER_AGENT=forest-<repo-slug>
 ```
 
 `OPENROUTER_API_KEY_<ROLE>` wins for the declaration whose name matches
 `<ROLE>` (uppercased); the instance-wide `OPENROUTER_API_KEY` is the fallback
 for any role without a dedicated key.
 
-`POWDER_AGENT` opts the Kernel into listing Powder jobs. Omit it for
-GitHub-only selection. Use one agent identity per repository Kernel.
+Do not configure retired queue credentials or enable automatic backlog
+selection. Supply current work through an explicit operator handoff.
 
 Do not put an OpenRouter management key in this file. Do not reuse a personal
 interactive key or an evaluation key. The intended production layout uses one
@@ -297,14 +288,14 @@ the operator chooses.
 
 Git is the coordination authority. Live workflow state is create-only evidence
 under `refs/forest/v1/{request,checks,verdict}/<sha>`, plus `forest/*` branches
-and `master`. GitHub Issues and Powder jobs are the Tracker. Pull requests are disposable
-human Projections, never authority.
+and `master`. This protocol is retained for compatible requests explicitly
+supplied by the operator. A historical queue item does not authorize a Run.
 
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit. Verifier calls `forest publish verdict`.
 The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
-`master` in the same atomic push. It then reconciles the landed Subject to
-terminal Powder state without changing a successful Gate into failure. See
+`master` in the same atomic push. Historical tracker reconciliation remains
+in the implementation. See
 [ADR 0021](docs/adr/0021-kernel-review-request-publication.md),
 [ADR 0022](docs/adr/0022-kernel-verdict-publication.md), and
 [ADR 0023](docs/adr/0023-powder-jobs-and-review-request-v2.md).
@@ -314,25 +305,24 @@ Which identity may create or update which ref is in
 A read-only forge credential breaks every declaration. Branch protection cannot
 see evidence refs. Restrict `master` with a forge ruleset.
 
-Agents own Subject selection, implementation, review judgment, and the initial
-Powder take. The Kernel owns publication and bounded terminal Powder
-reconciliation. See [managed-repository
-onboarding](docs/onboarding-managed-repo.md) for the operator procedure.
+The operator selects current work. Agents own implementation and review
+judgment; the Kernel owns the retained publication protocol. The
+[managed-repository guide](docs/onboarding-managed-repo.md) is a historical
+setup reference, not an instruction to restart retired intake.
 
-## Ready subjects
+## Current requests
 
-A `forest:ready` Issue or takeable Powder job is a self-contained spec: problem,
-repro, scope bound, machine-checkable acceptance criteria, and a verification
-path. Grooming stays human-supervised, and the factory remains a dumb consumer
-of ready Subjects.
+Clarify the selected request with a problem or scenario, scope, observable
+acceptance criteria, and a verification path. Use
+[`org-skills/grooming-checklist/SKILL.md`](org-skills/grooming-checklist/SKILL.md)
+when that brief is useful. No queue entry or readiness label is required.
 
-- [`docs/forest-ready-contract.md`](docs/forest-ready-contract.md) — what ready
-  means and how it is enforced by convention.
-- [`docs/templates/powder-job-spec.md`](docs/templates/powder-job-spec.md) — the
-  template for a ready Powder job spec.
-- [`org-skills/grooming-checklist/SKILL.md`](org-skills/grooming-checklist/SKILL.md) —
-  the supervised grooming checklist skill (not a factory declaration).
+If the request needs durable work tracking, use Linear for non-R90 work.
+Capture only selected opportunities with source pointers and proposal status;
+do not import historical queues or create issues automatically.
 
+The former readiness contract and job template remain historical records. They
+do not govern new Misty Step work.
 
 ## Poll protocol
 
@@ -343,26 +333,39 @@ than 1, timeout, or malformed behavior records an unhealthy trigger. See
 [ADR 0012](docs/adr/0012-poll-trigger-protocol.md) and the
 [onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
 
-Builder Poll also wakes on a takeable or held Powder job for `forest.yaml`
-`repo` when `POWDER_AGENT` is set. Before dispatch it reconciles the current
-Git-landed Subject to terminal Powder state or fails closed.
+The old Builder tracker path remains in the binary for historical compatibility.
+Do not configure or restart it as a source of new work.
 
 Verifier and Fixer Poll `ls-remote` evidence refs for each `forest/*` tip.
 Historical notes are unread. A missing evidence ref is no work.
 
 ## Merge Gate
 
+Both Verdict kinds require the Runner's `FOREST_RUN_ID` to match a valid live
+Verifier record in the owning primary checkout. A linked worktree resolves to
+that owner; `FOREST_ROOT` cannot redirect the check. Missing or ended context
+is refused even for an identical retry, and ownership is checked again
+immediately before publication. This is an operational guard, not security
+containment between processes running as the same user.
+
 The Gate requires one valid request evidence ref, passing Checks, and an
 approve Verdict for the same Revision, plus a fast-forward of `master` to that
-Revision. `forest publish verdict` performs that push. The existing request is
-not republished. The merge never uses force. The credential scan is a
-Kernel-owned preflight (`forest scan-secrets` against the detached candidate
-worktree, resolved from the running Kernel binary and the external `trufflehog`
-outside the managed checkout). It runs unconditionally before configured Checks
-and never compiles or executes candidate code, so a candidate cannot supply the
-Gate's credential scanner. Except for the trusted first `master` baseline, the
-Auditor checks the observable final state after the Effect; it does not enforce
-it. See [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
+Revision. Before `forest publish verdict` runs the configured Checks, it
+validates the Builder or Fixer request, confirms the request branch still
+points to the Revision, requires every submitted result to pass, and requires
+the submitted names to equal the `forest.yaml` Check names at that Revision,
+in the same order.
+The credential scan is a Kernel-owned preflight (`forest scan-secrets` against
+the detached candidate worktree, resolved from the running Kernel binary and
+the external `trufflehog` outside the managed checkout). It runs unconditionally
+before configured Checks and never compiles or executes candidate code, so a
+candidate cannot supply the Gate's credential scanner. The atomic push
+publishes Checks and Verdict, fast-forwards `master`, and includes the
+validated request OID as a no-op leased refspec. The request content is not
+replaced, and the primary branch is never forced. Except for the trusted first
+`master` baseline, the Auditor checks the observable final state after the
+Effect; it remains the observer rather than the Gate owner. See
+[ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
 
 ## Auditor and trust boundary
 
@@ -417,7 +420,7 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest config show` | Print the loaded configuration. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
 | `forest trigger list\|show <agent>` | Print resolved trigger state. |
-| `forest trigger reset <agent>` | Clear one agent's accumulated errors. Refuses while a Kernel runs. |
+| `forest trigger reset <agent>` | Clear one agent's accumulated errors, including provider-budget fail-closed (`run_error=provider budget exhausted`). Refuses while a Kernel runs; resume is stop Kernel, reset, start. |
 | `forest doctor` | Run non-mutating machine-operability checks and report one explicit result per check. |
 | `forest run list` | Page the Ledger, newest first, optionally filtered by agent, exit code, or start time. |
 | `forest run show <run-id>` | Print one Ledger row. |
@@ -499,7 +502,7 @@ read-only external probe, or `unknown` when no answer was obtained — plus
 `ok`, and either `evidence` or a `reason`. It checks `mise`, `go`, and `pi` on
 PATH; `gh auth status`; the instance credential file mode (`0600`); read-only
 forge push capability through `gh api`; the OpenRouter key with a read-only key
-probe; and Powder reachability when `POWDER_AGENT` is set. The forge and key
+probe. Legacy tracker reachability checks remain in code. The forge and key
 probes never write remotely, and evidence/reason never contain credential
 values. Exit is `0` when every check is healthy and `2` otherwise.
 
@@ -585,6 +588,19 @@ The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
 token classes — `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
 `reasoning` — as operational observability, not accounting. The Ledger never
 records a cost, price, spend, or currency field and never computes money.
+
+## Historical promotion evidence
+
+Historical promotion evidence remains in
+`evals/jobs/fast/fast-20260901T224519Z/report.md` and settled Runs
+`1788301018846047029-critic` and `1788301018844450077-tester`. Those results
+predate the retirement of automatic draft intake.
+
+The local ignored report path is an original locator, not proof of shared or
+durable artifact retention. Preserve the receipt and Run identities; when
+citing them outside this checkout, use an approved retained artifact locator
+with the relevant revision or digest. Do not treat the old promotion result as
+current readiness or permission to restart draft intake.
 
 ## License
 
