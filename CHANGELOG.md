@@ -1,3 +1,10 @@
+## [0.0.16](https://github.com/misty-step/iron-forest/compare/v0.0.15...v0.0.16) (2026-09-09)
+
+
+### Features
+
+* **runtime:** add explicit requests and organized repository profiles ([eb8479c](https://github.com/misty-step/iron-forest/commit/eb8479c2b55eba1716f5299683b715f0c55e01c8))
+
 ## Unreleased
 
 ### Features
