@@ -32,7 +32,7 @@ Create the repository-owned profile at `.iron-forest/config.yaml`:
 ```yaml
 repo: misty-step/iron-forest
 delivery: git-native
-required_tools: [gh, powder, trufflehog]
+required_tools: [gh, trufflehog]
 agents:
   builder:  { poll: "./.iron-forest/bin/forest poll builder",  interval: 300 }
   verifier: { poll: "./.iron-forest/bin/forest poll verifier", interval: 120 }

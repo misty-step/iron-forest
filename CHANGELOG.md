@@ -27,6 +27,8 @@
 
 * Keep update recovery transaction-local; preserve historical evidence across
   explicit adoption and restore coherent source, binary, profile and service state.
+* Stop declaring archived Powder as a factory selfcheck requirement.
+
 
 ## [0.0.15](https://github.com/misty-step/iron-forest/compare/v0.0.14...v0.0.15) (2026-09-08)
 

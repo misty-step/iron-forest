@@ -1,6 +1,6 @@
 repo: misty-step/iron-forest        # forge identity (owner/name)
 delivery: git-native
-required_tools: [gh, powder, trufflehog]
+required_tools: [gh, trufflehog]
 agents:
   builder:  { poll: "./.iron-forest/bin/forest poll builder",  interval: 300 }
   verifier: { poll: "./.iron-forest/bin/forest poll verifier", interval: 120 }
