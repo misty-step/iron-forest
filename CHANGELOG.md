@@ -1,3 +1,10 @@
+## [0.0.18](https://github.com/misty-step/iron-forest/compare/v0.0.17...v0.0.18) (2026-09-09)
+
+
+### Bug Fixes
+
+* **config:** stop requiring archived Powder on selfcheck ([6c17df5](https://github.com/misty-step/iron-forest/commit/6c17df587b92040276db7f00eed8fb0dfedd757d))
+
 ## [0.0.17](https://github.com/misty-step/iron-forest/compare/v0.0.16...v0.0.17) (2026-09-09)
 
 
