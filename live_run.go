@@ -22,19 +22,27 @@ type liveRunRecord struct {
 	Work          *WorkReference    `json:"work,omitempty"`
 	DefinitionSHA string            `json:"definition_sha,omitempty"`
 	ExtensionSHA  map[string]string `json:"extension_sha,omitempty"`
+	// Result snapshots observed execution facts before cleanup. Finalized
+	// distinguishes a completed finalization awaiting Ledger publication from
+	// a Run interrupted during cleanup or completion observation.
+	Result    *RunRecord `json:"result,omitempty"`
+	Finalized bool       `json:"finalized,omitempty"`
 }
 
 // LiveRunView is the read-surface answer for one live Run. StartedAt is the
 // same UTC/RFC3339 timestamp the Runner recorded at dispatch; Elapsed is
 // derived from that recorded timestamp, not from filesystem metadata.
 type LiveRunView struct {
-	RunID     string         `json:"run_id"`
-	Agent     string         `json:"agent"`
-	StartedAt string         `json:"started_at"`
-	Elapsed   string         `json:"elapsed"`
-	Cancel    string         `json:"cancel"`
-	RequestID string         `json:"request_id,omitempty"`
-	Work      *WorkReference `json:"work,omitempty"`
+	RunID       string         `json:"run_id"`
+	Agent       string         `json:"agent"`
+	StartedAt   string         `json:"started_at"`
+	Elapsed     string         `json:"elapsed"`
+	Cancel      string         `json:"cancel"`
+	RequestID   string         `json:"request_id,omitempty"`
+	Work        *WorkReference `json:"work,omitempty"`
+	ProcessExit *int           `json:"process_exit,omitempty"`
+	Outcome     string         `json:"outcome,omitempty"`
+	Completion  *RunCompletion `json:"completion,omitempty"`
 }
 
 // liveRunPath names the per-agent live Run record. One file per agent is safe
@@ -93,11 +101,15 @@ func writeLiveRun(path string, record liveRunRecord) error {
 }
 
 func liveRecord(record RunRecord) liveRunRecord {
-	return liveRunRecord{
+	live := liveRunRecord{
 		RunID: record.RunID, Agent: record.Agent, StartedAt: record.Started,
 		RequestID: record.RequestID, Work: record.Work,
 		DefinitionSHA: record.DefinitionSHA, ExtensionSHA: record.ExtensionSHA,
 	}
+	if record.Outcome != "" {
+		live.Result = &record
+	}
+	return live
 }
 
 // readLiveRuns reads every live Run record, newest Run first. An absent runs
@@ -137,6 +149,11 @@ func readLiveRuns(root string) ([]liveRunRecord, error) {
 func liveRunView(record liveRunRecord, now time.Time) LiveRunView {
 	view := LiveRunView{RunID: record.RunID, Agent: record.Agent, StartedAt: record.StartedAt,
 		RequestID: record.RequestID, Work: record.Work}
+	if record.Result != nil {
+		view.ProcessExit = record.Result.ProcessExit
+		view.Outcome = record.Result.Outcome
+		view.Completion = record.Result.Completion
+	}
 	if record.RunID != "" {
 		view.Cancel = "forest run cancel " + record.RunID
 	}
@@ -178,11 +195,30 @@ func recoverInterruptedRuns(root string) error {
 		} else if !found {
 			record := RunRecord{RunID: live.RunID, Agent: live.Agent, Started: live.StartedAt,
 				RequestID: live.RequestID, Work: live.Work, DefinitionSHA: live.DefinitionSHA,
-				ExtensionSHA: live.ExtensionSHA, Exit: 137, Error: "Run interrupted before completion"}
-			if hasRunCancellationMarker(root, live.RunID) {
-				record.Exit, record.Error = runCancelledExit, runCancelledError
+				ExtensionSHA: live.ExtensionSHA}
+			if live.Result != nil {
+				if live.Result.RunID != live.RunID || live.Result.Agent != live.Agent {
+					return fmt.Errorf("interrupted Run %s has mismatched result identity", live.RunID)
+				}
+				record = *live.Result
 			}
-			// No completion time survived; never count downtime as execution.
+			if !live.Finalized {
+				// Check the operator marker before assigning interrupted. A
+				// retained timed_out cause takes precedence over a later cancel.
+				_ = applyRunCancellation(root, &record)
+				switch record.Outcome {
+				case runOutcomeCancelled, runOutcomeTimedOut, runOutcomeInterrupted:
+				default:
+					record.Outcome, record.Exit = runOutcomeInterrupted, 137
+					record.Error = "Run interrupted before finalization"
+					record.NoWork = false
+				}
+				// No final completion time survived. Retain only a duration
+				// actually observed; never count Kernel downtime as execution.
+			}
+			if live.Finalized && live.Result == nil {
+				return fmt.Errorf("interrupted Run %s has no finalized result", live.RunID)
+			}
 			if err := AppendRun(root, record); err != nil {
 				return err
 			}

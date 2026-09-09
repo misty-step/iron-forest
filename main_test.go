@@ -278,31 +278,14 @@ func TestStatusBoundsAuditViolationsWithoutDuplicatingErrors(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("status code=%d stderr=%q stdout=%s", code, stderr, stdout)
 	}
-	want := `repo: owner/name
-kernel: stopped
-triggers:
-  builder errors=0 code=0 running=false stale=false poll_error=poll failed run_error=run failed audit_error=audit transport failed
-live runs: none
-last audit: violations master=abc123
-audit violations: total=12 omitted=2
-audit violation: policy-0
-audit violation: policy-1
-audit violation: policy-2
-audit violation: policy-3
-audit violation: policy-4
-audit violation: policy-5
-audit violation: policy-6
-audit violation: policy-7
-audit violation: policy-8
-audit violation: policy-9
-recent runs (oldest first, at most 10):
-  exit=0 duration=1.250s agent=builder run=status-run
-ledger: runs=1 pass_rate=1.000
-  builder runs=1 pass_rate=1.000 duration_p50=1.250s duration_p95=1.250s tokens_in=0 tokens_out=0 cache_read=0 cache_write=0 reasoning=0
-recent failures: none
-`
-	if stdout != want {
-		t.Fatalf("status stdout:\n%s\nwant:\n%s", stdout, want)
+	if strings.Count(stdout, "\naudit violation: ") != statusViolations {
+		t.Fatalf("status did not bound displayed audit violations: %s", stdout)
+	}
+	for i := range len(violations) {
+		present := strings.Contains(stdout, "\naudit violation: policy-"+strconv.Itoa(i)+"\n")
+		if present != (i < statusViolations) {
+			t.Fatalf("status audit violation %d presence=%t: %s", i, present, stdout)
+		}
 	}
 	if strings.Count(stdout, "audit transport failed") != 1 {
 		t.Fatalf("status duplicated AuditError: %s", stdout)
@@ -348,7 +331,8 @@ func TestStatusReportsExactlyTenRecentRunsInOrder(t *testing.T) {
 		index := i + 2
 		want := "  exit=" + strconv.Itoa(index) +
 			" duration=" + strconv.Itoa(index) + ".000s" +
-			" agent=builder run=status-run-" + strconv.Itoa(index)
+			" agent=builder run=status-run-" + strconv.Itoa(index) +
+			" outcome=unknown process_exit=unknown completion=unobserved"
 		if line != want {
 			t.Fatalf("recent run line %d=%q, want %q", i, line, want)
 		}

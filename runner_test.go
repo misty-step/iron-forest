@@ -197,11 +197,11 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "parse harness usage") || !strings.Contains(err.Error(), "nonnegative") {
 		t.Fatalf("invalid usage record=%#v err=%v", record, err)
 	}
-	if record.Exit != 1 {
-		t.Fatalf("invalid usage exit=%d, want 1", record.Exit)
+	if record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeInternalError {
+		t.Fatalf("invalid usage record=%#v, want internal error retaining raw exit zero", record)
 	}
 	rows, ledgerErr := readLedger(root, -1)
-	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
+	if ledgerErr != nil || len(rows) != 1 || rows[0].Exit != 1 || rows[0].ProcessExit == nil || *rows[0].ProcessExit != 0 || rows[0].Outcome != runOutcomeInternalError {
 		t.Fatalf("invalid usage ledger=%v err=%v, want one failing row", rows, ledgerErr)
 	}
 	if rows[0].TokensIn != 0 || rows[0].TokensOut != 0 || rows[0].CacheRead != 0 || rows[0].CacheWrite != 0 || rows[0].Reasoning != 0 {
@@ -235,7 +235,7 @@ exit 0
 	runner := NewRunner(root)
 	runner.PiPath = pi
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
-	if err == nil || record.Exit != 1 || !strings.Contains(err.Error(), "pi agent ended with error") {
+	if err == nil || record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeProviderFailed || !strings.Contains(err.Error(), "pi agent ended with error") {
 		t.Fatalf("terminal Pi error record=%#v err=%v, want failing Run", record, err)
 	}
 	if record.TokensIn != 1 || record.TokensOut != 2 {
@@ -288,7 +288,7 @@ func TestRunnerRejectsOpenRouterBudgetAsProviderBudgetExhausted(t *testing.T) {
 			runner := NewRunner(root)
 			runner.PiPath = pi
 			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
-			if err == nil || record.Exit != 1 || record.Error != providerBudgetExhausted {
+			if err == nil || record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeProviderFailed || record.Error != providerBudgetExhausted {
 				t.Fatalf("budget record=%#v err=%v, want %q", record, err, providerBudgetExhausted)
 			}
 			if !strings.Contains(err.Error(), providerBudgetExhausted) {
@@ -540,7 +540,7 @@ func TestRunnerTerminatesProcessTreeOnCallerDeadline(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	record, err := runner.Run(ctx, Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
-	if err == nil || record.Exit != 124 || time.Since(started) > 4*time.Second {
+	if err == nil || record.Exit != runTimedOutExit || record.Outcome != runOutcomeTimedOut || record.ProcessExit == nil || *record.ProcessExit != 0 || time.Since(started) > 4*time.Second {
 		t.Fatalf("deadline record=%#v err=%v elapsed=%v", record, err, time.Since(started))
 	}
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "term" {
@@ -548,7 +548,7 @@ func TestRunnerTerminatesProcessTreeOnCallerDeadline(t *testing.T) {
 	}
 }
 
-func TestRunnerWatchdogCancelsWedgedRun(t *testing.T) {
+func TestRunnerWatchdogTimesOutWedgedRun(t *testing.T) {
 	root, _ := testClone(t)
 	omp := filepath.Join(t.TempDir(), "omp")
 	_, heartbeat := processHeartbeatFixture(t)
@@ -568,18 +568,18 @@ done
 	runner.PiPath = omp
 	started := time.Now()
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x", MaxDuration: 1})
-	if err == nil || !errors.Is(err, errRunCancelled) {
-		t.Fatalf("watchdog record=%#v err=%v, want cancellation", record, err)
+	if err == nil || !errors.Is(err, errRunTimedOut) || errors.Is(err, errRunCancelled) {
+		t.Fatalf("watchdog record=%#v err=%v, want duration expiry, not operator cancellation", record, err)
 	}
-	if record.Exit != runCancelledExit || record.Error != runCancelledError {
-		t.Fatalf("watchdog record=%#v, want exit %d error %q", record, runCancelledExit, runCancelledError)
+	if record.Exit != runTimedOutExit || record.Error != runTimedOutError || record.Outcome != runOutcomeTimedOut || record.ProcessExit == nil || *record.ProcessExit != -1 {
+		t.Fatalf("watchdog record=%#v, want timed_out with raw signal exit", record)
 	}
 	if time.Since(started) > 15*time.Second {
 		t.Fatalf("watchdog took %v", time.Since(started))
 	}
 	rows, ledgerErr := readLedger(root, -1)
-	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != runCancelledExit || rows[0].Error != runCancelledError {
-		t.Fatalf("watchdog ledger=%v err=%v, want one cancelled row", rows, ledgerErr)
+	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != runTimedOutExit || rows[0].Outcome != runOutcomeTimedOut || rows[0].Error != runTimedOutError {
+		t.Fatalf("watchdog ledger=%v err=%v, want one timed-out row", rows, ledgerErr)
 	}
 	assertProcessQuiescent(t, heartbeat, "wedged run", "watchdog")
 }
@@ -825,7 +825,7 @@ exec "$REAL_GIT" "$@"
 	runner := NewRunner(root)
 	runner.GitPath, runner.PiPath = gitWrapper, omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder"})
-	if err == nil || record.Exit != 1 {
+	if err == nil || record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeInternalError {
 		t.Fatalf("cleanup record=%#v err=%v", record, err)
 	}
 	for _, want := range []string{"git worktree remove", "exit status 9", "git worktree prune", "exit status 11"} {

@@ -13,10 +13,10 @@ couple the appliance to one substrate.
 
 ## Decision
 
-Day-one isolation is worktree separation. Agent Runs have no wall-clock
-deadline. Runner cleanup uses a separate 10-second bound, post-dispatch audit
-uses a separate 60-second bound, and the systemd service drains active Runs
-without a deadline.
+Isolation is worktree separation. Agent Runs have no default wall-clock
+deadline; a declaration may set an elapsed-time `max_duration`. Runner cleanup
+uses a separate 10-second bound, post-dispatch audit uses a separate 60-second
+bound, and the systemd service drains active Runs without a deadline.
 
 This posture is not a security sandbox. A trusted declaration still runs with
 the operating-system user's configured credentials and can access the

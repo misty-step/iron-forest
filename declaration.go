@@ -80,8 +80,11 @@ type Declaration struct {
 	ExtensionPaths []string          `json:"extensions"`
 	ExtensionSHA   map[string]string `json:"extension_sha,omitempty"`
 	RequestCommand string            `json:"request,omitempty"`
-	Request        *RunRequest       `json:"-"`
-	RunID          string            `json:"-"`
+	// CompletionCommand observes profile-owned completion evidence after Pi.
+	// It is not a merge, retry, or tracker transition instruction to Kernel.
+	CompletionCommand string      `json:"completion,omitempty"`
+	Request           *RunRequest `json:"-"`
+	RunID             string      `json:"-"`
 	// DefinitionSHA is the digest over the ordered declaration pair (agent.md
 	// then task.md) as loaded. The Runner recomputes it immediately before exec
 	// so a run executes only the declaration bytes the Kernel loaded (see #144).
@@ -97,6 +100,7 @@ type declarationFrontmatter struct {
 	Thinking   yaml.Node  `yaml:"thinking"`
 	Extensions StringList `yaml:"extensions"`
 	Request    yamlString `yaml:"request"`
+	Completion yamlString `yaml:"completion"`
 }
 
 func declarationDir(root, name string) string {
@@ -253,18 +257,19 @@ func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declarat
 		return Declaration{}, fmt.Errorf("agent %s extensions: %w", name, err)
 	}
 	return Declaration{
-		Name:           name,
-		Model:          model,
-		Tools:          tools,
-		Thinking:       strings.TrimSpace(thinking),
-		SystemPrompt:   body,
-		TaskPrompt:     string(taskData),
-		ModelSource:    modelSource,
-		SkillPaths:     skillPaths,
-		DefinitionSHA:  definitionSHA,
-		ExtensionPaths: append([]string{}, metadata.Extensions...),
-		ExtensionSHA:   extensionSHA,
-		RequestCommand: strings.TrimSpace(string(metadata.Request)),
+		Name:              name,
+		Model:             model,
+		Tools:             tools,
+		Thinking:          strings.TrimSpace(thinking),
+		SystemPrompt:      body,
+		TaskPrompt:        string(taskData),
+		ModelSource:       modelSource,
+		SkillPaths:        skillPaths,
+		DefinitionSHA:     definitionSHA,
+		ExtensionPaths:    append([]string{}, metadata.Extensions...),
+		ExtensionSHA:      extensionSHA,
+		RequestCommand:    strings.TrimSpace(string(metadata.Request)),
+		CompletionCommand: strings.TrimSpace(string(metadata.Completion)),
 	}, nil
 }
 

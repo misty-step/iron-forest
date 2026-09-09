@@ -13,9 +13,29 @@ import (
 const (
 	runCancelledExit  = 130
 	runCancelledError = "run cancelled by operator"
+	runTimedOutExit   = 124
+	runTimedOutError  = "run exceeded max_duration"
 )
 
 var errRunCancelled = errors.New(runCancelledError)
+var errRunTimedOut = errors.New(runTimedOutError)
+
+// A durable operator marker cannot replace a stop cause already observed at
+// its source (notably a duration expiry while deferred cleanup is running).
+func applyRunCancellation(root string, record *RunRecord) bool {
+	switch record.Outcome {
+	case runOutcomeCancelled:
+		return true
+	case runOutcomeTimedOut, runOutcomeInterrupted:
+		return false
+	}
+	if !hasRunCancellationMarker(root, record.RunID) {
+		return false
+	}
+	record.NoWork = false
+	record.Outcome, record.Exit, record.Error = runOutcomeCancelled, runCancelledExit, runCancelledError
+	return true
+}
 
 type cancelRunPayload struct {
 	RunID string `json:"run_id"`

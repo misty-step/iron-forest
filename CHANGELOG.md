@@ -29,13 +29,23 @@
 * Add persistent admission show/pause/resume/drain and interrupted-Run evidence.
 * Add external delivery authority with native-publication refusal and explicitly
   not-applicable audit; selfcheck resolves only declared capabilities.
+* Add an optional profile-owned `completion` observer. Kernel retains its
+  bounded `forest.completion.v1` result separately from process exit, so a
+  successful process without its required external effect is no longer a pass.
+* Record known execution outcomes (`setup_failed`, `execution_failed`,
+  `provider_failed`, `cancelled`, `timed_out`, `interrupted`, `internal_error`)
+  and the raw `process_exit`. Missing legacy values stay unclassified.
 
 ### Bug Fixes
 
 * Keep update recovery transaction-local; preserve historical evidence across
   explicit adoption and restore coherent source, binary, profile and service state.
 * Stop declaring archived Powder as a factory selfcheck requirement.
-
+* Attribute an elapsed `max_duration` expiry to a timeout instead of an
+  operator cancellation.
+* Replace the retired queue-first onboarding walkthrough with the current
+  request-first path, and stop presenting the exit-zero Ledger fraction as
+  agent or delivery quality.
 
 ## [0.0.15](https://github.com/misty-step/iron-forest/compare/v0.0.14...v0.0.15) (2026-09-08)
 
