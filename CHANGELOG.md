@@ -1,3 +1,10 @@
+## [0.0.19](https://github.com/misty-step/iron-forest/compare/v0.0.18...v0.0.19) (2026-09-09)
+
+
+### Features
+
+* **kernel:** separate observed completion from execution outcome (MIS-26) ([c164d88](https://github.com/misty-step/iron-forest/commit/c164d88d060a7ad086b0f14608aae7a0696a71e7))
+
 ## [0.0.18](https://github.com/misty-step/iron-forest/compare/v0.0.17...v0.0.18) (2026-09-09)
 
 
