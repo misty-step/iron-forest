@@ -21,65 +21,45 @@ profile that can change agent behavior without changing Kernel code.
 
 ## Decision
 
-The Kernel owns config load and validation, Poll scheduling, worktree
-preparation, per-agent Git identity, OMP invocation, process-local Run
-serialization, read-only auditing, Ledger writes, and the status CLI. Agent
-Runs have no wall-clock deadline. Runner cleanup has a separate 10-second
-bound. Post-dispatch audit has a separate 60-second bound. The systemd service
-drains active Runs without a deadline.
+The Kernel owns config validation, Poll scheduling, explicit request admission,
+worktree preparation, Pi invocation, cooperative Run serialization and recovery,
+native publication mechanics, read-only auditing, Ledger writes, and the CLI.
+There is no default Run deadline; a declaration may set an elapsed-time
+`max_duration`. Cleanup and external observation commands have their own bounds.
+Persistent pause and drain fence new dispatch while allowing admitted work to
+finish. Startup records interrupted Runs; it does not resume model context.
 
-After each completed dispatch, the Auditor takes a bounded stable snapshot. It
-does not run at startup or after an idle Poll skip. Schema and actor checks cover
-each snapshotted `refs/notes/forest/*` entry within a 500-entry-per-ref
-capacity bound. Ancestry and the
-complete Gate check target the final observed remote `master` tip. The first
-observed tip becomes the durable trusted baseline. Remote history cannot reveal
-a tip that advanced again between audits; such intermediate tips are not
-independently Gate-checked. The Auditor stores only current violations in
-`audit.json`. It appends violations to `audit.log` only when the current set
-differs from the prior persisted set. A passing Audit clears current violations
-and adds no history. Audit history retains exactly the latest 1,000 violation
-entries. Each entry is at most 64 KiB. A ref with more than 500 listed or tree
-entries, a note enumeration or note-show transport-output overflow, a note
-payload above 64 KiB, or malformed or unresolvable canonical note state
-(malformed list or tree rows, a listed note without its tree entry, a
-mismatched, unexpected, or duplicate tree entry, a non-SHA path, a non-blob
-entry, or a note object missing from the object database) becomes a bounded
-persisted policy violation and a
-non-pass Audit result, never an AuditError. Current Audit results retain at
-most 999 concrete violation entries, each at most 1 KiB, plus one exact
-omission summary. A bounded policy violation cannot permanently kill Auditor
-health; a capacity violation clears when the ref shrinks again, and durable
-corruption keeps its bounded violation until the state is repaired.
+The profile owns selection, prompts, tools, checks and the interpretation of
+external effects. `request` returns an opaque, attributed request.
+Optional `completion` observes its required effect and returns a bounded
+`forest.completion.v1` result. Kernel retains that result separately from raw
+process exit and known execution cause. Neither a successful process nor a
+completed review is a claim of delivery.
 
-Each history rewrite removes prior reserved temps and streams old entries
-through a bounded ring. It syncs a same-directory temp, renames it atomically,
-and syncs the directory. An oversized history entry is rejected without
-replacing the prior history.
+For `git-native`, publication uses the current write-once
+`refs/forest/v1/{request,checks,verdict}/<sha>` contracts. Retired notes are not a
+parallel authority; see [ADR 0028](0028-review-request-notes-retired.md).
+For `external`, profile and operator own publication and reconciliation; Kernel
+native publication is refused. A profile's tracker or forge semantics do not
+become new Kernel branches.
 
-The Auditor is read-only and checks observable final Git state only. It cannot
-prove check execution, atomic push ordering, or force absence. It detects
-violations after profile Effects. It does not block, authorize, reject, or
-enforce a merge.
+The Auditor checks observable final Git state. It cannot prove every historical
+check execution, intermediate tip or atomic push ordering. It does not authorize
+a merge. The current bounds and persisted evidence are specified by the
+[operator contract](../../README.md#auditor-and-trust-boundary), not by a second
+description of the retired notes protocol.
 
-The profile owns `.iron-forest/config.yaml`, agent declarations, Poll commands, Subject
-selection, Checks commands, and Verifier notes, branch pushes, and merges.
-Declarations own `model`, `tools`, and `thinking`; the host owns OMP provider
-routing. The Kernel writes review-request notes and their paired branch push
-only through `forest publish review-request`. It never selects a Subject.
+Ledger rows retain execution identity, request/work attribution, declared
+resource digests, timing, outcome, optional completion evidence and five token
+classes (`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, `reasoning`).
+The Ledger is operational evidence, not monetary accounting; it does not
+calculate cost, price, spend or currency.
 
-Each Ledger row records Run identity, timing, exit, and exactly five retained
-token classes (`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
-`reasoning`) as operational observability, not accounting. The Ledger never
-records a cost, price, spend, or currency field and never computes money.
-Request-bearing dispatch also retains `request_id` and an optional opaque
-immutable `work` reference. Tracker-specific selection and claims remain profile
-commands; Kernel has no tracker branch for that association.
-
-Kernel non-goals are sandbox enforcement, leases, retirement or recovery
-machinery, a Manager Flow, money accounting, MCP, webhooks, and a report Gate
-beyond read-only Auditor validation. The Kernel does not self-update in place.
-Deployment updates are a tracker issue, not Kernel behavior.
+Kernel non-goals are sandbox enforcement, external workflow orchestration,
+automatic retries, a fleet manager, provider budget authority and self-update.
+The host owns grants, containment and deployment. The repository profile owns
+whether and how an uncertain effect needs operator reconciliation.
+Deployment updates are explicit owner operations, not Kernel behavior.
 
 Day-one worktree separation is not a security sandbox. A trusted
 declaration can access host credentials, filesystem, and network. Stronger
@@ -94,6 +74,5 @@ A profile can evolve prompts and tools while the Kernel keeps deterministic
 mechanics. The Kernel has no hidden policy path and cannot become a second
 workflow writer.
 
-Deployment must provide its own update mechanism. The missing deployment
-workflow is visible as follow-up work instead of an in-process self-update
-contract.
+Deployment supplies its own revision-coherent update and recovery procedure.
+The Kernel does not update itself or transfer operational ownership.

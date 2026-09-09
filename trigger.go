@@ -235,6 +235,18 @@ func liveRunsHuman(state triggerState, liveRuns []LiveRunView) string {
 	for _, run := range liveRuns {
 		fmt.Fprintf(&human, "\n  run_id=%s agent=%s started_at=%s elapsed=%s cancel=%q",
 			run.RunID, run.Agent, run.StartedAt, run.Elapsed, run.Cancel)
+		// A live record carrying an observed result is a Run past its model
+		// attempt, still finalizing. Report those facts rather than implying
+		// the attempt is still running.
+		if run.Outcome != "" {
+			fmt.Fprintf(&human, " outcome=%s", oneLine(run.Outcome))
+		}
+		if run.ProcessExit != nil {
+			fmt.Fprintf(&human, " process_exit=%d", *run.ProcessExit)
+		}
+		if run.Completion != nil {
+			fmt.Fprintf(&human, " completion=%s", oneLine(run.Completion.Status))
+		}
 	}
 	return human.String()
 }

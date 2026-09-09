@@ -43,12 +43,33 @@ type Usage struct {
 	Reasoning  int64 `json:"reasoning"`
 }
 
+// Outcomes describe execution, not delivery. Missing legacy values remain
+// unclassified; readers must not reconstruct a cause from Exit or Error.
+const (
+	runOutcomeCompleted       = "completed"
+	runOutcomeNoWork          = "no_work"
+	runOutcomeSetupFailed     = "setup_failed"
+	runOutcomeExecutionFailed = "execution_failed"
+	runOutcomeProviderFailed  = "provider_failed"
+	runOutcomeCancelled       = "cancelled"
+	runOutcomeTimedOut        = "timed_out"
+	runOutcomeInterrupted     = "interrupted"
+	runOutcomeInternalError   = "internal_error"
+)
+
 type RunRecord struct {
 	RunID    string  `json:"run_id"`
 	Agent    string  `json:"agent"`
 	Started  string  `json:"started"`
 	Duration float64 `json:"duration"`
 	Exit     int     `json:"exit"`
+	// Exit remains the terminal command compatibility status. ProcessExit is
+	// the raw Pi exit (including -1 for a signal), absent when not observed.
+	ProcessExit *int   `json:"process_exit,omitempty"`
+	Outcome     string `json:"outcome,omitempty"`
+	// Completion is independently observed profile evidence, never inferred
+	// from either execution status. It is absent without a configured observer.
+	Completion *RunCompletion `json:"completion,omitempty"`
 	// NoWork marks an admitted selection whose request command exited 1
 	// before a request or model execution existed. It is not a failed Run.
 	NoWork     bool  `json:"no_work,omitempty"`
@@ -57,8 +78,8 @@ type RunRecord struct {
 	CacheRead  int64 `json:"cache_read"`
 	CacheWrite int64 `json:"cache_write"`
 	Reasoning  int64 `json:"reasoning"`
-	// Error records the Run's failure cause when the exit is nonzero, such as an
-	// operator cancellation. It stays empty for successful Runs and no-work selection.
+	// Error records the known execution or finalization failure. Profile
+	// completion reasons are retained separately, including on exit-zero Runs.
 	Error string `json:"error,omitempty"`
 	// DefinitionSHA records the verified declaration digest (the ordered
 	// agent.md + task.md pair) that was loaded and confirmed unchanged at

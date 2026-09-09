@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -126,4 +127,94 @@ func requestPrompt(standing string, request *RunRequest) string {
 		return standing
 	}
 	return standing + "\n\n## Explicit Run request\n\n" + request.Prompt
+}
+
+// RunCompletion is the profile's observation of its required external effect.
+// Kernel retains this opaque evidence without interpreting the work system.
+type RunCompletion struct {
+	Schema   string `json:"schema"`
+	Status   string `json:"status"`
+	Reason   string `json:"reason,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+type completionContext struct {
+	Schema  string      `json:"schema"`
+	Run     RunRecord   `json:"run"`
+	Request *RunRequest `json:"request"`
+}
+
+func decodeRunCompletion(data []byte) (*RunCompletion, error) {
+	if len(data) > trustedTransportOutputLimit {
+		return nil, fmt.Errorf("completion exceeds %d bytes", trustedTransportOutputLimit)
+	}
+	var completion RunCompletion
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&completion); err != nil {
+		return nil, fmt.Errorf("parse completion: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, errors.New("completion must contain exactly one JSON object")
+	}
+	if completion.Schema != "forest.completion.v1" {
+		return nil, errors.New("completion requires schema forest.completion.v1")
+	}
+	switch completion.Status {
+	case "completed":
+		if strings.TrimSpace(completion.Evidence) == "" {
+			return nil, errors.New("completed observation requires evidence")
+		}
+	case "incomplete", "unknown":
+		if strings.TrimSpace(completion.Reason) == "" {
+			return nil, errors.New("incomplete or unknown observation requires a reason")
+		}
+	default:
+		return nil, errors.New("completion status must be completed, incomplete, or unknown")
+	}
+	return &completion, nil
+}
+
+// completionForRun is a bounded, profile-owned observer. A missing command
+// leaves evidence absent; malformed output or a failed command is unknown,
+// even when its stdout contains an otherwise valid completed observation.
+func (r *Runner) completionForRun(ctx context.Context, declaration Declaration, record RunRecord, request *RunRequest, log io.Writer) *RunCompletion {
+	if declaration.CompletionCommand == "" {
+		return nil
+	}
+	unknown := func(err error) *RunCompletion {
+		_, _ = fmt.Fprintf(log, "completion observation: %v\n", err)
+		return &RunCompletion{Schema: "forest.completion.v1", Status: "unknown", Reason: err.Error()}
+	}
+	if err := r.verifyDeclarationDigest(declaration); err != nil {
+		return unknown(err)
+	}
+	input, err := json.Marshal(completionContext{Schema: "forest.completion-context.v1", Run: record, Request: request})
+	if err != nil {
+		return unknown(fmt.Errorf("encode completion context: %w", err))
+	}
+	path, err := trustedPath(r.Root)
+	if err != nil {
+		return unknown(err)
+	}
+	root, err := filepath.Abs(r.Root)
+	if err != nil {
+		return unknown(fmt.Errorf("resolve completion root: %w", err))
+	}
+	observerCtx, cancel := context.WithTimeout(ctx, pollCommandTimeout)
+	defer cancel()
+	command := exec.Command("/bin/sh", "-c", declaration.CompletionCommand)
+	command.Dir = root
+	command.Stdin = bytes.NewReader(input)
+	command.Stderr = log
+	command.Env = append(childEnvironment(), "PATH="+path, "FOREST_ROOT="+root, "FOREST_RUN_ID="+record.RunID)
+	data, err := processGroupOutput(observerCtx, command)
+	if err != nil {
+		return unknown(fmt.Errorf("completion command: %w", err))
+	}
+	completion, err := decodeRunCompletion(data)
+	if err != nil {
+		return unknown(err)
+	}
+	return completion
 }

@@ -213,7 +213,7 @@ done
 
 	select {
 	case result := <-done:
-		if result.record.Exit == 0 || result.record.Error != runCancelledError {
+		if result.record.Exit != runCancelledExit || result.record.Outcome != runOutcomeCancelled || result.record.ProcessExit == nil || *result.record.ProcessExit != -1 || result.record.Error != runCancelledError {
 			t.Fatalf("cancelled run record=%#v err=%v, want nonzero exit and cancellation cause", result.record, result.err)
 		}
 	case <-time.After(15 * time.Second):
@@ -227,7 +227,7 @@ done
 	if len(rows) != 1 {
 		t.Fatalf("ledger rows=%v, want one cancelled row", rows)
 	}
-	if rows[0].RunID != runID || rows[0].Exit == 0 || rows[0].Error != runCancelledError {
+	if rows[0].RunID != runID || rows[0].Exit != runCancelledExit || rows[0].Outcome != runOutcomeCancelled || rows[0].Error != runCancelledError {
 		t.Fatalf("cancelled ledger row=%#v, want run %s with nonzero exit and cancellation cause", rows[0], runID)
 	}
 	if rows[0].RequestID != "cancelled-request" || rows[0].Work == nil || rows[0].Work.ID != "immutable-item" {

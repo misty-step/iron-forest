@@ -14,7 +14,9 @@ const statusRecentFailures = 10
 // observability only: token fields are the five retained Ledger token classes
 // (ADR 0011), and no cost, price, spend, or currency value is computed.
 type statusLedgerAggregates struct {
-	Runs           int                 `json:"runs"`
+	Runs int `json:"runs"`
+	// PassRate retains the machine key for compatibility: the fraction of
+	// terminal execution statuses with exit zero, not completion or delivery.
 	PassRate       float64             `json:"pass_rate"`
 	Agents         []statusAgentLedger `json:"agents"`
 	RecentFailures []statusRunFailure  `json:"recent_failures"`
@@ -38,10 +40,13 @@ type statusAgentLedger struct {
 // statusRunFailure is one non-zero Ledger row, newest first. Error carries the
 // recorded failure reason; it stays empty when the row recorded no reason.
 type statusRunFailure struct {
-	RunID string `json:"run_id"`
-	Agent string `json:"agent"`
-	Exit  int    `json:"exit"`
-	Error string `json:"error,omitempty"`
+	RunID       string         `json:"run_id"`
+	Agent       string         `json:"agent"`
+	Exit        int            `json:"exit"`
+	ProcessExit *int           `json:"process_exit,omitempty"`
+	Outcome     string         `json:"outcome,omitempty"`
+	Completion  *RunCompletion `json:"completion,omitempty"`
+	Error       string         `json:"error,omitempty"`
 }
 
 // tailRuns returns the last n records in Ledger order, or the whole slice when
@@ -70,7 +75,7 @@ func computeLedgerAggregates(records []RunRecord) statusLedgerAggregates {
 	byAgent := make(map[string]*agentAcc)
 	total, passes := 0, 0
 	for _, record := range records {
-		if record.NoWork {
+		if record.NoWork || record.Outcome == runOutcomeNoWork {
 			continue
 		}
 		total++
@@ -125,14 +130,17 @@ func computeLedgerAggregates(records []RunRecord) statusLedgerAggregates {
 	failures := make([]statusRunFailure, 0, statusRecentFailures)
 	for i := len(records) - 1; i >= 0 && len(failures) < statusRecentFailures; i-- {
 		record := records[i]
-		if record.Exit == 0 || record.NoWork {
+		if record.Exit == 0 || record.NoWork || record.Outcome == runOutcomeNoWork {
 			continue
 		}
 		failures = append(failures, statusRunFailure{
-			RunID: record.RunID,
-			Agent: record.Agent,
-			Exit:  record.Exit,
-			Error: record.Error,
+			RunID:       record.RunID,
+			Agent:       record.Agent,
+			Exit:        record.Exit,
+			ProcessExit: record.ProcessExit,
+			Outcome:     record.Outcome,
+			Completion:  record.Completion,
+			Error:       record.Error,
 		})
 	}
 	aggregates.RecentFailures = failures
@@ -142,10 +150,10 @@ func computeLedgerAggregates(records []RunRecord) statusLedgerAggregates {
 // ledgerAggregatesHuman renders the roll-up for the human status view.
 func ledgerAggregatesHuman(aggregates statusLedgerAggregates) string {
 	var human strings.Builder
-	fmt.Fprintf(&human, "ledger: runs=%d pass_rate=%.3f", aggregates.Runs, aggregates.PassRate)
+	fmt.Fprintf(&human, "ledger: runs=%d execution_exit_zero_rate=%.3f", aggregates.Runs, aggregates.PassRate)
 	for _, agent := range aggregates.Agents {
 		fmt.Fprintf(&human,
-			"\n  %s runs=%d pass_rate=%.3f duration_p50=%.3fs duration_p95=%.3fs tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
+			"\n  %s runs=%d execution_exit_zero_rate=%.3f duration_p50=%.3fs duration_p95=%.3fs tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
 			oneLine(agent.Agent), agent.Runs, agent.PassRate, agent.DurationP50, agent.DurationP95,
 			agent.TokensIn, agent.TokensOut, agent.CacheRead, agent.CacheWrite, agent.Reasoning)
 	}

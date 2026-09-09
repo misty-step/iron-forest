@@ -522,16 +522,28 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 	var piDir string
 	var worktreeMayExist, harnessStarted, evidenceWritten bool
 	defer func() {
-		if hasRunCancellationMarker(r.Root, runID) {
-			record.NoWork = false
-			record.Error, record.Exit = runCancelledError, runCancelledExit
+		// Classify setup at its return boundary, before cleanup can outlive the
+		// caller's deadline. Harness outcomes were already recorded at source.
+		if record.Outcome == "" {
+			record.Outcome = runOutcomeSetupFailed
+			if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(runErr, context.Canceled) {
+				recordContextFailure(&record, runErr)
+			}
+		}
+		if applyRunCancellation(r.Root, &record) {
 			runErr = errors.Join(runErr, errRunCancelled)
 		}
+		// Retain known execution facts before deferred cleanup; recovery must
+		// not turn an observed timeout into an operator cancellation.
+		if err := writeLiveRun(livePath, liveRecord(record)); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("retain Run execution: %w", err))
+		}
+		var finalizationErr error
 		if piDir != "" {
-			runErr = errors.Join(runErr, r.cleanupFilesystem(piDir))
+			finalizationErr = errors.Join(finalizationErr, r.cleanupFilesystem(piDir))
 		}
 		if worktreeMayExist {
-			runErr = errors.Join(runErr, r.cleanupWorktree(worktree, runID))
+			finalizationErr = errors.Join(finalizationErr, r.cleanupWorktree(worktree, runID))
 		}
 		if logFile != nil {
 			if !evidenceWritten {
@@ -540,24 +552,33 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 			if runErr != nil {
 				_, _ = fmt.Fprintln(logFile, runErr)
 			}
-			runErr = errors.Join(runErr, logFile.Finalize())
+			finalizationErr = errors.Join(finalizationErr, logFile.Finalize())
 			if harnessStarted {
 				usage, err := parseAgentUsage(logPath)
 				if err != nil {
-					runErr = errors.Join(runErr, fmt.Errorf("parse harness usage: %w", err))
+					finalizationErr = errors.Join(finalizationErr, fmt.Errorf("parse harness usage: %w", err))
 				} else {
 					record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
 					record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
 					record.Reasoning = usage.Reasoning
 				}
 			}
-			runErr = errors.Join(runErr, completeRunLog(logPath))
+			finalizationErr = errors.Join(finalizationErr, completeRunLog(logPath))
+		}
+		// Preserve the first execution cause. Cleanup or usage failures make an
+		// otherwise successful attempt an internal error, never alter raw Pi exit.
+		runErr = errors.Join(runErr, finalizationErr)
+		if runErr != nil && (record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork) {
+			record.Outcome = runOutcomeInternalError
+		}
+		if applyRunCancellation(r.Root, &record) {
+			runErr = errors.Join(runErr, errRunCancelled)
 		}
 		record.Duration = time.Since(started).Seconds()
 		if runErr != nil {
 			record.NoWork = false
 			if record.Exit == 0 {
-				record.Exit = runContextExit(ctx, 1)
+				record.Exit = 1
 			}
 			if record.Error == "" {
 				record.Error = runErr.Error()
@@ -565,11 +586,42 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 		}
 		if record.Exit != 0 && runErr == nil && !record.NoWork {
 			runErr = fmt.Errorf("agent %s exited with %d", declaration.Name, record.Exit)
+			if record.Error == "" {
+				record.Error = runErr.Error()
+			}
+		}
+		finalLive := liveRecord(record)
+		finalLive.Finalized = true
+		if err := writeLiveRun(livePath, finalLive); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("retain finalized Run: %w", err))
+			if record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork {
+				record.Outcome = runOutcomeInternalError
+			}
+			if record.Exit == 0 {
+				record.Exit = 1
+			}
+			record.NoWork = false
+			if record.Error == "" {
+				record.Error = runErr.Error()
+			}
 		}
 		if err := AppendRun(r.Root, record); err != nil {
 			// Preserve the durable owner record for recovery, never silently lose
 			// request attribution when the final Ledger publication fails.
-			runErr = errors.Join(runErr, err)
+			runErr = errors.Join(runErr, fmt.Errorf("append Run: %w", err))
+			if record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork {
+				record.Outcome = runOutcomeInternalError
+			}
+			if record.Exit == 0 {
+				record.Exit = 1
+			}
+			record.NoWork = false
+			if record.Error == "" {
+				record.Error = runErr.Error()
+			}
+			failedLive := liveRecord(record)
+			failedLive.Finalized = true
+			runErr = errors.Join(runErr, writeLiveRun(livePath, failedLive))
 		} else {
 			_ = os.Remove(livePath)
 			_ = os.Remove(runCancellationMarkerPath(r.Root, runID))
@@ -588,7 +640,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 	}
 	request, err := r.requestForRun(ctx, declaration, record, logFile)
 	if errors.Is(err, errRequestNoWork) {
-		record.NoWork, record.Exit = true, exitNoWork
+		record.NoWork, record.Exit, record.Outcome = true, exitNoWork, runOutcomeNoWork
 		return record, nil
 	}
 	if err != nil {
@@ -635,6 +687,28 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 		deadline = started.Add(time.Duration(declaration.MaxDuration) * time.Second)
 	}
 	runErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, primaryRef, &record, deadline)
+	if harnessStarted {
+		if applyRunCancellation(r.Root, &record) {
+			runErr = errors.Join(runErr, errRunCancelled)
+		}
+		record.Duration = time.Since(started).Seconds()
+		if runErr != nil && record.Error == "" {
+			record.Error = runErr.Error()
+		}
+		if err := writeLiveRun(livePath, liveRecord(record)); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("retain Run execution: %w", err))
+			if record.Outcome == runOutcomeCompleted {
+				record.Outcome, record.Exit = runOutcomeInternalError, 1
+			}
+			if record.Error == "" {
+				record.Error = runErr.Error()
+			}
+		}
+		// A cancelled model may already have created its required external
+		// effect. Give the read observer its own existing command bound, not
+		// the model's expired context. This never retries the model.
+		record.Completion = r.completionForRun(context.WithoutCancel(ctx), declaration, record, request, logFile)
+	}
 	return record, runErr
 }
 
@@ -771,7 +845,7 @@ func processGroupOutput(ctx context.Context, command *exec.Cmd) ([]byte, error) 
 		}
 	case <-ctx.Done():
 		runErr = ctx.Err()
-		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
+		_, cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
 	}
 	var readerCloseErr error
 	if cleanupErr != nil {
@@ -971,7 +1045,7 @@ func (t *agentOutcomeTracker) Err() error {
 
 func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declaration, piDir string, logFile io.Writer, primaryRef string, record *RunRecord, deadline time.Time) (err error, started bool) {
 	if err := ctx.Err(); err != nil {
-		record.Exit = contextExit(err)
+		recordContextFailure(record, err)
 		return err, false
 	}
 	path, err := r.piExecutable()
@@ -1052,24 +1126,49 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 		defer watchdogTimer.Stop()
 	}
 	var runErr, cleanupErr error
+	var reaped bool
 	select {
 	case waitErr := <-wait:
+		reaped = true
 		record.Exit, runErr = processResult(ctx, waitErr)
+		record.Outcome = runOutcomeCompleted
+		if record.Exit != 0 {
+			record.Outcome = runOutcomeExecutionFailed
+		}
+		if applyRunCancellation(r.Root, record) {
+			runErr = errRunCancelled
+		} else if runErr != nil {
+			recordContextFailure(record, runErr)
+		}
 		cleanupErr = stopResidualProcessGroup(command.Process.Pid, processStopGrace)
-		if cleanupErr != nil && record.Exit == 0 {
-			record.Exit = 1
-		}
 	case <-ctx.Done():
-		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
-		record.Exit = contextExit(ctx.Err())
-		runErr = ctx.Err()
-	case <-watchdog:
-		if markerErr := writeRunCancellationMarker(r.Root, record.RunID); markerErr != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("write run cancellation marker: %w", markerErr))
+		if applyRunCancellation(r.Root, record) {
+			runErr = errRunCancelled
+		} else {
+			runErr = ctx.Err()
+			recordContextFailure(record, runErr)
 		}
-		cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
-		record.Exit = runCancelledExit
-		record.Error = runCancelledError
+		if err := writeLiveRun(liveRunPath(r.Root, record.Agent), liveRecord(*record)); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("retain Run stop cause: %w", err))
+		}
+		reaped, cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
+	case <-watchdog:
+		if applyRunCancellation(r.Root, record) {
+			runErr = errRunCancelled
+		} else {
+			record.Outcome, record.Exit, record.Error = runOutcomeTimedOut, runTimedOutExit, runTimedOutError
+			runErr = errRunTimedOut
+		}
+		if err := writeLiveRun(liveRunPath(r.Root, record.Agent), liveRecord(*record)); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("retain Run stop cause: %w", err))
+		}
+		reaped, cleanupErr = stopProcessGroup(command.Process.Pid, wait, processStopGrace)
+	}
+	// Only a consumed Wait synchronizes access to ProcessState. If the bounded
+	// stop could not reap Pi, its raw exit remains honestly unobserved.
+	if reaped && command.ProcessState != nil {
+		exit := command.ProcessState.ExitCode()
+		record.ProcessExit = &exit
 	}
 	var readerCloseErr error
 	if cleanupErr != nil {
@@ -1081,10 +1180,16 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	}
 
 	outcomeErr := outcome.Err()
-	if outcomeErr != nil && isProviderBudgetError(outcomeErr.Error()) {
-		record.Error = providerBudgetExhausted
+	if outcomeErr != nil && (record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeExecutionFailed) {
+		record.Outcome = runOutcomeProviderFailed
+		if outcome.budgetFailed {
+			record.Error = providerBudgetExhausted
+		}
 	}
 	err = errors.Join(runErr, cleanupErr, writerCloseErr, readErr, readerCloseErr, outcomeErr)
+	if err != nil && record.Outcome == runOutcomeCompleted {
+		record.Outcome = runOutcomeInternalError
+	}
 	if err != nil && record.Exit == 0 {
 		record.Exit = 1
 	}
@@ -1097,7 +1202,7 @@ const (
 	processGroupProbeStep  = 10 * time.Millisecond
 )
 
-func stopProcessGroup(pid int, wait <-chan error, grace time.Duration) error {
+func stopProcessGroup(pid int, wait <-chan error, grace time.Duration) (reaped bool, err error) {
 	if processGroupExists(pid) {
 		_ = syscall.Kill(-pid, syscall.SIGTERM)
 	}
@@ -1105,12 +1210,14 @@ func stopProcessGroup(pid int, wait <-chan error, grace time.Duration) error {
 	defer timer.Stop()
 	select {
 	case <-wait:
+		reaped = true
 	case <-timer.C:
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		waitTimer := time.NewTimer(processGroupProbeLimit)
 		defer waitTimer.Stop()
 		select {
 		case <-wait:
+			reaped = true
 		case <-waitTimer.C:
 		}
 	}
@@ -1118,9 +1225,9 @@ func stopProcessGroup(pid int, wait <-chan error, grace time.Duration) error {
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 	if !waitProcessGroupQuiescence(pid, processGroupProbeLimit) {
-		return fmt.Errorf("process group %d did not quiesce", pid)
+		return reaped, fmt.Errorf("process group %d did not quiesce", pid)
 	}
-	return nil
+	return reaped, nil
 }
 
 func stopResidualProcessGroup(pid int, grace time.Duration) error {
@@ -1181,11 +1288,13 @@ func contextExit(err error) int {
 	return 130
 }
 
-func runContextExit(ctx context.Context, fallback int) int {
-	if err := ctx.Err(); err != nil {
-		return contextExit(err)
+func recordContextFailure(record *RunRecord, err error) {
+	record.Exit = contextExit(err)
+	record.Outcome = runOutcomeInterrupted
+	if errors.Is(err, context.DeadlineExceeded) {
+		record.Outcome = runOutcomeTimedOut
 	}
-	return fallback
+	record.Error = err.Error()
 }
 
 // piExecutable resolves the agent harness through the trusted PATH, exactly as

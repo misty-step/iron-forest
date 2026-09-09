@@ -48,7 +48,7 @@ func TestExplicitRequestBypassesSelectionAndSurvivesFailedRun(t *testing.T) {
 		t.Fatalf("Run did not receive both standing task and explicit request: %q %v", args, err)
 	}
 	rows, err := readLedger(root, -1)
-	if err != nil || len(rows) != 1 || rows[0].Exit != 7 || rows[0].RequestID != request.ID || !reflect.DeepEqual(rows[0].Work, request.Work) {
+	if err != nil || len(rows) != 1 || rows[0].Exit != 7 || rows[0].ProcessExit == nil || *rows[0].ProcessExit != 7 || rows[0].Outcome != runOutcomeExecutionFailed || rows[0].RequestID != request.ID || !reflect.DeepEqual(rows[0].Work, request.Work) {
 		t.Fatalf("failed Run lost immutable attribution: %#v %v", rows, err)
 	}
 	retained, err := readRunRequest(forestPath(root, "runs", rows[0].RunID+".request.json"))
@@ -61,7 +61,7 @@ func TestScheduledRequestReceivesRunIDBeforePreparationFailure(t *testing.T) {
 	root := t.TempDir()
 	runner := NewRunner(root)
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "Standing task", RequestCommand: `printf '{"schema":"forest.request.v1","id":"%s","prompt":"One request","work":{"system":"tracker","id":"immutable"}}\n' "$FOREST_RUN_ID"`})
-	if err == nil || record.Exit == 0 || record.RequestID != record.RunID || record.Work == nil || record.Work.ID != "immutable" {
+	if err == nil || record.Exit == 0 || record.ProcessExit != nil || record.Outcome != runOutcomeSetupFailed || record.RequestID != record.RunID || record.Work == nil || record.Work.ID != "immutable" {
 		t.Fatalf("preparation failure lost selected request: %#v %v", record, err)
 	}
 	retained, found, err := FindRun(root, record.RunID)
@@ -96,7 +96,13 @@ func TestScheduledRequestDistinguishesNoWorkFromFailure(t *testing.T) {
 			if err != nil || len(rows) != 1 || rows[0].NoWork != test.noWork || rows[0].Exit == 0 {
 				t.Fatalf("request receipt=%#v error=%v", rows, err)
 			}
+			if rows[0].ProcessExit != nil || rows[0].Completion != nil {
+				t.Fatalf("selection without a harness invented execution or completion: %#v", rows[0])
+			}
 			if test.noWork {
+				if rows[0].Outcome != runOutcomeNoWork {
+					t.Fatalf("no-work selection outcome=%q", rows[0].Outcome)
+				}
 				aggregates := computeLedgerAggregates(rows)
 				if aggregates.Runs != 0 || len(aggregates.RecentFailures) != 0 || scheduler.health["builder"].RunError != "" {
 					t.Fatalf("no-work selection fabricated an execution outcome: %#v health=%#v", aggregates, scheduler.health["builder"])
@@ -238,7 +244,7 @@ func TestInterruptedRunRecoveryPreservesAttributionWithoutDuplicates(t *testing.
 		t.Fatal(err)
 	}
 	rows, err := readLedger(root, -1)
-	if err != nil || len(rows) != 1 || rows[0].Exit != 137 || rows[0].RequestID != live.RequestID || !reflect.DeepEqual(rows[0].Work, live.Work) || !reflect.DeepEqual(rows[0].ExtensionSHA, live.ExtensionSHA) {
+	if err != nil || len(rows) != 1 || rows[0].Exit != 137 || rows[0].Outcome != runOutcomeInterrupted || rows[0].ProcessExit != nil || rows[0].RequestID != live.RequestID || !reflect.DeepEqual(rows[0].Work, live.Work) || !reflect.DeepEqual(rows[0].ExtensionSHA, live.ExtensionSHA) {
 		t.Fatalf("interrupted attribution duplicated or lost: %#v %v", rows, err)
 	}
 }

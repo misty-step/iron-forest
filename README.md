@@ -34,9 +34,9 @@ repo: misty-step/iron-forest
 delivery: git-native
 required_tools: [gh, trufflehog]
 agents:
-  builder:  { poll: "./.iron-forest/bin/forest poll builder",  interval: 300 }
-  verifier: { poll: "./.iron-forest/bin/forest poll verifier", interval: 120 }
-  fixer:    { poll: "./.iron-forest/bin/forest poll fixer",    interval: 300 }
+  builder:  { poll: "exit 1", interval: 300 }
+  verifier: { poll: "exit 1", interval: 120 }
+  fixer:    { poll: "exit 1", interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -46,10 +46,10 @@ checks:
     run: mise exec -- go test ./...
 ```
 
-The Poll declarations above describe the retained profile protocol, not an
-active queue setup. Do not enable the legacy Builder tracker Poll for new
-work; use a current operator handoff. This guide does not authorize installing
-services or starting schedules.
+These explicit exit-1 Polls disable scheduled dispatch during manual onboarding.
+Use `once --request` for approved work; it bypasses Poll, not admission or the
+Kernel lock. Adopt an actual selector only through a deliberate repository-owned
+profile change. This quick start does not install or start a service.
 
 ### One profile, explicit requests, persistent admission
 
@@ -143,6 +143,47 @@ omit native `checks`. `required_tools` names additional profile dependencies;
 selfcheck always requires only the Kernel's `git` and `pi`, plus those explicitly
 declared tools.
 
+### Execution, completion, and delivery
+
+A Run records independent facts:
+
+- `exit` remains the terminal Run status for existing CLI consumers.
+- `process_exit`, when present, is the raw harness process exit; it does not
+  change because usage parsing, cleanup, or completion observation failed.
+- `outcome` records a known execution cause: `completed`, `no_work`,
+  `setup_failed`, `execution_failed`, `provider_failed`, `cancelled`, `timed_out`,
+  `interrupted`, or `internal_error`. Missing legacy fields mean unknown.
+- `completion`, when configured, records the profile's observation of the
+  requested external effect. It is not a delivery or correctness verdict.
+
+An optional declaration frontmatter `completion: <shell command>` runs once
+after a harness attempt, before worktree cleanup, in the owning repository root.
+It receives `FOREST_ROOT`, `FOREST_RUN_ID`, and one JSON object on stdin:
+
+```json
+{"schema":"forest.completion-context.v1","run":{"run_id":"…"},"request":null}
+```
+
+`run` carries the Run facts available at that point; `request` is the retained
+request object when supplied. The observer must return exactly one bounded
+`forest.completion.v1` object. `status` is `completed`, `incomplete`, or
+`unknown`; `completed` requires a nonempty `evidence` reference, and other
+statuses require a `reason`. Execution uses the same bound as a request command.
+Malformed output, failed observation, and unavailability remain unknown, never
+an inferred pass. An unconfigured observer makes no completion claim.
+
+The observer belongs to the profile: it reads the authoritative receipt, not an
+agent's assertion of success. A Verifier's valid `changes` receipt is a completed
+review; exit zero without the required receipt is not. The profile owns the
+response to an incomplete effect, including admission pause when another paid
+attempt would duplicate or obscure it. Kernel does not retry the observer,
+merge a PR, or reconcile a tracker.
+
+Keep completion observers and their dependencies versioned with the profile.
+Their stdin and stderr can contain private request context; ordinary observers
+should publish only bounded reasons and evidence references. Host credentials
+and external permission boundaries still apply.
+
 ### Repository-owned composition
 
 `.iron-forest/config.yaml` accepts arbitrary declaration names. The roster above is the
@@ -175,10 +216,9 @@ agents:
   fixer: { poll: "./.iron-forest/bin/forest poll fixer", interval: 300, max_duration: 3600 }
 ```
 
-When `max_duration` is set, the Kernel's progress watchdog cancels a Run that
-exceeds the bound using the same supported cancel path as `forest run cancel`,
-records the cancellation in the Ledger, and returns the trigger to a clean
-not-running state.
+When `max_duration` is set, the Kernel's elapsed-time watchdog cancels a Run that
+exceeds the bound, records `timed_out` rather than operator cancellation, and
+returns the trigger to a clean not-running state.
 
 Declare each agent with two prompt files. Skills live only in an existing
 shared directory and, when a role needs private skills, its own directory:
@@ -200,8 +240,8 @@ explicitly to a supervised Pi or company-agent session that configures,
 operates, or observes one or more repository instances.
 
 `agent.md` uses YAML frontmatter with optional `model`, `tools`, `thinking`,
-`request`, and `extensions`, followed by the system prompt. `task.md` is the
-standing user prompt. `model` and `thinking` resolve through the declaration,
+`request`, `completion`, and `extensions`, followed by the system prompt.
+`task.md` is the standing user prompt. `model` and `thinking` resolve through the declaration,
 then `.iron-forest/defaults.yaml`, then — for `model` only — the built-in
 `openrouter/deepseek/deepseek-v4-pro-0813`. An empty or comment-only defaults
 file is the zero Defaults, not an error. `forest declaration show` publishes
@@ -236,53 +276,26 @@ Kernel from the factory source into that sibling.
 
 ### Second-party deployment checklist
 
-To adopt an existing repository as a second-party deployment, follow the
-[onboarding guide](docs/onboarding-managed-repo.md) and finish these checks
-before handoff:
+Use the [onboarding guide](docs/onboarding-managed-repo.md). Before handing a
+repository to another operator:
 
-1. Add `.iron-forest/config.yaml`, `.iron-forest/agents/`, and `checks:` to the new repository; mirror
-   `checks:` in the new repository's CI.
-2. Build and validate locally:
-   `mise exec -- go build -o .iron-forest/bin/forest . && ./.iron-forest/bin/forest selfcheck`.
-3. Install the service with `deploy/install-service.sh <sibling-directory-name>`
-   (no argument in self-host mode).
-   The retained self-host installer also enables
-   `forest-eval-flywheel@iron-forest.timer`; that side effect is not approval to
-   restart retired intake. Do not run that installation path as a current-work
-   setup step without an explicitly approved operational change. Sibling
-   installs do not receive the manager timer. The
-   [flywheel record](docs/production-flywheel.md) is historical, not setup policy.
-4. Verify the installed service is active without starting a second Kernel:
-   `systemctl --user is-active forest@<sibling-directory-name>` (expect
-   `active`) and, from the managed checkout, `./.iron-forest/bin/forest status`.
-5. Record the deployment in the operator-owned inventory (Estate for Misty
-   Step), with `identity`, `host`, `repo`, and the running revision from
-   `./.iron-forest/bin/forest version`. Do not maintain a deployment registry in a retired
-   readiness document.
-6. Return external findings in the requested report with source repository,
-   inspected revision, observed behavior, and verification evidence. Do not
-   create speculative tickets.
-7. Confirm observability before rollout with the read surface. After the first
-   completed dispatch, run `./.iron-forest/bin/forest status` and `./.iron-forest/bin/forest audit show`. To force
-   a rescan, confirm the service is inactive first:
-   `systemctl --user stop forest@<sibling-directory-name>`, then
-   `./.iron-forest/bin/forest audit show --rescan`, then
-   `systemctl --user start forest@<sibling-directory-name>`.
-8. Run `./.iron-forest/bin/forest doctor` and resolve every finding before declaring the
-   deployment complete. It checks tool presence, `gh` auth, the credential file
-   mode, read-only forge capability, and the OpenRouter key. Legacy tracker
-   checks are implementation residue and do not authorize configuration.
+1. Name its operational owner, exact checkout, host and delivery authority.
+   External human-merge profiles must not inherit native publication grants.
+2. Validate the repository-owned profile, actual packaged Pi/extensions and
+   installed artifact identity without admitting paid work.
+3. Provision scoped worker credentials separately from human completion and
+   deployment authority. A prompt or Git author name is not a permission boundary.
+4. Start exactly one Kernel through the owning deployment procedure, paused
+   until the owner accepts its evidence. Do not enable historical queue or eval
+   intake as an incidental setup step.
+5. Exercise one approved request and inspect execution, required completion and
+   delivery independently. Verify read-only observation and the recovery path.
+6. Record the deployed identity in the owner's inventory and return the exact
+   verification evidence. Source tests or a restart do not certify another binary.
 
-Build with the pinned toolchain and validate local configuration:
-
-```sh
-mise exec -- go build -o .iron-forest/bin/forest .
-./.iron-forest/bin/forest selfcheck
-```
-
-`forest selfcheck` validates `.iron-forest/config.yaml` and declaration frontmatter locally.
-The read-only Auditor runs after each completed agent dispatch. Starting the
-Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
+`selfcheck` validates local config and declarations. It does not make a model
+call or prove external completion. The native Auditor runs after completed
+dispatches, not because a Kernel started or an idle Poll returned no work.
 
 ### Adopting merged revisions
 
@@ -598,8 +611,10 @@ instance health: overall `runs` and `pass_rate`; one entry per agent with
 `runs`, `pass_rate`, `duration_p50`, `duration_p95`, and the five retained token
 classes (`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, `reasoning`);
 and `recent_failures`, the newest nonzero rows with `run_id`, `agent`, `exit`,
-and any recorded `error`. Token classes are observability, not accounting: no
-cost, price, spend, or currency value is ever computed.
+and any recorded `error`. The retained `pass_rate` key is the fraction of
+exit-zero Runs, not review quality, observed completion or delivery. Human output
+names this execution exit-zero rate. Token classes are observability, not
+accounting: no cost, price, spend, or currency value is ever computed.
 
 `doctor` checks one checkout without mutating it. Each check reports a result
 verb — `observed` for a local presence or mode read, `evidenced` for a

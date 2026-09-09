@@ -736,6 +736,14 @@ func runRunShow(rest []string, flags cliFlags) cliOutcome {
 		work, _ := json.Marshal(record.Work)
 		human += "\n  work=" + string(work)
 	}
+	if record.Completion != nil {
+		if record.Completion.Reason != "" {
+			human += "\n  completion_reason=" + oneLine(record.Completion.Reason)
+		}
+		if record.Completion.Evidence != "" {
+			human += "\n  completion_evidence=" + oneLine(record.Completion.Evidence)
+		}
+	}
 	return cliOutcome{Exit: exitOK, Data: record, Human: human}
 }
 
@@ -965,6 +973,21 @@ func auditReportedMaster(state AuditState) string {
 func runRecordHuman(record RunRecord, indent string) string {
 	row := fmt.Sprintf("%sexit=%d duration=%.3fs agent=%s run=%s",
 		indent, record.Exit, record.Duration, oneLine(record.Agent), oneLine(record.RunID))
+	outcome := record.Outcome
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	row += " outcome=" + oneLine(outcome)
+	if record.ProcessExit == nil {
+		row += " process_exit=unknown"
+	} else {
+		row += fmt.Sprintf(" process_exit=%d", *record.ProcessExit)
+	}
+	if record.Completion == nil {
+		row += " completion=unobserved"
+	} else {
+		row += " completion=" + oneLine(record.Completion.Status)
+	}
 	if record.NoWork {
 		row += " no_work=true"
 	}
