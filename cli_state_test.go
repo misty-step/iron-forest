@@ -256,7 +256,7 @@ func TestCLIPassingAuditPublishesEmptyViolations(t *testing.T) {
 func TestCLIDeclarationWithoutToolsPublishesEmptyList(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
-	dir := filepath.Join(root, "agents", "builder")
+	dir := filepath.Join(root, ".iron-forest/agents", "builder")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestCLITriggerResetSeparatesUnconfiguredFromUnwritten(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, workspaceName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// State left behind by an agent that has since been removed from forest.yaml.
+	// State left behind by an agent that has since been removed from .iron-forest/config.yaml.
 	if err := os.WriteFile(forestPath(root, "triggers.json"),
 		[]byte(`{"retired":{"agent":"retired","consecutive_errors":3}}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -517,7 +517,7 @@ func TestCLIHumanReportsKeepStoredStringsOnOneLine(t *testing.T) {
 func TestCLIDeclarationShowIndentsPromptBodies(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
-	agentPath := filepath.Join(root, "agents", "builder", "agent.md")
+	agentPath := filepath.Join(root, ".iron-forest/agents", "builder", "agent.md")
 	if err := os.MkdirAll(filepath.Dir(agentPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestCLIDeclarationShowIndentsPromptBodies(t *testing.T) {
 	if err := os.WriteFile(agentPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agents", "builder", "task.md"), []byte("standing\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".iron-forest/agents", "builder", "task.md"), []byte("standing\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -550,7 +550,7 @@ func TestCLIDeclarationShowIndentsPromptBodies(t *testing.T) {
 func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
-	dir := filepath.Join(root, "agents", "builder")
+	dir := filepath.Join(root, ".iron-forest/agents", "builder")
 	if err := os.MkdirAll(filepath.Join(dir, "skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
 	_, human, _ := captureCLIOutput(t, func() int {
 		return runSurfaceCommand([]string{"declaration", "show", "builder", "--root", root})
 	})
-	for _, want := range []string{"model_source: declaration", "skills:\n  agents/builder/skills"} {
+	for _, want := range []string{"model_source: declaration", "skills:\n  .iron-forest/agents/builder/skills"} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human=%q, want %q", human, want)
 		}
@@ -577,7 +577,7 @@ func TestCLIDeclarationShowPublishesComposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(encoded), `"skills":["agents/builder/skills"]`) {
+	if !strings.Contains(string(encoded), `"skills":[".iron-forest/agents/builder/skills"]`) {
 		t.Fatalf("JSON=%s, want explicit skill directory", encoded)
 	}
 }

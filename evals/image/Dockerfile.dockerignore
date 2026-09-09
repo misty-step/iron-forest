@@ -2,8 +2,9 @@
 !go.mod
 !go.sum
 !*.go
-!agents/
-!agents/**
+!.iron-forest/
+!.iron-forest/agents/
+!.iron-forest/agents/**
 !evals/
 !evals/runtime/
 !evals/runtime/**

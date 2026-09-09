@@ -1,0 +1,20 @@
+repo: misty-step/iron-forest        # forge identity (owner/name)
+delivery: git-native
+required_tools: [gh, powder, trufflehog]
+agents:
+  builder:  { poll: "./.iron-forest/bin/forest poll builder",  interval: 300 }
+  verifier: { poll: "./.iron-forest/bin/forest poll verifier", interval: 120 }
+  fixer:    { poll: "./.iron-forest/bin/forest poll fixer",    interval: 300 }
+  critic:   { poll: "./.iron-forest/agents/critic/poll.sh", interval: 86400 }
+  tester:   { poll: "./.iron-forest/agents/tester/poll.sh", interval: 86400 }
+checks:
+  - name: build
+    run: mise exec -- go build ./...
+  - name: vet
+    run: mise exec -- go vet ./...
+  - name: test
+    run: mise exec -- go test ./...
+  # A published branch must never carry credential material. The Kernel owns
+  # the credential scan as an unconditional Gate preflight and never compiles
+  # or executes candidate code for it; it is not a configured check here.
+  # Legitimate fixtures are excluded in .iron-forest/secrets.yaml.

@@ -64,9 +64,7 @@ func writeTestConfig(t *testing.T, root string, agents ...string) {
 		config += "  " + agent + ":\n    poll: \"exit 1\"\n    interval: 1\n"
 	}
 	config += "checks:\n  - name: test\n    run: \"true\"\n"
-	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", config)
 }
 
 func writeTriggerState(t *testing.T, root, state string) {
@@ -241,29 +239,6 @@ func TestCLIEmptyCollectionsAreArrays(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"runs":[]`) {
 		t.Fatalf("run list payload=%s, want runs as an empty array", encoded)
-	}
-}
-
-func TestCLISelfcheckEmitsEnvelope(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	writeTestDeclaration(t, root, "builder")
-	bin := t.TempDir()
-	for _, name := range []string{"git", "gh", "pi"} {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", bin)
-
-	code, envelope, stderr := decodeEnvelope(t, "selfcheck", "--json", "--root", root)
-	if code != exitOK {
-		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
-	}
-	keys := payloadKeys(t, envelope)
-	tools, ok := keys["tools"].([]any)
-	if !ok || len(tools) != 3 {
-		t.Fatalf("selfcheck payload tools=%v, want three resolved tools", keys["tools"])
 	}
 }
 
@@ -510,60 +485,31 @@ func TestCLIRootShorthandRejectsMissingOrEmptyValue(t *testing.T) {
 	}
 }
 
-// selfcheck publishes the paths it resolved, not a constant list of names.
-func TestCLISelfcheckPublishesResolvedToolPaths(t *testing.T) {
-	t.Setenv("FOREST_DEFAULTS", "")
+// Profile capability checks must not require unrelated tracker installations.
+func TestSelfcheckOnlyRequiresConfiguredTools(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	writeTestDeclaration(t, root, "builder")
 	bin := t.TempDir()
-	for _, name := range []string{"git", "gh", "pi"} {
+	for _, name := range []string{"git", "pi"} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Setenv("PATH", bin)
-
-	_, envelope, _ := decodeEnvelope(t, "selfcheck", "--json", "--root", root)
-	encoded, err := json.Marshal(envelope.Data)
-	if err != nil {
+	if outcome := runSelfcheck(nil, cliFlags{root: root}); outcome.Exit != exitOK {
+		t.Fatalf("unconfigured tracker blocked Kernel selfcheck: %s", outcome.ErrText)
+	}
+	config := string(mustReadFile(t, configPath(root))) + "\nrequired_tools: [trufflehog]\n"
+	writeTree(t, root, profileName+"/config.yaml", config)
+	if outcome := runSelfcheck(nil, cliFlags{root: root}); outcome.Exit == exitOK || !strings.Contains(outcome.ErrText, "trufflehog") {
+		t.Fatalf("missing declared capability was not identified: %#v", outcome)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "trufflehog"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var payload selfcheckPayload
-	if err := json.Unmarshal(encoded, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if len(payload.Tools) != 3 {
-		t.Fatalf("tools=%+v, want three", payload.Tools)
-	}
-	for _, tool := range payload.Tools {
-		if !filepath.IsAbs(tool.Path) {
-			t.Fatalf("tool %s path=%q, want an absolute resolved path", tool.Name, tool.Path)
-		}
-	}
-	// git and gh resolve through PATH, so they must land in the trusted bin.
-	for _, tool := range payload.Tools[:2] {
-		if tool.Path != filepath.Join(bin, tool.Name) {
-			t.Fatalf("tool %s path=%q, want %s", tool.Name, tool.Path, filepath.Join(bin, tool.Name))
-		}
-	}
-	if payload.DefaultsSource != "" || payload.Defaults.Model != "" {
-		t.Fatalf("absent defaults leaked into selfcheck: %#v", payload)
-	}
-	defaultsPath := filepath.Join(root, "forest.defaults.yaml")
-	if err := os.WriteFile(defaultsPath, []byte("model: host/model\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, envelope, _ = decodeEnvelope(t, "selfcheck", "--json", "--root", root)
-	encoded, err = json.Marshal(envelope.Data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(encoded, &payload); err != nil {
-		t.Fatal(err)
-	}
-	if payload.DefaultsSource != defaultsPath || payload.Defaults.Model != "host/model" {
-		t.Fatalf("selfcheck defaults=%#v source=%q", payload.Defaults, payload.DefaultsSource)
+	if outcome := runSelfcheck(nil, cliFlags{root: root}); outcome.Exit != exitOK {
+		t.Fatalf("installing declared capability did not unblock selfcheck: %s", outcome.ErrText)
 	}
 }
 

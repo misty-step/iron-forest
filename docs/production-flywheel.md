@@ -37,7 +37,7 @@ score.
 ## Intake
 
 `evals/scripts/production_flywheel.py ingest` reads the retained Run logs in
-`.forest/runs`, extracts each Run's `forest.run` identity line, locates the
+`.iron-forest/runtime/runs`, extracts each Run's `forest.run` identity line, locates the
 OpenRouter Broadcast trace by `session_id = Forest Run id`, and creates a draft
 dataset item in `iron-forest-production`. Before writing draft items, ingest
 ensures the `iron-forest-production` dataset exists, mirroring the exporter's
@@ -46,7 +46,7 @@ need manual dataset creation.
 
 ```sh
 cd evals
-uv run --extra langfuse python scripts/production_flywheel.py ingest --runs-dir ../.forest/runs
+uv run --extra langfuse python scripts/production_flywheel.py ingest --runs-dir ../.iron-forest/runtime/runs
 ```
 
 Draft items are created only once. The item id is `prod-<run-id>`, so a retry
@@ -101,7 +101,7 @@ execution authority; the script never runs a trial.
 Self-host installation enables `forest-eval-flywheel@iron-forest.timer`. The
 timer runs daily with a bounded randomized delay and is persistent across host
 downtime. It first retries queued paired-eval exports, then reads the manager
-checkout's retained `.forest/runs`, performs idempotent production intake, and
+checkout's retained `.iron-forest/runtime/runs`, performs idempotent production intake, and
 emits the current coverage report to the unit journal. Successful retries
 remove their outbox; failed jobs remain queued. The service has no write path
 to the Git production-case manifest.

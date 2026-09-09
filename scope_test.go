@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -82,7 +81,7 @@ func configWithScope(scope string) string {
 }
 
 func TestDecodeConfigScope(t *testing.T) {
-	cfg, err := decodeConfig([]byte(configWithScope("scope:\n  subjects: [\"4\", \"if-241\"]\n")), "forest.yaml")
+	cfg, err := decodeConfig([]byte(configWithScope("scope:\n  subjects: [\"4\", \"if-241\"]\n")), ".iron-forest/config.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +89,7 @@ func TestDecodeConfigScope(t *testing.T) {
 		t.Fatalf("scope=%#v, want subjects [4 if-241]", cfg.Scope)
 	}
 
-	cfg, err = decodeConfig([]byte(configWithScope("")), "forest.yaml")
+	cfg, err = decodeConfig([]byte(configWithScope("")), ".iron-forest/config.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +111,7 @@ func TestDecodeConfigScope(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := decodeConfig([]byte(test.data), "forest.yaml")
+			_, err := decodeConfig([]byte(test.data), ".iron-forest/config.yaml")
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("decodeConfig() error = %v, want substring %q", err, test.want)
 			}
@@ -283,9 +282,7 @@ func TestSelfcheckRejectsMalformedScope(t *testing.T) {
 			root := t.TempDir()
 			writeCLIConfig(t, root, "exit 1")
 			config := "repo: owner/name\nprimary: refs/heads/master\n" + test.scope + "agents:\n  builder:\n    poll: exit 1\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
-			if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeTree(t, root, profileName+"/config.yaml", config)
 			code, _, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"selfcheck", "--root", root}) })
 			if code != exitError {
 				t.Fatalf("selfcheck code=%d, want %d (stderr=%q)", code, exitError, stderr)

@@ -71,7 +71,7 @@ def trial_dirs(job_dir: Path) -> list[Path]:
 def find_forest_run_id(trial_dir: Path) -> str | None:
     """Recover the candidate Forest Run id from the downloaded Run logs.
 
-    The IronForestAgent copies the managed checkout's ``.forest/runs`` directory
+    The IronForestAgent copies the managed checkout's ``.iron-forest/runtime/runs`` directory
     into the trial agent logs directory, and each retained Run log is named
     ``<run-id>.log``.
     """

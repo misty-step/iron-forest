@@ -86,13 +86,13 @@ func TestScanSecretsLoadsFixtureExclusions(t *testing.T) {
 	defer func() { scanEnv.lookPath, scanEnv.runGeneric = origLook, origRun }()
 
 	dir := t.TempDir()
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - testdata/fixture.txt\n  - config_test.go\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - testdata/fixture.txt\n  - config_test.go\n")
 	writeTree(t, dir, "testdata/fixture.txt", "validated fixture placeholder\n")
 	writeTree(t, dir, "config_test.go", "package main\n")
 	if _, err := scanSecretsTree(dir); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{".git", ".forest", "testdata/fixture.txt", "config_test.go"}
+	want := []string{".git", ".iron-forest/runtime", "testdata/fixture.txt", "config_test.go"}
 	for _, pattern := range want {
 		found := false
 		for _, g := range got {
@@ -137,7 +137,7 @@ func TestScanSecretsMalformedScannerOutputFailsClosed(t *testing.T) {
 // it reads, so a legitimate fixture cannot fail the generic pass.
 func TestWriteExcludePaths(t *testing.T) {
 	dir := t.TempDir()
-	path, err := writeExcludePaths(dir, []string{".git", ".forest", "config_test.go"})
+	path, err := writeExcludePaths(dir, []string{".git", ".iron-forest/runtime", "config_test.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestWriteExcludePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, want := range []string{".git", ".forest", "config_test.go"} {
+	for _, want := range []string{".git", ".iron-forest/runtime", "config_test.go"} {
 		if !strings.Contains(s, excludePathRule(dir, want)+"\n") {
 			t.Fatalf("exclusion file should contain the anchored rule for %q, got %q", want, s)
 		}
@@ -156,7 +156,7 @@ func TestWriteExcludePaths(t *testing.T) {
 
 func TestLoadSecretsConfigRejectsGlobExclusion(t *testing.T) {
 	dir := t.TempDir()
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - '*'\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - '*'\n")
 	_, err := loadSecretsConfig(dir)
 	if err == nil || !strings.Contains(err.Error(), "glob metacharacters") {
 		t.Fatalf("error=%v, want a glob metacharacter rejection", err)
@@ -165,7 +165,7 @@ func TestLoadSecretsConfigRejectsGlobExclusion(t *testing.T) {
 
 func TestLoadSecretsConfigRejectsParentExclusion(t *testing.T) {
 	dir := t.TempDir()
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - ../x\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - ../x\n")
 	_, err := loadSecretsConfig(dir)
 	if err == nil || !strings.Contains(err.Error(), "parent path element") {
 		t.Fatalf("error=%v, want a parent path rejection", err)
@@ -174,7 +174,7 @@ func TestLoadSecretsConfigRejectsParentExclusion(t *testing.T) {
 
 func TestLoadSecretsConfigRejectsMissingExclusion(t *testing.T) {
 	dir := t.TempDir()
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - missing.txt\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - missing.txt\n")
 	_, err := loadSecretsConfig(dir)
 	if err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("error=%v, want a missing path rejection", err)
@@ -183,7 +183,7 @@ func TestLoadSecretsConfigRejectsMissingExclusion(t *testing.T) {
 
 func TestLoadSecretsConfigRejectsRootExclusion(t *testing.T) {
 	dir := t.TempDir()
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - .\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - .\n")
 	_, err := loadSecretsConfig(dir)
 	if err == nil || !strings.Contains(err.Error(), "root") {
 		t.Fatalf("error=%v, want a scanned-tree-root rejection", err)
@@ -200,7 +200,7 @@ func TestLoadSecretsConfigRejectsSymlinkExclusion(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - innocent_link\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - innocent_link\n")
 	_, err := loadSecretsConfig(dir)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("error=%v, want a symlink exclusion rejection", err)
@@ -213,7 +213,7 @@ func TestLoadSecretsConfigRejectsSymlinkComponentExclusion(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - link/credentials.txt\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - link/credentials.txt\n")
 	_, err := loadSecretsConfig(dir)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("error=%v, want a symlink path component rejection", err)
@@ -222,7 +222,7 @@ func TestLoadSecretsConfigRejectsSymlinkComponentExclusion(t *testing.T) {
 
 func TestLoadSecretsConfigRejectsUnknownField(t *testing.T) {
 	dir := t.TempDir()
-	writeTree(t, dir, "forest.secrets.yaml", "exclude:\n  - config_test.go\nextra: true\n")
+	writeTree(t, dir, ".iron-forest/secrets.yaml", "exclude:\n  - config_test.go\nextra: true\n")
 	writeTree(t, dir, "config_test.go", "package main\n")
 	_, err := loadSecretsConfig(dir)
 	if err == nil || !strings.Contains(err.Error(), "not found") {

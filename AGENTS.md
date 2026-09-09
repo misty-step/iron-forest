@@ -28,8 +28,8 @@ leads only.
   owner runs `deploy/install-service.sh update <instance> <factory-sha>`.
   The script requires a clean, exact factory revision before stopping the
   consumer unit, drains live Runs, fast-forwards and rebuilds the selected
-  checkout, runs `./forest selfcheck`, verifies `build_sha`, forces
-  `./forest audit show --rescan`, restarts, and verifies the unit is active.
+  checkout, runs `./.iron-forest/bin/forest selfcheck`, verifies `build_sha`, forces
+  `./.iron-forest/bin/forest audit show --rescan`, restarts, and verifies the unit is active.
   The factory checkout is never mutated; a restart alone is not an update.
 - Keep exactly one Kernel checkout per repository (ADR 0015).
 - This manager owns only repo `misty-step/iron-forest`, root

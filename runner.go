@@ -506,161 +506,136 @@ func NewRunner(root string) *Runner {
 	return &Runner{Root: root, GitPath: "git", PiPath: "pi"}
 }
 
-func (r *Runner) Run(ctx context.Context, declaration Declaration) (RunRecord, error) {
+func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRecord, runErr error) {
 	started := time.Now().UTC()
-	runID := newRunID(declaration.Name, started)
-	record := RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano)}
-	logPath := runLogPath(r.Root, runID)
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return record, err
+	runID := declaration.RunID
+	if runID == "" {
+		runID = newRunID(declaration.Name, started)
 	}
-	logFile, err := openBoundedRunLog(logPath)
+	record = RunRecord{RunID: runID, Agent: declaration.Name, Started: started.Format(time.RFC3339Nano),
+		DefinitionSHA: declaration.DefinitionSHA, ExtensionSHA: declaration.ExtensionSHA}
+	attachRunRequest(&record, declaration.Request)
+	logPath := runLogPath(r.Root, runID)
+	livePath := liveRunPath(r.Root, declaration.Name)
+	worktree := forestPath(r.Root, "worktrees", runID)
+	var logFile *boundedRunLog
+	var piDir string
+	var worktreeMayExist, harnessStarted, evidenceWritten bool
+	defer func() {
+		if hasRunCancellationMarker(r.Root, runID) {
+			record.NoWork = false
+			record.Error, record.Exit = runCancelledError, runCancelledExit
+			runErr = errors.Join(runErr, errRunCancelled)
+		}
+		if piDir != "" {
+			runErr = errors.Join(runErr, r.cleanupFilesystem(piDir))
+		}
+		if worktreeMayExist {
+			runErr = errors.Join(runErr, r.cleanupWorktree(worktree, runID))
+		}
+		if logFile != nil {
+			if !evidenceWritten {
+				_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration))
+			}
+			if runErr != nil {
+				_, _ = fmt.Fprintln(logFile, runErr)
+			}
+			runErr = errors.Join(runErr, logFile.Finalize())
+			if harnessStarted {
+				usage, err := parseAgentUsage(logPath)
+				if err != nil {
+					runErr = errors.Join(runErr, fmt.Errorf("parse harness usage: %w", err))
+				} else {
+					record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
+					record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
+					record.Reasoning = usage.Reasoning
+				}
+			}
+			runErr = errors.Join(runErr, completeRunLog(logPath))
+		}
+		record.Duration = time.Since(started).Seconds()
+		if runErr != nil {
+			record.NoWork = false
+			if record.Exit == 0 {
+				record.Exit = runContextExit(ctx, 1)
+			}
+			if record.Error == "" {
+				record.Error = runErr.Error()
+			}
+		}
+		if record.Exit != 0 && runErr == nil && !record.NoWork {
+			runErr = fmt.Errorf("agent %s exited with %d", declaration.Name, record.Exit)
+		}
+		if err := AppendRun(r.Root, record); err != nil {
+			// Preserve the durable owner record for recovery, never silently lose
+			// request attribution when the final Ledger publication fails.
+			runErr = errors.Join(runErr, err)
+		} else {
+			_ = os.Remove(livePath)
+			_ = os.Remove(runCancellationMarkerPath(r.Root, runID))
+		}
+	}()
+	if err := writeLiveRun(livePath, liveRecord(record)); err != nil {
+		return record, fmt.Errorf("publish live Run: %w", err)
+	}
+	var err error
+	logFile, err = openBoundedRunLog(logPath)
 	if err != nil {
 		return record, err
 	}
-
-	// Publish the live Run record before any preparation work so `forest
-	// status` can report age while the Run is still in flight. The record is
-	// removed on every return path below.
-	livePath := liveRunPath(r.Root, declaration.Name)
-	if err := writeLiveRun(livePath, liveRunRecord{RunID: runID, Agent: declaration.Name, StartedAt: record.Started}); err != nil {
-		_, _ = fmt.Fprintf(logFile, "publish live run: %v\n", err)
-	} else {
-		defer func() { _ = os.Remove(livePath) }()
-	}
-
-	worktree := forestPath(r.Root, "worktrees", runID)
-	primaryRef, worktreeMayExist, prepareErr := r.prepareWorktree(ctx, worktree)
-	if prepareErr != nil {
-		var cleanupErr error
-		if worktreeMayExist {
-			cleanupErr = r.cleanupWorktree(worktree, runID)
-			if cleanupErr != nil {
-				cleanupErr = fmt.Errorf("cleanup worktree: %w", cleanupErr)
-				_, _ = fmt.Fprintln(logFile, cleanupErr)
-			}
-		}
-		record.Exit = runContextExit(ctx, 1)
-		record.Duration = time.Since(started).Seconds()
-		_, _ = fmt.Fprintf(logFile, "prepare worktree: %v\n", prepareErr)
-		finalizeErr := logFile.Finalize()
-		if finalizeErr != nil {
-			finalizeErr = fmt.Errorf("finalize Run log: %w", finalizeErr)
-		}
-		retentionErr := completeRunLog(logPath)
-		if retentionErr != nil {
-			retentionErr = fmt.Errorf("retain completed Run logs: %w", retentionErr)
-		}
-		appendErr := AppendRun(r.Root, record)
-		return record, errors.Join(prepareErr, cleanupErr, finalizeErr, retentionErr, appendErr)
-	}
-
-	skillErr := validateDeclarationSkillPaths(worktree, declaration.Name, declaration.SkillPaths)
-	if skillErr != nil {
-		skillErr = fmt.Errorf("validate Run skills: %w", skillErr)
-		record.Exit = runContextExit(ctx, 1)
-		_, _ = fmt.Fprintln(logFile, skillErr)
-	}
-
-	var piDir string
-	var piErr error
-	if skillErr == nil {
-		// Pi state is isolated in a fresh OS temporary directory. Credentials
-		// remain in the inherited service environment; no operator Pi files
-		// enter the Run.
-		piDir, piErr = os.MkdirTemp("", "iron-forest-pi-")
-		if piErr == nil {
-			piErr = configurePiSessionAffinity(piDir, record.RunID, declaration, r.Repo)
-		}
-		if piErr != nil {
-			piErr = fmt.Errorf("prepare Run Pi directory: %w", piErr)
-			record.Exit = runContextExit(ctx, 1)
-			_, _ = fmt.Fprintln(logFile, piErr)
-		} else {
-			_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration))
-		}
-	}
-	harnessRunnable := skillErr == nil && piErr == nil
-	var runDeadline time.Time
-	if declaration.MaxDuration > 0 {
-		runDeadline = started.Add(time.Duration(declaration.MaxDuration) * time.Second)
-	}
-	var invokeErr error
-	harnessStarted := false
-	if harnessRunnable {
-		invokeErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, primaryRef, &record, runDeadline)
-	}
-	if hasRunCancellationMarker(r.Root, runID) {
-		record.Error = runCancelledError
-		record.Exit = runCancelledExit
-		invokeErr = errors.Join(invokeErr, errRunCancelled)
-	}
-	var piCleanupErr error
-	if piDir != "" {
-		if removeErr := r.cleanupFilesystem(piDir); removeErr != nil {
-			piCleanupErr = fmt.Errorf("cleanup Run Pi directory: %w", removeErr)
-			_, _ = fmt.Fprintln(logFile, piCleanupErr)
-			if record.Exit == 0 {
-				record.Exit = 1
-			}
-		}
-	}
-	cleanupErr := r.cleanupWorktree(worktree, runID)
-	if cleanupErr != nil {
-		cleanupErr = fmt.Errorf("cleanup worktree: %w", cleanupErr)
-		_, _ = fmt.Fprintln(logFile, cleanupErr)
-		if record.Exit == 0 {
-			record.Exit = 1
-		}
-	}
-	record.Duration = time.Since(started).Seconds()
-	finalizeErr := logFile.Finalize()
-	if finalizeErr != nil {
-		finalizeErr = fmt.Errorf("finalize Run log: %w", finalizeErr)
-		if record.Exit == 0 {
-			record.Exit = 1
-		}
-	}
-	// Usage exists only if the harness started. Demanding it after a refusal to
-	// start would report "no usage" as the cause and bury the real one.
-	var usageErr error
-	if harnessStarted {
-		usage, parseErr := parseAgentUsage(logPath)
-		if parseErr != nil {
-			usageErr = fmt.Errorf("parse harness usage: %w", parseErr)
-			if record.Exit == 0 {
-				record.Exit = 1
-			}
-		} else {
-			record.TokensIn, record.TokensOut = usage.TokensIn, usage.TokensOut
-			record.CacheRead, record.CacheWrite = usage.CacheRead, usage.CacheWrite
-			record.Reasoning = usage.Reasoning
-		}
-	}
-	retentionErr := completeRunLog(logPath)
-	if retentionErr != nil {
-		retentionErr = fmt.Errorf("retain completed Run logs: %w", retentionErr)
-		if record.Exit == 0 {
-			record.Exit = 1
-		}
-	}
-	appendErr := AppendRun(r.Root, record)
-	if appendErr == nil {
-		// The cancellation marker exists only until the Runner has recorded the
-		// cancelled outcome. Once the Ledger row exists, a later cancel finds it
-		// first, so marker removal is best-effort and never changes the outcome.
-		_ = os.Remove(runCancellationMarkerPath(r.Root, runID))
-	}
-	if err := errors.Join(skillErr, piErr, invokeErr, piCleanupErr, cleanupErr, finalizeErr, usageErr, retentionErr, appendErr); err != nil {
+	if err := r.verifyDeclarationDigest(declaration); err != nil {
 		return record, err
 	}
-	if record.Exit != 0 {
-		if record.Error != "" {
-			return record, fmt.Errorf("agent %s %s", declaration.Name, record.Error)
-		}
-		return record, fmt.Errorf("agent %s exited with %d", declaration.Name, record.Exit)
+	request, err := r.requestForRun(ctx, declaration, record, logFile)
+	if errors.Is(err, errRequestNoWork) {
+		record.NoWork, record.Exit = true, exitNoWork
+		return record, nil
 	}
-	return record, nil
+	if err != nil {
+		return record, err
+	}
+	attachRunRequest(&record, request)
+	declaration.TaskPrompt = requestPrompt(declaration.TaskPrompt, request)
+	if err := writeLiveRun(livePath, liveRecord(record)); err != nil {
+		return record, fmt.Errorf("persist Run request association: %w", err)
+	}
+	_, _ = fmt.Fprintln(logFile, runEvidenceLine(record, declaration))
+	evidenceWritten = true
+	if request != nil {
+		data, err := json.Marshal(request)
+		if err != nil {
+			return record, err
+		}
+		path := forestPath(r.Root, "runs", runID+".request.json")
+		if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+			return record, fmt.Errorf("retain Run request: %w", err)
+		}
+	}
+	primaryRef, mayExist, err := r.prepareWorktree(ctx, worktree)
+	worktreeMayExist = mayExist
+	if err != nil {
+		return record, fmt.Errorf("prepare worktree: %w", err)
+	}
+	if err := validateDeclarationSkillPaths(worktree, declaration.Name, declaration.SkillPaths); err != nil {
+		return record, fmt.Errorf("validate Run skills: %w", err)
+	}
+	if err := verifyDeclarationExtensions(worktree, declaration); err != nil {
+		return record, fmt.Errorf("validate Run extensions: %w", err)
+	}
+	// All writable Pi state belongs to this instance, never the operator's home.
+	piDir, err = os.MkdirTemp(forestPath(r.Root), "pi-"+runID+"-")
+	if err != nil {
+		return record, fmt.Errorf("prepare Run Pi directory: %w", err)
+	}
+	if err := configurePiSessionAffinity(piDir, record.RunID, declaration, r.Repo); err != nil {
+		return record, err
+	}
+	var deadline time.Time
+	if declaration.MaxDuration > 0 {
+		deadline = started.Add(time.Duration(declaration.MaxDuration) * time.Second)
+	}
+	runErr, harnessStarted = r.invoke(ctx, worktree, declaration, piDir, logFile, primaryRef, &record, deadline)
+	return record, runErr
 }
 
 func newRunID(agent string, now time.Time) string {
@@ -1016,6 +991,9 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	for _, skill := range declaration.SkillPaths {
 		args = append(args, "--skill", skill)
 	}
+	for _, extension := range declaration.ExtensionPaths {
+		args = append(args, "--extension", extension)
+	}
 	if len(declaration.Tools) > 0 {
 		args = append(args, "--tools", strings.Join(declaration.Tools, ","))
 	}
@@ -1041,6 +1019,10 @@ func (r *Runner) invoke(ctx context.Context, worktree string, declaration Declar
 	command.Stdout = writer
 	command.Stderr = writer
 	if err := r.verifyDeclarationDigest(declaration); err != nil {
+		record.Exit = 1
+		return errors.Join(err, writer.Close(), reader.Close()), false
+	}
+	if err := verifyDeclarationExtensions(worktree, declaration); err != nil {
 		record.Exit = 1
 		return errors.Join(err, writer.Close(), reader.Close()), false
 	}
@@ -1247,14 +1229,22 @@ func runEvidenceLine(record RunRecord, declaration Declaration) string {
 	if skills == nil {
 		skills = []string{}
 	}
-	line, _ := json.Marshal(map[string]any{
-		"type":         "forest.run",
-		"run_id":       record.RunID,
-		"agent":        declaration.Name,
-		"model":        declaration.Model,
-		"model_source": declaration.ModelSource,
-		"skills":       skills,
-	})
+	evidence := map[string]any{
+		"type": "forest.run", "run_id": record.RunID, "agent": declaration.Name,
+		"model": declaration.Model, "model_source": declaration.ModelSource,
+		"skills": skills, "extensions": declaration.ExtensionPaths,
+		"definition_sha": declaration.DefinitionSHA, "extension_sha": declaration.ExtensionSHA,
+	}
+	if record.RequestID != "" {
+		evidence["request_id"] = record.RequestID
+	}
+	if record.Work != nil {
+		evidence["work"] = record.Work
+	}
+	if record.NoWork {
+		evidence["no_work"] = true
+	}
+	line, _ := json.Marshal(evidence)
 	return string(line)
 }
 

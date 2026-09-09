@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -19,8 +20,7 @@ func runCLI(args []string) int {
 		printUsage()
 		return exitInvalidArg
 	}
-	// Engine commands act on the current checkout and hold the Kernel lock, so
-	// they take no flags. Everything else is the flag-bearing surface.
+	// Engine commands act on the current checkout and hold the Kernel lock.
 	switch args[0] {
 	case "serve", "once", "poll":
 		return runEngineCommand(args[0], args[1:])
@@ -46,11 +46,19 @@ func runEngineCommand(command string, rest []string) int {
 		}
 		return serve(root)
 	case "once":
-		if len(rest) != 1 {
+		if len(rest) == 1 && !strings.HasPrefix(rest[0], "-") {
+			return once(root, rest[0], nil)
+		}
+		if len(rest) != 3 || strings.HasPrefix(rest[0], "-") || rest[1] != "--request" || rest[2] == "" {
 			printUsage()
 			return exitInvalidArg
 		}
-		return once(root, rest[0])
+		request, err := readRunRequest(rest[2])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return exitInvalidArg
+		}
+		return once(root, rest[0], request)
 	default:
 		return runPollCLI(root, rest)
 	}
@@ -107,6 +115,8 @@ func printUsage() {
 engine:
   forest serve                  run the scheduler until interrupted
   forest once <agent>           poll once, dispatch on exit 0
+  forest once <agent> --request <file>
+                                dispatch an explicit forest.request.v1 without polling
   forest poll <agent> [--scope <selector>]
                                 evaluate the built-in trigger for builder,
                                 verifier, or fixer
@@ -206,7 +216,7 @@ func serve(root string) int {
 	})
 }
 
-func once(root, agent string) int {
+func once(root, agent string, request *RunRequest) int {
 	return withLock(root, func() int {
 		cfg, err := loadConfig(configPath(root))
 		if err != nil {
@@ -226,9 +236,12 @@ func once(root, agent string) int {
 		scheduler := NewScheduler(root, cfg, runner)
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		dispatched, err := scheduler.Once(ctx, agent)
+		dispatched, err := scheduler.OnceRequest(ctx, agent, request)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
+			if errors.Is(err, errAdmissionPaused) {
+				return exitConflict
+			}
 			return exitError
 		}
 		if dispatched {
@@ -335,7 +348,7 @@ func runStatus(_ []string, flags cliFlags) cliOutcome {
 	if state.LockErr != nil {
 		kernel.LockError = state.LockErr.Error()
 	}
-	audit, err := readAuditState(flags.root)
+	audit, err := configuredAuditState(flags.root, cfg)
 	if err != nil {
 		return failure(exitError, "%s", err)
 	}
@@ -479,22 +492,19 @@ func runSelfcheck(_ []string, flags cliFlags) cliOutcome {
 			return failure(exitError, "%s", err)
 		}
 	}
-	runner := NewRunner(flags.root)
-	tools := []struct {
-		name    string
-		resolve func() (string, error)
-	}{
-		{name: "git", resolve: func() (string, error) { return trustedExecutable(flags.root, "git") }},
-		{name: "gh", resolve: func() (string, error) { return trustedExecutable(flags.root, "gh") }},
-		{name: "pi", resolve: runner.piExecutable},
-	}
-	resolved := make([]toolPath, 0, len(tools))
-	for _, tool := range tools {
-		path, err := tool.resolve()
-		if err != nil {
-			return failure(exitError, "%s unavailable: %s", tool.name, err)
+	required := []string{"git", "pi"}
+	for _, name := range cfg.RequiredTools {
+		if !slices.Contains(required, name) {
+			required = append(required, name)
 		}
-		resolved = append(resolved, toolPath{Name: tool.name, Path: path})
+	}
+	resolved := make([]toolPath, 0, len(required))
+	for _, name := range required {
+		path, err := trustedExecutable(flags.root, name)
+		if err != nil {
+			return failure(exitError, "%s unavailable: %s", name, err)
+		}
+		resolved = append(resolved, toolPath{Name: name, Path: path})
 	}
 	human := fmt.Sprintf("selfcheck: ok\nrepo: %s\nprimary: %s (%s)\n%s\ndeclarations: %s\ntools: %s",
 		oneLine(cfg.Repo), oneLine(primary), oneLine(primarySource), scopeHuman(cfg.Scope), strings.Join(names, " "), strings.Join(toolNames(resolved), " "))

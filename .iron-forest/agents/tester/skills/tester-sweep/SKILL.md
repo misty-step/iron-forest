@@ -11,7 +11,7 @@ not infer an assignment from a timer or historical queue entry.
 ## 1. Orient
 
 Read the accepted contract(s) affected by the request and repository
-conventions (`README.md`, `forest.yaml`, and any repository-level `AGENTS.md`
+conventions (`README.md`, `.iron-forest/config.yaml`, and any repository-level `AGENTS.md`
 when present). Identify user-visible surfaces (CLI commands, configuration, Gate
 and evidence boundaries) named by the request before looking for gaps.
 

@@ -122,6 +122,10 @@ func cliCommands() []cliCommand {
 		{phrase: "doctor", run: runDoctor},
 		{phrase: "selfcheck", run: runSelfcheck},
 		{phrase: "version", run: runVersion},
+		{phrase: "admission show", run: runAdmissionShow},
+		{phrase: "admission pause", run: runAdmissionPause},
+		{phrase: "admission resume", run: runAdmissionResume},
+		{phrase: "admission drain", run: runAdmissionDrain},
 		{phrase: "config show", run: runConfigShow},
 		{phrase: "declaration list", run: runDeclarationList},
 		{phrase: "declaration show", args: 1, operands: "<name>", run: runDeclarationShow},
@@ -216,7 +220,7 @@ func runSurfaceCommand(args []string) int {
 	// configuration would report a clean factory where there is none.
 	if _, err := os.Stat(configPath(flags.root)); err != nil {
 		return render(command.phrase, rest, flags, failure(exitError,
-			"%s is not an Iron Forest checkout: no forest.yaml", flags.root))
+			"%s is not an Iron Forest checkout: no .iron-forest/config.yaml", flags.root))
 	}
 	return render(command.phrase, rest, flags, command.run(rest, flags))
 }
@@ -526,6 +530,8 @@ func runDeclarationShow(rest []string, flags cliFlags) cliOutcome {
 		field("tools", strings.Join(declaration.Tools, ",")),
 		field("thinking", oneLine(declaration.Thinking)),
 		field("skills", "\n"+indentBlock(strings.Join(declaration.SkillPaths, "\n"))),
+		field("extensions", "\n"+indentBlock(strings.Join(declaration.ExtensionPaths, "\n"))),
+		field("request", oneLine(declaration.RequestCommand)),
 		field("system_prompt", "\n"+indentBlock(declaration.SystemPrompt)),
 		field("task_prompt", "\n"+indentBlock(declaration.TaskPrompt)),
 	}, "\n")
@@ -723,6 +729,13 @@ func runRunShow(rest []string, flags cliFlags) cliOutcome {
 	human := runRecordHuman(record, "")
 	human += fmt.Sprintf("\n  started=%s tokens_in=%d tokens_out=%d cache_read=%d cache_write=%d reasoning=%d",
 		oneLine(record.Started), record.TokensIn, record.TokensOut, record.CacheRead, record.CacheWrite, record.Reasoning)
+	if record.RequestID != "" {
+		human += "\n  request_id=" + oneLine(record.RequestID)
+	}
+	if record.Work != nil {
+		work, _ := json.Marshal(record.Work)
+		human += "\n  work=" + string(work)
+	}
 	return cliOutcome{Exit: exitOK, Data: record, Human: human}
 }
 
@@ -841,6 +854,14 @@ func readRunLogFrom(path string, offset int64) (string, error) {
 }
 
 func runAuditShow(_ []string, flags cliFlags) cliOutcome {
+	cfg, err := loadConfig(configPath(flags.root))
+	if err != nil {
+		return failure(exitError, "%s", err)
+	}
+	if cfg.Delivery == "external" {
+		state := externalAuditState()
+		return cliOutcome{Exit: exitOK, Data: state, Human: "audit: not applicable\n" + state.Reason}
+	}
 	if flags.rescan {
 		// audit() rewrites audit.json and audit.log, and its temp cleanup would
 		// remove a concurrent writer's in-flight file, so it runs under the
@@ -944,6 +965,9 @@ func auditReportedMaster(state AuditState) string {
 func runRecordHuman(record RunRecord, indent string) string {
 	row := fmt.Sprintf("%sexit=%d duration=%.3fs agent=%s run=%s",
 		indent, record.Exit, record.Duration, oneLine(record.Agent), oneLine(record.RunID))
+	if record.NoWork {
+		row += " no_work=true"
+	}
 	if record.Error != "" {
 		row += " error=" + oneLine(record.Error)
 	}

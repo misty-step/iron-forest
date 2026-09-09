@@ -34,7 +34,7 @@ func runPollScript(t *testing.T, path string, powderEnv map[string]string) int {
 }
 
 func TestRetiredInvestigatorPollsRemainIdle(t *testing.T) {
-	for _, path := range []string{"./agents/critic/poll.sh", "./agents/tester/poll.sh"} {
+	for _, path := range []string{"./.iron-forest/agents/critic/poll.sh", "./.iron-forest/agents/tester/poll.sh"} {
 		for _, configuration := range []struct {
 			name string
 			env  map[string]string

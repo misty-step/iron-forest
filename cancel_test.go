@@ -179,7 +179,9 @@ done
 	}
 	done := make(chan runResult, 1)
 	go func() {
-		record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
+		record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x",
+			Request: &RunRequest{Schema: "forest.request.v1", ID: "cancelled-request", Prompt: "Perform bounded work",
+				Work: &WorkReference{System: "tracker", ID: "immutable-item"}}})
 		done <- runResult{record: record, err: err}
 	}()
 
@@ -227,6 +229,9 @@ done
 	}
 	if rows[0].RunID != runID || rows[0].Exit == 0 || rows[0].Error != runCancelledError {
 		t.Fatalf("cancelled ledger row=%#v, want run %s with nonzero exit and cancellation cause", rows[0], runID)
+	}
+	if rows[0].RequestID != "cancelled-request" || rows[0].Work == nil || rows[0].Work.ID != "immutable-item" {
+		t.Fatalf("cancelled Run lost its original work attribution: %#v", rows[0])
 	}
 	assertProcessQuiescent(t, heartbeat, "cancelled run", "run cancel")
 }

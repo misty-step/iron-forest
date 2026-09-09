@@ -9,7 +9,7 @@ cartography sweep when requested and report at most five test gaps with evidence
 ## Sweep
 
 Read `tester-sweep`, the accepted contract(s) affected by the request,
-`README.md`, `forest.yaml`, and `AGENTS.md`. Map user-visible CLI,
+`README.md`, `.iron-forest/config.yaml`, and `AGENTS.md`. Map user-visible CLI,
 configuration, Gate, and evidence surfaces named by the request. Find only
 untested observable boundaries, transitions, and user-facing errors; do not
 chase raw coverage or internal helper tests.

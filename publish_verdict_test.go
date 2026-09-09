@@ -216,19 +216,15 @@ checks:
   - {name: test, run: "true"}
   - {name: vet, run: "true"}
 `
-			if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(config), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			runGitDir(t, root, "add", "forest.yaml")
+			writeTree(t, root, profileName+"/config.yaml", config)
+			runGitDir(t, root, "add", ".iron-forest/config.yaml")
 			runGitDir(t, root, "commit", "-m", "candidate checks")
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			pushRequestForRevision(t, root, "if-candidate-checks", revision)
 			before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 			// The invoking checkout advertises only test; the candidate also requires vet.
 			workingConfig := strings.Replace(config, "  - {name: vet, run: \"true\"}\n", "", 1)
-			if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(workingConfig), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeTree(t, root, profileName+"/config.yaml", workingConfig)
 			checks, verdict := writeEvidencePayloadsWithResults(t, revision, "approve", test.results)
 			seedVerdictRun(t, root, "1-verifier")
 
@@ -304,10 +300,8 @@ agents:
 checks:
   - {name: test, run: 'sha=$(git rev-parse HEAD); git push --force origin HEAD:refs/forest/v1/request/$sha'}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, root, "add", "forest.yaml")
+	writeTree(t, root, profileName+"/config.yaml", string(config))
+	runGitDir(t, root, "add", ".iron-forest/config.yaml")
 	runGitDir(t, root, "commit", "-m", "move request during checks")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
@@ -474,18 +468,14 @@ agents:
 checks:
   - {name: test, run: "false"}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, root, "add", "forest.yaml")
+	writeTree(t, root, profileName+"/config.yaml", string(config))
+	runGitDir(t, root, "add", ".iron-forest/config.yaml")
 	runGitDir(t, root, "commit", "-m", "failing checks")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	pushRequestForRevision(t, root, "if-runs-checks", revision)
 	before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 	workingConfig := strings.Replace(string(config), `run: "false"`, `run: "true"`, 1)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(workingConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", workingConfig)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
 	_, err := publishVerdict(context.Background(), publishVerdictInput{

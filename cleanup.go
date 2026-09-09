@@ -34,7 +34,26 @@ func cleanupReservedResidueWith(ctx context.Context, root string, runner *Runner
 	if refErr == nil {
 		worktreeErr = cleanupReservedWorktrees(ctx, root, runner)
 	}
-	return errors.Join(refErr, worktreeErr, cleanupReservedTemps(ctx, root, remove), cleanupLiveRunRecords(ctx, root, remove))
+	return errors.Join(refErr, worktreeErr, cleanupReservedTemps(ctx, root, remove), cleanupLiveRunRecords(ctx, root, remove), cleanupPiResidue(ctx, root, runner))
+}
+
+func cleanupPiResidue(ctx context.Context, root string, runner *Runner) error {
+	entries, err := os.ReadDir(forestPath(root))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "pi-") || !isReservedRunID(strings.TrimPrefix(entry.Name(), "pi-")) {
+			continue
+		}
+		if err := runner.removeFilesystem(ctx, forestPath(root, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func cleanupReservedWorktrees(ctx context.Context, root string, runner *Runner) error {

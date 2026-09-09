@@ -76,6 +76,13 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if input.RunID == "" || strings.ContainsAny(input.RunID, "/ \t\n") {
 		return publishReviewRequestResult{}, fmt.Errorf("FOREST_RUN_ID is required")
 	}
+	runRoot, err := primaryCheckout(ctx, input.Root)
+	if err != nil {
+		return publishReviewRequestResult{}, err
+	}
+	if err := requireNativeDelivery(runRoot); err != nil {
+		return publishReviewRequestResult{}, err
+	}
 	payloadPath, err := filepath.Abs(input.PayloadPath)
 	if err != nil {
 		return publishReviewRequestResult{}, err

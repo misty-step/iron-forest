@@ -18,9 +18,9 @@ omp -p --mode json --no-session --auto-approve --cwd <worktree> \
   [--tools <comma-separated-tools>] [--thinking <level>] "<task>"
 ```
 
-A declaration uses `agents/<name>/agent.md`. Its YAML frontmatter requires
+A declaration uses `.iron-forest/agents/<name>/agent.md`. Its YAML frontmatter requires
 `model` and may contain `tools` and `thinking`. The body is the system prompt.
-The standing user prompt is `agents/<name>/task.md`. The Kernel parses the
+The standing user prompt is `.iron-forest/agents/<name>/task.md`. The Kernel parses the
 frontmatter itself and passes the declaration data to OMP.
 
 The Runner adds `--tools` only when `tools` is present. It adds `--thinking`

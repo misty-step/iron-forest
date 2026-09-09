@@ -16,16 +16,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const workspaceName = ".forest"
+const profileName = ".iron-forest"
+const workspaceName = ".iron-forest/runtime"
 
 var repoNamePattern = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
 type Config struct {
-	Repo    string                 `yaml:"repo" json:"repo"`
-	Primary string                 `yaml:"primary" json:"primary,omitempty"`
-	Scope   *Scope                 `yaml:"scope" json:"scope,omitempty"`
-	Agents  map[string]AgentConfig `yaml:"agents" json:"agents"`
-	Checks  []Check                `yaml:"checks" json:"checks"`
+	Repo          string                 `yaml:"repo" json:"repo"`
+	Primary       string                 `yaml:"primary" json:"primary,omitempty"`
+	Scope         *Scope                 `yaml:"scope" json:"scope,omitempty"`
+	Agents        map[string]AgentConfig `yaml:"agents" json:"agents"`
+	Delivery      string                 `yaml:"delivery" json:"delivery"`
+	RequiredTools []string               `yaml:"required_tools" json:"required_tools,omitempty"`
+	Checks        []Check                `yaml:"checks" json:"checks"`
 }
 
 type AgentConfig struct {
@@ -56,11 +59,13 @@ func (i *yamlInt) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type configYAML struct {
-	Repo    yamlString                      `yaml:"repo"`
-	Primary yamlString                      `yaml:"primary"`
-	Scope   scopeYAML                       `yaml:"scope"`
-	Agents  map[*yamlString]agentConfigYAML `yaml:"agents"`
-	Checks  []checkYAML                     `yaml:"checks"`
+	Repo          yamlString                      `yaml:"repo"`
+	Primary       yamlString                      `yaml:"primary"`
+	Scope         scopeYAML                       `yaml:"scope"`
+	Agents        map[*yamlString]agentConfigYAML `yaml:"agents"`
+	Checks        []checkYAML                     `yaml:"checks"`
+	Delivery      yamlString                      `yaml:"delivery"`
+	RequiredTools StringList                      `yaml:"required_tools"`
 }
 
 type agentConfigYAML struct {
@@ -74,7 +79,7 @@ type checkYAML struct {
 	Run  yamlString `yaml:"run"`
 }
 
-func configPath(root string) string { return filepath.Join(root, "forest.yaml") }
+func configPath(root string) string { return filepath.Join(root, profileName, "config.yaml") }
 func forestPath(root string, parts ...string) string {
 	return filepath.Join(append([]string{root, workspaceName}, parts...)...)
 }
@@ -93,31 +98,14 @@ type defaultsYAML struct {
 	Thinking yamlString `yaml:"thinking"`
 }
 
-// defaultsPath locates the instance defaults: FOREST_DEFAULTS names the file
-// when set, and the checkout's forest.defaults.yaml is the fallback. A relative
-// override resolves against the checkout, so --root and the engine agree.
-func defaultsPath(root string) string {
-	if path := strings.TrimSpace(os.Getenv("FOREST_DEFAULTS")); path != "" {
-		if !filepath.IsAbs(path) {
-			return filepath.Join(root, path)
-		}
-		return path
-	}
-	return filepath.Join(root, "forest.defaults.yaml")
-}
+// defaultsPath is the profile-owned instance defaults; there is no ambient loader.
+func defaultsPath(root string) string { return filepath.Join(root, profileName, "defaults.yaml") }
 
-// loadDefaults reads the instance defaults. The source is returned so the read
-// surface can state where a value came from. An explicit FOREST_DEFAULTS that
-// is missing is an error: the operator named a file, so silence would hide a
-// typo.
+// loadDefaults returns the optional profile defaults and their resolved source.
 func loadDefaults(root string) (Defaults, string, error) {
 	path := defaultsPath(root)
-	explicit := strings.TrimSpace(os.Getenv("FOREST_DEFAULTS")) != ""
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		if explicit {
-			return Defaults{}, "", fmt.Errorf("read %s: %w", path, err)
-		}
 		return Defaults{}, "", nil
 	}
 	if err != nil {
@@ -170,7 +158,11 @@ func decodeConfig(data []byte, source string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("parse %s: multiple YAML documents", source)
 	}
-	cfg := Config{Repo: string(document.Repo), Primary: strings.TrimSpace(string(document.Primary))}
+	cfg := Config{Repo: string(document.Repo), Primary: strings.TrimSpace(string(document.Primary)),
+		Delivery: string(document.Delivery), RequiredTools: document.RequiredTools}
+	if cfg.Delivery == "" {
+		cfg.Delivery = "git-native"
+	}
 	scope, err := scopeFromYAML(document.Scope)
 	if err != nil {
 		return Config{}, fmt.Errorf("validate %s: %w", source, err)
@@ -214,6 +206,14 @@ func durationFromSeconds(seconds int) (time.Duration, error) {
 }
 
 func (c Config) Validate() error {
+	if c.Delivery != "" && c.Delivery != "git-native" && c.Delivery != "external" {
+		return fmt.Errorf("delivery must be git-native or external")
+	}
+	for _, name := range c.RequiredTools {
+		if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, "/\\ \t\r\n") {
+			return fmt.Errorf("required_tools must name executables, got %q", name)
+		}
+	}
 	if !repoNamePattern.MatchString(c.Repo) {
 		return fmt.Errorf("repo must have owner/name shape: %q", c.Repo)
 	}
@@ -262,7 +262,7 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if len(c.Checks) == 0 {
+	if len(c.Checks) == 0 && c.Delivery != "external" {
 		return errors.New("checks must not be empty")
 	}
 	seen := make(map[string]struct{}, len(c.Checks))
@@ -289,4 +289,15 @@ func agentNames(cfg Config) []string {
 	}
 	slices.Sort(names)
 	return names
+}
+
+func requireNativeDelivery(root string) error {
+	cfg, err := loadConfig(configPath(root))
+	if err != nil {
+		return err
+	}
+	if cfg.Delivery == "external" {
+		return conflictError("delivery is external; native Kernel publication is disabled")
+	}
+	return nil
 }

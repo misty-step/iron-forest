@@ -8,9 +8,17 @@
 > Preserved commands and examples below describe the retired workflow.
 
 Iron Forest runs one Kernel process per repository. The Kernel uses that
-repository's `forest.yaml`, agent declarations, Git refs, and local Ledger.
+repository's `.iron-forest/config.yaml`, agent declarations, Git refs, and local Ledger.
 Self-host mode uses the factory source checkout as the managed repository.
 Sibling mode keeps a separate managed checkout beside the factory source.
+
+The supported layout is now the single `.iron-forest` profile and runtime.
+For current direct requests, explicit extensions, persistent admission, and
+external delivery, use the
+[current operator contract](../README.md#one-profile-explicit-requests-persistent-admission).
+The Git-native examples below are not a second delivery authority for a profile
+that selects `delivery: external`. That mode refuses native publication and
+reports the native audit as not applicable.
 
 ## Topology
 
@@ -41,7 +49,7 @@ The user service resolves these tools through
 
 Configure forge access and Pi provider credentials for the service. Put its
 credential variables in `%h/.config/iron-forest/%i.env`; do not put
-credentials in `forest.yaml`, defaults, declarations, prompts, skills, or
+credentials in `.iron-forest/config.yaml`, defaults, declarations, prompts, skills, or
 commits. Runs inherit credentials only from the service environment. A trusted
 declaration has those credentials plus filesystem and network access. Worktree
 separation is not a security sandbox. Stronger containment belongs to the
@@ -97,18 +105,18 @@ gh label create forest:ready \
 
 Do not use a second scheduling label. The Builder Poll checks this label and
 checks that no matching remote `forest/<subject>/*` branch exists.
-A takeable Powder job for `forest.yaml` `repo` also wakes Builder when `POWDER_AGENT` is set.
+A takeable Powder job for `.iron-forest/config.yaml` `repo` also wakes Builder when `POWDER_AGENT` is set.
 
 ## 2. Declare the repository
 
-Write `forest.yaml` at the root of the managed checkout:
+Write `.iron-forest/config.yaml` at the root of the managed checkout:
 
 ```yaml
 repo: owner/name
 agents:
-  builder:  { poll: "./forest poll builder",  interval: 300 }
-  verifier: { poll: "./forest poll verifier", interval: 120 }
-  fixer:    { poll: "./forest poll fixer",    interval: 300 }
+  builder:  { poll: "./.iron-forest/bin/forest poll builder",  interval: 300 }
+  verifier: { poll: "./.iron-forest/bin/forest poll verifier", interval: 120 }
+  fixer:    { poll: "./.iron-forest/bin/forest poll fixer",    interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -132,7 +140,7 @@ snapshot refs before the supervisor force-stops its command group. Runner
 cleanup has a separate 10-second bound. A completed dispatch starts an audit
 with a separate 60-second bound. These mechanical bounds do not limit agent
 reasoning or model execution. The model is
-in declaration frontmatter, not `forest.yaml`. `checks:` is the complete check
+in declaration frontmatter, not `.iron-forest/config.yaml`. `checks:` is the complete check
 list for this repository. Mirror these commands in `.github/workflows/ci.yml`
 in the same order.
 
@@ -153,7 +161,7 @@ Powder API key per Kernel. Copy approved values into the protected instance
 environment without printing them. A deployment that explicitly requires
 per-instance API keys must own their issuance and rotation path.
 
-The job must have a nonempty spec and `repo` equal to `forest.yaml` `repo`.
+The job must have a nonempty spec and `repo` equal to `.iron-forest/config.yaml` `repo`.
 Builder takes it and publishes `forest/<id>/<slug>` with review-request v2.
 Fixer calls `take` for that same Subject before repair; only its locally stored
 per-job claim can resume a live lease. After approve, the Kernel uses that claim
@@ -168,7 +176,7 @@ Create one pair of prompt files per shipped declaration, one shared skill
 directory, and optional role-specific skill directories:
 
 ```text
-agents/
+.iron-forest/agents/
   _shared/
     skills/
   builder/
@@ -199,22 +207,22 @@ may add or omit Critic and Tester like any other declaration; their Polls skip
 cleanly when Powder is not configured.
 
 `agent.md` starts with YAML frontmatter containing optional `model`, `tools`,
-and `thinking`, then the system prompt. `task.md` is the standing user prompt.
+`thinking`, `request`, and `extensions`, then the system prompt. `task.md` is the standing user prompt.
 `model` and `thinking` fall through declaration frontmatter to instance
 defaults; `model` alone has a built-in final value. Defaults contain only
 `model` and `thinking`. Keep Git note, merge, and always-on engineering
 instructions in the system prompts. Agents use native `git`; no wrapper is
 required.
 
-The only skill sources are existing `agents/_shared/skills` and, when present,
-`agents/<name>/skills`. Their published paths are repository-relative and Pi
+The only skill sources are existing `.iron-forest/agents/_shared/skills` and, when present,
+`.iron-forest/agents/<name>/skills`. Their published paths are repository-relative and Pi
 resolves them from the Run worktree. The Runner gives each Run a new writable
 `PI_CODING_AGENT_DIR` without operator Pi state. For an OpenRouter model, it
 contains only a generated, credential-free model override that enables the
 Run ID's session-affinity header. The Runner invokes Pi with `--no-extensions`,
 `--no-skills`, `--no-prompt-templates`, and `--no-themes`, plus one explicit
-`--skill` per existing skill source directory. Declaration and Run evidence
-publish those directory paths as `skills`.
+`--skill` per existing skill source directory and `--extension` per declared,
+digest-verified profile extension. Declaration and Run evidence publish both.
 
 ## 4. Build and validate
 
@@ -232,8 +240,8 @@ The factory source checkout is also the managed repository. From that checkout,
 build with the pinned toolchain and validate its declarations:
 
 ```sh
-mise exec -- go build -o forest .
-./forest selfcheck
+mise exec -- go build -o .iron-forest/bin/forest .
+./.iron-forest/bin/forest selfcheck
 deploy/install-service.sh
 ```
 
@@ -247,17 +255,17 @@ need the Iron Forest Go source. From the factory source checkout, build the
 Kernel into the sibling, validate there, and install that sibling instance:
 
 ```sh
-mise exec -- go build -o ../<sibling-directory-name>/forest .
-(cd ../<sibling-directory-name> && ./forest selfcheck)
+mise exec -- go build -o ../<sibling-directory-name>/.iron-forest/bin/forest .
+(cd ../<sibling-directory-name> && ./.iron-forest/bin/forest selfcheck)
 deploy/install-service.sh <sibling-directory-name>
 cd ../<sibling-directory-name>
 ```
 
 The one-argument installer always builds the Kernel from the factory source
-checkout into the named sibling. Before restarting either mode, the installer
-stops that instance and removes only timestamped legacy `.forest/profiles`
-entries, which may contain credentials copied by an older Kernel. It then runs
-selfcheck with the service's trusted `PATH` and without `FOREST_DEFAULTS`.
+checkout into the named sibling's `.iron-forest/bin/forest`. It snapshots its
+own transaction, pauses/drains and stops an installed instance, verifies source,
+binary and profile evidence, and restarts paused. New installations require an
+explicit `forest admission resume` after the operator accepts the receipt.
 The installed unit reads operator-supplied credentials from
 `%h/.config/iron-forest/%i.env`; protect it as mode `0600`. The Runner selects
 the OpenRouter completion key for each Run: `OPENROUTER_API_KEY_<ROLE>` wins
@@ -265,10 +273,11 @@ for a role, and the instance-wide `OPENROUTER_API_KEY` is the fallback.
 Never put a management, personal interactive, or evaluation key there. The
 intended production layout uses one completion key per agent role for
 OpenRouter and Langfuse analytics. This is an attribution control, not an
-isolation boundary. Use
-a systemd drop-in only when one instance needs a different defaults file. The
-installer stops on any selfcheck error. The Auditor needs a completed agent
-dispatch before it can validate remote Git evidence.
+isolation boundary. Defaults come only from `.iron-forest/defaults.yaml`;
+there is no external defaults-file override. `selfcheck` requires `git`, `pi`
+and explicitly configured `required_tools`, not unrelated tracker CLIs.
+The installer stops on selfcheck errors and verifies native audit or explicitly
+not-applicable external delivery before restoring previously open admission.
 
 The final `cd` keeps all later Kernel and observation commands in the managed
 repository.
@@ -281,7 +290,7 @@ deployment, skip the installer and start exactly one process from the managed
 checkout:
 
 ```sh
-./forest serve
+./.iron-forest/bin/forest serve
 ```
 
 Exit 0 dispatches work.
@@ -302,13 +311,15 @@ violation.
 Poll once and conditionally dispatch one declaration:
 
 ```sh
-./forest once builder
-./forest poll builder
-./forest status
+./.iron-forest/bin/forest once builder --request /path/to/request.json
+./.iron-forest/bin/forest poll builder
+./.iron-forest/bin/forest status
 ```
 
-`once` evaluates the configured Builder Poll first. It dispatches only when that
-Poll exits 0. A healthy Poll skip exits 1 without an agent Run.
+`once --request` appends the explicit `forest.request.v1` prompt to the standing
+task, bypasses selection, and retains immutable request/work attribution.
+Admission must be open and no scheduler may hold the Kernel lock. Without
+`--request`, `once` evaluates the configured Poll; exit 1 is a healthy skip.
 
 ## 6. Observe the first Subject
 
@@ -332,7 +343,7 @@ atomically. That request evidence is the reject handoff back to the Verifier.
 From the managed checkout, use status and evidence refs as the evidence surface:
 
 ```sh
-./forest status
+./.iron-forest/bin/forest status
 git log --oneline --decorate --all
 git fetch origin refs/forest/v1/request/<sha>
 git show FETCH_HEAD:request.json
@@ -352,13 +363,13 @@ and does not block or enforce them.
 
 ## 7. Change configuration safely
 
-Commit changes to `forest.yaml` or `agents/` through the same review Gate as
-code. Run `./forest selfcheck` after local configuration or declaration
+Commit changes to `.iron-forest/config.yaml` or `.iron-forest/agents/` through the same review Gate as
+code. Run `./.iron-forest/bin/forest selfcheck` after local configuration or declaration
 validation. A remote audit occurs only after a completed agent dispatch; Kernel
 startup and idle Poll skips do not audit. Keep `checks:` and
 `.github/workflows/ci.yml` aligned.
 
-Each `.forest/runs.jsonl` Ledger row records `run_id`, `agent`, `started`,
+Each `.iron-forest/runtime/runs.jsonl` Ledger row records `run_id`, `agent`, `started`,
 `duration`, `exit`, and exactly five retained token classes — `tokens_in`,
 `tokens_out`, `cache_read`, `cache_write`, and `reasoning` — as operational
 observability, not accounting. The Ledger never records a cost, price, spend,

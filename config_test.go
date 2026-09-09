@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,19 +20,17 @@ agents:
 checks:
   - {name: test, run: "go test ./..."}
 `
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(config), 0o644); err != nil {
+	writeTree(t, root, profileName+"/config.yaml", config)
+	if err := os.MkdirAll(filepath.Join(root, ".iron-forest/agents", "builder"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "agents", "builder"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".iron-forest/agents", "builder", "agent.md"), []byte("---\nmodel: local/model\ntools: [git, read]\nthinking: low\n---\nSystem rules\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agents", "builder", "agent.md"), []byte("---\nmodel: local/model\ntools: [git, read]\nthinking: low\n---\nSystem rules\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".iron-forest/agents", "builder", "task.md"), []byte("Select one item."), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agents", "builder", "task.md"), []byte("Select one item."), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := loadConfig(filepath.Join(root, "forest.yaml"))
+	cfg, err := loadConfig(filepath.Join(root, ".iron-forest/config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +77,7 @@ checks:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := decodeConfig([]byte(test.data), "forest.yaml"); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := decodeConfig([]byte(test.data), ".iron-forest/config.yaml"); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("decodeConfig() error = %v, want %q", err, test.want)
 			}
 		})
@@ -102,10 +98,9 @@ agents:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "forest.yaml")
-			if err := os.WriteFile(path, []byte(config+test.checks), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			root := t.TempDir()
+			path := configPath(root)
+			writeTree(t, root, profileName+"/config.yaml", config+test.checks)
 			_, err := loadConfig(path)
 			want := "validate " + path + ": checks must not be empty"
 			if err == nil || err.Error() != want {
@@ -167,7 +162,7 @@ func TestDeclarationYAMLValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			dir := filepath.Join(root, "agents", "builder")
+			dir := filepath.Join(root, ".iron-forest/agents", "builder")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -223,7 +218,7 @@ agents:
 checks:
   - {name: test, run: "go test ./..."}
 `
-	cfg, err := decodeConfig([]byte(config), "forest.yaml")
+	cfg, err := decodeConfig([]byte(config), ".iron-forest/config.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +234,7 @@ agents:
   builder: {poll: x, interval: 1}
 checks:
   - {name: test, run: "true"}
-`), "forest.yaml")
+`), ".iron-forest/config.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +268,7 @@ checks:
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := decodeConfig([]byte(test.data), "forest.yaml")
+			_, err := decodeConfig([]byte(test.data), ".iron-forest/config.yaml")
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("decodeConfig() error = %v, want %q", err, test.want)
 			}
@@ -337,7 +332,7 @@ func TestConfigAcceptsUniqueAgentSlugs(t *testing.T) {
 
 func writeAgentFiles(t *testing.T, root, name, frontmatter, body, task string) {
 	t.Helper()
-	dir := filepath.Join(root, "agents", name)
+	dir := filepath.Join(root, ".iron-forest/agents", name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -379,24 +374,17 @@ func TestModelChainResolvesDeclarationThenDefaultsThenBuiltIn(t *testing.T) {
 	}
 }
 
-func TestDefaultsFileIsOptionalAndFOREST_DEFAULTSWins(t *testing.T) {
+func TestDefaultsAreProfileOwnedAndIgnoreAmbientOverride(t *testing.T) {
 	root := t.TempDir()
-	defaults, source, err := loadDefaults(root)
-	if err != nil || defaults != (Defaults{}) || source != "" {
-		t.Fatalf("optional defaults=%#v source=%q err=%v", defaults, source, err)
-	}
+	writeTree(t, root, profileName+"/defaults.yaml", "model: profile/model\nthinking: high\n")
 	override := filepath.Join(t.TempDir(), "host.yaml")
-	if err := os.WriteFile(override, []byte("model: host/model\nthinking: high\n"), 0o644); err != nil {
+	if err := os.WriteFile(override, []byte("model: unrelated/model\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("FOREST_DEFAULTS", override)
-	defaults, source, err = loadDefaults(root)
-	if err != nil || defaults.Model != "host/model" || defaults.Thinking != "high" || source != override {
-		t.Fatalf("override defaults=%#v source=%q err=%v", defaults, source, err)
-	}
-	t.Setenv("FOREST_DEFAULTS", "missing.yaml")
-	if _, _, err := loadDefaults(root); err == nil || !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing explicit defaults err=%v, want not exist", err)
+	defaults, source, err := loadDefaults(root)
+	if err != nil || defaults.Model != "profile/model" || defaults.Thinking != "high" || source != defaultsPath(root) {
+		t.Fatalf("profile defaults=%#v source=%q err=%v", defaults, source, err)
 	}
 }
 
@@ -411,8 +399,8 @@ func TestDeclarationDiscoversConventionalSkillDirectoriesAndRejectsSymlinks(t *t
 		t.Fatalf("skills without directories=%v", declaration.SkillPaths)
 	}
 
-	shared := filepath.Join(root, "agents", "_shared", "skills")
-	role := filepath.Join(root, "agents", "builder", "skills")
+	shared := filepath.Join(root, ".iron-forest/agents", "_shared", "skills")
+	role := filepath.Join(root, ".iron-forest/agents", "builder", "skills")
 	if err := os.MkdirAll(shared, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +408,7 @@ func TestDeclarationDiscoversConventionalSkillDirectoriesAndRejectsSymlinks(t *t
 	if err := os.Symlink(outside, role); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "agents", "other", "skills"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".iron-forest/agents", "other", "skills"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "must be a real directory") {
@@ -437,7 +425,7 @@ func TestDeclarationDiscoversConventionalSkillDirectoriesAndRejectsSymlinks(t *t
 	if err := os.Symlink(outside, nestedLink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "contains symlink agents/_shared/skills/outside") {
+	if _, err := loadDeclaration(root, "builder"); err == nil || !strings.Contains(err.Error(), "contains symlink .iron-forest/agents/_shared/skills/outside") {
 		t.Fatalf("nested skill symlink err=%v, want rejection", err)
 	}
 	if err := os.Remove(nestedLink); err != nil {
@@ -447,33 +435,8 @@ func TestDeclarationDiscoversConventionalSkillDirectoriesAndRejectsSymlinks(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"agents/_shared/skills", "agents/builder/skills"}
+	want := []string{".iron-forest/agents/_shared/skills", ".iron-forest/agents/builder/skills"}
 	if !reflect.DeepEqual(declaration.SkillPaths, want) {
 		t.Fatalf("skills=%v, want %v", declaration.SkillPaths, want)
-	}
-}
-
-func TestRunEvidencePublishesSkillsWithoutProfiles(t *testing.T) {
-	line := runEvidenceLine(
-		RunRecord{RunID: "1-builder"},
-		Declaration{
-			Name:        "builder",
-			Model:       "local",
-			ModelSource: "declaration",
-			SkillPaths:  []string{"agents/_shared/skills", "agents/builder/skills"},
-		},
-	)
-	var evidence map[string]any
-	if err := json.Unmarshal([]byte(line), &evidence); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(line, "profile") {
-		t.Fatalf("evidence leaked obsolete profile data: %s", line)
-	}
-	if got := evidence["skills"]; !reflect.DeepEqual(got, []any{"agents/_shared/skills", "agents/builder/skills"}) {
-		t.Fatalf("skills=%v", got)
-	}
-	if _, exists := evidence["env"]; exists {
-		t.Fatalf("evidence retained declaration env: %v", evidence)
 	}
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func writeTestDeclaration(t *testing.T, root, agent string) {
-	dir := filepath.Join(root, "agents", agent)
+	dir := filepath.Join(root, ".iron-forest/agents", agent)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -136,14 +136,12 @@ agents:
 checks:
   - {name: test, run: "go test ./..."}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", string(config))
 	for _, relative := range []string{
-		filepath.Join("agents", "_shared", "skills", "shared", "SKILL.md"),
-		filepath.Join("agents", "builder", "skills", "builder", "SKILL.md"),
-		filepath.Join("agents", "verifier", "skills", "verifier", "SKILL.md"),
-		filepath.Join("agents", "fixer", "skills", "fixer", "SKILL.md"),
+		filepath.Join(".iron-forest/agents", "_shared", "skills", "shared", "SKILL.md"),
+		filepath.Join(".iron-forest/agents", "builder", "skills", "builder", "SKILL.md"),
+		filepath.Join(".iron-forest/agents", "verifier", "skills", "verifier", "SKILL.md"),
+		filepath.Join(".iron-forest/agents", "fixer", "skills", "fixer", "SKILL.md"),
 	} {
 		path := filepath.Join(root, relative)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -153,7 +151,7 @@ checks:
 			t.Fatal(err)
 		}
 	}
-	runGitDir(t, root, "add", "file", "forest.yaml", "agents")
+	runGitDir(t, root, "add", "file", ".iron-forest/config.yaml", ".iron-forest/agents")
 	runGitDir(t, root, "commit", "-m", "initial")
 	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/master")
 	return root, origin

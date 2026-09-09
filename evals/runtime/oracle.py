@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-FOREST = "/usr/local/bin/forest"
+FOREST = "/workspace/.iron-forest/bin/forest"
 GIT = "/usr/bin/git"
 NO_EFFECTS = {"no_effect", "builder_scope_held_outside", "builder_scope_branch_no_match"}
 CONFLICTS = {"builder_branch_race", "fixer_conflict", "fixer_branch_race", "verifier_conflict", "verifier_approve_race"}
@@ -36,7 +36,7 @@ class Oracle:
         root = Path(os.environ["FOREST_ROOT"]).resolve()
         if os.geteuid() != pwd.getpwnam("forest").pw_uid:
             raise PermissionError("oracle actions must execute as forest, not root")
-        if self.cwd != root / ".forest" / "worktrees" / self.run_id:
+        if self.cwd != root / ".iron-forest/runtime" / "worktrees" / self.run_id:
             raise RuntimeError("oracle actions require the actual Runner-assigned worktree")
         if self.effect not in ROLE_EFFECTS[self.role]:
             raise ValueError(f"unsupported {self.role} oracle effect: {self.effect}")
@@ -141,7 +141,12 @@ class Oracle:
 
     def path(self, relative: str) -> Path:
         path = (self.cwd / relative).resolve()
-        if not path.is_relative_to(self.cwd) or Path(relative).parts[0] in {".git", ".forest"}:
+        relative_parts = Path(relative).parts
+        if (
+            not path.is_relative_to(self.cwd)
+            or relative_parts[:1] == (".git",)
+            or relative_parts[:2] == (".iron-forest", "runtime")
+        ):
             raise ValueError(f"oracle file escapes assigned source worktree: {relative}")
         return path
 
@@ -325,7 +330,7 @@ class Oracle:
                 raise ValueError("tester oracle needs the prepared concrete failing_example command")
             empty = self.command("/bin/sh", "-c", example, expected=None, phase="inspection-check")
             tracked = self.git("ls-files").splitlines()
-            test_paths = [path for path in tracked if "test" in Path(path).name.lower() and not path.startswith("agents/")]
+            test_paths = [path for path in tracked if "test" in Path(path).name.lower() and not path.startswith(".iron-forest/agents/")]
             self.inspect_files(test_paths)
             for path, lines in inspected.items():
                 boundary = next((index for index, line in enumerate(lines, 1) if line.strip() == "if not channel:"), None)

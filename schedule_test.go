@@ -508,9 +508,7 @@ func TestSchedulerPersistsAndClearsCauseSpecificErrors(t *testing.T) {
 		Checks: []Check{{Name: "test", Run: "true"}},
 	}
 	configData := "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder:\n    poll: poll\n    interval: 1\n  fixer:\n    poll: poll\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
-	if err := os.WriteFile(configPath(root), []byte(configData), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", configData)
 	scheduler := NewScheduler(root, cfg, nil)
 	scheduler.health["fixer"] = TriggerHealth{
 		Agent:      "fixer",

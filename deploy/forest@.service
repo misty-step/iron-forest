@@ -14,8 +14,8 @@ WorkingDirectory=@FOREST_ROOT@/%i
 # Required per-instance credentials and other private service environment.
 EnvironmentFile=%h/.config/iron-forest/%i.env
 PrivateTmp=yes
-ExecStartPre=@FOREST_ROOT@/%i/forest selfcheck
-ExecStart=@FOREST_ROOT@/%i/forest serve
+ExecStartPre=@FOREST_ROOT@/%i/.iron-forest/bin/forest selfcheck
+ExecStart=@FOREST_ROOT@/%i/.iron-forest/bin/forest serve
 Restart=always
 RestartSec=10
 # Signal only the Kernel first. It stops new dispatches and drains active Runs.
@@ -26,7 +26,7 @@ TimeoutStopSec=infinity
 # from the base directories. Selfcheck fails before ExecStart when a host cannot
 # dispatch.
 Environment=PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
-UnsetEnvironment=FOREST_DEFAULTS POWDER_AGENT POWDER_URL POWDER_API_BASE_URL POWDER_API_KEY
+UnsetEnvironment=POWDER_AGENT POWDER_URL POWDER_API_BASE_URL POWDER_API_KEY
 
 [Install]
 WantedBy=default.target

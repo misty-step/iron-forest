@@ -11,7 +11,7 @@ work, such as changing a prompt or check.
 
 ## Decision
 
-Iron Forest has no protected-path list. `forest.yaml`, `agents/`, and every
+Iron Forest has no protected-path list. `.iron-forest/config.yaml`, `.iron-forest/agents/`, and every
 other repository path may change in a Subject. The merge Gate uses independent
 review of the exact Revision, declared Checks, and repository Git rules instead
 of path names.

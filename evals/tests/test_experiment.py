@@ -23,14 +23,14 @@ import affected_role  # noqa: E402
 class AffectedRoleTest(unittest.TestCase):
     def test_single_agent_surface_targets_its_role(self):
         self.assertEqual(
-            affected_role.classify(["agents/verifier/agent.md", "agents/verifier/skills/review/SKILL.md"]),
+            affected_role.classify([".iron-forest/agents/verifier/agent.md", ".iron-forest/agents/verifier/skills/review/SKILL.md"]),
             "verifier",
         )
 
     def test_kernel_or_cross_role_change_uses_shared_sentinels(self):
         self.assertEqual(affected_role.classify(["runner.go"]), "shared")
         self.assertEqual(
-            affected_role.classify(["agents/builder/agent.md", "agents/verifier/agent.md"]),
+            affected_role.classify([".iron-forest/agents/builder/agent.md", ".iron-forest/agents/verifier/agent.md"]),
             "shared",
         )
 

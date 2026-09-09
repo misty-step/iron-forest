@@ -27,14 +27,16 @@ Their automatic intake polls are disabled.
 
 ## Quick start
 
-Create `forest.yaml` in the repository root:
+Create the repository-owned profile at `.iron-forest/config.yaml`:
 
 ```yaml
 repo: misty-step/iron-forest
+delivery: git-native
+required_tools: [gh, powder, trufflehog]
 agents:
-  builder:  { poll: "./forest poll builder",  interval: 300 }
-  verifier: { poll: "./forest poll verifier", interval: 120 }
-  fixer:    { poll: "./forest poll fixer",    interval: 300 }
+  builder:  { poll: "./.iron-forest/bin/forest poll builder",  interval: 300 }
+  verifier: { poll: "./.iron-forest/bin/forest poll verifier", interval: 120 }
+  fixer:    { poll: "./.iron-forest/bin/forest poll fixer",    interval: 300 }
 checks:
   - name: build
     run: mise exec -- go build ./...
@@ -49,9 +51,101 @@ active queue setup. Do not enable the legacy Builder tracker Poll for new
 work; use a current operator handoff. This guide does not authorize installing
 services or starting schedules.
 
+### One profile, explicit requests, persistent admission
+
+There is one supported layout. Config, defaults, secret-scan policy, declarations,
+and reviewed extensions are versioned together; credentials are not:
+
+```text
+.iron-forest/
+  config.yaml
+  defaults.yaml
+  secrets.yaml
+  agents/<name>/{agent.md,task.md}
+  extensions/                 # optional explicitly declared files
+  bin/forest                  # installed executable; ignored by Git
+  runtime/                    # Ledger, live Runs, logs, worktrees, admission
+```
+
+Neither root-level configuration/agents nor `.forest` are runtime inputs.
+`FOREST_DEFAULTS` does not override `.iron-forest/defaults.yaml`.
+
+For direct work, save a `forest.request.v1` JSON file:
+
+```json
+{
+  "schema": "forest.request.v1",
+  "id": "unique-request-id",
+  "prompt": "Implement only the attached operator request and report its evidence.",
+  "work": {
+    "system": "https://tracker.example",
+    "id": "immutable-item-id",
+    "key": "EX-9",
+    "url": "https://tracker.example/items/immutable-item-id"
+  }
+}
+```
+
+`work` is optional. Its `system` and `id` are required when present; `key` and
+`url` are optional display values. Kernel never resolves a tracker or infers an
+association from a title, branch, or current queue. One Run serves at most one
+primary work reference.
+
+```sh
+./.iron-forest/bin/forest admission show --json
+./.iron-forest/bin/forest once builder --request /path/to/request.json
+```
+
+An explicit `once` appends `prompt` to the standing task and bypasses both Poll
+and a scheduled request command. It still requires open admission and the
+exclusive Kernel lock: stop an existing scheduler before a foreground `once`.
+The request ID and work object survive preparation failure, Pi failure,
+cancellation, and interrupted-Run recovery in live evidence and the Ledger.
+The full request is retained as `runtime/runs/<run-id>.request.json`.
+
+A declaration may instead set `request: <shell command>` in `agent.md`
+frontmatter. After its configured Poll returns 0 and admission is reserved,
+Kernel allocates the Run ID and executes that command in the repository root
+with `FOREST_ROOT` and `FOREST_RUN_ID`. stdout must be one `forest.request.v1`
+object; stderr goes to the Run log. The command has the Poll command's 65-second
+bound. A clean exit 1 means selection raced to no work: no Pi process starts,
+`once` exits 1, and the reserved selection receipt is retained with `no_work: true`
+without becoming a successful or failed model Run in aggregate status. Other
+command errors, malformed output, timeouts, and cleanup failures are failed Runs,
+not hidden selection of another item. The profile, not Kernel, owns any external
+claim/link command and its tracker API.
+
+```sh
+./.iron-forest/bin/forest admission pause
+./.iron-forest/bin/forest admission drain
+./.iron-forest/bin/forest admission resume
+```
+
+Pause is instance-scoped, durable, and blocks scheduled and manual dispatch.
+It does not wait for active Runs, so a Run's own failure handler may safely pause
+admission before exiting. Only drain waits for the Run lifetime leases.
+Drain first pauses admission, then waits for already admitted Runs without
+cancelling them. It fences a Poll completing concurrently with pause and a Run
+reserved before its subprocess starts. Resume is refused while a drain command
+is active. Interrupting drain leaves the instance paused. The JSON read surface
+reports `paused`, `active_runs`, `active_count`, and `drained`; orphaned records
+without live subprocesses are reported separately as `interrupted_runs`.
+Drain does not promise to resume Pi sessions. A new Kernel fences and terminates
+verified orphan Run groups, records interrupted attribution once, and then
+cleans their worktrees.
+
+Choose one delivery authority in `config.yaml`: `delivery: git-native` (the
+default) retains native publication and Gate auditing; `delivery: external`
+refuses native publication and reports audit `last_result: not_applicable`
+with an explicit reason. External delivery is observed independently; it is
+never reported as a fabricated native pass or violation. External profiles may
+omit native `checks`. `required_tools` names additional profile dependencies;
+selfcheck always requires only the Kernel's `git` and `pi`, plus those explicitly
+declared tools.
+
 ### Repository-owned composition
 
-`forest.yaml` accepts arbitrary declaration names. The roster above is the
+`.iron-forest/config.yaml` accepts arbitrary declaration names. The roster above is the
 shipped opinionated profile, not a Kernel enum or a required workflow. Each
 managed repository may supply its own Polls, prompts, model, thinking level,
 Pi tool allowlists, shared skills, role skills, and Checks. One Kernel still
@@ -61,11 +155,12 @@ instances through their CLI read surfaces.
 Start each declaration with Pi's smallest useful tool set. A role can use an
 installed CLI such as `gh` or a browser driver only when `bash` is
 in that declaration's Pi tool allowlist and an explicit skill defines the CLI
-contract. Pi extensions are different: the Runner disables extension discovery,
-and declarations cannot yet select an extension path. Do not add an
-extension-provided tool name until the Runner
-has an explicit, inspectable extension input and the role proves one real
-scenario with it.
+contract. Pi extension discovery stays disabled. A declaration can opt into
+reviewed, versioned files with frontmatter such as
+`extensions: [.iron-forest/extensions/usage.ts]`. Paths must be normalized
+repository-relative files under `.iron-forest`, outside `runtime` and `bin`;
+symlinks are refused. Declaration and Run evidence expose paths and SHA-256
+digests. The bytes in the fetched Run worktree must match before Pi starts.
 
 Legacy tracker validation and reconciliation remain in Kernel code and old
 evaluation fixtures. They are not active work-selection instructions. A profile
@@ -77,7 +172,7 @@ agent; `0` or an omitted key leaves the Run unbounded:
 
 ```yaml
 agents:
-  fixer: { poll: "./forest poll fixer", interval: 300, max_duration: 3600 }
+  fixer: { poll: "./.iron-forest/bin/forest poll fixer", interval: 300, max_duration: 3600 }
 ```
 
 When `max_duration` is set, the Kernel's progress watchdog cancels a Run that
@@ -89,10 +184,10 @@ Declare each agent with two prompt files. Skills live only in an existing
 shared directory and, when a role needs private skills, its own directory:
 
 ```text
-agents/<name>/agent.md
-agents/<name>/task.md
-agents/_shared/skills/          # optional; every declaration
-agents/<name>/skills/           # optional; this declaration only
+.iron-forest/agents/<name>/agent.md
+.iron-forest/agents/<name>/task.md
+.iron-forest/agents/_shared/skills/          # optional; every declaration
+.iron-forest/agents/<name>/skills/           # optional; this declaration only
 ```
 
 Operator-supervised (org) skills live under `org-skills/`. They are not factory
@@ -104,28 +199,28 @@ Iron Forest ships the operator-facing
 explicitly to a supervised Pi or company-agent session that configures,
 operates, or observes one or more repository instances.
 
-`agent.md` uses YAML frontmatter with optional `model`, `tools`, and `thinking`,
-followed by the system prompt. `task.md` is the standing user prompt. `model`
-and `thinking` resolve through the declaration, then `forest.defaults.yaml` (or
-`$FOREST_DEFAULTS`), then — for `model` only — the built-in
+`agent.md` uses YAML frontmatter with optional `model`, `tools`, `thinking`,
+`request`, and `extensions`, followed by the system prompt. `task.md` is the
+standing user prompt. `model` and `thinking` resolve through the declaration,
+then `.iron-forest/defaults.yaml`, then — for `model` only — the built-in
 `openrouter/deepseek/deepseek-v4-pro-0813`. An empty or comment-only defaults
 file is the zero Defaults, not an error. `forest declaration show` publishes
 the resolved model and its source.
 
-Every Run gives Pi a new writable agent directory through
-`PI_CODING_AGENT_DIR`; no operator Pi state is inherited. For an OpenRouter
+Every Run gives Pi a new writable agent directory under `.iron-forest/runtime`
+through `PI_CODING_AGENT_DIR`; no operator Pi state is inherited. For an OpenRouter
 model, the Runner writes only a credential-free `models.json` override that
 enables Pi's OpenRouter session-affinity header. Pi extension, skill,
 prompt-template, and theme discovery are disabled with `--no-extensions`,
 `--no-skills`, `--no-prompt-templates`, and `--no-themes`. The Runner passes
-each existing skill source directory with an explicit `--skill`. Those paths
-are repository-relative and Pi resolves them from the Run worktree.
-Declaration and Run evidence publish the directories as `skills`.
+each existing skill source directory with an explicit `--skill` and each
+declared extension file with `--extension`. Paths resolve from the Run worktree.
+Declaration and Run evidence publish resolved resources and request provenance.
 
 Pi's exact session ID is the Run ID. The generated OpenRouter model override
 makes Pi send it as `x-session-id`, so Broadcast destinations can group every
 model request for a Run and correlate the provider trace directly with the
-Ledger and `.forest/runs/<run-id>.log`.
+Ledger and `.iron-forest/runtime/runs/<run-id>.log`.
 
 Credentials come only from the service environment inherited by the Run.
 Declaration frontmatter has no `env` field; unknown metadata fails validation.
@@ -145,10 +240,10 @@ To adopt an existing repository as a second-party deployment, follow the
 [onboarding guide](docs/onboarding-managed-repo.md) and finish these checks
 before handoff:
 
-1. Add `forest.yaml`, `agents/`, and `checks:` to the new repository; mirror
+1. Add `.iron-forest/config.yaml`, `.iron-forest/agents/`, and `checks:` to the new repository; mirror
    `checks:` in the new repository's CI.
 2. Build and validate locally:
-   `mise exec -- go build -o forest . && ./forest selfcheck`.
+   `mise exec -- go build -o .iron-forest/bin/forest . && ./.iron-forest/bin/forest selfcheck`.
 3. Install the service with `deploy/install-service.sh <sibling-directory-name>`
    (no argument in self-host mode).
    The retained self-host installer also enables
@@ -159,21 +254,21 @@ before handoff:
    [flywheel record](docs/production-flywheel.md) is historical, not setup policy.
 4. Verify the installed service is active without starting a second Kernel:
    `systemctl --user is-active forest@<sibling-directory-name>` (expect
-   `active`) and, from the managed checkout, `./forest status`.
+   `active`) and, from the managed checkout, `./.iron-forest/bin/forest status`.
 5. Record the deployment in the operator-owned inventory (Estate for Misty
    Step), with `identity`, `host`, `repo`, and the running revision from
-   `./forest version`. Do not maintain a deployment registry in a retired
+   `./.iron-forest/bin/forest version`. Do not maintain a deployment registry in a retired
    readiness document.
 6. Return external findings in the requested report with source repository,
    inspected revision, observed behavior, and verification evidence. Do not
    create speculative tickets.
 7. Confirm observability before rollout with the read surface. After the first
-   completed dispatch, run `./forest status` and `./forest audit show`. To force
+   completed dispatch, run `./.iron-forest/bin/forest status` and `./.iron-forest/bin/forest audit show`. To force
    a rescan, confirm the service is inactive first:
    `systemctl --user stop forest@<sibling-directory-name>`, then
-   `./forest audit show --rescan`, then
+   `./.iron-forest/bin/forest audit show --rescan`, then
    `systemctl --user start forest@<sibling-directory-name>`.
-8. Run `./forest doctor` and resolve every finding before declaring the
+8. Run `./.iron-forest/bin/forest doctor` and resolve every finding before declaring the
    deployment complete. It checks tool presence, `gh` auth, the credential file
    mode, read-only forge capability, and the OpenRouter key. Legacy tracker
    checks are implementation residue and do not authorize configuration.
@@ -181,11 +276,11 @@ before handoff:
 Build with the pinned toolchain and validate local configuration:
 
 ```sh
-mise exec -- go build -o forest .
-./forest selfcheck
+mise exec -- go build -o .iron-forest/bin/forest .
+./.iron-forest/bin/forest selfcheck
 ```
 
-`forest selfcheck` validates `forest.yaml` and declaration frontmatter locally.
+`forest selfcheck` validates `.iron-forest/config.yaml` and declaration frontmatter locally.
 The read-only Auditor runs after each completed agent dispatch. Starting the
 Kernel alone, or receiving only healthy Poll skips, does not audit the remote.
 
@@ -196,21 +291,33 @@ Adopt merged revisions with the fenced update procedure:
     deploy/install-service.sh update <instance>                  # self-host factory checkout
     deploy/install-service.sh update <instance> <factory-sha>    # sibling managed checkout
 
-For the self-host factory checkout, the script checks that the working tree is
-clean, stops the service (which stops new dispatches and drains live Runs),
-confirms the instance is inactive, fast-forwards the checkout to the remote
-primary, rebuilds, runs `./forest selfcheck`, verifies the installed binary
-reports the built `build_sha`, forces a fresh audit with
-`./forest audit show --rescan`, restarts the service, and verifies it is active.
+The script snapshots the current binary and profile into a unique transaction
+before touching the service. It never reads an unrelated `forest.prev`. It
+pauses/drains a current installation (or drains the old service during explicit
+adoption), stops it, acquires its Kernel lock, fast-forwards source, builds the
+profile-local executable, verifies `build_sha`, and runs selfcheck and a fresh
+audit. External delivery returns an explicit not-applicable audit. It refreshes
+the service executable path, restarts paused, verifies the receipt, and only
+then restores previously open admission. A fresh installation stays paused.
+Failure restores this transaction's source, binary, profile and unit; historical
+Run evidence is never replaced by a stale snapshot.
 For a sibling managed checkout, pass the exact factory Revision already adopted
 by the factory owner; the script verifies the factory checkout is clean and
 exactly at that Revision before it stops the consumer unit, then builds that
 Revision into the sibling. It never mutates the factory checkout. Never
 restart-only: the unit runs the checkout-local binary.
 
+For legacy adoption, the fetched revision must already move versioned config,
+policy, agent paths and executable callers to `.iron-forest`. The installer
+alone may move `.forest` to `.iron-forest/runtime`, preserving the Ledger and
+Run artifacts, and adopt a root-level defaults file when there is no competing
+profile defaults file. Competing old/new runtime or defaults directories fail
+closed rather than merge evidence. Review/remove obsolete credential-bearing
+legacy Pi profiles before adoption; they are not valid declaration inputs.
+
 Before `serve` or `once` loads trigger health, the Scheduler performs reserved
 garbage collection under the Kernel lock. One 30-second deadline bounds the
-total operation. It removes reserved `.forest/worktrees/<run-id>` paths through
+total operation. It removes reserved `.iron-forest/runtime/worktrees/<run-id>` paths through
 Runner cleanup and prunes their registry entries. One `update-ref` transaction
 removes private Runner, Poll, and Audit refs. It removes only known stale
 `audit.json`, `audit.log`, and `triggers.json` temps. The Ledger owns Ledger
@@ -220,7 +327,7 @@ Reserved garbage collection never resumes a Run.
 Start the Kernel:
 
 ```sh
-./forest serve
+./.iron-forest/bin/forest serve
 ```
 
 Use exactly one Kernel checkout and process per repository. Its OS lock rejects
@@ -240,11 +347,9 @@ reasoning or model execution.
 The user service receives
 `PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin`,
 loads operator-supplied credentials from
-`%h/.config/iron-forest/%i.env`, and unsets `FOREST_DEFAULTS`. It does not set
-`PI_CODING_AGENT_DIR`; the Runner owns that variable for each Run. Before
-restart, the installer stops the instance, removes timestamped legacy
-`.forest/profiles` residue, and runs selfcheck with the equivalent
-`$HOME`-expanded environment.
+`%h/.config/iron-forest/%i.env`. It does not set `PI_CODING_AGENT_DIR`; the
+Runner owns that variable for each Run. The installer runs selfcheck with the
+equivalent `$HOME`-expanded trusted PATH. Defaults come only from the profile.
 
 Protect the environment file as mode `0600`. The Runner selects the OpenRouter
 completion key for each Run from the instance environment:
@@ -353,7 +458,7 @@ approve Verdict for the same Revision, plus a fast-forward of `master` to that
 Revision. Before `forest publish verdict` runs the configured Checks, it
 validates the Builder or Fixer request, confirms the request branch still
 points to the Revision, requires every submitted result to pass, and requires
-the submitted names to equal the `forest.yaml` Check names at that Revision,
+the submitted names to equal the `.iron-forest/config.yaml` Check names at that Revision,
 in the same order.
 The credential scan is a Kernel-owned preflight (`forest scan-secrets` against
 the detached candidate worktree, resolved from the running Kernel binary and
@@ -416,7 +521,7 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest once <agent>` | Poll once, then dispatch that declaration only when the Poll exits 0. |
 | `forest poll <agent>` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`. |
 | `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, recent Runs, and Ledger aggregates. |
-| `forest selfcheck` | Validate `forest.yaml` and declarations locally. |
+| `forest selfcheck` | Validate `.iron-forest/config.yaml` and declarations locally. |
 | `forest config show` | Print the loaded configuration. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
 | `forest trigger list\|show <agent>` | Print resolved trigger state. |
@@ -597,7 +702,7 @@ allowlisted contender controls. It maps separate candidate, Judge, and
 Langfuse credentials into the runtime. Harbor and history artifacts remain
 under `evals/jobs/`, which is ignored by Git.
 
-The Ledger is `.forest/runs.jsonl`. Each row records Run identity (`run_id` and
+The Ledger is `.iron-forest/runtime/runs.jsonl`. Each row records Run identity (`run_id` and
 `agent`), timing (`started` and `duration`), `exit`, and exactly five retained
 token classes — `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
 `reasoning` — as operational observability, not accounting. The Ledger never

@@ -41,7 +41,7 @@ jobs:
           commit_time="$(git show -s --format=%cI HEAD)"
           dirty="false"
           if [ -n "$(git status --porcelain)" ]; then dirty="true"; fi
-          bin="$(mktemp -d)/forest"
+          bin=".iron-forest/bin/forest"
           mise exec -- go build -ldflags "-X main.buildSHA=$sha -X main.buildTime=$commit_time -X main.buildDirty=$dirty" -o "$bin" .
           "$bin" version | grep -Fx "build_sha: $sha"
       # Mirrors the Kernel-owned credential scan. The Gate itself runs the
@@ -50,9 +50,9 @@ jobs:
       # runs its scan-secrets command against the whole worktree (untracked
       # files included).
       - name: Build the forest scanner
-        run: mise exec -- go build -o /tmp/forest .
+        run: mise exec -- go build -o .iron-forest/bin/forest .
       - name: Scan for leaked credentials
-        run: /tmp/forest scan-secrets .
+        run: ./.iron-forest/bin/forest scan-secrets .
 
   eval-fast:
     runs-on: ubuntu-latest

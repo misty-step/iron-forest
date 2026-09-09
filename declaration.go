@@ -76,28 +76,37 @@ type Declaration struct {
 	ModelSource string `json:"model_source,omitempty"`
 	// SkillPaths lists the explicit repository-relative skill directories that
 	// Pi receives for this declaration.
-	SkillPaths []string `json:"skills"`
+	SkillPaths     []string          `json:"skills"`
+	ExtensionPaths []string          `json:"extensions"`
+	ExtensionSHA   map[string]string `json:"extension_sha,omitempty"`
+	RequestCommand string            `json:"request,omitempty"`
+	Request        *RunRequest       `json:"-"`
+	RunID          string            `json:"-"`
 	// DefinitionSHA is the digest over the ordered declaration pair (agent.md
 	// then task.md) as loaded. The Runner recomputes it immediately before exec
 	// so a run executes only the declaration bytes the Kernel loaded (see #144).
 	DefinitionSHA string `json:"definition_sha,omitempty"`
 	// MaxDuration is the optional per-declaration watchdog bound in seconds,
-	// copied from the agent's forest.yaml configuration. Zero means unbounded.
+	// copied from the agent's .iron-forest/config.yaml configuration. Zero means unbounded.
 	MaxDuration int `json:"max_duration,omitempty"`
 }
 
 type declarationFrontmatter struct {
-	Model    yamlString `yaml:"model"`
-	Tools    yaml.Node  `yaml:"tools"`
-	Thinking yaml.Node  `yaml:"thinking"`
+	Model      yamlString `yaml:"model"`
+	Tools      yaml.Node  `yaml:"tools"`
+	Thinking   yaml.Node  `yaml:"thinking"`
+	Extensions StringList `yaml:"extensions"`
+	Request    yamlString `yaml:"request"`
 }
 
-func declarationDir(root, name string) string { return filepath.Join(root, "agents", name) }
+func declarationDir(root, name string) string {
+	return filepath.Join(root, profileName, "agents", name)
+}
 
 func declarationSkillPaths(root, name string) ([]string, error) {
 	relativePaths := []string{
-		filepath.Join("agents", "_shared", "skills"),
-		filepath.Join("agents", name, "skills"),
+		filepath.Join(profileName, "agents", "_shared", "skills"),
+		filepath.Join(profileName, "agents", name, "skills"),
 	}
 	paths := make([]string, 0, len(relativePaths))
 	for _, relative := range relativePaths {
@@ -120,8 +129,8 @@ func declarationSkillPaths(root, name string) ([]string, error) {
 
 func validateDeclarationSkillPaths(root, name string, paths []string) error {
 	allowed := map[string]struct{}{
-		filepath.ToSlash(filepath.Join("agents", "_shared", "skills")): {},
-		filepath.ToSlash(filepath.Join("agents", name, "skills")):      {},
+		filepath.ToSlash(filepath.Join(profileName, "agents", "_shared", "skills")): {},
+		filepath.ToSlash(filepath.Join(profileName, "agents", name, "skills")):      {},
 	}
 	for _, relative := range paths {
 		normalized := filepath.ToSlash(filepath.Clean(relative))
@@ -239,17 +248,77 @@ func loadDeclarationWithDefaults(root, name string, defaults Defaults) (Declarat
 	if err != nil {
 		return Declaration{}, err
 	}
+	extensionSHA, err := declarationExtensionDigests(root, metadata.Extensions)
+	if err != nil {
+		return Declaration{}, fmt.Errorf("agent %s extensions: %w", name, err)
+	}
 	return Declaration{
-		Name:          name,
-		Model:         model,
-		Tools:         tools,
-		Thinking:      strings.TrimSpace(thinking),
-		SystemPrompt:  body,
-		TaskPrompt:    string(taskData),
-		ModelSource:   modelSource,
-		SkillPaths:    skillPaths,
-		DefinitionSHA: definitionSHA,
+		Name:           name,
+		Model:          model,
+		Tools:          tools,
+		Thinking:       strings.TrimSpace(thinking),
+		SystemPrompt:   body,
+		TaskPrompt:     string(taskData),
+		ModelSource:    modelSource,
+		SkillPaths:     skillPaths,
+		DefinitionSHA:  definitionSHA,
+		ExtensionPaths: append([]string{}, metadata.Extensions...),
+		ExtensionSHA:   extensionSHA,
+		RequestCommand: strings.TrimSpace(string(metadata.Request)),
 	}, nil
+}
+
+// Only reviewed profile files may be extensions. Reject symlinks at every path
+// component so an apparently repository-relative resource cannot escape it.
+func declarationExtensionDigests(root string, paths []string) (map[string]string, error) {
+	digests := make(map[string]string, len(paths))
+	for _, path := range paths {
+		if filepath.IsAbs(path) || filepath.ToSlash(filepath.Clean(path)) != path ||
+			!strings.HasPrefix(path, profileName+"/") ||
+			strings.HasPrefix(path, workspaceName+"/") || strings.HasPrefix(path, profileName+"/bin/") {
+			return nil, fmt.Errorf("extension must be a normalized profile-relative file: %q", path)
+		}
+		if _, duplicate := digests[path]; duplicate {
+			return nil, fmt.Errorf("duplicate extension %q", path)
+		}
+		current := root
+		parts := strings.Split(path, "/")
+		for i, component := range parts {
+			current = filepath.Join(current, component)
+			info, err := os.Lstat(current)
+			if err != nil {
+				return nil, err
+			}
+			if info.Mode()&os.ModeSymlink != 0 || (i < len(parts)-1 && !info.IsDir()) ||
+				(i == len(parts)-1 && !info.Mode().IsRegular()) {
+				return nil, fmt.Errorf("extension path is not a regular profile file: %q", path)
+			}
+		}
+		file, err := os.Open(current)
+		if err != nil {
+			return nil, err
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, file)
+		if err := errors.Join(copyErr, file.Close()); err != nil {
+			return nil, err
+		}
+		digests[path] = hex.EncodeToString(hash.Sum(nil))
+	}
+	return digests, nil
+}
+
+func verifyDeclarationExtensions(root string, declaration Declaration) error {
+	digests, err := declarationExtensionDigests(root, declaration.ExtensionPaths)
+	if err != nil {
+		return err
+	}
+	for path, digest := range digests {
+		if declaration.ExtensionSHA[path] != digest {
+			return fmt.Errorf("extension %s changed since load", path)
+		}
+	}
+	return nil
 }
 
 // declarationPairDigest fingerprints the ordered declaration pair: the bytes of

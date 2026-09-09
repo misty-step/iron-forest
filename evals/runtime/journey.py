@@ -17,8 +17,8 @@ from reference import run_reference
 ROOT = Path("/workspace")
 ORIGIN = Path("/origin.git")
 RUNTIME = Path(__file__).resolve().parent
-LIVE = ROOT / ".forest/runs/live-verifier.json"
-LEDGER = ROOT / ".forest/runs.jsonl"
+LIVE = ROOT / ".iron-forest/runtime/runs/live-verifier.json"
+LEDGER = ROOT / ".iron-forest/runtime/runs.jsonl"
 
 
 def require(condition: bool, message: str) -> None:
@@ -56,7 +56,7 @@ def record_phase(report: dict, name: str, before: int, completed: subprocess.Com
              "stdout": completed.stdout, "stderr": completed.stderr, "refs": refs()}
     report["phases"].append(phase)
     for row in observed:
-        log_path = ROOT / ".forest/runs" / f"{row['run_id']}.log"
+        log_path = ROOT / ".iron-forest/runtime/runs" / f"{row['run_id']}.log"
         log = log_path.read_text()
         row["log_sha256"] = hashlib.sha256(log.encode()).hexdigest()
         row["log"] = log
@@ -103,7 +103,7 @@ def interrupt_verifier(report: dict, scenario: dict, state: dict) -> str:
         require(refs() == before_refs, "paused Verifier changed refs before publication")
         forest = pwd.getpwnam("forest")
         cancellation = subprocess.run(
-            ["/usr/local/bin/forest", "run", "cancel", paused_run["run_id"], "--root", str(ROOT), "--json"],
+            [str(ROOT / ".iron-forest/bin/forest"), "run", "cancel", paused_run["run_id"], "--root", str(ROOT), "--json"],
             user=forest.pw_uid, group=forest.pw_gid, extra_groups=[],
             text=True, capture_output=True, check=False,
         )
@@ -139,7 +139,7 @@ def main() -> int:
         require(os.geteuid() == 0 and RUNTIME == Path("/opt/iron-forest-eval") and Path("/.dockerenv").is_file(),
                 "journey must run as root inside the evaluation Docker image")
         # Fixture setup replaces /workspace; do not leave our current directory
-        # pointing at its removed inode, or query Forest before forest.yaml exists.
+        # pointing at its removed inode, or query Forest before .iron-forest/config.yaml exists.
         os.chdir("/")
         scenario = {
             "id": "explicit-request-interrupted-delivery",
@@ -158,7 +158,7 @@ def main() -> int:
         require(setup.returncode == 0, f"journey fixture setup failed: {setup.stderr}")
         os.chdir(ROOT)
         state = json.loads(STATE.read_text())
-        version = subprocess.run(["/usr/local/bin/forest", "version", "--json"], text=True, capture_output=True, check=True)
+        version = subprocess.run([str(ROOT / ".iron-forest/bin/forest"), "version", "--json"], text=True, capture_output=True, check=True)
         report["forest_version"] = json.loads(version.stdout)
         report["pi_version"] = subprocess.run(["/usr/local/bin/pi", "--version"], text=True, capture_output=True, check=True).stdout.strip()
         scanner = subprocess.run(["/usr/local/bin/trufflehog", "--version"], text=True, capture_output=True, check=True)
