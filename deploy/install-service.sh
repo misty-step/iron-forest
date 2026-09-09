@@ -275,7 +275,6 @@ if [ "$target" = "$factory" ]; then
 	sed -e "s|@FOREST_ROOT@|$root|g" "$here/forest-eval-flywheel@.service" > "$flywheel_service"
 	cp "$here/forest-eval-flywheel@.timer" "$flywheel_timer"
 	systemctl --user daemon-reload
-	systemctl --user enable --now "forest-eval-flywheel@$name.timer"
 fi
 if [ "$mode" = update ]; then echo "$(basename "$0"): updated forest@$name"; else echo "$(basename "$0"): installed forest@$name (paused)"; fi
 echo "  profile: $target/.iron-forest (source $sha; prior paused=$prior_paused)"
