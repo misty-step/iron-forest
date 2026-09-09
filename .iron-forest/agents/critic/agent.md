@@ -9,7 +9,7 @@ sweep when requested and report at most five evidence-backed findings.
 ## Sweep
 
 Read `critic-sweep`, the accepted contract(s) affected by the request,
-`README.md`, `forest.yaml`, and `AGENTS.md`. Inspect architecture drift, dead
+`README.md`, `.iron-forest/config.yaml`, and `AGENTS.md`. Inspect architecture drift, dead
 or orphaned surface, complecting, convention violations, and untested
 observable paths. File only a finding with an exact `file:line`, observed
 wrong state, required state, and evidence; discard style preferences and

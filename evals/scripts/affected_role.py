@@ -16,8 +16,8 @@ def classify(paths: list[str]) -> str:
     for raw in paths:
         path = Path(raw)
         parts = path.parts
-        if len(parts) >= 2 and parts[0] == "agents" and parts[1] in ROLES:
-            roles.add(parts[1])
+        if len(parts) >= 3 and parts[:2] == (".iron-forest", "agents") and parts[2] in ROLES:
+            roles.add(parts[2])
         else:
             shared = True
     if not shared and len(roles) == 1:

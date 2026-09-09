@@ -13,14 +13,15 @@ coordinate multiple repository instances.
 
 ## Orient
 
-Resolve the managed repository and read `README.md`, `forest.yaml`, and the relevant declaration under `agents/<name>/`. Run the CLI read surfaces before inferring state:
+Resolve the managed repository and read `README.md`, `.iron-forest/config.yaml`, and the relevant declaration under `.iron-forest/agents/<name>/`. Run the CLI read surfaces before inferring state:
 
 ```sh
-forest version --json
-forest config show --json
-forest declaration list --json
-forest status --json
-forest audit show --json
+./.iron-forest/bin/forest version --json
+./.iron-forest/bin/forest config show --json
+./.iron-forest/bin/forest declaration list --json
+./.iron-forest/bin/forest status --json
+./.iron-forest/bin/forest admission show --json
+./.iron-forest/bin/forest audit show --json
 ```
 
 Use `forest declaration show <name> --json`, `forest run list --json`, and `forest run show <id> --json` only for the declaration or Run that can change the decision. Treat Git evidence as authority and CLI output as the supported operational projection.
@@ -31,12 +32,14 @@ Done when the repository, Kernel revision, configured roster, active or failed R
 
 Keep the Kernel generic. Configure each role through:
 
-- `forest.yaml`: arbitrary declaration name, executable Poll, interval, optional `max_duration`;
-- `agents/<name>/agent.md`: system prompt plus model, thinking, and Pi tool allowlist;
-- `agents/<name>/task.md`: standing task;
-- `agents/_shared/skills/`: skills every declaration receives when present;
-- `agents/<name>/skills/`: skills only that declaration receives when present;
+- `.iron-forest/config.yaml`: declaration Polls/intervals, optional `max_duration`, one `delivery` authority, and explicit `required_tools`;
+- `.iron-forest/agents/<name>/agent.md`: system prompt, model, thinking, tool allowlist, optional scheduled `request` command and explicit `extensions`;
+- `.iron-forest/agents/<name>/task.md`: standing task;
+- `.iron-forest/agents/_shared/skills/`: skills every declaration receives when present;
+- `.iron-forest/agents/<name>/skills/`: skills only that declaration receives when present;
 - `checks:`: deterministic exact-revision gates.
+- `.iron-forest/defaults.yaml` and `.iron-forest/secrets.yaml`: instance defaults and narrow scanner policy;
+- `.iron-forest/bin/forest` and `.iron-forest/runtime`: the installed executable and persistent instance evidence.
 
 Start with Pi's smallest useful tool set. Add a CLI through `bash` plus an explicit skill when that is sufficient. Add a Pi extension only through an accepted, inspectable declaration input; ambient Pi extensions are disabled. Keep credentials in the instance service environment, never in configuration, prompts, skills, or commits.
 
@@ -54,7 +57,15 @@ Done when `forest selfcheck`, `forest config show`, and every affected `forest d
 
 ## Operate
 
-Use `forest once <name>` for one supervised dispatch. Use `forest run logs`, `forest run cancel`, trigger controls, and the sanctioned deployment procedure shown by `forest --help` and the repository runbook. Diagnose a failed Run from its retained log, exact declaration digest, revision, and Audit state before changing configuration.
+Use `forest once <name> --request <file>` for one explicitly authorized supervised
+dispatch from a `forest.request.v1` envelope; `work.system` and `work.id` preserve
+an optional immutable association without giving Kernel a tracker API. Stop an
+existing scheduler before `once`; both respect persistent admission. Use
+`forest admission pause|drain|resume` to control new dispatch, and `forest run
+cancel` only to cancel a particular Run. Drain does not cancel or resume Pi
+sessions. `delivery: external` refuses native publication and reports native
+audit as not applicable, not as a pass. Diagnose failed or interrupted Runs from
+their retained request, log, Ledger, and resolved resource digests.
 
 For several repositories, keep each Kernel independent. An external manager may collect their JSON read surfaces, groom each repository's work source, and propose profile changes. It does not create a cross-repository Kernel, shared coordination store, or hidden policy path.
 

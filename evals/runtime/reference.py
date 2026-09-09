@@ -80,7 +80,7 @@ def run_reference(scenario: dict, state: dict) -> subprocess.CompletedProcess[st
         # Do not supply a Run ID, worktree, identity, or live marker. Runner owns
         # all of them, including cleanup on failed publication and no-work paths.
         with subprocess.Popen(
-            ["/usr/local/bin/forest", "once", role],
+            [str(WORKSPACE / ".iron-forest/bin/forest"), "once", role, "--request", "/run/forest-eval/run-request.json"],
             cwd=WORKSPACE,
             env=environment,
             user=forest.pw_uid,

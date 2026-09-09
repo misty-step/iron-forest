@@ -34,7 +34,7 @@ invent refs, retry loops, or force flags.
    expected result before editing; preserve other agents' changes.
 3. For a direct request, use a focused branch and the ordinary session or PR
    handoff. Report checks, result, and unresolved work without a new ticket.
-4. For an explicitly requested Forest run, read `forest.yaml`. A present
+4. For an explicitly requested Forest run, read `.iron-forest/config.yaml`. A present
    `scope.subjects` list remains an allowlist. Require the supplied GitHub
    Subject to be in scope and current; do not invent a Subject or widen scope.
 5. Fetch `origin` immediately before branching and create the branch from the
@@ -44,7 +44,7 @@ invent refs, retry loops, or force flags.
 ## Implement and publish
 
 Read the current request and repository conventions, implement the specified
-behavior, and run every command in `forest.yaml` `checks:`. A failed Check ends
+behavior, and run every command in `.iron-forest/config.yaml` `checks:`. A failed Check ends
 the attempt: make no commit, review request, or PR; report the failed check and
 remaining work.
 
@@ -52,7 +52,7 @@ For a passing attempt, commit the change, write a request payload outside the
 repository, and call only:
 
 ```sh
-forest publish review-request builder "$branch" "$payload_file"
+"$FOREST_ROOT/.iron-forest/bin/forest" publish review-request builder "$branch" "$payload_file"
 ```
 
 The Kernel owns the write-once evidence ref and atomic branch update; use the

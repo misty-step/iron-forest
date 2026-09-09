@@ -85,6 +85,9 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err != nil {
 		return publishVerdictResult{}, fmt.Errorf("resolve publication checkout: %w", err)
 	}
+	if err := requireNativeDelivery(runRoot); err != nil {
+		return publishVerdictResult{}, err
+	}
 	if err := requireVerdictRun(runRoot, input.RunID); err != nil {
 		return publishVerdictResult{}, err
 	}
@@ -212,6 +215,9 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	// Checks can outlive their owning Run. Never publish after that owner ends
 	// or is replaced, even if every candidate check passed.
 	if err := requireVerdictRun(runRoot, input.RunID); err != nil {
+		return publishVerdictResult{}, err
+	}
+	if err := requireNativeDelivery(runRoot); err != nil {
 		return publishVerdictResult{}, err
 	}
 	if err := gitRun(ctx, input.Root, args...); err != nil {

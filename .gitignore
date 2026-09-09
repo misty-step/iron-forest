@@ -1,10 +1,13 @@
 # Go build output
 /forest
 /forest.prev
+/.iron-forest/bin/
 /dist/
 *.test
 
 # forest workspace (per-Run worktrees, Ledger, Run logs)
+/.iron-forest/runtime/
+# Pre-adoption evidence is never read by the Kernel.
 /.forest/
 /.omp/
 

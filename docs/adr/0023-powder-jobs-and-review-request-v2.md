@@ -46,7 +46,7 @@ Builder Poll lists GitHub Issues and Powder candidates and asks one question:
 does this repository have an unclaimed Subject?
 
 - an open `forest:ready` Issue with no `forest/<n>/*` branch; or
-- a takeable Powder job for `forest.yaml` `repo`, or an audit-matched live job
+- a takeable Powder job for `.iron-forest/config.yaml` `repo`, or an audit-matched live job
   whose private local claim succeeds through `powder take`, with no
   `forest/<id>/*` branch.
 

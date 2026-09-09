@@ -23,10 +23,8 @@ agents:
 checks:
   - {name: test, run: "true"}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, root, "add", "forest.yaml")
+	writeTree(t, root, profileName+"/config.yaml", string(config))
+	runGitDir(t, root, "add", ".iron-forest/config.yaml")
 	runGitDir(t, root, "commit", "-m", "passing checks")
 
 }
@@ -227,9 +225,7 @@ func TestPublishReviewRequestAcceptsIdenticalRequest(t *testing.T) {
 
 func TestPublishReviewRequestRefusesFailedCheck(t *testing.T) {
 	root, _ := testClone(t)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"false\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", "repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"false\"}\n")
 	runGitDir(t, root, "commit", "-am", "failing check")
 
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
@@ -268,10 +264,8 @@ agents:
 checks:
   - {name: test, run: "true"}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, root, "add", "forest.yaml", "scansecrets.go", "fixture.txt")
+	writeTree(t, root, profileName+"/config.yaml", string(config))
+	runGitDir(t, root, "add", ".iron-forest/config.yaml", "scansecrets.go", "fixture.txt")
 	runGitDir(t, root, "commit", "-m", "candidate neutered scanner and planted fixture")
 	runGitDir(t, root, "checkout", "-b", "forest/1/ready")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
@@ -714,9 +708,7 @@ func TestPublishReviewRequestRefusesRepositorySh(t *testing.T) {
 
 func TestPublishReviewRequestIgnoresRepositoryGo(t *testing.T) {
 	root, _ := testClone(t)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"go planted\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", "repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"go planted\"}\n")
 	runGitDir(t, root, "commit", "-am", "check uses go")
 	if err := os.WriteFile(filepath.Join(root, "go"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -740,9 +732,7 @@ agents:
 checks:
   - {name: test, run: "grep -qx dirty file"}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", string(config))
 	runGitDir(t, root, "commit", "-am", "check requires dirty file")
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -762,9 +752,7 @@ func TestPublishReviewRequestKeepsCapturedPayloadIfCheckRewritesFile(t *testing.
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	payload := writeReviewPayload(t, root, revision, "forest/1/ready")
 	config := "repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"printf TAMPERED > " + payload + "\"}\n"
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(config), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", config)
 	runGitDir(t, root, "commit", "-am", "check rewrites payload")
 	revision = strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	original := []byte(`{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/ready","revision":"` + revision + `","time":"2026-08-15T00:00:00Z","tracker":"github"}` + "\n")
@@ -789,9 +777,7 @@ func TestPublishReviewRequestKeepsCapturedPayloadIfCheckRewritesFile(t *testing.
 }
 func TestPublishReviewRequestCleansCanceledCheckWorktree(t *testing.T) {
 	root, _ := testClone(t)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"sleep 30\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", "repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"sleep 30\"}\n")
 	runGitDir(t, root, "commit", "-am", "slow check")
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -884,9 +870,7 @@ func TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary(t *testing.T) {
 		os.Exit(0)
 	}
 	primary, _ := testClone(t)
-	if err := os.WriteFile(filepath.Join(primary, "forest.yaml"), []byte("repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"sleep 30\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, primary, profileName+"/config.yaml", "repo: owner/name\nagents:\n  builder: {poll: \"true\", interval: 1}\nchecks:\n  - {name: test, run: \"sleep 30\"}\n")
 	runGitDir(t, primary, "commit", "-am", "slow check")
 	linked := filepath.Join(t.TempDir(), "1786820000000000002-builder")
 	runGitDir(t, primary, "worktree", "add", "--detach", linked, "HEAD")
@@ -1094,9 +1078,7 @@ checks:
       ` + command + `
       printf complete > "$FOREST_TEST_CHECK_COMPLETE"
 `
-			if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(config), 0o644); err != nil {
-				t.Fatal(err)
-			}
+			writeTree(t, root, profileName+"/config.yaml", config)
 			runGitDir(t, root, "commit", "-am", "change Run ownership during checks")
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			request := reviewRequestJSON("1", revision, "github")

@@ -10,7 +10,7 @@
 Use this template when filing a Powder job so the spec carries everything a
 Builder and Verifier need. Replace each placeholder and delete optional sections
 rather than leaving placeholders in the filed job. Read the
-[`forest:ready` contract](../forest-ready-contract.md) for the meaning of each
+[`forest:ready` contract](../.iron-forest/bin/forest-ready-contract.md) for the meaning of each
 section.
 
 ## External draft note

@@ -26,7 +26,7 @@ evals, not inferred from elapsed time.
 
 Agent Runs have no configured or implicit wall-clock deadline.
 
-`forest.yaml` agents declare their Poll command and Poll interval. The
+`.iron-forest/config.yaml` agents declare their Poll command and Poll interval. The
 removed `timeout` key is rejected as unknown configuration rather than retained
 as a compatibility alias. An optional per-declaration `max_duration` watchdog
 bound may be set; it defaults off and is documented in the amendment below. The
@@ -67,7 +67,7 @@ agent reasoning or model execution.
 
 The no-deadline decision remains the default. A repository may opt one
 declaration back into a wall-clock bound for liveness by setting the optional
-`max_duration` key (seconds) under that agent in `forest.yaml`. Zero or an
+`max_duration` key (seconds) under that agent in `.iron-forest/config.yaml`. Zero or an
 omitted key leaves the Run unbounded.
 
 When set, the Kernel's progress watchdog cancels a Run that exceeds the bound.

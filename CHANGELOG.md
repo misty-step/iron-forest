@@ -1,3 +1,19 @@
+## Unreleased
+
+### Features
+
+* Unify the versioned profile, installed binary and runtime beneath `.iron-forest`.
+* Add explicit Run requests, immutable work attribution, profile-owned scheduled
+  request commands, and reviewed extension paths with resolved digests.
+* Add persistent admission show/pause/resume/drain and interrupted-Run evidence.
+* Add external delivery authority with native-publication refusal and explicitly
+  not-applicable audit; selfcheck resolves only declared capabilities.
+
+### Bug Fixes
+
+* Keep update recovery transaction-local; preserve historical evidence across
+  explicit adoption and restore coherent source, binary, profile and service state.
+
 ## [0.0.15](https://github.com/misty-step/iron-forest/compare/v0.0.14...v0.0.15) (2026-09-08)
 
 

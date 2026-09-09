@@ -520,7 +520,7 @@ func TestRunCLISelfcheckRejectsWhitespaceSystemPrompt(t *testing.T) {
 	root := t.TempDir()
 	writeTestDeclaration(t, root, "builder")
 	writeCLIConfig(t, root, "poll")
-	agentPath := filepath.Join(root, "agents", "builder", "agent.md")
+	agentPath := filepath.Join(root, ".iron-forest/agents", "builder", "agent.md")
 	if err := os.WriteFile(agentPath, []byte("---\nmodel: local\n---\n \n\t\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -557,9 +557,7 @@ func TestSelfcheckRejectsRepositoryToolPath(t *testing.T) {
 func writeCLIConfig(t *testing.T, root, poll string) {
 	t.Helper()
 	config := "repo: owner/name\nprimary: refs/heads/master\nagents:\n  builder:\n    poll: " + poll + "\n    interval: 1\nchecks:\n  - name: test\n    run: \"true\"\n"
-	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", config)
 }
 
 func waitForCLIFile(t *testing.T, path string) {

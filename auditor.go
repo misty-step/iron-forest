@@ -24,6 +24,7 @@ type AuditState struct {
 	LastAt        string   `json:"last_at"`
 	LastResult    string   `json:"last_result"`
 	Violations    []string `json:"violations"`
+	Reason        string   `json:"reason,omitempty"`
 }
 
 type auditSnapshot struct {
@@ -46,9 +47,10 @@ const (
 )
 
 type AuditResult struct {
-	Master     string
-	Advanced   bool
-	Violations []string
+	Master        string
+	Advanced      bool
+	Violations    []string
+	NotApplicable bool
 }
 
 type auditDependencies struct {
@@ -67,6 +69,13 @@ func auditStatePath(root string) string { return forestPath(root, "audit.json") 
 func auditLogPath(root string) string   { return forestPath(root, "audit.log") }
 
 func audit(ctx context.Context, root string) (AuditResult, error) {
+	cfg, err := loadConfig(configPath(root))
+	if err != nil {
+		return AuditResult{}, err
+	}
+	if cfg.Delivery == "external" {
+		return AuditResult{NotApplicable: true}, nil
+	}
 	return auditWithDependencies(ctx, root, defaultAuditDependencies())
 }
 
@@ -99,11 +108,11 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 			return AuditResult{}, err
 		}
 	}
-	configData, err := deps.runGit(ctx, root, "show", master+":forest.yaml")
+	configData, err := deps.runGit(ctx, root, "show", master+":.iron-forest/config.yaml")
 	if err != nil {
-		return AuditResult{}, fmt.Errorf("read forest.yaml at %s: %w", master, err)
+		return AuditResult{}, fmt.Errorf("read .iron-forest/config.yaml at %s: %w", master, err)
 	}
-	cfg, err := decodeConfig(configData, master+":forest.yaml")
+	cfg, err := decodeConfig(configData, master+":.iron-forest/config.yaml")
 	if err != nil {
 		return AuditResult{}, err
 	}
@@ -177,7 +186,7 @@ func auditWithDependencies(ctx context.Context, root string, deps auditDependenc
 
 func ensureAuditWorkspace(root string, deps auditDependencies) error {
 	path := filepath.Join(root, workspaceName)
-	if err := os.Mkdir(path, 0o755); err != nil {
+	if err := os.MkdirAll(path, 0o755); err != nil {
 		if !os.IsExist(err) {
 			return err
 		}
@@ -219,6 +228,18 @@ func readAuditState(root string) (AuditState, error) {
 		state.Violations = []string{}
 	}
 	return state, nil
+}
+
+func externalAuditState() AuditState {
+	return AuditState{LastResult: "not_applicable", Violations: []string{},
+		Reason: "delivery is external; the Kernel does not audit or publish primary delivery"}
+}
+
+func configuredAuditState(root string, cfg Config) (AuditState, error) {
+	if cfg.Delivery == "external" {
+		return externalAuditState(), nil
+	}
+	return readAuditState(root)
 }
 
 func writeAuditState(root string, state AuditState, deps auditDependencies) error {

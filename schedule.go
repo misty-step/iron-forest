@@ -99,6 +99,10 @@ func NewScheduler(root string, cfg Config, runner *Runner) *Scheduler {
 		return s
 	}
 	if runner != nil {
+		if err := recoverInterruptedRuns(root); err != nil {
+			s.startupErr = fmt.Errorf("recover interrupted Runs: %w", err)
+			return s
+		}
 		s.Run = runner.Run
 		if err := cleanupReservedResidue(root, runner); err != nil {
 			s.startupErr = fmt.Errorf("reserved garbage collection: %w", err)
@@ -131,7 +135,7 @@ func NewScheduler(root string, cfg Config, runner *Runner) *Scheduler {
 }
 
 func (s *Scheduler) Tick(ctx context.Context, agent string) (bool, error) {
-	declaration, run, claimed, err := s.claimRun(ctx, agent)
+	declaration, run, claimed, err := s.claimRun(ctx, agent, nil)
 	if err != nil || !claimed {
 		return false, err
 	}
@@ -147,7 +151,11 @@ func (s *Scheduler) Tick(ctx context.Context, agent string) (bool, error) {
 }
 
 func (s *Scheduler) Once(ctx context.Context, agent string) (bool, error) {
-	declaration, run, claimed, err := s.claimRun(ctx, agent)
+	return s.OnceRequest(ctx, agent, nil)
+}
+
+func (s *Scheduler) OnceRequest(ctx context.Context, agent string, request *RunRequest) (bool, error) {
+	declaration, run, claimed, err := s.claimRun(ctx, agent, request)
 	if err != nil || !claimed {
 		return false, err
 	}
@@ -155,13 +163,26 @@ func (s *Scheduler) Once(ctx context.Context, agent string) (bool, error) {
 	if err := s.completeRun(agent, record, runErr); err != nil && runErr == nil {
 		runErr = err
 	}
+	if record.NoWork && runErr == nil {
+		return false, nil
+	}
 	return true, runErr
 }
 
-func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, func(context.Context, Declaration) (RunRecord, error), bool, error) {
+func (s *Scheduler) claimRun(ctx context.Context, agent string, request *RunRequest) (Declaration, func(context.Context, Declaration) (RunRecord, error), bool, error) {
 	cfg, ok := s.Config.Agents[agent]
 	if !ok {
 		return Declaration{}, nil, false, fmt.Errorf("agent %q is not configured", agent)
+	}
+	admission, err := readAdmission(s.Root)
+	if err != nil {
+		return Declaration{}, nil, false, err
+	}
+	if admission.Paused {
+		if request != nil {
+			return Declaration{}, nil, false, errAdmissionPaused
+		}
+		return Declaration{}, nil, false, nil
 	}
 	s.mu.Lock()
 	if s.startupErr != nil {
@@ -178,7 +199,7 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 		return Declaration{}, nil, false, nil
 	}
 	poll := s.Poll
-	if poll == nil {
+	if poll == nil && request == nil {
 		s.mu.Unlock()
 		return Declaration{}, nil, false, fmt.Errorf("poller is not configured")
 	}
@@ -193,7 +214,10 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 		}
 	}()
 
-	result := poll(ctx, cfg.Poll)
+	result := PollResult{}
+	if request == nil {
+		result = poll(ctx, cfg.Poll)
+	}
 	s.mu.Lock()
 	health := s.health[agent]
 	health.Agent = agent
@@ -229,6 +253,10 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 		return Declaration{}, nil, false, err
 	}
 	declaration.MaxDuration = cfg.MaxDuration
+	declaration.Request = request
+	if request != nil {
+		declaration.RequestCommand = ""
+	}
 
 	s.mu.Lock()
 	if err := ctx.Err(); err != nil {
@@ -240,6 +268,19 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 		s.mu.Unlock()
 		return Declaration{}, nil, false, fmt.Errorf("runner is not configured")
 	}
+	started := time.Now().UTC()
+	declaration.RunID = newRunID(agent, started)
+	reservation := RunRecord{RunID: declaration.RunID, Agent: agent, Started: started.Format(time.RFC3339Nano),
+		DefinitionSHA: declaration.DefinitionSHA, ExtensionSHA: declaration.ExtensionSHA}
+	attachRunRequest(&reservation, request)
+	active, err := reserveRunAdmission(s.Root, reservation)
+	if err != nil {
+		s.mu.Unlock()
+		if errors.Is(err, errAdmissionPaused) && request == nil {
+			return Declaration{}, nil, false, nil
+		}
+		return Declaration{}, nil, false, err
+	}
 	health = s.health[agent]
 	health.Agent = agent
 	health.Running = true
@@ -248,17 +289,28 @@ func (s *Scheduler) claimRun(ctx context.Context, agent string) (Declaration, fu
 		health.Running = false
 		s.health[agent] = health
 		s.mu.Unlock()
+		_ = os.Remove(liveRunPath(s.Root, agent))
+		_ = active.Close()
 		return Declaration{}, nil, false, fmt.Errorf("persist running state: %w", err)
 	}
 	runStarted = true
 	s.mu.Unlock()
-	return declaration, run, true, nil
+	return declaration, func(ctx context.Context, declaration Declaration) (RunRecord, error) {
+		defer active.Close()
+		return run(ctx, declaration)
+	}, true, nil
 }
 
 func (s *Scheduler) completeRun(agent string, record RunRecord, runErr error) error {
 	s.mu.Lock()
 	delete(s.inFlight, agent)
 	defer s.mu.Unlock()
+	if record.NoWork && runErr == nil {
+		health := s.health[agent]
+		health.Running = false
+		s.health[agent] = health
+		return s.saveHealthLocked()
+	}
 	auditCtx, cancel := context.WithTimeout(context.Background(), auditTimeout)
 	auditMessage := auditSummary(auditCtx, s.Root)
 	cancel()

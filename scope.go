@@ -142,7 +142,7 @@ type scopeYAML struct {
 }
 
 // UnmarshalYAML decodes the scope mapping with the same strict scalar rules as
-// the rest of forest.yaml while naming the scope field on every failure, so a
+// the rest of .iron-forest/config.yaml while naming the scope field on every failure, so a
 // malformed scope is reported as a scope problem rather than a generic parse
 // error.
 func (s *scopeYAML) UnmarshalYAML(value *yaml.Node) error {

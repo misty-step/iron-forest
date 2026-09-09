@@ -174,7 +174,7 @@ class GradingBoundaryTest(unittest.TestCase):
         }
 
     def write_trace(self, events: list[dict]) -> None:
-        runs = self.workspace / ".forest" / "runs"
+        runs = self.workspace / ".iron-forest/runtime" / "runs"
         runs.mkdir(parents=True, exist_ok=True)
         (runs / "fixture.log").write_text("".join(json.dumps(event) + "\n" for event in events))
 
@@ -315,7 +315,7 @@ class GradingBoundaryTest(unittest.TestCase):
     def test_read_only_findings_reject_surviving_local_commits(self) -> None:
         self.scenario.update(role="critic", effect="critic_findings")
         self.state["request"] = {"instructions": "Review the value-handling surface without editing it."}
-        (self.workspace / ".git" / "info" / "exclude").write_text(".forest/\n")
+        (self.workspace / ".git" / "info" / "exclude").write_text(".iron-forest/runtime/\n")
         self.write_trace([{
             "type": "message_end",
             "message": {

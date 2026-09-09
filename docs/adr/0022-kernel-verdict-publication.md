@@ -42,7 +42,7 @@ publication.
 - `changes`: one atomic push of the two refs. `master` does not move.
 - `approve`: fetch and validate the Builder or Fixer request, require its
   branch tip to equal the Revision, require every submitted Checks result to
-  pass, and require the submitted names to equal the `forest.yaml` Check names
+  pass, and require the submitted names to equal the `.iron-forest/config.yaml` Check names
   at that Revision in the same order. Run the Kernel-owned credential scan and
   those configured Checks, then make one atomic push of the Checks and Verdict
   refs plus `sha:refs/heads/master`. The validated request OID participates as

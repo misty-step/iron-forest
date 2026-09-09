@@ -44,23 +44,29 @@ type Usage struct {
 }
 
 type RunRecord struct {
-	RunID      string  `json:"run_id"`
-	Agent      string  `json:"agent"`
-	Started    string  `json:"started"`
-	Duration   float64 `json:"duration"`
-	Exit       int     `json:"exit"`
-	TokensIn   int64   `json:"tokens_in"`
-	TokensOut  int64   `json:"tokens_out"`
-	CacheRead  int64   `json:"cache_read"`
-	CacheWrite int64   `json:"cache_write"`
-	Reasoning  int64   `json:"reasoning"`
+	RunID    string  `json:"run_id"`
+	Agent    string  `json:"agent"`
+	Started  string  `json:"started"`
+	Duration float64 `json:"duration"`
+	Exit     int     `json:"exit"`
+	// NoWork marks an admitted selection whose request command exited 1
+	// before a request or model execution existed. It is not a failed Run.
+	NoWork     bool  `json:"no_work,omitempty"`
+	TokensIn   int64 `json:"tokens_in"`
+	TokensOut  int64 `json:"tokens_out"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
+	Reasoning  int64 `json:"reasoning"`
 	// Error records the Run's failure cause when the exit is nonzero, such as an
-	// operator cancellation. It stays empty for successful Runs.
+	// operator cancellation. It stays empty for successful Runs and no-work selection.
 	Error string `json:"error,omitempty"`
 	// DefinitionSHA records the verified declaration digest (the ordered
 	// agent.md + task.md pair) that was loaded and confirmed unchanged at
 	// dispatch, so a later check can see which declaration a Run executed.
-	DefinitionSHA string `json:"definition_sha,omitempty"`
+	DefinitionSHA string            `json:"definition_sha,omitempty"`
+	RequestID     string            `json:"request_id,omitempty"`
+	Work          *WorkReference    `json:"work,omitempty"`
+	ExtensionSHA  map[string]string `json:"extension_sha,omitempty"`
 }
 
 func ledgerPath(root string) string { return filepath.Join(root, workspaceName, "runs.jsonl") }
@@ -92,6 +98,14 @@ func appendRun(root string, record RunRecord, files ledgerFileOps) (err error) {
 	defer ledgerMu.Unlock()
 	path := ledgerPath(root)
 	dir := filepath.Dir(path)
+	profile := filepath.Join(root, profileName)
+	if err := os.Mkdir(profile, 0o755); err == nil {
+		if err := syncLedgerDirectory(root, files); err != nil {
+			return err
+		}
+	} else if !os.IsExist(err) {
+		return err
+	}
 	if err := os.Mkdir(dir, 0o755); err == nil {
 		if err := syncLedgerDirectory(filepath.Dir(dir), files); err != nil {
 			return err

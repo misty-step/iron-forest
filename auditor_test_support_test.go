@@ -28,15 +28,13 @@ func newAdvancedAuditFixture(t *testing.T, config string) (string, string) {
 		t.Fatal(err)
 	}
 	if config != "" {
-		if err := os.WriteFile(filepath.Join(root, "forest.yaml"), []byte(config), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeTree(t, root, profileName+"/config.yaml", config)
 	}
 	if err := os.WriteFile(filepath.Join(root, "advance"), []byte("advance\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if config != "" {
-		runGitDir(t, root, "add", "advance", "forest.yaml")
+		runGitDir(t, root, "add", "advance", ".iron-forest/config.yaml")
 	} else {
 		runGitDir(t, root, "add", "advance")
 	}

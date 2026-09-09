@@ -15,5 +15,5 @@ Environment=PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:
 PrivateTmp=yes
 NoNewPrivileges=yes
 ExecStart=/usr/bin/env uv run --project evals --extra langfuse python evals/scripts/langfuse_export.py --retry-root evals/jobs/model
-ExecStart=/usr/bin/env uv run --project evals --extra langfuse python evals/scripts/production_flywheel.py ingest --runs-dir .forest/runs
+ExecStart=/usr/bin/env uv run --project evals --extra langfuse python evals/scripts/production_flywheel.py ingest --runs-dir .iron-forest/runtime/runs
 ExecStart=/usr/bin/env uv run --project evals --extra langfuse python evals/scripts/production_flywheel.py report

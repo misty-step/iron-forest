@@ -147,13 +147,11 @@ agents:
 checks:
   - {name: test, run: "go test ./..."}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", string(config))
 	if err := os.WriteFile(filepath.Join(root, "unrelated"), []byte("unrelated\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGitDir(t, root, "add", "forest.yaml", "unrelated")
+	runGitDir(t, root, "add", ".iron-forest/config.yaml", "unrelated")
 	runGitDir(t, root, "commit", "-m", "unrelated tip")
 	unrelated := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	addGateNotes(t, root, unrelated, `[{"name":"test","ok":true,"exit":0}]`)
@@ -364,7 +362,7 @@ func TestAuditorRequiresDurableStateAndHistory(t *testing.T) {
 
 func TestAuditHistoryRetainsLatestEntriesAndCleansStaleTemps(t *testing.T) {
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Dir(auditLogPath(root)), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(auditLogPath(root)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	var old strings.Builder
@@ -407,7 +405,7 @@ func TestAuditHistoryRetainsLatestEntriesAndCleansStaleTemps(t *testing.T) {
 
 func TestAuditHistoryRejectsImpossibleEntriesWithoutChangingHistory(t *testing.T) {
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Dir(auditLogPath(root)), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(auditLogPath(root)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	before := []byte("prior history\n")
@@ -439,24 +437,3 @@ func TestAuditHistoryRejectsImpossibleEntriesWithoutChangingHistory(t *testing.T
 	}
 }
 
-func TestAuditSyncsRootWhenItCreatesForest(t *testing.T) {
-	root, _ := testClone(t)
-	deps := defaultAuditDependencies()
-	rootSyncs := 0
-	deps.syncFile = func(file *os.File) error {
-		if filepath.Clean(file.Name()) == filepath.Clean(root) {
-			rootSyncs++
-		}
-		return file.Sync()
-	}
-
-	if _, err := auditWithDependencies(context.Background(), root, deps); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := auditWithDependencies(context.Background(), root, deps); err != nil {
-		t.Fatal(err)
-	}
-	if rootSyncs != 1 {
-		t.Fatalf("repository root syncs=%d want one first-creation sync", rootSyncs)
-	}
-}

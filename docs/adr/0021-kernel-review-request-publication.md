@@ -41,7 +41,7 @@ the paired branch push. It implements the ADR 0010 profile contract exactly:
   (empty when absent); Builder branch empty; Fixer branch the rejected SHA
 
 
-The command also runs every configured `forest.yaml` Check at `HEAD`. A
+The command also runs every configured `.iron-forest/config.yaml` Check at `HEAD`. A
 nonzero exit refuses publication. That is the declared Check, not a
 heuristic.
 

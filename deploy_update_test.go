@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,421 +12,237 @@ import (
 	"time"
 )
 
-// The fenced-update shell script is the executable deployment contract, so a
-// regression here is caught by asserting the guards the rejected Revision got
-// wrong. These are content checks, but they pin the blocking behaviors: the
-// updater must stop the service first (rather than polling for an idle window
-// while the scheduler can still dispatch), and it must force a fresh audit
-// before restart instead of passively waiting for one afterward.
-func TestDeployUpdateFenceGuards(t *testing.T) {
-	script, err := os.ReadFile("deploy/install-service.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(script)
-
-	if strings.Contains(content, "idle_timeout_seconds") {
-		t.Fatal("update must not impose a wall-clock idle deadline; the drain has no deadline")
-	}
-	if strings.Contains(content, "is_idle") {
-		t.Fatal("update must not poll for an idle window before stopping; it must stop first")
-	}
-	if strings.Contains(content, "waiting for an idle window") {
-		t.Fatal("update must not wait for an idle window while the scheduler can still dispatch")
-	}
-	if !strings.Contains(content, `systemctl --user stop "forest@$name"`) {
-		t.Fatal("update must request service stop before fetching or rebuilding")
-	}
-	if !strings.Contains(content, "./forest audit show --rescan --json") {
-		t.Fatal("update must force a fresh audit with `forest audit show --rescan` before restart")
-	}
-	if strings.Contains(content, "audit_timeout_seconds") {
-		t.Fatal("update must not passively wait for an audit pass after restart")
-	}
-	if !strings.Contains(content, `rm -f -- "$prev_binary"`) {
-		t.Fatal("rollback must remove forest.prev so the restored pre-change .gitignore keeps the next clean-tree check clean")
-	}
-	if !strings.Contains(content, `update <instance> <factory-sha>`) {
-		t.Fatal("update usage must require a factory revision for sibling updates")
-	}
-	if !strings.Contains(content, `./forest version --json`) {
-		t.Fatal("update must verify the installed binary reports the built build_sha")
-	}
-	if !strings.Contains(content, `factory checkout is behind the requested revision`) {
-		t.Fatal("update must refuse a sibling update when the factory checkout is behind the requested revision")
-	}
+type deployFixture struct {
+	target, factory, factorySHA, priorSHA string
+	home, log, release, binary, evidence  string
+	command                               *exec.Cmd
+	output                                lockedBuffer
 }
 
-// TestDeployUpdateDrainsBeforeProceeding runs the real install script against a
-// fake systemctl whose stop blocks until the test releases the drain. It proves
-// the updater requests the stop before it can observe status or dispatch, and
-// that it does not proceed past the stop until the drain completes.
-func TestDeployUpdateDrainsBeforeProceeding(t *testing.T) {
-	script, err := os.ReadFile("deploy/install-service.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+// The subprocess is the real installer. Git repositories and historical runtime
+// evidence are real; only systemd and compilation are replaced at the boundary.
+func newDeployFixture(t *testing.T, failure string) *deployFixture {
+	t.Helper()
 	temp := t.TempDir()
-	home := filepath.Join(temp, "home")
+	f := &deployFixture{target: filepath.Join(temp, "inst"), factory: filepath.Join(temp, "factory"), home: filepath.Join(temp, "home"), log: filepath.Join(temp, "events"), release: filepath.Join(temp, "drained"), binary: "#!/bin/sh\n# actual prior binary\nexit 0\n", evidence: "{\"run_id\":\"1-builder\",\"request_id\":\"historical\"}\n"}
 	bin := filepath.Join(temp, "bin")
-	factory := filepath.Join(temp, "factory")
-	deploy := filepath.Join(factory, "deploy")
-	target := filepath.Join(temp, "inst")
-	origin := filepath.Join(temp, "origin.git")
-	stateDir := filepath.Join(temp, "state")
-
-	for _, dir := range []string{home, bin, deploy, target, origin, stateDir} {
+	for _, dir := range []string{f.target, f.factory, f.home, bin} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	// Copy the script under test into a temporary factory so the script's
-	// root/factory derivation stays inside the test directory.
-	scriptPath := filepath.Join(deploy, "install-service.sh")
-	if err := os.WriteFile(scriptPath, script, 0o755); err != nil {
+	for _, name := range []string{"install-service.sh", "forest@.service", "forest-eval-flywheel@.service", "forest-eval-flywheel@.timer"} {
+		data, err := os.ReadFile(filepath.Join("deploy", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTree(t, f.factory, "deploy/"+name, string(data))
+	}
+	runGitDir(t, f.factory, "init", "--initial-branch=master")
+	configGit(t, f.factory, "Deploy Test", "deploy@forest.invalid")
+	runGitDir(t, f.factory, "add", "deploy")
+	runGitDir(t, f.factory, "commit", "-m", "reviewed installer")
+	f.factorySHA = strings.TrimSpace(string(runGitDir(t, f.factory, "rev-parse", "HEAD")))
+	origin := filepath.Join(temp, "origin.git")
+	runGit(t, "init", "--bare", "--initial-branch=master", origin)
+	runGitDir(t, f.target, "init", "--initial-branch=master")
+	configGit(t, f.target, "Deploy Test", "deploy@forest.invalid")
+	writeTree(t, f.target, "forest.yaml", "repo: owner/name\n")
+	writeTree(t, f.target, ".gitignore", "/forest\n/forest.prev\n/.forest/\n/.iron-forest/runtime/\n/.iron-forest/bin/\n")
+	runGitDir(t, f.target, "add", "forest.yaml", ".gitignore")
+	runGitDir(t, f.target, "commit", "-m", "coherent legacy source")
+	f.priorSHA = strings.TrimSpace(string(runGitDir(t, f.target, "rev-parse", "HEAD")))
+	runGitDir(t, f.target, "remote", "add", "origin", origin)
+	runGitDir(t, f.target, "push", "origin", "HEAD:master")
+	if err := os.WriteFile(filepath.Join(f.target, "forest"), []byte(f.binary), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	runGitDir(t, factory, "init")
-	configGit(t, factory, "Deploy Test", "deploy@forest.invalid")
-	runGitDir(t, factory, "add", "deploy/install-service.sh")
-	runGitDir(t, factory, "commit", "-m", "installer")
-	factorySHA := strings.TrimSpace(string(runGitDir(t, factory, "rev-parse", "HEAD")))
-
-	runGit(t, "init", "--bare", origin)
-
-	runGitDir(t, target, "init")
-	configGit(t, target, "Deploy Test", "deploy@forest.invalid")
-	if err := os.WriteFile(filepath.Join(target, "forest.yaml"), []byte("repo: owner/name\n"), 0o644); err != nil {
+	writeTree(t, f.target, "forest.prev", "unrelated stale backup\n")
+	writeTree(t, f.target, ".forest/runs.jsonl", f.evidence)
+	writeTree(t, f.home, ".config/systemd/user/forest@.service", "prior unit\n")
+	writeTree(t, f.home, ".config/iron-forest/inst.env", "OPENROUTER_API_KEY=test-only\n")
+	if err := os.Chmod(filepath.Join(f.home, ".config/iron-forest/inst.env"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(target, "forest"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	// The fetched revision carries the complete source profile migration. The
+	// deployment transaction alone adopts the historical runtime and binary.
+	author := filepath.Join(temp, "author")
+	runGit(t, "clone", origin, author)
+	configGit(t, author, "Deploy Test", "deploy@forest.invalid")
+	if err := os.MkdirAll(filepath.Join(author, profileName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	runGitDir(t, target, "add", "forest.yaml", "forest")
-	runGitDir(t, target, "commit", "-m", "initial")
-	runGitDir(t, target, "remote", "add", "origin", origin)
-	runGitDir(t, target, "push", "origin", "HEAD:refs/heads/master")
-
-	envDir := filepath.Join(home, ".config", "iron-forest")
-	if err := os.MkdirAll(envDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(envDir, "inst.env"), []byte("OPENROUTER_API_KEY=test\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	runGitDir(t, author, "mv", "forest.yaml", profileName+"/config.yaml")
+	runGitDir(t, author, "commit", "-m", "profile cutover")
+	runGitDir(t, author, "push", "origin", "HEAD:master")
 
 	systemctl := `#!/bin/sh
-log() { printf '%s\n' "$1" >> "$FAKE_LOG"; }
-verb="${2:-}"
-case "$verb" in
+case "$2" in
   stop)
-    log "systemctl-stop"
-    while [ ! -e "$FAKE_DRAIN_DONE" ]; do
-      sleep 0.02
-      if [ -e "$FAKE_ABORT" ]; then exit 1; fi
-    done
-    printf '%s\n' stopped > "$FAKE_STATE"
-    exit 0
+    printf 'stop\n' >> "$DEPLOY_LOG"
+    while [ ! -f "$DEPLOY_RELEASE" ]; do sleep 0.01; done
+    printf inactive > "$DEPLOY_STATE"
     ;;
-  is-active)
-    log "systemctl-is-active"
-    if [ "$(cat "$FAKE_STATE" 2>/dev/null)" = stopped ]; then
-      printf '%s\n' inactive
-    else
-      printf '%s\n' active
-    fi
-    exit 0
-    ;;
-  restart)
-    log "systemctl-restart"
-    printf '%s\n' active > "$FAKE_STATE"
-    exit 0
-    ;;
+  is-active) cat "$DEPLOY_STATE" ;;
+  restart) printf 'restart\n' >> "$DEPLOY_LOG"; printf active > "$DEPLOY_STATE" ;;
 esac
-exit 0
 `
-	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(systemctl), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	mise := `#!/bin/sh
-dest=""
-prev=""
+printf 'build\n' >> "$DEPLOY_LOG"
+[ "$DEPLOY_FAILURE" != build ] || exit 71
+previous=''
 for arg in "$@"; do
-  if [ "$prev" = "-o" ]; then dest="$arg"; fi
-  prev="$arg"
+  [ "$previous" != -o ] || destination="$arg"
+  previous="$arg"
 done
-mkdir -p "$(dirname "$dest")"
-cat > "$dest" <<'FAKE_FOREST'
+cat > "$destination" <<'FOREST'
 #!/bin/sh
-printf '%s\n' "forest-$1" >> "$FAKE_LOG"
 case "$1" in
-  status)
-    printf '%s\n' '{"exit":0,"data":{"kernel":{"running_known":true},"triggers":[],"audit":{"last_result":"pass","last_at":"2026-08-22T00:00:00Z"}}}'
-    ;;
-  selfcheck)
-    exit 0
-    ;;
   version)
-    printf '%s\n' "{\"exit\":0,\"data\":{\"build_sha\":\"$FAKE_SHA\",\"commit_time\":\"\",\"dirty\":false}}"
+    sha="$DEPLOY_FACTORY_SHA"
+    [ "$DEPLOY_FAILURE" != version ] || sha=wrong
+    printf '{"exit":0,"data":{"build_sha":"%s"}}\n' "$sha"
     ;;
-  audit)
-    printf '%s\n' '{"exit":0,"data":{"last_result":"pass","last_at":"2026-08-22T00:00:00Z"}}'
-    ;;
+  selfcheck) [ "$DEPLOY_FAILURE" != selfcheck ] || exit 72 ;;
+  audit) printf '{"exit":0,"data":{"last_result":"pass","last_at":"2026-01-01T00:00:00Z"}}\n' ;;
+  status) printf '{"exit":0,"data":{"audit":{"last_result":"pass","last_at":"2026-01-01T00:00:00Z"}}}\n' ;;
+  admission) printf '{"exit":0,"data":{"paused":true,"drained":true}}\n' ;;
 esac
-exit 0
-FAKE_FOREST
-chmod +x "$dest"
-exit 0
+FOREST
+chmod +x "$destination"
 `
-	if err := os.WriteFile(filepath.Join(bin, "mise"), []byte(mise), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gitScript := `#!/bin/sh
+	git := `#!/bin/sh
 case "$*" in
-  *"ls-remote --symref origin HEAD"*)
-    printf 'ref: refs/heads/master\tHEAD\n'
-    printf '0000000000000000000000000000000000000000\tHEAD\n'
-    exit 0
-    ;;
+  *"fetch origin"*) printf 'fetch\n' >> "$DEPLOY_LOG"; [ "$DEPLOY_FAILURE" != fetch ] || exit 73 ;;
 esac
-exec "$FAKE_REAL_GIT" "$@"
+exec "$DEPLOY_REAL_GIT" "$@"
 `
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(gitScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	logPath := filepath.Join(stateDir, "log")
-	drainDone := filepath.Join(stateDir, "drain-done")
-	abortPath := filepath.Join(stateDir, "abort")
-	statePath := filepath.Join(stateDir, "state")
-
-	env := make([]string, 0, len(os.Environ())+6)
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "PATH=") {
-			continue
-		}
-		env = append(env, kv)
-	}
-	env = append(env,
-		"HOME="+home,
-		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"FAKE_LOG="+logPath,
-		"FAKE_DRAIN_DONE="+drainDone,
-		"FAKE_ABORT="+abortPath,
-		"FAKE_STATE="+statePath,
-		"FAKE_REAL_GIT="+realGit,
-		"FAKE_SHA="+factorySHA,
-	)
-
-	cmd := exec.Command("bash", scriptPath, "update", "inst", factorySHA)
-	cmd.Dir = temp
-	cmd.Env = env
-	var output lockedBuffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.WriteFile(drainDone, []byte("done"), 0o644)
-		_ = os.WriteFile(abortPath, []byte("abort"), 0o644)
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	})
-
-	waitForLogLine(t, logPath, "systemctl-stop")
-	if got := output.String(); strings.Contains(got, "fast-forwarding") {
-		t.Fatalf("update proceeded past the drain before it ended:\n%s", got)
-	}
-	if strings.Contains(output.String(), "waiting for an idle window") {
-		t.Fatalf("update polled for an idle window before stopping:\n%s", output.String())
-	}
-
-	if err := os.WriteFile(drainDone, []byte("done"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("update failed: %v\n%s", err, output.String())
-	}
-	out := output.String()
-	if !strings.Contains(out, "updated forest@inst") {
-		t.Fatalf("update did not complete successfully:\n%s", out)
-	}
-	if !strings.Contains(out, "stopping forest@inst (stops new dispatches and drains live Runs)") {
-		t.Fatalf("update did not report the stop-first fence:\n%s", out)
-	}
-	if stopIdx := strings.Index(out, "stopping forest@inst"); stopIdx == -1 {
-		t.Fatal("missing stop message")
-	} else if fastForwardIdx := strings.Index(out, "fast-forwarding forest@inst"); fastForwardIdx != -1 && fastForwardIdx < stopIdx {
-		t.Fatalf("fast-forward happened before the stop request:\n%s", out)
-	}
-}
-
-// TestDeployUpdateSiblingRejectsStaleFactoryRevision proves the sibling update
-// fence: when the factory remote has advanced but the local factory checkout
-// has not adopted that Revision, the updater fails before it stops the
-// consumer unit and never reports success with the stale factory HEAD.
-func TestDeployUpdateSiblingRejectsStaleFactoryRevision(t *testing.T) {
-	script, err := os.ReadFile("deploy/install-service.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	temp := t.TempDir()
-	home := filepath.Join(temp, "home")
-	bin := filepath.Join(temp, "bin")
-	factory := filepath.Join(temp, "factory")
-	deploy := filepath.Join(factory, "deploy")
-	target := filepath.Join(temp, "inst")
-	factoryOrigin := filepath.Join(temp, "factory-origin.git")
-	targetOrigin := filepath.Join(temp, "target-origin.git")
-	stateDir := filepath.Join(temp, "state")
-
-	for _, dir := range []string{home, bin, deploy, target, factoryOrigin, targetOrigin, stateDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	for name, body := range map[string]string{"systemctl": systemctl, "mise": mise, "git": git} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	scriptPath := filepath.Join(deploy, "install-service.sh")
-	if err := os.WriteFile(scriptPath, script, 0o755); err != nil {
+	state := filepath.Join(temp, "service-state")
+	if err := os.WriteFile(state, []byte("active"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Factory: one committed Revision, then a remote that moves ahead while the
-	// local factory checkout stays at the old HEAD.
-	runGitDir(t, factory, "init")
-	configGit(t, factory, "Deploy Test", "deploy@forest.invalid")
-	runGitDir(t, factory, "add", "deploy/install-service.sh")
-	runGitDir(t, factory, "commit", "-m", "factory-old")
-	oldFactorySHA := strings.TrimSpace(string(runGitDir(t, factory, "rev-parse", "HEAD")))
-
-	runGit(t, "init", "--bare", factoryOrigin)
-	runGitDir(t, factory, "remote", "add", "origin", factoryOrigin)
-	runGitDir(t, factory, "push", "origin", "HEAD:refs/heads/master")
-
-	advance := filepath.Join(temp, "advance")
-	if err := os.MkdirAll(advance, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, "clone", factoryOrigin, advance)
-	configGit(t, advance, "Deploy Test", "deploy@forest.invalid")
-	if err := os.WriteFile(filepath.Join(advance, "advance"), []byte("advance\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, advance, "add", "advance")
-	runGitDir(t, advance, "commit", "-m", "factory-new")
-	newFactorySHA := strings.TrimSpace(string(runGitDir(t, advance, "rev-parse", "HEAD")))
-	runGitDir(t, advance, "push", "origin", "HEAD:refs/heads/master")
-
-	// Fetch the advanced Revision into the local factory object store without
-	// moving its HEAD, so the updater observes a stale (behind) factory rather
-	// than an absent object.
-	runGitDir(t, factory, "fetch", "origin")
-	if got := strings.TrimSpace(string(runGitDir(t, factory, "rev-parse", "HEAD"))); got != oldFactorySHA {
-		t.Fatalf("test setup moved factory HEAD: got %s want %s", got, oldFactorySHA)
-	}
-
-	// Distinct target repository. It passes the target-side preconditions so
-	// the only reason the update may fail is the factory revision fence.
-	runGit(t, "init", "--bare", targetOrigin)
-	runGitDir(t, target, "init")
-	configGit(t, target, "Deploy Test", "deploy@forest.invalid")
-	if err := os.WriteFile(filepath.Join(target, "forest.yaml"), []byte("repo: owner/name\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "forest"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, target, "add", "forest.yaml", "forest")
-	runGitDir(t, target, "commit", "-m", "target-initial")
-	runGitDir(t, target, "remote", "add", "origin", targetOrigin)
-	runGitDir(t, target, "push", "origin", "HEAD:refs/heads/master")
-
-	envDir := filepath.Join(home, ".config", "iron-forest")
-	if err := os.MkdirAll(envDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(envDir, "inst.env"), []byte("OPENROUTER_API_KEY=test\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	logPath := filepath.Join(stateDir, "log")
-	statePath := filepath.Join(stateDir, "state")
-	if err := os.WriteFile(statePath, []byte("active"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	systemctl := `#!/bin/sh
-printf '%s\n' "systemctl-${2:-$1}" >> "$FAKE_LOG"
-verb="${2:-$1}"
-case "$verb" in
-  stop)
-    printf '%s\n' inactive > "$FAKE_STATE"
-    exit 0
-    ;;
-  is-active)
-    cat "$FAKE_STATE" 2>/dev/null || printf '%s\n' active
-    exit 0
-    ;;
-  restart)
-    printf '%s\n' active > "$FAKE_STATE"
-    exit 0
-    ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(systemctl), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	env := make([]string, 0, len(os.Environ())+4)
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "PATH=") {
-			continue
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	f.command = exec.CommandContext(ctx, "bash", filepath.Join(f.factory, "deploy/install-service.sh"), "update", "inst", f.factorySHA)
+	f.command.Dir = temp
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "HOME=") && !strings.HasPrefix(value, "PATH=") {
+			f.command.Env = append(f.command.Env, value)
 		}
-		env = append(env, kv)
 	}
-	env = append(env,
-		"HOME="+home,
-		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"FAKE_LOG="+logPath,
-		"FAKE_STATE="+statePath,
-	)
+	f.command.Env = append(f.command.Env, "HOME="+f.home, "PATH="+bin+":"+os.Getenv("PATH"), "DEPLOY_LOG="+f.log, "DEPLOY_RELEASE="+f.release, "DEPLOY_STATE="+state, "DEPLOY_REAL_GIT="+realGit, "DEPLOY_FAILURE="+failure, "DEPLOY_FACTORY_SHA="+f.factorySHA)
+	f.command.Stdout, f.command.Stderr = &f.output, &f.output
+	return f
+}
 
-	cmd := exec.Command("bash", scriptPath, "update", "inst", newFactorySHA)
-	cmd.Dir = temp
-	cmd.Env = env
-	var output lockedBuffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+func TestDeployUpdateDrainsBeforeProceeding(t *testing.T) {
+	f := newDeployFixture(t, "")
+	if err := f.command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(f.release, nil, 0o644) })
+	waitForLogLine(t, f.log, "stop")
+	events, _ := os.ReadFile(f.log)
+	if strings.Contains(string(events), "fetch") || strings.Contains(string(events), "build") {
+		t.Fatalf("deployment changed source before drain completed: %s", events)
+	}
+	if got := string(mustReadFile(t, filepath.Join(f.target, "forest"))); got != f.binary {
+		t.Fatalf("binary changed during drain: %s", got)
+	}
+	if err := os.WriteFile(f.release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.command.Wait(); err != nil {
+		t.Fatalf("adoption failed: %v\n%s", err, f.output.String())
+	}
+	if _, err := os.Stat(filepath.Join(f.target, profileName, "bin", "forest")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(configPath(f.target)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.target, "forest")); !os.IsNotExist(err) {
+		t.Fatalf("legacy executable survived adoption: %v", err)
+	}
+	if got := string(mustReadFile(t, ledgerPath(f.target))); got != f.evidence {
+		t.Fatalf("adoption changed historical evidence: %s", got)
+	}
+}
 
-	if err := cmd.Run(); err == nil {
-		t.Fatalf("stale sibling update succeeded (factory HEAD=%s requested=%s):\n%s", oldFactorySHA, newFactorySHA, output.String())
+func TestDeployUpdateRollbackUsesOnlyCurrentTransaction(t *testing.T) {
+	for _, stage := range []string{"fetch", "build", "selfcheck", "version"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newDeployFixture(t, stage)
+			if err := os.WriteFile(f.release, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.command.Run(); err == nil {
+				t.Fatalf("%s failure succeeded: %s", stage, f.output.String())
+			}
+			if got := string(mustReadFile(t, filepath.Join(f.target, "forest"))); got != f.binary {
+				t.Fatalf("restored stale or candidate binary: %s\n%s", got, f.output.String())
+			}
+			if got := strings.TrimSpace(string(runGitDir(t, f.target, "rev-parse", "HEAD"))); got != f.priorSHA {
+				t.Fatalf("source/binary rollback split: %s want %s", got, f.priorSHA)
+			}
+			if got := string(mustReadFile(t, filepath.Join(f.target, ".forest/runs.jsonl"))); got != f.evidence {
+				t.Fatalf("rollback lost evidence: %s", got)
+			}
+			if got := string(mustReadFile(t, filepath.Join(f.target, "forest.prev"))); got != "unrelated stale backup\n" {
+				t.Fatalf("transaction consumed unrelated backup: %s", got)
+			}
+			if got := string(mustReadFile(t, filepath.Join(f.home, ".config/systemd/user/forest@.service"))); got != "prior unit\n" {
+				t.Fatalf("rollback retained candidate service: %s", got)
+			}
+			if _, err := os.Stat(filepath.Join(f.target, "forest.yaml")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(configPath(f.target)); !os.IsNotExist(err) {
+				t.Fatalf("candidate profile survived rollback: %v", err)
+			}
+		})
 	}
+}
 
-	out := output.String()
-	if !strings.Contains(out, "factory checkout is behind the requested revision") {
-		t.Fatalf("stale sibling update did not report the behind fence:\n%s", out)
+func TestDeployUpdateSiblingRejectsStaleFactoryRevision(t *testing.T) {
+	f := newDeployFixture(t, "")
+	writeTree(t, f.factory, "advanced", "new source\n")
+	runGitDir(t, f.factory, "add", "advanced")
+	runGitDir(t, f.factory, "commit", "-m", "not adopted")
+	advanced := strings.TrimSpace(string(runGitDir(t, f.factory, "rev-parse", "HEAD")))
+	runGitDir(t, f.factory, "checkout", f.factorySHA)
+	f.command.Args[len(f.command.Args)-1] = advanced
+	if err := f.command.Run(); err == nil {
+		t.Fatal("stale factory was deployed")
 	}
-	if strings.Contains(out, "updated forest@inst") {
-		t.Fatalf("stale sibling update reported success:\n%s", out)
+	if _, err := os.Stat(f.log); !os.IsNotExist(err) {
+		t.Fatalf("consumer was touched before factory revision fence: %v\n%s", err, f.output.String())
 	}
-	logBody, _ := os.ReadFile(logPath)
-	if strings.Contains(string(logBody), "systemctl-stop") {
-		t.Fatalf("consumer unit was stopped before the factory revision fence:\n%s", string(logBody))
+}
+
+func TestDeployUpdateRejectsCompetingRuntimeOwnersBeforeTouchingConsumer(t *testing.T) {
+	f := newDeployFixture(t, "")
+	writeTree(t, f.target, profileName+"/runtime/runs.jsonl", "current runtime evidence\n")
+	if err := f.command.Run(); err == nil {
+		t.Fatal("competing legacy/current runtime owners were adopted")
+	}
+	if _, err := os.Stat(f.log); !os.IsNotExist(err) {
+		t.Fatalf("consumer was touched before runtime ownership was resolved: %v\n%s", err, f.output.String())
+	}
+	if got := string(mustReadFile(t, ledgerPath(f.target))); got != "current runtime evidence\n" {
+		t.Fatalf("current runtime evidence changed: %q", got)
+	}
+	if got := string(mustReadFile(t, filepath.Join(f.target, ".forest/runs.jsonl"))); got != f.evidence {
+		t.Fatalf("legacy runtime evidence changed: %q", got)
 	}
 }
 
@@ -433,14 +250,13 @@ func waitForLogLine(t *testing.T, path, want string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		body, _ := os.ReadFile(path)
-		if strings.Contains(string(body), want) {
+		body, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(body), want) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	body, _ := os.ReadFile(path)
-	t.Fatalf("timed out waiting for %q in %s; log:\n%s", want, path, body)
+	t.Fatalf("timed out waiting for %q in %s", want, path)
 }
 
 type lockedBuffer struct {
@@ -453,9 +269,4 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 	defer b.mu.Unlock()
 	return b.b.Write(p)
 }
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.b.String()
-}
+func (b *lockedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }

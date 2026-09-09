@@ -29,14 +29,14 @@ const secretScanner = "trufflehog"
 // and the factory workspace (per-Run worktrees, Ledger, lock). This is
 // infrastructure, not a protected-path list, so it stays tiny and never extends
 // to content.
-var defaultScanExcludes = []string{".git", ".forest"}
+var defaultScanExcludes = []string{".git", ".iron-forest/runtime", ".iron-forest/bin"}
 
 type secretFinding struct {
 	Path string
 	Rule string
 }
 
-// secretsConfig is forest.secrets.yaml: the explicit exclusion path for
+// secretsConfig is .iron-forest/secrets.yaml: the explicit exclusion path for
 // legitimate fixtures. It must stay narrow and name content only; it is not a
 // return of the protected-path list that docs/adr/0003 removed.
 type secretsConfig struct {
@@ -56,7 +56,7 @@ var scanEnv = struct {
 // scanSecretsTree runs the generic secret scan over a working tree dir and
 // returns every finding. It fails closed: a required generic scanner that is
 // absent returns an error naming the tool rather than silently narrowing to
-// nothing. Exclusions are loaded from forest.secrets.yaml at the scanned root.
+// nothing. Exclusions are loaded from .iron-forest/secrets.yaml at the scanned root.
 func scanSecretsTree(dir string) ([]secretFinding, error) {
 	return scanSecretsTreeRoot(context.Background(), dir, dir)
 }
@@ -77,13 +77,13 @@ func scanSecretsTreeRoot(ctx context.Context, trustRoot, dir string) ([]secretFi
 	return scanGeneric(ctx, trustRoot, dir, excludes)
 }
 
-// loadSecretsConfig reads forest.secrets.yaml from the scanned root, or returns
+// loadSecretsConfig reads .iron-forest/secrets.yaml from the scanned root, or returns
 // an os.IsNotExist error when the file is absent. It decodes with
 // KnownFields(true) so unknown keys fail rather than being silently ignored,
 // and every exclude is validated before it reaches the scanner.
 func loadSecretsConfig(dir string) (secretsConfig, error) {
 	var cfg secretsConfig
-	b, err := os.ReadFile(filepath.Join(dir, "forest.secrets.yaml"))
+	b, err := os.ReadFile(filepath.Join(dir, ".iron-forest/secrets.yaml"))
 	if err != nil {
 		return cfg, err
 	}
@@ -95,18 +95,18 @@ func loadSecretsConfig(dir string) (secretsConfig, error) {
 		if errors.Is(err, io.EOF) {
 			return cfg, nil
 		}
-		return cfg, fmt.Errorf("parse forest.secrets.yaml: %w", err)
+		return cfg, fmt.Errorf("parse .iron-forest/secrets.yaml: %w", err)
 	}
 	var extra yaml.Node
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err != nil {
-			return cfg, fmt.Errorf("parse forest.secrets.yaml: %w", err)
+			return cfg, fmt.Errorf("parse .iron-forest/secrets.yaml: %w", err)
 		}
-		return cfg, fmt.Errorf("parse forest.secrets.yaml: multiple YAML documents")
+		return cfg, fmt.Errorf("parse .iron-forest/secrets.yaml: multiple YAML documents")
 	}
 	for _, pattern := range cfg.Exclude {
 		if err := validateScanExclude(dir, pattern); err != nil {
-			return cfg, fmt.Errorf("forest.secrets.yaml exclude %q: %w", pattern, err)
+			return cfg, fmt.Errorf(".iron-forest/secrets.yaml exclude %q: %w", pattern, err)
 		}
 	}
 	return cfg, nil

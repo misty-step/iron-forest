@@ -5,6 +5,14 @@ Status: accepted, 2026-08-10
 The agent-Run timeout and finite service-drain clauses are superseded by
 [0020](0020-unbounded-agent-runs.md).
 
+The current profile layout and request/admission contract are documented in
+[README](../../README.md#one-profile-explicit-requests-persistent-admission).
+Config, defaults, policy, declarations, explicit extension inputs, the installed
+binary and runtime live under `.iron-forest`. Root-level loaders are retired.
+`delivery: external` delegates delivery authority outside Kernel: native
+publication is refused and native audit is explicitly not applicable. The
+Git-native contracts below apply only to `delivery: git-native`.
+
 ## Context
 
 The former architecture mixed scheduling, agent policy, coordination, and
@@ -54,7 +62,7 @@ prove check execution, atomic push ordering, or force absence. It detects
 violations after profile Effects. It does not block, authorize, reject, or
 enforce a merge.
 
-The profile owns `forest.yaml`, agent declarations, Poll commands, Subject
+The profile owns `.iron-forest/config.yaml`, agent declarations, Poll commands, Subject
 selection, Checks commands, and Verifier notes, branch pushes, and merges.
 Declarations own `model`, `tools`, and `thinking`; the host owns OMP provider
 routing. The Kernel writes review-request notes and their paired branch push
@@ -64,6 +72,9 @@ Each Ledger row records Run identity, timing, exit, and exactly five retained
 token classes (`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
 `reasoning`) as operational observability, not accounting. The Ledger never
 records a cost, price, spend, or currency field and never computes money.
+Request-bearing dispatch also retains `request_id` and an optional opaque
+immutable `work` reference. Tracker-specific selection and claims remain profile
+commands; Kernel has no tracker branch for that association.
 
 Kernel non-goals are sandbox enforcement, leases, retirement or recovery
 machinery, a Manager Flow, money accounting, MCP, webhooks, and a report Gate

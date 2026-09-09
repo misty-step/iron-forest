@@ -9,7 +9,7 @@ import (
 const (
 	primaryRefPrefix = "refs/heads/"
 
-	// PrimarySourceConfig identifies a `forest.yaml primary:` override.
+	// PrimarySourceConfig identifies a `.iron-forest/config.yaml primary:` override.
 	PrimarySourceConfig = "config"
 	// PrimarySourceRemote identifies the advertised remote HEAD symref.
 	PrimarySourceRemote = "remote"
@@ -38,7 +38,7 @@ func validatePrimaryRef(ref string) error {
 }
 
 // resolvePrimary returns the full primary branch ref and the source that
-// supplied it. An explicit forest.yaml primary wins without contacting the
+// supplied it. An explicit .iron-forest/config.yaml primary wins without contacting the
 // remote; otherwise the ref is read from the remote HEAD advertisement and
 // validated. It never consults the clone-time refs/remotes/origin/HEAD, because
 // that symref is absent from bare fetches and can go stale when the remote
@@ -61,7 +61,7 @@ func resolvePrimary(ctx context.Context, root string, cfg Config) (string, strin
 }
 
 // resolvedPrimaryRef loads the checkout config and resolves it. The audit path
-// already has checkout access but not a Config; this keeps the local forest.yaml
+// already has checkout access but not a Config; this keeps the local .iron-forest/config.yaml
 // primary override in force for snapshot enumeration.
 func resolvedPrimaryRef(ctx context.Context, root string) (string, string, error) {
 	cfg, err := loadConfig(configPath(root))

@@ -128,7 +128,7 @@ operator-maintained documentation, not a new Kernel surface.
 Grooming is human-supervised, not a fourth declaration
 ([ADR 0014](adr/0014-agent-roster.md)). The factory remains a dumb consumer:
 Builder Poll checks only that a Powder spec is nonempty, that `repo` matches
-`forest.yaml`, and that no `forest/<id>/*` branch exists. It does not judge spec
+`.iron-forest/config.yaml`, and that no `forest/<id>/*` branch exists. It does not judge spec
 quality, and the Kernel does not lint it.
 
 Operators apply this contract during supervised backlog sessions with the
@@ -143,7 +143,7 @@ aid the same supervised session; it must not become a factory gate.
 ## Poll scope is not selection permission
 
 A scoped Poll wakes a declaration only for in-scope Subjects; it never widens
-the declaration's own selection rules. When `forest.yaml` sets
+the declaration's own selection rules. When `.iron-forest/config.yaml` sets
 `scope.subjects`, that list is the complete Builder allowlist, and a Run must
 not claim or work any other Subject even if that Subject is otherwise eligible.
 The declaration prompt is the enforcement point inside the Run, not the Poll.

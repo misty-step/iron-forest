@@ -53,7 +53,7 @@ def tree_digest(path: Path) -> str:
 
 
 def parse_declaration(role: str) -> dict[str, Any]:
-    path = ROOT / "agents" / role / "agent.md"
+    path = ROOT / ".iron-forest/agents" / role / "agent.md"
     text = path.read_text()
     lines = text.splitlines()
     if not lines or lines[0] != "---":
@@ -91,8 +91,8 @@ def effective_configuration(role: str, variant: dict[str, Any] | None) -> dict[s
                 configuration[field] = variant[field]
         appended = variant.get("prompt_append") or ""
         configuration["prompt_append_digest"] = canonical_digest(appended) if appended else None
-    role_skills = ROOT / "agents" / role / "skills"
-    shared_skills = ROOT / "agents" / "_shared" / "skills"
+    role_skills = ROOT / ".iron-forest/agents" / role / "skills"
+    shared_skills = ROOT / ".iron-forest/agents" / "_shared" / "skills"
     configuration["skill_digest"] = canonical_digest(
         {
             "role": tree_digest(role_skills) if role_skills.is_dir() else None,

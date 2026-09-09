@@ -339,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ingest_parser = subparsers.add_parser("ingest", help="Turn production Run logs into draft Langfuse dataset items")
-    ingest_parser.add_argument("--runs-dir", type=Path, default=Path(".forest/runs"))
+    ingest_parser.add_argument("--runs-dir", type=Path, default=Path(".iron-forest/runtime/runs"))
     ingest_parser.add_argument("--dataset", default=PRODUCTION_DATASET)
 
     promote_parser = subparsers.add_parser("promote", help="Validate and record a human-verified production case")

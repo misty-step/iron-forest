@@ -175,7 +175,7 @@ def read_trace() -> Trace:
     receipts: set[str] = set()
     completions: set[str] = set()
     pending: dict[tuple[str, str], dict] = {}
-    for log in sorted((WORKSPACE / ".forest" / "runs").glob("*.log")):
+    for log in sorted((WORKSPACE / ".iron-forest/runtime" / "runs").glob("*.log")):
         content = log.read_text(errors="replace")
         parts.append(content)
         for line in content.splitlines():

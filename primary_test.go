@@ -24,10 +24,8 @@ agents:
 checks:
   - {name: test, run: "true"}
 `)
-	if err := os.WriteFile(filepath.Join(root, "forest.yaml"), config, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGitDir(t, root, "add", "file", "forest.yaml")
+	writeTree(t, root, profileName+"/config.yaml", string(config))
+	runGitDir(t, root, "add", "file", ".iron-forest/config.yaml")
 	runGitDir(t, root, "commit", "-m", "initial")
 	runGitDir(t, root, "push", "origin", "HEAD:refs/heads/"+branch)
 	return root, origin
@@ -57,9 +55,7 @@ agents:
 checks:
   - {name: test, run: "true"}
 `
-	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeTree(t, root, profileName+"/config.yaml", config)
 	cfg, err := loadConfig(configPath(root))
 	if err != nil {
 		t.Fatal(err)
@@ -107,10 +103,8 @@ agents:
 checks:
   - {name: test, run: "true"}
 `
-	if err := os.WriteFile(configPath(root), []byte(config), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// The checkout has no forest.yaml primary override and no `origin` remote
+	writeTree(t, root, profileName+"/config.yaml", config)
+	// The checkout has no .iron-forest/config.yaml primary override and no `origin` remote
 	// advertises a HEAD symref, so selfcheck must fail rather than guess.
 	outcome := runSelfcheck(nil, cliFlags{root: root})
 	if outcome.Exit == exitOK {

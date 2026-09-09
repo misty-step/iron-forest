@@ -53,8 +53,9 @@ func tailRuns(records []RunRecord, n int) []RunRecord {
 	return records[len(records)-n:]
 }
 
-// computeLedgerAggregates rolls up every Ledger row in one pass. records must
-// be in Ledger order (oldest first), which is what readLedger(root, -1) returns.
+// computeLedgerAggregates rolls up completed execution outcomes. No-work
+// selection receipts remain queryable in the Ledger but are not model Runs.
+// records must be in Ledger order (oldest first).
 func computeLedgerAggregates(records []RunRecord) statusLedgerAggregates {
 	aggregates := statusLedgerAggregates{Agents: []statusAgentLedger{}}
 	type agentAcc struct {
@@ -69,6 +70,9 @@ func computeLedgerAggregates(records []RunRecord) statusLedgerAggregates {
 	byAgent := make(map[string]*agentAcc)
 	total, passes := 0, 0
 	for _, record := range records {
+		if record.NoWork {
+			continue
+		}
 		total++
 		if record.Exit == 0 {
 			passes++
@@ -121,7 +125,7 @@ func computeLedgerAggregates(records []RunRecord) statusLedgerAggregates {
 	failures := make([]statusRunFailure, 0, statusRecentFailures)
 	for i := len(records) - 1; i >= 0 && len(failures) < statusRecentFailures; i-- {
 		record := records[i]
-		if record.Exit == 0 {
+		if record.Exit == 0 || record.NoWork {
 			continue
 		}
 		failures = append(failures, statusRunFailure{

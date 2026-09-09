@@ -58,7 +58,7 @@ requested identity is no-work or an unsupported handoff.
 
 ## Checks and review
 
-Read `forest.yaml` from the reviewed Revision and run every `checks:` command in
+Read `.iron-forest/config.yaml` from the reviewed Revision and run every `checks:` command in
 listed order, recording each name and numeric exit. Review the diff from
 `origin/${FOREST_PRIMARY_REF#refs/heads/}` to that SHA, tracing changed paths,
 callers, errors, state, cleanup, trust boundaries, tests, conventions, and
@@ -84,7 +84,7 @@ complete payloads for that exact SHA:
 Write each payload to a temporary file outside the repository, then call only:
 
 ```sh
-forest publish verdict "$checks_payload_file" "$verdict_payload_file"
+"$FOREST_ROOT/.iron-forest/bin/forest" publish verdict "$checks_payload_file" "$verdict_payload_file"
 ```
 
 The Kernel validates the payloads, writes create-only Checks and Verdict refs,

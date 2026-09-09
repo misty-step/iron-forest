@@ -145,9 +145,9 @@ def main() -> int:
     for name in HIDDEN_FILES:
         copy_path(HIDDEN / name, BUNDLE / name)
 
-    copy_path(WORKSPACE / "forest.yaml", BUNDLE / "forest.yaml")
-    copy_path(WORKSPACE / ".forest" / "runs", BUNDLE / "workspace" / ".forest" / "runs")
-    copy_path(WORKSPACE / ".forest" / "runs.jsonl", BUNDLE / "workspace" / ".forest" / "runs.jsonl")
+    copy_path(WORKSPACE / ".iron-forest/config.yaml", BUNDLE / ".iron-forest/config.yaml")
+    copy_path(WORKSPACE / ".iron-forest/runtime" / "runs", BUNDLE / "workspace" / ".iron-forest/runtime" / "runs")
+    copy_path(WORKSPACE / ".iron-forest/runtime" / "runs.jsonl", BUNDLE / "workspace" / ".iron-forest/runtime" / "runs.jsonl")
     copy_path(AGENT_LOGS, BUNDLE / "agent")
     copy_path(ORIGIN, BUNDLE / "origin.git")
 

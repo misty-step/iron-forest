@@ -14,9 +14,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git jq python3 sudo \
     && rm -rf /var/lib/apt/lists/*
 RUN npm install --global @earendil-works/pi-coding-agent@0.84.4
-COPY --from=forest-build /out/forest /usr/local/bin/forest
+COPY --from=forest-build /out/forest /opt/iron-forest/.iron-forest/bin/forest
 COPY --from=secret-scanner /usr/bin/trufflehog /usr/local/bin/trufflehog
-COPY agents /opt/iron-forest/agents
+COPY .iron-forest/agents /opt/iron-forest/.iron-forest/agents
 COPY evals/runtime /opt/iron-forest-eval
 RUN useradd --create-home forest \
     && mkdir -p /hidden /workspace /run/forest-eval \

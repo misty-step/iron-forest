@@ -332,7 +332,6 @@ func TestDoctorOpenRouterKeyMissing(t *testing.T) {
 	}
 }
 
-
 func TestCLIDoctorPowderCheckUsesServiceEnvironment(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")

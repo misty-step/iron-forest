@@ -33,14 +33,14 @@ pi -p --mode json --no-session --session-id <run-id> --approve \
   --no-extensions --no-skills --no-prompt-templates --no-themes \
   --model <model> --system-prompt <instructions> \
   [--tools <comma-separated-tools>] [--thinking <level>] \
-  [--skill <repository-relative-path>]... "<task>"
+  [--skill <repository-relative-path>]... [--extension <profile-file>]... "<task>"
 ```
 
 `--no-skills` disables skill discovery; it does not replace the repeated,
 explicit `--skill` arguments. The only skill sources are:
 
-1. `agents/_shared/skills`, when that shared directory exists;
-2. `agents/<name>/skills`, when that role-specific directory exists.
+1. `.iron-forest/agents/_shared/skills`, when that shared directory exists;
+2. `.iron-forest/agents/<name>/skills`, when that role-specific directory exists.
 
 Skill source directory paths are repository-relative and Pi resolves them from
 the Run worktree. The declaration read surface and the Run's `forest.run`
@@ -48,8 +48,11 @@ evidence publish the selected directories as `skills`. The obsolete
 `profile_files` and declaration `env` fields are removed rather than aliased;
 these breaking read-surface changes advance the envelope to `forest.cli.v2`.
 
-No extension, ambient skill, prompt template, or theme is available to the
-child, including one installed in the host's Pi directory. Project context-file
+No ambient extension, skill, prompt template, or theme is available to the
+child, including one installed in the host's Pi directory. Optional declaration
+`extensions` lists normalized files under `.iron-forest`, outside runtime/bin.
+No symlinks are accepted. Resolved paths and SHA-256 digests enter Run evidence;
+the fetched worktree bytes must match before exec. Project context-file
 discovery remains enabled for the Run worktree.
 
 The ephemeral Pi session ID is the exact Run ID. For an OpenRouter model, the
@@ -59,8 +62,8 @@ the Run ID as `x-session-id`, giving Broadcast destinations a stable join key
 for provider traces, Ledger records, and retained Run logs without adding
 credentials or prompt content to Kernel evidence.
 
-For every Run, the Runner creates a new writable scratch directory and sets
-the child's `PI_CODING_AGENT_DIR` to it. It starts without operator Pi
+For every Run, the Runner creates a new writable scratch directory under
+`.iron-forest/runtime` and sets the child's `PI_CODING_AGENT_DIR` to it. It starts without operator Pi
 filesystem state; only the credential-free OpenRouter model override may be
 materialized there. Declarations cannot supply environment entries.
 Provider and forge credentials reach Pi only through the inherited service
@@ -94,11 +97,10 @@ containment belongs to the host the operator chooses.
 ## Consequences
 
 - Builder and Fixer receive any shared skills. Verifier receives those plus any
-  skills under `agents/verifier/skills`.
+  skills under `.iron-forest/agents/verifier/skills`.
 - Installing an MCP extension or other Pi resource on the host cannot alter a
   Run unless the explicit process contract changes.
-- An operator sets one fleet model or thinking level in
-  `forest.defaults.yaml` or `$FOREST_DEFAULTS`; declaration frontmatter still
-  wins.
+- An operator sets model or thinking defaults only in
+  `.iron-forest/defaults.yaml`; declaration frontmatter still wins.
 - `forest selfcheck` publishes the defaults file it loaded.
 - Replacing the harness still means changing one explicit command shape.

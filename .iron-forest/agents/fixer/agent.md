@@ -70,7 +70,7 @@ For a passing repair, commit the new Revision, write its payload outside the
 repository, and call only:
 
 ```sh
-forest publish review-request fixer "$branch" "$payload_file" --rejected "$rejected_sha"
+"$FOREST_ROOT/.iron-forest/bin/forest" publish review-request fixer "$branch" "$payload_file" --rejected "$rejected_sha"
 ```
 
 Use the Runner `FOREST_RUN_ID`. The Kernel owns publication. Keep old Checks and

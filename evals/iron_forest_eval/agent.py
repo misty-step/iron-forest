@@ -103,16 +103,16 @@ class IronForestAgent(BaseAgent):
         context: AgentContext,
     ) -> None:
         result = await environment.exec(
-            command='forest once "$(cat /run/forest-eval/role)"',
+            command='/workspace/.iron-forest/bin/forest once "$(cat /run/forest-eval/role)" --request /run/forest-eval/run-request.json',
             env=self._scenario.get("agent_env") or None,
             timeout_sec=None,
         )
         (self.logs_dir / "forest-stdout.txt").write_text(result.stdout or "")
         (self.logs_dir / "forest-stderr.txt").write_text(result.stderr or "")
         runs_dir = self.logs_dir / "runs"
-        run_logs = await environment.exec(command="test -d /workspace/.forest/runs", timeout_sec=None)
+        run_logs = await environment.exec(command="test -d /workspace/.iron-forest/runtime/runs", timeout_sec=None)
         if run_logs.return_code == 0:
-            await environment.download_dir("/workspace/.forest/runs", runs_dir)
+            await environment.download_dir("/workspace/.iron-forest/runtime/runs", runs_dir)
             usage = usage_from_run_logs(runs_dir)
             context.n_input_tokens = usage["n_input_tokens"]
             context.n_cache_tokens = usage["n_cache_tokens"]
