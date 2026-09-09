@@ -1,3 +1,10 @@
+## [0.0.17](https://github.com/misty-step/iron-forest/compare/v0.0.16...v0.0.17) (2026-09-09)
+
+
+### Bug Fixes
+
+* **deploy:** preserve explicit evaluation timer admission ([6768b68](https://github.com/misty-step/iron-forest/commit/6768b68ceaf4e66dbcdeef79b506e1ae702351dd))
+
 ## [0.0.16](https://github.com/misty-step/iron-forest/compare/v0.0.15...v0.0.16) (2026-09-09)
 
 
