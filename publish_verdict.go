@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -78,7 +77,7 @@ func withPowderReconciliation(result publishVerdictResult, reconciliation powder
 
 func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerdictResult, error) {
 	input.RunID = strings.TrimSpace(input.RunID)
-	if input.RunID == "" || strings.ContainsAny(input.RunID, "/\\ \t\r\n") {
+	if !validPublicationRunID(input.RunID) {
 		return publishVerdictResult{}, fmt.Errorf("FOREST_RUN_ID must identify a valid Verifier run")
 	}
 	runRoot, err := primaryCheckout(ctx, input.Root)
@@ -88,7 +87,8 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err := requireNativeDelivery(runRoot); err != nil {
 		return publishVerdictResult{}, err
 	}
-	if err := requireVerdictRun(runRoot, input.RunID); err != nil {
+	run, err := requirePublicationRun(runRoot, "verifier", input.RunID)
+	if err != nil {
 		return publishVerdictResult{}, err
 	}
 	checksPath, err := filepath.Abs(input.ChecksPath)
@@ -124,6 +124,21 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 			return publishVerdictResult{}, err
 		}
 	}
+	cfg, err := loadConfig(configPath(runRoot))
+	if err != nil {
+		return publishVerdictResult{}, err
+	}
+	poller := input.Powder
+	if poller == nil {
+		poller = NewPoller(input.Root, cfg.Repo, Scope{})
+	}
+	request, requestOID, err := requireVerdictRequest(ctx, poller, revision, run)
+	if err != nil {
+		return publishVerdictResult{}, err
+	}
+	// A generic request never invokes legacy tracker reconciliation, even if
+	// unrelated Powder credentials or historical primary evidence exist.
+	legacyPowder := request.Schema == "forest.review-request.v2" && request.Tracker == "powder"
 
 	checksRef := evidenceChecksRefPrefix + revision
 	verdictRef := evidenceVerdictRefPrefix + revision
@@ -140,47 +155,36 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		return publishVerdictResult{}, err
 	}
 	if identical {
+		if err := requireUnchangedPublicationRun(runRoot, run); err != nil {
+			return publishVerdictResult{}, err
+		}
+		if err := requireNativeDelivery(runRoot); err != nil {
+			return publishVerdictResult{}, err
+		}
 		result := publishVerdictResult{Status: "identical", Revision: revision, Verdict: verdict.Verdict}
-		if verdict.Verdict != "approve" {
+		if verdict.Verdict != "approve" || !legacyPowder {
 			return result, nil
 		}
-		cfg, loadErr := loadConfig(configPath(input.Root))
-		if loadErr != nil {
-			return withPowderReconciliation(result, powderReconcileResult{}, loadErr), nil
-		}
-		powder := input.Powder
-		if powder == nil {
-			powder = NewPoller(input.Root, cfg.Repo, Scope{})
-		}
-		reconciliation, reconcileErr := powder.reconcilePowderPrimary(ctx)
+		reconciliation, reconcileErr := poller.reconcilePowderPrimary(ctx)
 		return withPowderReconciliation(result, reconciliation, reconcileErr), nil
 	}
 	if existingChecks != "" || existingVerdict != "" {
 		return publishVerdictResult{}, conflictError("conflicting evidence ref for %s", revision)
 	}
 
+	if err := requireReviewRequestTip(ctx, input.Root, request); err != nil {
+		return publishVerdictResult{}, err
+	}
 	var primaryRef string
-	var powder *Poller
-	var requestOID string
 	if verdict.Verdict == "approve" {
-		cfg, loadErr := loadConfig(configPath(input.Root))
-		if loadErr != nil {
-			return publishVerdictResult{}, loadErr
-		}
 		primaryRef, _, err = resolvePrimary(ctx, input.Root, cfg)
 		if err != nil {
 			return publishVerdictResult{}, fmt.Errorf("resolve primary ref: %w", err)
 		}
-		powder = input.Powder
-		if powder == nil {
-			powder = NewPoller(input.Root, cfg.Repo, Scope{})
-		}
-		requestOID, err = requireApprovalRequest(ctx, input.Root, powder, revision)
-		if err != nil {
-			return publishVerdictResult{}, err
-		}
-		if _, err := powder.reconcilePowderPrimary(ctx); err != nil {
-			return publishVerdictResult{}, fmt.Errorf("reconcile current Powder Subject before approve: %w", err)
+		if legacyPowder {
+			if _, err := poller.reconcilePowderPrimary(ctx); err != nil {
+				return publishVerdictResult{}, fmt.Errorf("reconcile current Powder Subject before approve: %w", err)
+			}
 		}
 		if err := runConfiguredChecksWithAttestation(ctx, input.Root, revision, checks.Results); err != nil {
 			return publishVerdictResult{}, err
@@ -200,32 +204,39 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		"--force-with-lease=" + checksRef + ":",
 		"--force-with-lease=" + verdictRef + ":",
 	}
-	if verdict.Verdict == "approve" {
-		args = append(args, "--force-with-lease="+evidenceRequestRefPrefix+revision+":"+requestOID)
-	}
+	requestRef := evidenceRequestRefPrefix + revision
+	branchRef := "refs/heads/" + request.Branch
+	args = append(args,
+		"--force-with-lease="+requestRef+":"+requestOID,
+		"--force-with-lease="+branchRef+":"+revision,
+	)
 	args = append(args,
 		"origin",
 		checksCommit+":"+checksRef,
 		verdictCommit+":"+verdictRef,
+		requestOID+":"+requestRef,
+		revision+":"+branchRef,
 	)
 	if verdict.Verdict == "approve" {
-		requestRef := evidenceRequestRefPrefix + revision
-		args = append(args, requestOID+":"+requestRef, revision+":"+primaryRef)
+		args = append(args, revision+":"+primaryRef)
+	}
+	if err := poller.confirmEvidence(ctx, branchTip{Name: request.Branch, SHA: revision}, requestOID, ""); err != nil {
+		return publishVerdictResult{}, conflictError("candidate changed before publication: %w", err)
+	}
+	if err := requireNativeDelivery(runRoot); err != nil {
+		return publishVerdictResult{}, err
 	}
 	// Checks can outlive their owning Run. Never publish after that owner ends
 	// or is replaced, even if every candidate check passed.
-	if err := requireVerdictRun(runRoot, input.RunID); err != nil {
-		return publishVerdictResult{}, err
-	}
-	if err := requireNativeDelivery(runRoot); err != nil {
+	if err := requireUnchangedPublicationRun(runRoot, run); err != nil {
 		return publishVerdictResult{}, err
 	}
 	if err := gitRun(ctx, input.Root, args...); err != nil {
 		return publishVerdictResult{}, classifyVerdictPush(err)
 	}
 	result := publishVerdictResult{Status: "published", Revision: revision, Verdict: verdict.Verdict}
-	if verdict.Verdict == "approve" {
-		reconciliation, reconcileErr := powder.reconcilePowderPrimary(ctx)
+	if verdict.Verdict == "approve" && legacyPowder {
+		reconciliation, reconcileErr := poller.reconcilePowderPrimary(ctx)
 		result = withPowderReconciliation(result, reconciliation, reconcileErr)
 	}
 	return result, nil
@@ -240,45 +251,30 @@ func requirePassingApprovalChecks(checks checksNote) error {
 	return nil
 }
 
-func requireVerdictRun(root, runID string) error {
-	data, err := os.ReadFile(liveRunPath(root, "verifier"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("FOREST_RUN_ID does not match the active Verifier run")
-		}
-		return fmt.Errorf("read live Verifier run: %w", err)
-	}
-	var record liveRunRecord
-	if err := json.Unmarshal(data, &record); err != nil {
-		return fmt.Errorf("parse live Verifier run: %w", err)
-	}
-	if record.RunID != runID || record.Agent != "verifier" || !validNoteTime(record.StartedAt) {
-		return fmt.Errorf("FOREST_RUN_ID does not match a valid active Verifier run")
-	}
-	return nil
-}
-
-func requireApprovalRequest(ctx context.Context, root string, poller *Poller, revision string) (string, error) {
+func requireVerdictRequest(ctx context.Context, poller *Poller, revision string, run liveRunRecord) (reviewRequest, string, error) {
 	data, oid, err := poller.evidencePayloadAndOID(ctx, "request", revision, "builder", "fixer")
-	if isMissingNote(err) {
-		return "", fmt.Errorf("missing request evidence for approve revision %s", revision)
-	}
 	if err != nil {
-		return "", fmt.Errorf("read request evidence for approve: %w", err)
+		return reviewRequest{}, "", fmt.Errorf("read request evidence for verdict: %w", err)
 	}
 	request, err := decodeReview(data, revision)
 	if err != nil {
-		return "", fmt.Errorf("invalid request evidence for approve: %w", err)
+		return request, "", fmt.Errorf("invalid request evidence for verdict: %w", err)
 	}
-	branchRef := "refs/heads/" + request.Branch
-	tip, err := remoteOID(ctx, root, branchRef)
+	if !sameWorkReference(request.Work, run.Work) || request.RunID == run.RunID {
+		return request, "", fmt.Errorf("Verifier Run must independently review the same work as the request")
+	}
+	return request, oid, nil
+}
+
+func requireReviewRequestTip(ctx context.Context, root string, request reviewRequest) error {
+	tip, err := remoteOID(ctx, root, "refs/heads/"+request.Branch)
 	if err != nil {
-		return "", fmt.Errorf("read request branch tip: %w", err)
+		return fmt.Errorf("read request branch tip: %w", err)
 	}
-	if tip != revision {
-		return "", fmt.Errorf("request branch %q tip %q does not match revision %s", request.Branch, tip, revision)
+	if tip != request.Revision {
+		return conflictError("request branch %q tip %q does not match revision %s", request.Branch, tip, request.Revision)
 	}
-	return oid, nil
+	return nil
 }
 func payloadRevision(data []byte) (string, error) {
 	var payload struct {

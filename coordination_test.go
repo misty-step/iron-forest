@@ -33,10 +33,18 @@ func TestDecodeReviewAcceptsV2(t *testing.T) {
 	}
 }
 
-func TestDecodeReviewRejectsV1AndCrossFields(t *testing.T) {
+func TestDecodeReviewPreservesLegacyV1Evidence(t *testing.T) {
+	sha := strings.Repeat("b", 40)
+	payload := `{"schema":"forest.review-request.v1","issue":4,"branch":"forest/4-work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
+	note, err := decodeReview([]byte(payload), sha)
+	if err != nil || note.Subject != "4" || note.Branch != "forest/4-work" {
+		t.Fatalf("legacy evidence lost: %#v %v", note, err)
+	}
+}
+
+func TestDecodeReviewRejectsCrossFields(t *testing.T) {
 	sha := strings.Repeat("b", 40)
 	cases := []string{
-		`{"schema":"forest.review-request.v1","issue":4,"branch":"forest/4-work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`,
 		`{"schema":"forest.review-request.v2","issue":4,"subject":"4","branch":"forest/4/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`,
 		`{"schema":"forest.review-request.v2","subject":"iron-forest-ready","branch":"forest/iron-forest-ready-work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`,
 		`{"schema":"forest.review-request.v2","subject":"bad id","branch":"forest/bad-id/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`,

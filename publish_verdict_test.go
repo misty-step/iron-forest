@@ -40,6 +40,76 @@ func requireMissingRemoteRef(t *testing.T, root, ref string) {
 	}
 }
 
+func TestPublishVerdictRejectsWorkDriftBeforeIdentical(t *testing.T) {
+	for _, decision := range []string{"approve", "changes"} {
+		t.Run(decision, func(t *testing.T) {
+			root, _ := testClone(t)
+			writePassingChecks(t, root)
+			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			builder := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-09T00:00:00Z", RequestID: "build-request", Work: &WorkReference{System: "opaque", ID: "work-id", Key: "WORK-1"}}
+			seedPublicationRun(t, root, builder)
+			payload := writeReviewPayloadForRun(t, revision, "forest/work/implementation", builder)
+			if _, err := publishReviewRequest(context.Background(), publishReviewRequestInput{Root: root, Role: "builder", Branch: "forest/work/implementation", PayloadPath: payload, RunID: builder.RunID}); err != nil {
+				t.Fatal(err)
+			}
+			work := *builder.Work
+			verifier := liveRunRecord{RunID: "11-verifier", Agent: "verifier", StartedAt: builder.StartedAt, RequestID: "review-request", Work: &work}
+			checks, verdict := writeEvidencePayloads(t, revision, decision)
+			input := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}
+			for _, identical := range []bool{false, true} {
+				work.Key = "DIFFERENT-1"
+				seedPublicationRun(t, root, verifier)
+				before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
+				if _, err := publishVerdict(context.Background(), input); err == nil {
+					t.Fatalf("work drift accepted (identical=%t)", identical)
+				}
+				if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before {
+					t.Fatal("unrelated work received verdict evidence")
+				}
+				if !identical {
+					work.Key = builder.Work.Key
+					seedPublicationRun(t, root, verifier)
+					if _, err := publishVerdict(context.Background(), input); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestPublishVerdictRejectsCandidateMovedDuringChecks(t *testing.T) {
+	root, origin := testClone(t)
+	config := `repo: owner/name
+primary: refs/heads/master
+agents:
+  builder: {poll: "true", interval: 1}
+checks:
+  - name: test
+    run: git commit --allow-empty -m concurrent && git push origin HEAD:refs/heads/forest/work/implementation
+`
+	writeTree(t, root, profileName+"/config.yaml", config)
+	runGitDir(t, root, "commit", "-am", "move candidate during checks")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	primary := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
+	pushEvidence(t, root, "request", revision, pollReviewNoteBranch(revision, "forest/work/implementation"), "Iron Forest Builder", "builder@forest.invalid")
+	runGitDir(t, root, "push", "origin", revision+":refs/heads/forest/work/implementation")
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	seedVerdictRun(t, root, "1-verifier")
+	_, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier"})
+	if err == nil || !publishConflict(err) {
+		t.Fatalf("stale candidate error=%v", err)
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/forest/work/implementation"))); got == revision {
+		t.Fatal("configured check did not move candidate")
+	}
+	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != primary {
+		t.Fatal("stale candidate advanced primary")
+	}
+	requireMissingRemoteRef(t, root, evidenceChecksRefPrefix+revision)
+	requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
+}
+
 func seedVerdictRun(t *testing.T, root, runID string) {
 	t.Helper()
 	t.Setenv("FOREST_ROOT", root)
@@ -52,6 +122,7 @@ func TestPublishVerdictChangesCreatesEvidenceRefs(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "if-changes", revision)
 	before := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
 	checks, verdict := writeEvidencePayloads(t, revision, "changes")
 	seedVerdictRun(t, root, "1-verifier")
@@ -80,7 +151,6 @@ func TestPublishVerdictChangesCreatesEvidenceRefs(t *testing.T) {
 			t.Fatalf("published %s=%s, want %s", ref, got, want)
 		}
 	}
-	requireMissingRemoteRef(t, root, evidenceRequestRefPrefix+revision)
 }
 
 func TestPublishVerdictApproveFastForwardsMaster(t *testing.T) {
@@ -154,7 +224,7 @@ func TestPublishVerdictApproveRejectsInvalidRequestEvidence(t *testing.T) {
 			} else {
 				requestRevision = base
 			}
-			request := reviewRequestJSON("if-invalid-request", requestRevision, "powder")
+			request := pollReviewNoteBranch(requestRevision, "forest/if-invalid-request/work")
 			pushEvidence(t, root, "request", revision, request, author, email)
 			runGitDir(t, root, "push", "origin", revision+":refs/heads/forest/if-invalid-request/work")
 			before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
@@ -330,6 +400,7 @@ func TestPublishVerdictSecondPublishConflicts(t *testing.T) {
 			root, _ := testClone(t)
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			pushRequestForRevision(t, root, "if-conflict", revision)
 			checks, verdict := writeEvidencePayloads(t, revision, "changes")
 			seedVerdictRun(t, root, "1-verifier")
 			input := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier"}
@@ -363,6 +434,7 @@ func TestPublishVerdictRejectsPartialEvidence(t *testing.T) {
 			root, _ := testClone(t)
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			pushRequestForRevision(t, root, "if-partial", revision)
 			checks, verdict := writeEvidencePayloads(t, revision, "changes")
 			path := checks
 			if kind == "verdict" {
@@ -395,9 +467,7 @@ func TestPublishVerdictIdenticalIsSuccess(t *testing.T) {
 			root, _ := testClone(t)
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-			if decision == "approve" {
-				pushRequestForRevision(t, root, "if-identical", revision)
-			}
+			pushRequestForRevision(t, root, "if-identical", revision)
 			checks, verdict := writeEvidencePayloads(t, revision, decision)
 			seedVerdictRun(t, root, "1-verifier")
 			input := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier"}
@@ -492,16 +562,24 @@ checks:
 func pushRequestForRevision(t *testing.T, root, subject, revision string) {
 	t.Helper()
 	branch := "forest/" + subject + "/work"
-	request := reviewRequestJSON(subject, revision, "powder")
+	request := pollReviewNoteBranch(revision, branch)
 	pushEvidence(t, root, "request", revision, request, "Iron Forest Builder", "builder@forest.invalid")
 	runGitDir(t, root, "push", "origin", revision+":refs/heads/"+branch)
+}
+
+// Pending v2 requests remain legitimate read-only inputs after the writer
+// cutover, including their historical Powder completion protocol.
+func pushHistoricalPowderRequest(t *testing.T, root, subject, revision string) {
+	t.Helper()
+	pushEvidence(t, root, "request", revision, reviewRequestJSON(subject, revision, "powder"), "Iron Forest Builder", "builder@forest.invalid")
+	runGitDir(t, root, "push", "origin", revision+":refs/heads/forest/"+subject+"/work")
 }
 
 func TestPublishVerdictPreservesLandedApproveWhilePowderRetries(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushRequestForRevision(t, root, "if-next", revision)
+	pushHistoricalPowderRequest(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{doneFailure: 1}
@@ -540,7 +618,7 @@ func TestPublishVerdictBlocksLaterApproveOnPendingCurrentPowder(t *testing.T) {
 	seedApprovedCurrent(t, root, "if-current")
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushRequestForRevision(t, root, "if-next", revision)
+	pushHistoricalPowderRequest(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{doneFailure: 1}
@@ -563,7 +641,7 @@ func TestPublishVerdictBlocksLaterApproveOnNotFoundCurrentPowder(t *testing.T) {
 	seedApprovedCurrent(t, root, "if-current")
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushRequestForRevision(t, root, "if-next", revision)
+	pushHistoricalPowderRequest(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{notFound: true}
@@ -585,7 +663,7 @@ func TestPublishVerdictPreservesLandedApproveWhenPowderNotFound(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushRequestForRevision(t, root, "if-next", revision)
+	pushHistoricalPowderRequest(t, root, "if-next", revision)
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
 	lifecycle := &fakePowderLifecycle{notFound: true}

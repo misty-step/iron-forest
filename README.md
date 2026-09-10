@@ -143,6 +143,42 @@ omit native `checks`. `required_tools` names additional profile dependencies;
 selfcheck always requires only the Kernel's `git` and `pi`, plus those explicitly
 declared tools.
 
+### Repository-owned intent
+
+An optional `intent` in `.iron-forest/config.yaml` declares the repository's
+purpose, desired outcomes, constraints, and release policy alongside its roles
+and checks:
+
+```yaml
+intent:
+  purpose: Provide reliable local time records.
+  outcomes:
+    - Capture and correct records while disconnected.
+  constraints:
+    - Use only synthetic data in demos.
+  release_policy: Publish only after the profile's declared verification gates.
+```
+
+When `intent` is present, all four fields are required. `purpose` and
+`release_policy` are YAML string scalars; `outcomes` and `constraints` are
+sequences of string scalars, not comma-separated or space-separated shorthand.
+Explicit empty strings and `[]` are valid and retained. Nulls, incomplete
+objects, unknown or duplicate fields, and implicit numeric/boolean-to-string
+coercions are rejected with the profile path and intent field.
+
+`forest config show --json` publishes this exact object at `data.intent` in the
+existing `forest.cli.v2` envelope. An omitted declaration stays omitted, not
+`null` or a fabricated default. The human projection labels it `intent (declared)`.
+The command also reports effective `delivery`, loaded roles, checks, scope, and
+resolved primary provenance from the same configuration path.
+
+Intent describes policy; it neither changes `delivery` nor proves that policy is
+enforced. Kernel does not inject it into prompts or select work from it.
+Repository-owned declarations and requests, admission, delivery gates,
+completion evidence, credentials, and provider-side budgets retain their
+existing responsibilities. This is the current loaded profile, not a claim
+about historical Run intent or the configuration adopted by a running service.
+
 ### Execution, completion, and delivery
 
 A Run records independent facts:
@@ -412,11 +448,46 @@ supplied by the operator. A historical queue item does not authorize a Run.
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit. Verifier calls `forest publish verdict`.
 The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
-`master` in the same atomic push. Historical tracker reconciliation remains
-in the implementation. See
+the configured primary in the same atomic push. New requests use
+`forest.review-request.v3`; historical v1/v2 evidence remains readable and is
+never rewritten. Only pending v2 Powder requests retain their legacy
+reconciliation behavior. Generic v3 requests never invoke GitHub/Powder work
+mutation; their profile completion observer owns work-system effects. See
 [ADR 0021](docs/adr/0021-kernel-review-request-publication.md),
 [ADR 0022](docs/adr/0022-kernel-verdict-publication.md), and
 [ADR 0023](docs/adr/0023-powder-jobs-and-review-request-v2.md).
+
+The current review-request payload is:
+
+```json
+{
+  "schema": "forest.review-request.v3",
+  "subject": "selected-work",
+  "branch": "forest/selected-work/implementation",
+  "revision": "<full candidate SHA>",
+  "time": "<RFC3339 timestamp>",
+  "run_id": "<actual builder or fixer FOREST_RUN_ID>",
+  "request_id": "<actual Run request id>",
+  "work": {
+    "system": "<opaque system identifier>",
+    "id": "<immutable work identifier>",
+    "key": "<optional display key>",
+    "url": "<optional work URL>"
+  }
+}
+```
+
+`subject` is a branch-routing identity, not a tracker enum. `run_id` must name
+the actual live Builder/Fixer owner. `request_id` must match that Run's retained
+request and must be omitted when absent. `work` must exactly equal the complete
+persisted WorkReference snapshot, including optional display fields, or be
+omitted when absent. An explicit request without work is valid. No `tracker`
+member is accepted. Unknown or duplicate fields are rejected.
+
+The Verifier has its own Run/request IDs but must review the same complete work
+snapshot. Fixer preserves the rejected Subject, branch and work, requires its
+exact `changes` verdict, and stamps its own actual Run/request IDs onto the
+fresh revision. Old request and verdict refs remain unchanged.
 
 Which identity may create or update which ref is in
 [onboarding](docs/onboarding-managed-repo.md#forge-identities-and-references).
@@ -459,12 +530,13 @@ Historical notes are unread. A missing evidence ref is no work.
 
 ## Merge Gate
 
-Both Verdict kinds require the Runner's `FOREST_RUN_ID` to match a valid live
-Verifier record in the owning primary checkout. A linked worktree resolves to
-that owner; `FOREST_ROOT` cannot redirect the check. Missing or ended context
-is refused even for an identical retry, and ownership is checked again
-immediately before publication. This is an operational guard, not security
-containment between processes running as the same user.
+All publication roles require the Runner's `FOREST_RUN_ID` to match a valid live
+role owner in the primary checkout and, when present, its retained request.
+A linked worktree resolves to that owner; `FOREST_ROOT` cannot redirect the
+check. Missing, ended, finalizing or cancelled context is refused even for an
+identical retry. Ownership and complete request/work association are rechecked
+after candidate Checks and before publication. This is an operational guard,
+not security containment between processes running as the same user.
 
 The Gate requires one valid request evidence ref, passing Checks, and an
 approve Verdict for the same Revision, plus a fast-forward of `master` to that
@@ -478,9 +550,14 @@ the detached candidate worktree, resolved from the running Kernel binary and
 the external `trufflehog` outside the managed checkout). It runs unconditionally
 before configured Checks and never compiles or executes candidate code, so a
 candidate cannot supply the Gate's credential scanner. The atomic push
-publishes Checks and Verdict, fast-forwards `master`, and includes the
-validated request OID as a no-op leased refspec. The request content is not
-replaced, and the primary branch is never forced. Except for the trusted first
+publishes Checks and Verdict, fast-forwards primary, and includes the validated
+request OID and candidate branch as no-op leased refspecs. Both Verdict kinds
+require the exact request and work; moved candidates are refused after Checks.
+The request content is not replaced, and the primary branch is never forced.
+Greenfield checks fail closed: the profile declares required commands, and
+publication remains blocked until the candidate actually implements them.
+Candidate configuration must retain native delivery and nonempty Checks.
+Except for the trusted first
 `master` baseline, the Auditor checks the observable final state after the
 Effect; it remains the observer rather than the Gate owner. See
 [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
@@ -535,7 +612,7 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest poll <agent>` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`. |
 | `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, recent Runs, and Ledger aggregates. |
 | `forest selfcheck` | Validate `.iron-forest/config.yaml` and declarations locally. |
-| `forest config show` | Print the loaded configuration. |
+| `forest config show` | Print the loaded configuration, effective delivery mode, declared intent when present, and resolved primary provenance. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
 | `forest trigger list\|show <agent>` | Print resolved trigger state. |
 | `forest trigger reset <agent>` | Clear one agent's accumulated errors, including provider-budget fail-closed (`run_error=provider budget exhausted`). Refuses while a Kernel runs; resume is stop Kernel, reset, start. |

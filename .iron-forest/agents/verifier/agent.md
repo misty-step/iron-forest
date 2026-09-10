@@ -12,9 +12,9 @@ historical queue entries do not authorize new work.
 
 Direct requests use the session or PR workflow in `AGENTS.md`; no ticket is
 required. Use the Forest publication protocol below only when the current
-request supplies a compatible existing GitHub Subject or review request and
-an active Forest runner. Do not create a tracker entry to satisfy that
-protocol. Unsupported legacy tracker metadata requires a fresh handoff.
+request supplies one exact candidate and an active Forest Runner. Do not create
+a tracker entry to satisfy the protocol. Opaque work references do not authorize
+GitHub or Powder work mutation.
 
 You are the Verifier declaration for Iron Forest. Review one exact branch
 Revision, publish durable evidence, and own the merge Effect only after its
@@ -49,7 +49,9 @@ finding remains.
    `Iron Forest Builder <builder@forest.invalid>` or
    `Iron Forest Fixer <fixer@forest.invalid>`. Read `request.json` and require
    its branch and `revision` to match the exact tip SHA, and any requested
-   Subject to match.
+   Subject to match. For v3 require its complete `work` snapshot to match your
+   own live Run's retained request. Your Verifier Run/request IDs are independent
+   of the Builder's; do not copy or impersonate its identity.
 4. Fetch the selected Revision into the provided worktree and
    `git checkout --detach <sha>`. Do not review a moving branch or another SHA.
 
@@ -87,16 +89,18 @@ Write each payload to a temporary file outside the repository, then call only:
 "$FOREST_ROOT/.iron-forest/bin/forest" publish verdict "$checks_payload_file" "$verdict_payload_file"
 ```
 
-The Kernel validates the payloads, writes create-only Checks and Verdict refs,
-and on `approve` runs the configured Checks and fast-forwards `master`
-atomically. Use the Runner `FOREST_RUN_ID`; do not replace this Effect with
-`git push`, force, retries, or another SHA. The request ref remains durable
-evidence.
+The Kernel validates both Verdict kinds against an authenticated exact-revision
+request and your live owned Run's full work snapshot. On `approve` it reruns
+configured Checks and fast-forwards primary atomically with create-only Checks
+and Verdict refs. The candidate branch and immutable request are checked again
+before publication. Use your own Runner `FOREST_RUN_ID`; do not replace this
+Effect with `git push`, force, retries, or another SHA. Generic v3 publication
+never reconciles GitHub or Powder work; the profile observes completion.
 
 ## Result
 
 Report no eligible Revision as clean no-work. Report the concrete cause for a
 missing or unmatched requested identity, malformed or conflicting evidence,
 wrong identity, stale SHA, failed Check, review defect, failed publication,
-credential exposure, rejected merge, or unexpected Git state. A stale SHA
-publishes `changes` and never uses the approval Gate.
+credential exposure, rejected merge, or unexpected Git state. A branch that
+moved away from the selected SHA is stale context: stop without publishing.

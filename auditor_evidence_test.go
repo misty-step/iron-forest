@@ -30,7 +30,7 @@ func TestAuditorToleratesLegacyV1RequestButFlagsUnknownV2Key(t *testing.T) {
 		`{"schema":"forest.review-request.v1","issue":284,"branch":"forest/284-evidence-ref-selection","revision":"`+legacy+`","time":"2026-08-18T14:31:37Z"}`+"\n",
 		"Iron Forest Builder", "builder@forest.invalid")
 	pushEvidence(t, root, "request", unknown,
-		`{"schema":"forest.review-request.v2","extra":true,"subject":"1","branch":"forest/1/gate","revision":"`+unknown+`","time":"2026-08-10T00:00:00Z"}`+"\n",
+		`{"schema":"forest.review-request.v3","extra":true,"subject":"1","branch":"forest/1/gate","revision":"`+unknown+`","time":"2026-08-10T00:00:00Z","run_id":"fixture-builder"}`+"\n",
 		"Iron Forest Builder", "builder@forest.invalid")
 	addGateNotes(t, root, master, `[{"name":"test","ok":true,"exit":0}]`)
 

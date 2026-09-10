@@ -73,12 +73,16 @@ func isSHA(value string) bool {
 }
 
 type reviewRequest struct {
-	Schema   string `json:"schema"`
-	Subject  string `json:"subject"`
-	Branch   string `json:"branch"`
-	Revision string `json:"revision"`
-	Time     string `json:"time"`
-	Tracker  string `json:"tracker"`
+	Schema    string         `json:"schema"`
+	Subject   string         `json:"subject"`
+	Branch    string         `json:"branch"`
+	Revision  string         `json:"revision"`
+	Time      string         `json:"time"`
+	RunID     string         `json:"run_id,omitempty"`
+	RequestID string         `json:"request_id,omitempty"`
+	Work      *WorkReference `json:"work,omitempty"`
+	// Tracker is read-only compatibility for immutable v2 evidence.
+	Tracker string `json:"tracker,omitempty"`
 }
 
 type checksNote struct {
@@ -113,8 +117,9 @@ type verdictNote struct {
 }
 
 type strictJSONShape struct {
-	fields  map[string]*strictJSONShape
-	element *strictJSONShape
+	fields     map[string]*strictJSONShape
+	element    *strictJSONShape
+	stringOnly bool
 }
 
 func objectJSONShape(fields ...string) *strictJSONShape {
@@ -190,6 +195,9 @@ func scanStrictJSON(decoder *json.Decoder, shape *strictJSONShape) error {
 		if shape == nil || shape.fields != nil || shape.element != nil {
 			return fmt.Errorf("invalid JSON value")
 		}
+		if _, ok := token.(string); shape.stringOnly && !ok {
+			return fmt.Errorf("invalid JSON string")
+		}
 	}
 	return nil
 }
@@ -226,14 +234,64 @@ func validTracker(value string) bool {
 }
 
 func decodeReview(data []byte, sha string) (reviewRequest, error) {
+	var probe struct {
+		Schema    string          `json:"schema"`
+		RequestID json.RawMessage `json:"request_id"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return reviewRequest{}, err
+	}
+	if probe.Schema == "forest.review-request.v1" {
+		legacy, err := decodeLegacyReview(data, sha)
+		return reviewRequest{Schema: legacy.Schema, Subject: fmt.Sprint(legacy.Issue),
+			Branch: legacy.Branch, Revision: legacy.Revision, Time: legacy.Time}, err
+	}
+	shape := objectJSONShape("schema", "subject", "branch", "revision", "time")
+	switch probe.Schema {
+	case "forest.review-request.v2":
+		shape.fields["tracker"] = &strictJSONShape{}
+	case "forest.review-request.v3":
+		text := &strictJSONShape{stringOnly: true}
+		shape.fields["run_id"] = text
+		shape.fields["request_id"] = text
+		for field := range shape.fields {
+			shape.fields[field] = text
+		}
+		shape.fields["work"] = objectJSONShape("system", "id", "key", "url")
+		for field := range shape.fields["work"].fields {
+			shape.fields["work"].fields[field] = text
+		}
+	default:
+		return reviewRequest{}, fmt.Errorf("invalid review-request schema")
+	}
 	var note reviewRequest
-	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "subject", "branch", "revision", "time", "tracker")); err != nil {
+	if err := decodeStrictJSON(data, &note, shape); err != nil {
 		return note, err
 	}
-	if note.Schema != "forest.review-request.v2" || note.Revision != sha || !branchBelongsToSubject(note.Branch, note.Subject) || !validNoteTime(note.Time) || !validTracker(note.Tracker) {
+	if !isSHA(sha) || note.Revision != sha || !branchBelongsToSubject(note.Branch, note.Subject) || !validNoteTime(note.Time) {
 		return note, fmt.Errorf("invalid review-request note")
 	}
+	if note.Schema == "forest.review-request.v2" {
+		if !validTracker(note.Tracker) {
+			return note, fmt.Errorf("invalid review-request tracker")
+		}
+	} else if !validPublicationRunID(note.RunID) ||
+		(probe.RequestID != nil && strings.TrimSpace(note.RequestID) == "") ||
+		(note.Work != nil && (strings.TrimSpace(note.Work.System) == "" || strings.TrimSpace(note.Work.ID) == "")) {
+		return note, fmt.Errorf("invalid review-request Run or work identity")
+	}
 	return note, nil
+}
+
+func validPublicationRunID(runID string) bool {
+	return runID != "" && !strings.ContainsAny(runID, "/\\ \t\r\n") && runID != "." && runID != ".."
+}
+
+func sameWorkReference(left, right *WorkReference) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 type legacyReviewRequest struct {
@@ -258,19 +316,9 @@ func decodeLegacyReview(data []byte, sha string) (legacyReviewRequest, error) {
 	return note, nil
 }
 
-// decodeRequestEvidence decodes review-request evidence for the Auditor
-// read-only sweep. The v2 shape keeps its strict decoder as the authority;
-// the legacy v1 shape is tolerated so immutable pre-cutover refs do not
-// produce a permanent violation.
+// decodeRequestEvidence accepts current and historical immutable evidence.
+// Compatibility is read-only; publication accepts only the current schema.
 func decodeRequestEvidence(data []byte, sha string) error {
-	var probe struct {
-		Schema string `json:"schema"`
-	}
-	_ = json.Unmarshal(data, &probe)
-	if probe.Schema == "forest.review-request.v1" {
-		_, err := decodeLegacyReview(data, sha)
-		return err
-	}
 	_, err := decodeReview(data, sha)
 	return err
 }

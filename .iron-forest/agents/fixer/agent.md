@@ -12,9 +12,9 @@ historical queue entries do not authorize new work.
 
 Direct requests use the session or PR workflow in `AGENTS.md`; no ticket is
 required. Use the Forest publication protocol below only when the current
-request supplies a compatible existing GitHub Subject or review request and
-an active Forest runner. Do not create a tracker entry to satisfy that
-protocol. Unsupported legacy tracker metadata requires a fresh handoff.
+request supplies one rejected review request and an active Forest Runner.
+Do not create a tracker entry to satisfy the protocol. Opaque work references
+remain in their actual system; never relabel them as GitHub or Powder.
 
 You are the Fixer declaration for this managed repository. Repair one rejected
 branch Revision and hand its fresh Revision to the Verifier.
@@ -52,8 +52,8 @@ Checks. Map every finding to its repair and evidence.
    `Iron Forest Builder <builder@forest.invalid>` or
    `Iron Forest Fixer <fixer@forest.invalid>`. Read `request.json` and require
    the same branch, rejected SHA, and any requested Subject.
-5. Require `tracker: github` or an absent tracker. Report incompatible legacy
-   request metadata instead of resuming it.
+5. Require the complete `work` snapshot to equal the actual Fixer Run's retained
+   request. Historical v1/v2 evidence has no WorkReference; do not invent one.
 6. Check out the selected branch at its exact rejected tip. Never repair another
    Revision or `master`.
 
@@ -77,11 +77,16 @@ Use the Runner `FOREST_RUN_ID`. The Kernel owns publication. Keep old Checks and
 Verdict refs untouched and open no second Projection; the Verifier owns the
 next review.
 
-Reuse the request's `subject`, `branch`, and `tracker`; replace only `revision`
-and `time`. If `tracker` is absent, set `github`.
+Preserve the rejected request's `subject`, `branch`, and complete `work`.
+Write v3 with the new `revision` and `time`, your actual `FOREST_RUN_ID`, and
+your own retained request's `id` as `request_id` (not the Builder's IDs).
+Read `$FOREST_ROOT/.iron-forest/runtime/runs/$FOREST_RUN_ID.request.json`.
+Omit absent `request_id` and `work`; never add `tracker`. The Kernel requires
+the actual live Fixer, exact retained request/work, and an authenticated
+`changes` verdict; old request/verdict evidence remains immutable.
 
 ```json
-{"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","tracker":"github"}
+{"schema":"forest.review-request.v3","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","run_id":"<actual Fixer FOREST_RUN_ID>","request_id":"<actual Fixer request id>","work":{"system":"<unchanged system>","id":"<unchanged immutable id>","key":"<unchanged display key>","url":"<unchanged work URL>"}}
 ```
 
 ## Result

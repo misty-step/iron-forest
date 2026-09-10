@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -73,7 +74,7 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if input.Role == "builder" && input.Rejected != "" {
 		return publishReviewRequestResult{}, fmt.Errorf("builder publication does not accept --rejected")
 	}
-	if input.RunID == "" || strings.ContainsAny(input.RunID, "/ \t\n") {
+	if !validPublicationRunID(input.RunID) {
 		return publishReviewRequestResult{}, fmt.Errorf("FOREST_RUN_ID is required")
 	}
 	runRoot, err := primaryCheckout(ctx, input.Root)
@@ -81,6 +82,10 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		return publishReviewRequestResult{}, err
 	}
 	if err := requireNativeDelivery(runRoot); err != nil {
+		return publishReviewRequestResult{}, err
+	}
+	run, err := requirePublicationRun(runRoot, input.Role, input.RunID)
+	if err != nil {
 		return publishReviewRequestResult{}, err
 	}
 	payloadPath, err := filepath.Abs(input.PayloadPath)
@@ -99,14 +104,19 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if err != nil {
 		return publishReviewRequestResult{}, err
 	}
-	if note.Tracker != "github" && note.Tracker != "powder" {
-		return publishReviewRequestResult{}, fmt.Errorf("review-request tracker must be github or powder")
+	if note.Schema != "forest.review-request.v3" {
+		return publishReviewRequestResult{}, fmt.Errorf("new review requests require forest.review-request.v3")
+	}
+	if note.RunID != run.RunID || note.RequestID != run.RequestID || !sameWorkReference(note.Work, run.Work) {
+		return publishReviewRequestResult{}, fmt.Errorf("review-request Run, request or work does not match the active %s Run", input.Role)
 	}
 	if note.Branch != input.Branch {
 		return publishReviewRequestResult{}, fmt.Errorf("payload branch %q does not match %q", note.Branch, input.Branch)
 	}
+	var rejection rejectionEvidence
 	if input.Role == "fixer" {
-		if err := requireFixerRequestContinuity(ctx, input.Root, input.Rejected, note); err != nil {
+		rejection, err = requireFixerRequestContinuity(ctx, input.Root, input.Rejected, note)
+		if err != nil {
 			return publishReviewRequestResult{}, err
 		}
 	}
@@ -125,13 +135,20 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		return publishReviewRequestResult{}, err
 	}
 	if existingRequest != "" {
-		got, err := evidenceBlob(ctx, input.Root, requestRef, "request.json", "refs/forest/private/compare/")
+		poller := NewPoller(input.Root, "", Scope{})
+		got, oid, err := poller.evidencePayloadAndOID(ctx, "request", revision, input.Role)
 		if err != nil {
 			return publishReviewRequestResult{}, err
 		}
-		if !bytes.Equal(got, payload) {
+		if oid != existingRequest || !bytes.Equal(got, payload) {
 			return publishReviewRequestResult{}, conflictError("conflicting request evidence for %s", revision)
 		}
+	}
+	if err := requireUnchangedPublicationRun(runRoot, run); err != nil {
+		return publishReviewRequestResult{}, err
+	}
+	if err := requirePublicationHead(ctx, input.Root, revision); err != nil {
+		return publishReviewRequestResult{}, err
 	}
 
 	if input.Role == "builder" {
@@ -167,9 +184,27 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 		}
 		pushArgs = append(pushArgs, "--force-with-lease="+requestRef+":")
 		refspecs = append(refspecs, requestCommit+":"+requestRef)
+	} else {
+		pushArgs = append(pushArgs, "--force-with-lease="+requestRef+":"+existingRequest)
+		refspecs = append(refspecs, existingRequest+":"+requestRef)
+	}
+	if input.Role == "fixer" {
+		rejectedRequestRef := evidenceRequestRefPrefix + input.Rejected
+		rejectedVerdictRef := evidenceVerdictRefPrefix + input.Rejected
+		pushArgs = append(pushArgs,
+			"--force-with-lease="+rejectedRequestRef+":"+rejection.RequestOID,
+			"--force-with-lease="+rejectedVerdictRef+":"+rejection.VerdictOID,
+		)
+		refspecs = append(refspecs, rejection.RequestOID+":"+rejectedRequestRef, rejection.VerdictOID+":"+rejectedVerdictRef)
 	}
 	pushArgs = append(pushArgs, "origin")
 	pushArgs = append(pushArgs, refspecs...)
+	if err := requireNativeDelivery(runRoot); err != nil {
+		return publishReviewRequestResult{}, err
+	}
+	if err := requireUnchangedPublicationRun(runRoot, run); err != nil {
+		return publishReviewRequestResult{}, err
+	}
 	output, err := gitOutput(ctx, input.Root, pushArgs...)
 	if err != nil {
 		return publishReviewRequestResult{}, classifyReviewPush(output, err)
@@ -185,35 +220,92 @@ func classifyReviewPush(output []byte, err error) error {
 	return err
 }
 
-func requireFixerRequestContinuity(ctx context.Context, root, rejected string, note reviewRequest) error {
-	requestRef := evidenceRequestRefPrefix + rejected
-	existing, err := remoteOID(ctx, root, requestRef)
+type rejectionEvidence struct {
+	RequestOID string
+	VerdictOID string
+}
+
+func requireFixerRequestContinuity(ctx context.Context, root, rejected string, note reviewRequest) (rejectionEvidence, error) {
+	poller := NewPoller(root, "", Scope{})
+	data, requestOID, err := poller.evidencePayloadAndOID(ctx, "request", rejected, "builder", "fixer")
 	if err != nil {
-		return err
-	}
-	if existing == "" {
-		return fmt.Errorf("rejected request evidence is missing")
-	}
-	data, err := evidenceBlob(ctx, root, requestRef, "request.json", "refs/forest/private/compare/")
-	if err != nil {
-		return fmt.Errorf("read rejected request: %w", err)
+		return rejectionEvidence{}, fmt.Errorf("read rejected request: %w", err)
 	}
 	previous, err := decodeReview(data, rejected)
 	if err != nil {
-		return fmt.Errorf("invalid rejected request: %w", err)
+		return rejectionEvidence{}, fmt.Errorf("invalid rejected request: %w", err)
 	}
-	if previous.Subject != note.Subject {
-		return fmt.Errorf("fixer subject %q does not match rejected request %q", note.Subject, previous.Subject)
+	if previous.Subject != note.Subject || previous.Branch != note.Branch || !sameWorkReference(previous.Work, note.Work) {
+		return rejectionEvidence{}, fmt.Errorf("fixer subject, branch or work does not match the rejected request")
 	}
-	if previous.Branch != note.Branch {
-		return fmt.Errorf("fixer branch %q does not match rejected request %q", note.Branch, previous.Branch)
+	data, verdictOID, err := poller.evidencePayloadAndOID(ctx, "verdict", rejected, "verifier")
+	if err != nil {
+		return rejectionEvidence{}, fmt.Errorf("read rejected verdict: %w", err)
 	}
-	wantTracker := previous.Tracker
-	if wantTracker == "" {
-		wantTracker = "github"
+	verdict, err := decodeVerdict(data, rejected)
+	if err != nil || verdict.Verdict != "changes" {
+		return rejectionEvidence{}, fmt.Errorf("fixer requires a changes verdict for the rejected revision")
 	}
-	if note.Tracker != wantTracker {
-		return fmt.Errorf("fixer tracker %q does not match rejected request %q", note.Tracker, wantTracker)
+	return rejectionEvidence{RequestOID: requestOID, VerdictOID: verdictOID}, nil
+}
+
+// Ownership comes from the primary checkout's durable Runner records, never
+// FOREST_ROOT or a caller-supplied payload. A retained execution/finalization
+// result is ended context even before cleanup removes the live file.
+func requirePublicationRun(root, role, runID string) (liveRunRecord, error) {
+	var run liveRunRecord
+	if !validPublicationRunID(runID) {
+		return run, fmt.Errorf("FOREST_RUN_ID must identify a valid %s Run", role)
+	}
+	data, err := os.ReadFile(liveRunPath(root, role))
+	if err != nil {
+		return run, fmt.Errorf("read active %s Run: %w", role, err)
+	}
+	if err := json.Unmarshal(data, &run); err != nil {
+		return run, fmt.Errorf("parse live %s Run: %w", role, err)
+	}
+	if run.RunID != runID || run.Agent != role || !validNoteTime(run.StartedAt) || run.Result != nil || run.Finalized {
+		return run, fmt.Errorf("FOREST_RUN_ID does not match an active %s Run", role)
+	}
+	if hasRunCancellationMarker(root, runID) {
+		return run, fmt.Errorf("publication Run is cancelled")
+	}
+	if _, found, err := FindRun(root, runID); err != nil {
+		return run, fmt.Errorf("read publication Run history: %w", err)
+	} else if found {
+		return run, fmt.Errorf("publication Run has ended")
+	}
+	request, err := readRunRequest(forestPath(root, "runs", runID+".request.json"))
+	if os.IsNotExist(err) && run.RequestID == "" && run.Work == nil {
+		return run, nil
+	}
+	if err != nil {
+		return run, fmt.Errorf("read retained publication request: %w", err)
+	}
+	if request.ID != run.RequestID || !sameWorkReference(request.Work, run.Work) {
+		return run, fmt.Errorf("live publication Run does not match its retained request")
+	}
+	return run, nil
+}
+
+func requireUnchangedPublicationRun(root string, previous liveRunRecord) error {
+	current, err := requirePublicationRun(root, previous.Agent, previous.RunID)
+	if err != nil {
+		return err
+	}
+	if current.StartedAt != previous.StartedAt || current.RequestID != previous.RequestID || !sameWorkReference(current.Work, previous.Work) {
+		return fmt.Errorf("publication Run context changed")
+	}
+	return nil
+}
+
+func requirePublicationHead(ctx context.Context, root, revision string) error {
+	head, err := gitLine(ctx, root, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if head != revision {
+		return conflictError("publication HEAD changed from candidate revision")
 	}
 	return nil
 }
@@ -244,6 +336,9 @@ func runConfiguredChecksWithAttestation(ctx context.Context, root, revision stri
 	cfg, loadErr := loadConfig(configPath(dir))
 	if loadErr != nil {
 		return loadErr
+	}
+	if cfg.Delivery != "git-native" || len(cfg.Checks) == 0 {
+		return fmt.Errorf("native candidate requires configured Checks and git-native delivery")
 	}
 	if attested != nil {
 		if matchErr := requireMatchingCheckNames(cfg.Checks, attested); matchErr != nil {

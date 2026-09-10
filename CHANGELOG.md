@@ -42,6 +42,15 @@
 * Record known execution outcomes (`setup_failed`, `execution_failed`,
   `provider_failed`, `cancelled`, `timed_out`, `interrupted`, `internal_error`)
   and the raw `process_exit`. Missing legacy values stay unclassified.
+* Expose optional repository-owned `intent` through strict configuration loading
+  and `forest config show`, without inventing absent intent or treating declared
+  purpose, outcomes, constraints and release policy as enforced authority.
+* Expose the effective native/external delivery mode in `forest config show`
+  so profile admission and product packaging can inspect the actual mode.
+* Bind new native review requests to the owning live Run, request and complete
+  opaque work reference with `forest.review-request.v3`. Keep historical v1/v2
+  evidence readable; preserve independent verifier and fixer continuity, exact
+  revisions, configured checks, credential scanning and atomic publication.
 
 ### Bug Fixes
 
@@ -53,6 +62,8 @@
 * Replace the retired queue-first onboarding walkthrough with the current
   request-first path, and stop presenting the exit-zero Ledger fraction as
   agent or delivery quality.
+* Restore deterministic oracle execution without shadowing its entrypoint with
+  live Run state, and accept native v3 work subjects in evidence grading.
 
 ## [0.0.15](https://github.com/misty-step/iron-forest/compare/v0.0.14...v0.0.15) (2026-09-08)
 
