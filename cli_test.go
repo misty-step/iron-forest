@@ -153,6 +153,58 @@ func TestCLIPayloadsUseSnakeCaseKeys(t *testing.T) {
 	}
 }
 
+func TestCLIConfigIntentDistinguishesOmissionFromEmptyValues(t *testing.T) {
+	const base = `repo: owner/name
+primary: refs/heads/main
+agents:
+  builder: {poll: "exit 1", interval: 5}
+checks:
+  - {name: test, run: "true"}
+`
+	for _, present := range []bool{false, true} {
+		name := "omitted"
+		config := base
+		if present {
+			name = "explicit empty values"
+			config += `intent:
+  purpose: ""
+  outcomes: []
+  constraints: []
+  release_policy: ""
+`
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTree(t, root, profileName+"/config.yaml", config)
+			code, envelope, _ := decodeEnvelope(t, "config", "show", "--json", "--root", root)
+			if code != exitOK {
+				t.Fatalf("config show failed: %v", envelope.Error)
+			}
+			raw, exists := payloadKeys(t, envelope)["intent"]
+			if exists != present {
+				t.Fatalf("intent present=%t, want %t", exists, present)
+			}
+			if !present {
+				return
+			}
+			intent, ok := raw.(map[string]any)
+			if !ok {
+				t.Fatalf("declared intent must remain an object, got %#v", raw)
+			}
+			for _, field := range []string{"purpose", "release_policy"} {
+				if value, ok := intent[field].(string); !ok || value != "" {
+					t.Fatalf("intent.%s must preserve the explicit empty string, got %#v", field, intent[field])
+				}
+			}
+			for _, field := range []string{"outcomes", "constraints"} {
+				if values, ok := intent[field].([]any); !ok || len(values) != 0 {
+					t.Fatalf("intent.%s must be [], not null or omitted, got %#v", field, intent[field])
+				}
+			}
+		})
+	}
+}
+
 // A failure under --json must still be one envelope; a consumer never has to
 // sniff stderr to learn why a command failed.
 func TestCLIFailuresEmitOneEnvelopeUnderJSON(t *testing.T) {

@@ -84,6 +84,49 @@ checks:
 	}
 }
 
+func TestConfigIntentRejectsMalformedYAML(t *testing.T) {
+	const base = `repo: owner/name
+agents:
+  builder: {poll: "exit 1", interval: 5}
+checks:
+  - {name: test, run: "true"}
+`
+	const intent = `intent:
+  purpose: Preserve local records
+  outcomes: [Durable capture]
+  constraints: [Synthetic data only]
+  release_policy: Publish after verification
+`
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "null object", data: "intent: null\n"},
+		{name: "scalar object", data: "intent: words\n"},
+		{name: "numeric purpose", data: strings.Replace(intent, "purpose: Preserve local records", "purpose: 42", 1)},
+		{name: "null release policy", data: strings.Replace(intent, "release_policy: Publish after verification", "release_policy: null", 1)},
+		{name: "scalar outcomes", data: strings.Replace(intent, "outcomes: [Durable capture]", "outcomes: Durable capture", 1)},
+		{name: "null constraints", data: strings.Replace(intent, "constraints: [Synthetic data only]", "constraints: null", 1)},
+		{name: "null sequence item", data: strings.Replace(intent, "outcomes: [Durable capture]", "outcomes: [Durable capture, null]", 1)},
+		{name: "unknown field", data: intent + "  releases: automatic\n"},
+		{name: "duplicate field", data: intent + "  purpose: A different mandate\n"},
+		{name: "non-string key", data: intent + "  42: unexpected\n"},
+		{name: "missing field", data: strings.Replace(intent, "  release_policy: Publish after verification\n", "", 1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const source = ".iron-forest/config.yaml"
+			_, err := decodeConfig([]byte(base+test.data), source)
+			if err == nil {
+				t.Fatal("accepted malformed intent")
+			}
+			if !strings.Contains(err.Error(), source) || !strings.Contains(err.Error(), "intent") {
+				t.Fatalf("error must identify the profile and intent: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRequiresNonemptyChecks(t *testing.T) {
 	const config = `repo: owner/name
 agents:

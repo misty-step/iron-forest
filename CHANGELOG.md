@@ -42,6 +42,9 @@
 * Record known execution outcomes (`setup_failed`, `execution_failed`,
   `provider_failed`, `cancelled`, `timed_out`, `interrupted`, `internal_error`)
   and the raw `process_exit`. Missing legacy values stay unclassified.
+* Expose optional repository-owned `intent` through strict configuration loading
+  and `forest config show`, without inventing absent intent or treating declared
+  purpose, outcomes, constraints and release policy as enforced authority.
 
 ### Bug Fixes
 

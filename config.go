@@ -24,11 +24,21 @@ var repoNamePattern = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 type Config struct {
 	Repo          string                 `yaml:"repo" json:"repo"`
 	Primary       string                 `yaml:"primary" json:"primary,omitempty"`
+	Intent        *Intent                `yaml:"intent,omitempty" json:"intent,omitempty"`
 	Scope         *Scope                 `yaml:"scope" json:"scope,omitempty"`
 	Agents        map[string]AgentConfig `yaml:"agents" json:"agents"`
 	Delivery      string                 `yaml:"delivery" json:"delivery"`
 	RequiredTools []string               `yaml:"required_tools" json:"required_tools,omitempty"`
 	Checks        []Check                `yaml:"checks" json:"checks"`
+}
+
+// Intent is repository-declared purpose and policy, not evidence that the
+// Kernel, credentials, provider budgets, or release workflow enforce it.
+type Intent struct {
+	Purpose       string   `yaml:"purpose" json:"purpose"`
+	Outcomes      []string `yaml:"outcomes" json:"outcomes"`
+	Constraints   []string `yaml:"constraints" json:"constraints"`
+	ReleasePolicy string   `yaml:"release_policy" json:"release_policy"`
 }
 
 type AgentConfig struct {
@@ -61,6 +71,7 @@ func (i *yamlInt) UnmarshalYAML(value *yaml.Node) error {
 type configYAML struct {
 	Repo          yamlString                      `yaml:"repo"`
 	Primary       yamlString                      `yaml:"primary"`
+	Intent        yaml.Node                       `yaml:"intent"`
 	Scope         scopeYAML                       `yaml:"scope"`
 	Agents        map[*yamlString]agentConfigYAML `yaml:"agents"`
 	Checks        []checkYAML                     `yaml:"checks"`
@@ -77,6 +88,67 @@ type agentConfigYAML struct {
 type checkYAML struct {
 	Name yamlString `yaml:"name"`
 	Run  yamlString `yaml:"run"`
+}
+
+// Keep the raw node until conversion: yaml.v3 skips custom unmarshallers for
+// null values, but an explicit null intent is not an omitted declaration.
+func intentFromYAML(value *yaml.Node) (*Intent, error) {
+	if value.Kind == 0 {
+		return nil, nil
+	}
+	if value.Kind != yaml.MappingNode || value.ShortTag() != "!!map" {
+		return nil, fmt.Errorf("intent must be a YAML mapping, got %s", value.ShortTag())
+	}
+	intent := &Intent{}
+	seen := make(map[string]bool, 4)
+	for i := 0; i < len(value.Content); i += 2 {
+		name, err := stringScalar(value.Content[i])
+		if err != nil {
+			return nil, fmt.Errorf("intent key: %w", err)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("intent.%s is duplicated", name)
+		}
+		seen[name] = true
+		field := value.Content[i+1]
+		switch name {
+		case "purpose":
+			intent.Purpose, err = stringScalar(field)
+		case "outcomes":
+			intent.Outcomes, err = intentStringsFromYAML(field)
+		case "constraints":
+			intent.Constraints, err = intentStringsFromYAML(field)
+		case "release_policy":
+			intent.ReleasePolicy, err = stringScalar(field)
+		default:
+			return nil, fmt.Errorf("field %s not found in intent", name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("intent.%s: %w", name, err)
+		}
+	}
+	for _, name := range [...]string{"purpose", "outcomes", "constraints", "release_policy"} {
+		if !seen[name] {
+			return nil, fmt.Errorf("intent.%s is required when intent is present", name)
+		}
+	}
+	return intent, nil
+}
+
+// Intent lists are sequences, unlike the scalar shorthand accepted by tools.
+func intentStringsFromYAML(value *yaml.Node) ([]string, error) {
+	if value.Kind != yaml.SequenceNode || value.ShortTag() != "!!seq" {
+		return nil, fmt.Errorf("must be a YAML sequence of string scalars, got %s", value.ShortTag())
+	}
+	values := make([]string, len(value.Content))
+	for i, item := range value.Content {
+		decoded, err := stringScalar(item)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: %w", i+1, err)
+		}
+		values[i] = decoded
+	}
+	return values, nil
 }
 
 func configPath(root string) string { return filepath.Join(root, profileName, "config.yaml") }
@@ -158,8 +230,12 @@ func decodeConfig(data []byte, source string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("parse %s: multiple YAML documents", source)
 	}
+	intent, err := intentFromYAML(&document.Intent)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", source, err)
+	}
 	cfg := Config{Repo: string(document.Repo), Primary: strings.TrimSpace(string(document.Primary)),
-		Delivery: string(document.Delivery), RequiredTools: document.RequiredTools}
+		Intent: intent, Delivery: string(document.Delivery), RequiredTools: document.RequiredTools}
 	if cfg.Delivery == "" {
 		cfg.Delivery = "git-native"
 	}

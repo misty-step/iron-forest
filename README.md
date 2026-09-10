@@ -143,6 +143,42 @@ omit native `checks`. `required_tools` names additional profile dependencies;
 selfcheck always requires only the Kernel's `git` and `pi`, plus those explicitly
 declared tools.
 
+### Repository-owned intent
+
+An optional `intent` in `.iron-forest/config.yaml` declares the repository's
+purpose, desired outcomes, constraints, and release policy alongside its roles
+and checks:
+
+```yaml
+intent:
+  purpose: Provide reliable local time records.
+  outcomes:
+    - Capture and correct records while disconnected.
+  constraints:
+    - Use only synthetic data in demos.
+  release_policy: Publish only after the profile's declared verification gates.
+```
+
+When `intent` is present, all four fields are required. `purpose` and
+`release_policy` are YAML string scalars; `outcomes` and `constraints` are
+sequences of string scalars, not comma-separated or space-separated shorthand.
+Explicit empty strings and `[]` are valid and retained. Nulls, incomplete
+objects, unknown or duplicate fields, and implicit numeric/boolean-to-string
+coercions are rejected with the profile path and intent field.
+
+`forest config show --json` publishes this exact object at `data.intent` in the
+existing `forest.cli.v2` envelope. An omitted declaration stays omitted, not
+`null` or a fabricated default. The human projection labels it `intent (declared)`.
+The command still reports loaded roles, checks, scope, and resolved primary
+provenance from the same configuration path.
+
+Intent describes policy; it neither changes `delivery` nor proves that policy is
+enforced. Kernel does not inject it into prompts or select work from it.
+Repository-owned declarations and requests, admission, delivery gates,
+completion evidence, credentials, and provider-side budgets retain their
+existing responsibilities. This is the current loaded profile, not a claim
+about historical Run intent or the configuration adopted by a running service.
+
 ### Execution, completion, and delivery
 
 A Run records independent facts:
@@ -576,7 +612,7 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest poll <agent>` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`. |
 | `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, recent Runs, and Ledger aggregates. |
 | `forest selfcheck` | Validate `.iron-forest/config.yaml` and declarations locally. |
-| `forest config show` | Print the loaded configuration. |
+| `forest config show` | Print the loaded configuration, declared intent when present, and resolved primary provenance. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
 | `forest trigger list\|show <agent>` | Print resolved trigger state. |
 | `forest trigger reset <agent>` | Clear one agent's accumulated errors, including provider-budget fail-closed (`run_error=provider budget exhausted`). Refuses while a Kernel runs; resume is stop Kernel, reset, start. |

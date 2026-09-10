@@ -443,6 +443,7 @@ type configShowPayload struct {
 	Repo          string                 `json:"repo"`
 	Primary       string                 `json:"primary"`
 	PrimarySource string                 `json:"primary_source"`
+	Intent        *Intent                `json:"intent,omitempty"`
 	Scope         *Scope                 `json:"scope,omitempty"`
 	Agents        map[string]AgentConfig `json:"agents"`
 	Checks        []Check                `json:"checks"`
@@ -458,6 +459,10 @@ func runConfigShow(_ []string, flags cliFlags) cliOutcome {
 		return failure(exitError, "%s", err)
 	}
 	human := fmt.Sprintf("repo: %s\nprimary: %s (%s)\n%s", cfg.Repo, primary, primarySource, scopeHuman(cfg.Scope))
+	if cfg.Intent != nil {
+		human += fmt.Sprintf("\nintent (declared):\n  purpose: %q\n  outcomes: %q\n  constraints: %q\n  release_policy: %q",
+			cfg.Intent.Purpose, cfg.Intent.Outcomes, cfg.Intent.Constraints, cfg.Intent.ReleasePolicy)
+	}
 	for _, name := range agentNames(cfg) {
 		agent := cfg.Agents[name]
 		human += fmt.Sprintf("\nagent %s: poll=%q interval=%ds", name, agent.Poll, agent.Interval)
@@ -472,6 +477,7 @@ func runConfigShow(_ []string, flags cliFlags) cliOutcome {
 		Repo:          cfg.Repo,
 		Primary:       primary,
 		PrimarySource: primarySource,
+		Intent:        cfg.Intent,
 		Scope:         cfg.Scope,
 		Agents:        cfg.Agents,
 		Checks:        cfg.Checks,
