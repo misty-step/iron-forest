@@ -20,6 +20,12 @@ Anchor defects to the evidence-ref payload, Ledger row, Run id and log line, or
 command output actually read. Commit titles, timestamps, and recollection are
 leads only.
 
+For candidate verification, use the existing
+[`iron-forest` skill](org-skills/iron-forest/SKILL.md) and its
+[verification reference](org-skills/iron-forest/verification.md). It preserves
+the repository's deterministic checks and real Forest/Pi journey; operator
+skills require explicit composition, not ambient Runner discovery.
+
 ## Operations
 
 - Adopt a merged revision with

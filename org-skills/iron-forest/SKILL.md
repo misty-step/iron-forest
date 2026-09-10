@@ -73,6 +73,12 @@ Done when the requested Run or configuration action has one observable result, a
 
 ## Change the factory
 
+For candidate verification, load [verification.md](verification.md). It selects
+the existing Go/fast-tier checks or the standalone real Forest/Pi journey, with
+isolated fixture ownership, rejection/recovery oracles, evidence, cleanup, and
+explicit skill-discovery checks. Do not use the historical `VERIFY.md` receipt
+as current readiness or run local proof against the operating factory.
+
 Put stable role policy in declaration prompts or explicit skills. Put deterministic repository invariants in `checks:` or custom linters. Add Kernel code only for a closed mechanical loop with a known retry predicate and evidence that declarations or executable profile tools cannot own it reliably.
 
 For a new agent, define its trigger, evidence surface, authority, output, and stop condition before adding it to the roster. For a new tool or extension, prove one real role scenario and record the capability and credential boundary.

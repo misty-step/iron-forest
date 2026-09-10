@@ -650,6 +650,11 @@ relay; script against the stderr line or use `run show` for a structured answer.
 Use `master` as the target branch. The repository's `checks:` commands must
 match `.github/workflows/ci.yml`.
 
+For isolated candidate setup, real Forest/Pi interaction, failure oracles,
+evidence, cleanup, and explicit operator-skill discovery, follow the existing
+[`iron-forest` skill's verification reference](org-skills/iron-forest/verification.md).
+Do not run local verification against the operating factory's runtime or origin.
+
 ```sh
 mise exec -- go build ./...
 mise exec -- go vet ./...
