@@ -1,3 +1,17 @@
+## [0.0.20](https://github.com/misty-step/iron-forest/compare/v0.0.19...v0.0.20) (2026-09-10)
+
+
+### Bug Fixes
+
+* **config:** expose effective delivery for admission (MIS-55) ([f823932](https://github.com/misty-step/iron-forest/commit/f823932e415131f1c45246610363ab1dbbe3e208))
+* **evals:** restore live-bound oracle execution (MIS-57) ([900e9ac](https://github.com/misty-step/iron-forest/commit/900e9ac7fe7d8be778e2aec39d702c764f8ec4c3))
+
+
+### Features
+
+* **config:** expose repository-owned intent (MIS-55) ([ae06c55](https://github.com/misty-step/iron-forest/commit/ae06c55cac74b2aaf5f70c2a900fa8124b4398a5))
+* **publication:** bind native evidence to Run work (MIS-57) ([b6d4672](https://github.com/misty-step/iron-forest/commit/b6d46728f5367e51e36126e73ec626f248f0caa7))
+
 ## [0.0.19](https://github.com/misty-step/iron-forest/compare/v0.0.18...v0.0.19) (2026-09-09)
 
 
