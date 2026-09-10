@@ -45,6 +45,9 @@ class Oracle:
         self.request = json.loads(Path("/run/forest-eval/request.json").read_text())
         if self.request != data["request"]:
             raise RuntimeError("explicit request changed after oracle preparation")
+        self.run = json.loads((root / ".iron-forest/runtime/runs" / f"live-{self.role}.json").read_text())
+        if self.run.get("run_id") != self.run_id or self.run.get("agent") != self.role:
+            raise RuntimeError("oracle does not own the live Run")
 
     def emit(self, kind: str, **details) -> None:
         self.sequence += 1
@@ -87,7 +90,7 @@ class Oracle:
         if actor not in {f"Iron Forest {role.capitalize()} <{role}@forest.invalid>" for role in actors}:
             raise RuntimeError(f"unexpected {kind} evidence committer: {actor}")
         payload = json.loads(self.git("show", f"{oid}:{kind}.json"))
-        schema = "forest.review-request.v2" if kind == "request" else f"forest.{kind}.v1"
+        schema = "forest.review-request.v3" if kind == "request" else f"forest.{kind}.v1"
         if payload.get("schema") != schema or payload.get("revision") != revision:
             raise RuntimeError(f"invalid {kind} evidence for requested revision {revision}")
         return payload
@@ -200,10 +203,14 @@ class Oracle:
         return envelope["data"]
 
     def review_request(self, branch: str, revision: str) -> dict:
-        return {
-            "schema": "forest.review-request.v2", "subject": self.request["subject"],
-            "branch": branch, "revision": revision, "tracker": "github", "time": self.data["time"],
+        payload = {
+            "schema": "forest.review-request.v3", "subject": self.request["subject"],
+            "branch": branch, "revision": revision, "run_id": self.run_id, "time": self.data["time"],
         }
+        for key in ("request_id", "work"):
+            if key in self.run:
+                payload[key] = self.run[key]
+        return payload
 
     def builder(self, branch: str) -> None:
         primary = os.environ["FOREST_PRIMARY_REF"]
@@ -244,8 +251,8 @@ class Oracle:
         request = self.evidence("request", revision, {"builder", "fixer"})
         if request.get("branch") != branch or request.get("subject") != self.request["subject"]:
             raise RuntimeError("request evidence does not match explicitly supplied branch and Subject")
-        if request.get("tracker", "github") != "github":
-            raise RuntimeError("legacy tracker metadata is not a current GitHub handoff")
+        if request.get("work") != self.run.get("work"):
+            raise RuntimeError("candidate work does not match the actual Run request")
         self.git("fetch", "origin", revision)
         self.git("checkout", "--detach", revision)
         return revision, observed

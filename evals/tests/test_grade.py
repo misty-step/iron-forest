@@ -61,11 +61,11 @@ class GradingBoundaryTest(unittest.TestCase):
             self.addCleanup(patch.stop)
         (self.hidden / "forest-exit").write_text("0\n")
         self.request_payload = {
-            "schema": "forest.review-request.v2",
+            "schema": "forest.review-request.v3",
             "subject": "100",
             "branch": self.branch,
             "revision": self.candidate,
-            "tracker": "github",
+            "run_id": "fixture-builder",
             "time": "2026-08-14T00:00:00Z",
         }
         self.publish_evidence("request", self.request_payload, "builder")

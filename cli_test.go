@@ -588,9 +588,11 @@ func TestCLIPublishVerdictRequiresRunID(t *testing.T) {
 			root, origin := testClone(t)
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			pushRequestForRevision(t, root, "if-cli-changes", revision)
 			checks, verdict := writeEvidencePayloads(t, revision, "changes")
 			seedVerdictRun(t, root, "1-verifier")
 			before := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)"))
+			headsBefore := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads"))
 			t.Setenv("FOREST_RUN_ID", test.runID)
 			code, _, stderr := decodeEnvelope(t, "publish", "verdict", checks, verdict, "--root", root, "--json")
 			if code != exitError {
@@ -616,10 +618,9 @@ func TestCLIPublishVerdictRequiresRunID(t *testing.T) {
 			if got := string(fetchEvidenceFile(t, root, "verdict", revision, "verdict.json")); got != string(mustRead(t, verdict)) {
 				t.Fatalf("published verdict=%q", got)
 			}
-			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")); got != before {
-				t.Fatalf("changes verdict moved primary:\nbefore:\n%safter:\n%s", before, got)
+			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")); got != headsBefore {
+				t.Fatalf("changes verdict moved primary:\nbefore:\n%safter:\n%s", headsBefore, got)
 			}
-			requireMissingRemoteRef(t, root, evidenceRequestRefPrefix+revision)
 		})
 	}
 }
@@ -636,6 +637,7 @@ func TestCLIPublishVerdictRequiresRunIDBeforeIdentical(t *testing.T) {
 			root, origin := testClone(t)
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			pushRequestForRevision(t, root, "if-cli-identical", revision)
 			checks, verdict := writeEvidencePayloads(t, revision, "changes")
 			seedVerdictRun(t, root, "1-verifier")
 			t.Setenv("FOREST_RUN_ID", "1-verifier")

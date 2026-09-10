@@ -97,6 +97,7 @@ func argumentValue(args []string, name string) string {
 	return ""
 }
 
+// Historical v2 fixture only: current publication writers must emit v3.
 func reviewRequestJSON(subject, revision, tracker string) string {
 	payload := `{"schema":"forest.review-request.v2","subject":"` + subject + `","branch":"forest/` + subject + `/work","revision":"` + revision + `","time":"2026-08-29T00:00:00Z"`
 	if tracker != "" {

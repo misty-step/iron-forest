@@ -124,6 +124,16 @@ Kernel lock. It appends to the standing task; it does not replace role policy.
 A Run may create branches and external effects according to the profile. Pausing
 later does not undo an admitted Run or cancel it.
 
+For native delivery, use the [v3 publication contract](../README.md#git-coordination).
+Builder/Fixer evidence includes its actual live Run ID and optional retained
+request/work association. Verifier and Fixer requests must preserve the complete
+opaque work snapshot; they use their own Run/request identities. Never relabel
+Habitat as GitHub/Powder. Both Verdict kinds require exact candidate evidence,
+and native approval runs the scanner and candidate-configured Checks before
+atomic publication. Greenfield profiles declare real required commands; absent
+product/check implementation blocks publication rather than becoming a no-op.
+External delivery profiles remain under their own completion/merge authority.
+
 ## Read the result, not just the exit code
 
 Use the recorded Run ID with:

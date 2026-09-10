@@ -33,7 +33,7 @@ func TestAuditorRejectsChecksAndApproveWithoutReviewRequest(t *testing.T) {
 func TestAuditorRequiresExactlyOneValidReviewRequest(t *testing.T) {
 	master := strings.Repeat("a", 40)
 	other := strings.Repeat("b", 40)
-	validPayload := `{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/gate","revision":"` + master + `","time":"2026-08-10T00:00:00Z"}`
+	validPayload := pollReviewNoteBranch(master, "forest/1/gate")
 	validRequest := noteEntry{
 		Ref:      evidenceRequestRefPrefix + master,
 		Revision: master,
@@ -65,16 +65,16 @@ func TestAuditorRequiresExactlyOneValidReviewRequest(t *testing.T) {
 	wrongTarget := validRequest
 	wrongTarget.Revision = other
 	wrongTarget.Ref = evidenceRequestRefPrefix + other
-	wrongTarget.Payload = []byte(`{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/gate","revision":"` + other + `","time":"2026-08-10T00:00:00Z"}`)
+	wrongTarget.Payload = []byte(pollReviewNoteBranch(other, "forest/1/gate"))
 	wrongIdentity := validRequest
 	wrongIdentity.Author = "Unexpected"
 	wrongIdentity.Email = "unexpected@forest.invalid"
 	wrongBranch := validRequest
-	wrongBranch.Payload = []byte(`{"schema":"forest.review-request.v2","subject":"1","branch":"forest/2/wrong","revision":"` + master + `","time":"2026-08-10T00:00:00Z"}`)
+	wrongBranch.Payload = []byte(`{"schema":"forest.review-request.v3","subject":"1","branch":"forest/2/wrong","revision":"` + master + `","time":"2026-08-10T00:00:00Z","run_id":"fixture-builder"}`)
 	forbiddenSpace := validRequest
-	forbiddenSpace.Payload = []byte(`{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/bad branch","revision":"` + master + `","time":"2026-08-10T00:00:00Z"}`)
+	forbiddenSpace.Payload = []byte(pollReviewNoteBranch(master, "forest/1/bad branch"))
 	forbiddenDots := validRequest
-	forbiddenDots.Payload = []byte(`{"schema":"forest.review-request.v2","subject":"1","branch":"forest/1/bad..branch","revision":"` + master + `","time":"2026-08-10T00:00:00Z"}`)
+	forbiddenDots.Payload = []byte(pollReviewNoteBranch(master, "forest/1/bad..branch"))
 	cases := []struct {
 		name     string
 		requests []noteEntry
@@ -93,7 +93,7 @@ func TestAuditorRequiresExactlyOneValidReviewRequest(t *testing.T) {
 		{name: "single powder v2", requests: []noteEntry{{
 			Ref:      evidenceRequestRefPrefix + master,
 			Revision: master,
-			Payload:  []byte(`{"schema":"forest.review-request.v2","subject":"iron-forest-ready","branch":"forest/iron-forest-ready/work","revision":"` + master + `","time":"2026-08-10T00:00:00Z"}`),
+			Payload:  []byte(pollReviewNoteBranch(master, "forest/iron-forest-ready/work")),
 			Author:   "Iron Forest Builder",
 			Email:    "builder@forest.invalid",
 		}}, valid: true},

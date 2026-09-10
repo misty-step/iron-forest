@@ -82,7 +82,7 @@ def evidence(target: str | None, kind: str) -> tuple[dict, str] | None:
     exists but its commit, tree, JSON, or nested result shape is invalid.
     """
     schemas = {
-        "request": ("forest.review-request.v2", {"schema", "subject", "branch", "revision", "time", "tracker"}),
+        "request": ("forest.review-request.v3", {"schema", "subject", "branch", "revision", "time", "run_id"}),
         "checks": ("forest.checks.v1", {"schema", "revision", "results", "time"}),
         "verdict": ("forest.verdict.v1", {"schema", "revision", "verdict", "summary", "time"}),
     }
@@ -99,7 +99,8 @@ def evidence(target: str | None, kind: str) -> tuple[dict, str] | None:
     except (ValueError, RecursionError):
         return None
     schema, keys = schemas[kind]
-    if not isinstance(payload, dict) or set(payload) != keys:
+    optional = {"request_id", "work"} if kind == "request" else set()
+    if not isinstance(payload, dict) or not keys <= set(payload) or set(payload) - keys - optional:
         return None
     if payload.get("schema") != schema or payload.get("revision") != target:
         return None
@@ -117,8 +118,17 @@ def evidence(target: str | None, kind: str) -> tuple[dict, str] | None:
             return None
         if not isinstance(branch, str) or re.fullmatch(rf"forest/{re.escape(subject)}/[a-z0-9]+(?:-[a-z0-9]+)*", branch) is None:
             return None
-        if payload.get("tracker") != "github":
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id or re.search(r"[/\\\s]", run_id):
             return None
+        if "request_id" in payload and (not isinstance(payload["request_id"], str) or not payload["request_id"].strip()):
+            return None
+        if "work" in payload:
+            work = payload["work"]
+            if not isinstance(work, dict) or not {"system", "id"} <= set(work) or set(work) - {"system", "id", "key", "url"}:
+                return None
+            if any(not isinstance(work[key], str) for key in work) or not work["system"].strip() or not work["id"].strip():
+                return None
     elif kind == "checks":
         results = payload.get("results")
         if not isinstance(results, list) or not results:
