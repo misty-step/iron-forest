@@ -186,6 +186,36 @@ class GradingBoundaryTest(unittest.TestCase):
     def grade(self) -> dict:
         return grade_module.grade(self.scenario, self.state)[0]
 
+    def test_native_request_accepts_generic_work_subject(self) -> None:
+        payload = {
+            **self.request_payload,
+            "subject": "rings",
+            "branch": "forest/rings/initial-slice",
+            "request_id": "explicit-build-request",
+            "work": {
+                "system": "https://habitat.example",
+                "id": "immutable-work-id",
+                "key": "RNG-001",
+                "url": "https://habitat.example/work/immutable-work-id",
+            },
+        }
+        self.publish_evidence("request", payload, "builder")
+        self.assertEqual(grade_module.evidence(self.candidate, "request"), (payload, grade_module.ACTORS["builder"]))
+
+    def test_native_request_subject_length_boundary(self) -> None:
+        subject = "RNG_001." + "r" * 120
+        payload = {**self.request_payload, "subject": subject, "branch": f"forest/{subject}/candidate"}
+        self.publish_evidence("request", payload, "builder")
+        self.assertEqual(grade_module.evidence(self.candidate, "request"), (payload, grade_module.ACTORS["builder"]))
+        payload.update(subject=subject + "r", branch=f"forest/{subject}r/candidate")
+        self.publish_evidence("request", payload, "builder")
+        self.assertIsNone(grade_module.evidence(self.candidate, "request"))
+
+    def test_native_request_requires_its_subject_branch(self) -> None:
+        payload = {**self.request_payload, "subject": "rings", "branch": "forest/seedbed/initial-slice"}
+        self.publish_evidence("request", payload, "builder")
+        self.assertIsNone(grade_module.evidence(self.candidate, "request"))
+
     def test_retired_request_notes_cannot_authorize_current_publication(self) -> None:
         self.git("push", "origin", f":refs/forest/v1/request/{self.candidate}")
         self.git("notes", "--ref=refs/notes/forest/review-request", "add", "-m", json.dumps(self.request_payload), self.candidate)

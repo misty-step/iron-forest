@@ -62,6 +62,8 @@
 * Replace the retired queue-first onboarding walkthrough with the current
   request-first path, and stop presenting the exit-zero Ledger fraction as
   agent or delivery quality.
+* Restore deterministic oracle execution without shadowing its entrypoint with
+  live Run state, and accept native v3 work subjects in evidence grading.
 
 ## [0.0.15](https://github.com/misty-step/iron-forest/compare/v0.0.14...v0.0.15) (2026-09-08)
 

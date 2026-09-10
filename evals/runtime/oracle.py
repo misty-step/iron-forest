@@ -45,8 +45,8 @@ class Oracle:
         self.request = json.loads(Path("/run/forest-eval/request.json").read_text())
         if self.request != data["request"]:
             raise RuntimeError("explicit request changed after oracle preparation")
-        self.run = json.loads((root / ".iron-forest/runtime/runs" / f"live-{self.role}.json").read_text())
-        if self.run.get("run_id") != self.run_id or self.run.get("agent") != self.role:
+        self.live_run = json.loads((root / ".iron-forest/runtime/runs" / f"live-{self.role}.json").read_text())
+        if self.live_run.get("run_id") != self.run_id or self.live_run.get("agent") != self.role:
             raise RuntimeError("oracle does not own the live Run")
 
     def emit(self, kind: str, **details) -> None:
@@ -208,8 +208,8 @@ class Oracle:
             "branch": branch, "revision": revision, "run_id": self.run_id, "time": self.data["time"],
         }
         for key in ("request_id", "work"):
-            if key in self.run:
-                payload[key] = self.run[key]
+            if key in self.live_run:
+                payload[key] = self.live_run[key]
         return payload
 
     def builder(self, branch: str) -> None:
@@ -251,7 +251,7 @@ class Oracle:
         request = self.evidence("request", revision, {"builder", "fixer"})
         if request.get("branch") != branch or request.get("subject") != self.request["subject"]:
             raise RuntimeError("request evidence does not match explicitly supplied branch and Subject")
-        if request.get("work") != self.run.get("work"):
+        if request.get("work") != self.live_run.get("work"):
             raise RuntimeError("candidate work does not match the actual Run request")
         self.git("fetch", "origin", revision)
         self.git("checkout", "--detach", revision)

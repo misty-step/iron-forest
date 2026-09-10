@@ -114,7 +114,7 @@ def evidence(target: str | None, kind: str) -> tuple[dict, str] | None:
     if kind == "request":
         subject = payload.get("subject")
         branch = payload.get("branch")
-        if not isinstance(subject, str) or re.fullmatch(r"[1-9][0-9]*", subject) is None:
+        if not isinstance(subject, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", subject) is None:
             return None
         if not isinstance(branch, str) or re.fullmatch(rf"forest/{re.escape(subject)}/[a-z0-9]+(?:-[a-z0-9]+)*", branch) is None:
             return None
