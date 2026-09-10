@@ -69,7 +69,9 @@ func TestPublishVerdictRejectsWorkDriftBeforeIdentical(t *testing.T) {
 				if !identical {
 					work.Key = builder.Work.Key
 					seedPublicationRun(t, root, verifier)
-					if _, err := publishVerdict(context.Background(), input); err != nil { t.Fatal(err) }
+					if _, err := publishVerdict(context.Background(), input); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 		})
@@ -95,7 +97,9 @@ checks:
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
 	_, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier"})
-	if err == nil || !publishConflict(err) { t.Fatalf("stale candidate error=%v", err) }
+	if err == nil || !publishConflict(err) {
+		t.Fatalf("stale candidate error=%v", err)
+	}
 	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/forest/work/implementation"))); got == revision {
 		t.Fatal("configured check did not move candidate")
 	}
@@ -463,7 +467,7 @@ func TestPublishVerdictIdenticalIsSuccess(t *testing.T) {
 			root, _ := testClone(t)
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-				pushRequestForRevision(t, root, "if-identical", revision)
+			pushRequestForRevision(t, root, "if-identical", revision)
 			checks, verdict := writeEvidencePayloads(t, revision, decision)
 			seedVerdictRun(t, root, "1-verifier")
 			input := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier"}

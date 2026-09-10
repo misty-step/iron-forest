@@ -251,7 +251,6 @@ func requirePassingApprovalChecks(checks checksNote) error {
 	return nil
 }
 
-
 func requireVerdictRequest(ctx context.Context, poller *Poller, revision string, run liveRunRecord) (reviewRequest, string, error) {
 	data, oid, err := poller.evidencePayloadAndOID(ctx, "request", revision, "builder", "fixer")
 	if err != nil {

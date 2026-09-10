@@ -117,8 +117,8 @@ type verdictNote struct {
 }
 
 type strictJSONShape struct {
-	fields  map[string]*strictJSONShape
-	element *strictJSONShape
+	fields     map[string]*strictJSONShape
+	element    *strictJSONShape
 	stringOnly bool
 }
 

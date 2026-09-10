@@ -169,8 +169,8 @@ coercions are rejected with the profile path and intent field.
 `forest config show --json` publishes this exact object at `data.intent` in the
 existing `forest.cli.v2` envelope. An omitted declaration stays omitted, not
 `null` or a fabricated default. The human projection labels it `intent (declared)`.
-The command still reports loaded roles, checks, scope, and resolved primary
-provenance from the same configuration path.
+The command also reports effective `delivery`, loaded roles, checks, scope, and
+resolved primary provenance from the same configuration path.
 
 Intent describes policy; it neither changes `delivery` nor proves that policy is
 enforced. Kernel does not inject it into prompts or select work from it.
@@ -612,7 +612,7 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest poll <agent>` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`. |
 | `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, recent Runs, and Ledger aggregates. |
 | `forest selfcheck` | Validate `.iron-forest/config.yaml` and declarations locally. |
-| `forest config show` | Print the loaded configuration, declared intent when present, and resolved primary provenance. |
+| `forest config show` | Print the loaded configuration, effective delivery mode, declared intent when present, and resolved primary provenance. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
 | `forest trigger list\|show <agent>` | Print resolved trigger state. |
 | `forest trigger reset <agent>` | Clear one agent's accumulated errors, including provider-budget fail-closed (`run_error=provider budget exhausted`). Refuses while a Kernel runs; resume is stop Kernel, reset, start. |

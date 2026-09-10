@@ -140,7 +140,7 @@ func TestPublishNativeWorkRoundTrip(t *testing.T) {
 
 func TestPublishReviewRequestBindsActualRunContext(t *testing.T) {
 	cases := []struct {
-		name string
+		name   string
 		change func(*liveRunRecord)
 	}{
 		{"run", func(run *liveRunRecord) { run.RunID = "other-builder" }},
@@ -189,19 +189,29 @@ func TestPublishReviewRequestRequiresOwnedRunBeforeIdentical(t *testing.T) {
 			invalidate := func() {
 				switch state {
 				case "ended":
-					if err := os.Remove(liveRunPath(root, "builder")); err != nil { t.Fatal(err) }
+					if err := os.Remove(liveRunPath(root, "builder")); err != nil {
+						t.Fatal(err)
+					}
 				case "wrong role":
 					wrong := run
 					wrong.Agent = "fixer"
-					if err := writeLiveRun(liveRunPath(root, "builder"), wrong); err != nil { t.Fatal(err) }
+					if err := writeLiveRun(liveRunPath(root, "builder"), wrong); err != nil {
+						t.Fatal(err)
+					}
 				case "finalizing":
 					ended := run
 					ended.Result = &RunRecord{Outcome: runOutcomeCompleted}
-					if err := writeLiveRun(liveRunPath(root, "builder"), ended); err != nil { t.Fatal(err) }
+					if err := writeLiveRun(liveRunPath(root, "builder"), ended); err != nil {
+						t.Fatal(err)
+					}
 				case "cancelled":
-					if err := writeRunCancellationMarker(root, run.RunID); err != nil { t.Fatal(err) }
+					if err := writeRunCancellationMarker(root, run.RunID); err != nil {
+						t.Fatal(err)
+					}
 				case "missing retained request":
-					if err := os.Remove(forestPath(root, "runs", run.RunID+".request.json")); err != nil { t.Fatal(err) }
+					if err := os.Remove(forestPath(root, "runs", run.RunID+".request.json")); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
@@ -214,7 +224,9 @@ func TestPublishReviewRequestRequiresOwnedRunBeforeIdentical(t *testing.T) {
 			}
 			_ = os.Remove(runCancellationMarkerPath(root, run.RunID))
 			seedPublicationRun(t, root, run)
-			if _, err := publishReviewRequest(context.Background(), input); err != nil { t.Fatal(err) }
+			if _, err := publishReviewRequest(context.Background(), input); err != nil {
+				t.Fatal(err)
+			}
 			before = string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 			invalidate()
 			if _, err := publishReviewRequest(context.Background(), input); err == nil {
@@ -238,8 +250,12 @@ func TestPublishReviewRequestRechecksOwnerAfterChecks(t *testing.T) {
 	_, err := publishReviewRequest(context.Background(), publishReviewRequestInput{
 		Root: root, Role: "builder", Branch: "forest/work/implementation", PayloadPath: payload, RunID: "10-builder",
 	})
-	if err == nil { t.Fatal("ended builder published after checks") }
-	if _, err := os.Stat(liveRunPath(root, "builder")); !os.IsNotExist(err) { t.Fatalf("check did not end owner: %v", err) }
+	if err == nil {
+		t.Fatal("ended builder published after checks")
+	}
+	if _, err := os.Stat(liveRunPath(root, "builder")); !os.IsNotExist(err) {
+		t.Fatalf("check did not end owner: %v", err)
+	}
 	if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before {
 		t.Fatal("ended builder published refs")
 	}
@@ -255,34 +271,49 @@ func TestPublishFixerPreservesWorkAndBranch(t *testing.T) {
 			seedPublicationRun(t, root, builder)
 			branch := "forest/work/implementation"
 			payload := writeReviewPayloadForRun(t, rejected, branch, builder)
-			if _, err := publishReviewRequest(context.Background(), publishReviewRequestInput{Root: root, Role: "builder", Branch: branch, PayloadPath: payload, RunID: builder.RunID}); err != nil { t.Fatal(err) }
+			if _, err := publishReviewRequest(context.Background(), publishReviewRequestInput{Root: root, Role: "builder", Branch: branch, PayloadPath: payload, RunID: builder.RunID}); err != nil {
+				t.Fatal(err)
+			}
 			verifier := liveRunRecord{RunID: "11-verifier", Agent: "verifier", StartedAt: builder.StartedAt, RequestID: "review-request", Work: builder.Work}
 			seedPublicationRun(t, root, verifier)
 			checks, verdict := writeEvidencePayloads(t, rejected, "changes")
-			if _, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}); err != nil { t.Fatal(err) }
+			if _, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}); err != nil {
+				t.Fatal(err)
+			}
 			runGitDir(t, root, "commit", "--allow-empty", "-m", "repair")
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			work := *builder.Work
 			fixer := liveRunRecord{RunID: "12-fixer", Agent: "fixer", StartedAt: builder.StartedAt, RequestID: "repair-request", Work: &work}
 			switch drift {
-			case "subject": branch = "forest/other/implementation"
-			case "branch": branch = "forest/work/other"
-			case "work": fixer.Work.Key = "WORK-2"
+			case "subject":
+				branch = "forest/other/implementation"
+			case "branch":
+				branch = "forest/work/other"
+			case "work":
+				fixer.Work.Key = "WORK-2"
 			}
 			seedPublicationRun(t, root, fixer)
 			payload = writeReviewPayloadForRun(t, revision, branch, fixer)
 			before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 			result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{Root: root, Role: "fixer", Branch: branch, PayloadPath: payload, RunID: fixer.RunID, Rejected: rejected})
 			if drift == "none" {
-				if err != nil || result.Status != "published" { t.Fatalf("repair=%#v error=%v", result, err) }
+				if err != nil || result.Status != "published" {
+					t.Fatalf("repair=%#v error=%v", result, err)
+				}
 				verifier.RunID, verifier.RequestID = "13-verifier", "repaired-review-request"
 				seedPublicationRun(t, root, verifier)
 				checks, verdict = writeEvidencePayloads(t, revision, "approve")
-				if _, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}); err != nil { t.Fatal(err) }
+				if _, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}); err != nil {
+					t.Fatal(err)
+				}
 				return
 			}
-			if err == nil { t.Fatal("fixer changed rejected work identity") }
-			if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before { t.Fatal("drifted fixer changed refs") }
+			if err == nil {
+				t.Fatal("fixer changed rejected work identity")
+			}
+			if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before {
+				t.Fatal("drifted fixer changed refs")
+			}
 		})
 	}
 }
@@ -295,15 +326,21 @@ func TestPublishGreenfieldChecksFailClosedUntilAuthored(t *testing.T) {
 	payload := writeReviewPayload(t, root, revision, "forest/work/implementation", "10-builder")
 	input := publishReviewRequestInput{Root: root, Role: "builder", Branch: "forest/work/implementation", PayloadPath: payload, RunID: "10-builder"}
 	before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
-	if _, err := publishReviewRequest(context.Background(), input); err == nil { t.Fatal("missing product check passed") }
-	if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before { t.Fatal("greenfield failure published refs") }
+	if _, err := publishReviewRequest(context.Background(), input); err == nil {
+		t.Fatal("missing product check passed")
+	}
+	if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before {
+		t.Fatal("greenfield failure published refs")
+	}
 	writeTree(t, root, "product-check.sh", "test \"$(cat value.txt)\" = implemented\n")
 	writeTree(t, root, "value.txt", "implemented\n")
 	runGitDir(t, root, "add", "product-check.sh", "value.txt")
 	runGitDir(t, root, "commit", "-m", "author product and executable check")
 	revision = strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 	input.PayloadPath = writeReviewPayload(t, root, revision, input.Branch, input.RunID)
-	if result, err := publishReviewRequest(context.Background(), input); err != nil || result.Revision != revision { t.Fatalf("authored candidate=%#v error=%v", result, err) }
+	if result, err := publishReviewRequest(context.Background(), input); err != nil || result.Revision != revision {
+		t.Fatalf("authored candidate=%#v error=%v", result, err)
+	}
 }
 
 func fetchEvidence(t *testing.T, root, kind, sha string) string {
@@ -361,7 +398,6 @@ func TestPublishReviewRequestCreatesBranchAndRequestRef(t *testing.T) {
 		t.Fatalf("request evidence=%q", shown)
 	}
 }
-
 
 func TestPublishReviewRequestRejectsHistoricalWriter(t *testing.T) {
 	for _, schema := range []string{"forest.review-request.v1", "forest.review-request.v2"} {
@@ -750,7 +786,6 @@ func TestPublishReviewRequestFixerAdvancesRejectedBranch(t *testing.T) {
 		t.Fatalf("result=%#v", result)
 	}
 }
-
 
 func TestPublishReviewRequestFixerPreservesTrackerlessHistoricalEvidence(t *testing.T) {
 	root, _ := testClone(t)

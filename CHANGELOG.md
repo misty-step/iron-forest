@@ -45,6 +45,12 @@
 * Expose optional repository-owned `intent` through strict configuration loading
   and `forest config show`, without inventing absent intent or treating declared
   purpose, outcomes, constraints and release policy as enforced authority.
+* Expose the effective native/external delivery mode in `forest config show`
+  so profile admission and product packaging can inspect the actual mode.
+* Bind new native review requests to the owning live Run, request and complete
+  opaque work reference with `forest.review-request.v3`. Keep historical v1/v2
+  evidence readable; preserve independent verifier and fixer continuity, exact
+  revisions, configured checks, credential scanning and atomic publication.
 
 ### Bug Fixes
 
