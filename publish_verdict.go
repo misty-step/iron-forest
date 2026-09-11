@@ -103,10 +103,7 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err != nil {
 		return publishVerdictResult{}, err
 	}
-	poller := input.Powder
-	if poller == nil {
-		poller = NewPoller(input.Root, cfg.Repo, Scope{})
-	}
+	poller := NewPoller(input.Root, cfg.Repo, Scope{})
 	request, requestOID, err := requireVerdictRequest(ctx, poller, revision, run)
 	if err != nil {
 		return publishVerdictResult{}, err

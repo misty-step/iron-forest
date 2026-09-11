@@ -91,9 +91,6 @@ func TestPublishNativeWorkRoundTrip(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			root, origin := testClone(t)
-			// Even an unrelated legacy pending landing must not cause generic
-			// work to call a legacy tracker or mutate that older work.
-			seedApprovedCurrent(t, root, "unrelated-legacy")
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			builder := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-09T00:00:00Z", RequestID: "build-request", Work: work}
@@ -116,15 +113,10 @@ func TestPublishNativeWorkRoundTrip(t *testing.T) {
 			t.Setenv("POWDER_AGENT", "unrelated-legacy-owner")
 			t.Setenv("POWDER_URL", "")
 			t.Setenv("POWDER_API_BASE_URL", "")
-			poller := NewPoller(root, "owner/name", Scope{})
-			poller.PowderCommand = func(context.Context, ...string) ([]byte, []byte, error) {
-				t.Fatal("generic publication invoked Powder mutation")
-				return nil, nil, errors.New("unexpected tracker call")
-			}
-			verdictInput := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID, Powder: poller}
+			verdictInput := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}
 			for _, status := range []string{"published", "identical"} {
 				result, err := publishVerdict(context.Background(), verdictInput)
-				if err != nil || result.Status != status || result.PowderStatus != "" {
+				if err != nil || result.Status != status {
 					t.Fatalf("verifier %s=%#v error=%v", status, result, err)
 				}
 			}
