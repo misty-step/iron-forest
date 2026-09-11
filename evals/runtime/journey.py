@@ -65,6 +65,12 @@ def record_phase(report: dict, name: str, before: int, completed: subprocess.Com
     require(all(row[key] == 0 for key in ("tokens_in", "tokens_out", "cache_read", "cache_write", "reasoning")),
             f"{name}: deterministic input hook must not consume model tokens")
     require(not LIVE.exists(), f"{name}: live Verifier context survived completed Run cleanup")
+    scratch = ROOT / ".iron-forest/runtime/checks"
+    require(not scratch.exists() or not any(scratch.iterdir()),
+            f"{name}: disposable Check scratch survived")
+    if row["exit"] == 0:
+        require(not (ROOT / ".iron-forest/runtime/worktrees" / row["run_id"]).exists(),
+                f"{name}: successful disposable worktree survived")
     return row
 
 
@@ -102,6 +108,29 @@ def interrupt_verifier(report: dict, scenario: dict, state: dict) -> str:
         require(live["run_id"] == paused_run["run_id"], "pause receipt must identify the actual live Verifier")
         require(refs() == before_refs, "paused Verifier changed refs before publication")
         forest = pwd.getpwnam("forest")
+        worktree = ROOT / ".iron-forest/runtime/worktrees" / paused_run["run_id"]
+        def work_git(*args: str) -> bytes:
+            return subprocess.check_output(["/usr/bin/git", "-C", str(worktree), *args],
+                                           user=forest.pw_uid, group=forest.pw_gid, extra_groups=[])
+        committed = b"unpublished committed source\x00\xfc\n"
+        (worktree / "committed-source.bin").write_bytes(committed)
+        os.chown(worktree / "committed-source.bin", forest.pw_uid, forest.pw_gid)
+        work_git("add", "committed-source.bin")
+        work_git("-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "commit", "-m", "unpublished recovery fixture")
+        base = work_git("rev-parse", "HEAD").decode().strip()
+        work_git("rm", "committed-source.bin")
+        tracked = b"interrupted tracked source\x00\xff\n"
+        staged = b"\x00\xffstaged\n" * (256 * 1024)
+        untracked = b"interrupted untracked source\x00\xfe\n"
+        ignored = b"ignored original source\x00\xfd\n"
+        (worktree / "value.txt").write_bytes(staged)
+        work_git("add", "--", "value.txt")
+        (worktree / "value.txt").write_bytes(tracked)
+        for name, data in {"interrupted-source.bin": untracked, "ignored-source.bin": ignored}.items():
+            (worktree / name).write_bytes(data)
+            os.chown(worktree / name, forest.pw_uid, forest.pw_gid)
+        with (worktree / ".gitignore").open("a") as ignore:
+            ignore.write("\nignored-source.bin\n")
         cancellation = subprocess.run(
             [str(ROOT / ".iron-forest/bin/forest"), "run", "cancel", paused_run["run_id"], "--root", str(ROOT), "--json"],
             user=forest.pw_uid, group=forest.pw_gid, extra_groups=[],
@@ -116,6 +145,28 @@ def interrupt_verifier(report: dict, scenario: dict, state: dict) -> str:
         require(row["run_id"] == paused_run["run_id"], "interrupted Run must remain identifiable in the Ledger")
         require(row["exit"] == 130, "cancelled Run must retain the public cancellation exit in the Ledger")
         require(refs() == before_refs, "interrupted review published a partial Effect")
+        require(row.get("outcome") == "cancelled", "cancellation outcome was not persisted")
+        recovery = row.get("recovery", {})
+        require(recovery.get("path") == str(worktree.relative_to(ROOT)), "cancelled source path does not identify its original worktree")
+        require(worktree.parent.stat().st_mode & 0o777 == 0o700, "worktree custody directory is not private")
+        require(recovery.get("base_revision") == base, "recovery base lost unpublished HEAD")
+        work_git("reflog", "expire", "--expire=now", "--all")
+        work_git("gc", "--prune=now")
+        actual = {"worktree/value.txt": (worktree / "value.txt").read_bytes(),
+                  "index/0/value.txt": work_git("show", ":value.txt"),
+                  "worktree/interrupted-source.bin": (worktree / "interrupted-source.bin").read_bytes(),
+                  "worktree/ignored-source.bin": (worktree / "ignored-source.bin").read_bytes(),
+                  "HEAD/committed-source.bin": work_git("show", "HEAD:committed-source.bin")}
+        expected = dict(zip(actual, [tracked, staged, untracked, ignored, committed]))
+        require(actual == expected, "cancelled native Git source bytes changed")
+        require(not (worktree / "committed-source.bin").exists(), "staged deletion was lost")
+        require(work_git("rev-parse", "HEAD").decode().strip() == base, "native HEAD changed after GC")
+        report["source_recovery"] = {"evidence": recovery,
+                                     "members_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in actual.items()},
+                                     "members_bytes": {name: len(data) for name, data in actual.items()},
+                                     "private_parent_mode": oct(worktree.parent.stat().st_mode & 0o777),
+                                     "git_status": work_git("status", "--porcelain", "--ignored").decode(),
+                                     "survived_gc": True}
         return row["run_id"]
     finally:
         if process.poll() is None:
@@ -160,6 +211,14 @@ def main() -> int:
         state = json.loads(STATE.read_text())
         version = subprocess.run([str(ROOT / ".iron-forest/bin/forest"), "version", "--json"], text=True, capture_output=True, check=True)
         report["forest_version"] = json.loads(version.stdout)
+        image = json.loads(Path("/run/forest-eval-image.json").read_text())
+        actual_kernel = hashlib.sha256((ROOT / ".iron-forest/bin/forest").read_bytes()).hexdigest()
+        require(actual_kernel == image["kernel_sha256"], "journey Kernel differs from the selected image")
+        require(os.environ.get("FOREST_EVAL_IMAGE_ID") == image["image"], "journey image identity mismatch")
+        require(report["forest_version"]["data"]["build_sha"] == image["build_sha"],
+                "journey Kernel build revision mismatch")
+        require(report["forest_version"]["data"]["dirty"] == image["dirty"], "journey Kernel dirty identity mismatch")
+        report["image_inputs"] = {**image, "actual_kernel_sha256": actual_kernel}
         report["pi_version"] = subprocess.run(["/usr/local/bin/pi", "--version"], text=True, capture_output=True, check=True).stdout.strip()
         scanner = subprocess.run(["/usr/local/bin/trufflehog", "--version"], text=True, capture_output=True, check=True)
         report["scanner_version"] = (scanner.stdout + scanner.stderr).strip()
@@ -209,6 +268,13 @@ def main() -> int:
         require(refs() == landed, "identical retry changed publication refs")
         projection = json.loads((SCENARIO.parent / "pr-created.json").read_text())
         require(projection["count"] == 1 and projection["head"] == branch, "journey must retain one human Projection")
+        retained = ROOT / ".iron-forest/runtime/worktrees" / interrupted_id
+        require(retained.is_dir(), "fresh independent review deleted interrupted source")
+        forest = pwd.getpwnam("forest")
+        subprocess.run(["/usr/bin/git", "-C", str(ROOT), "worktree", "remove", "--force", str(retained)],
+                       user=forest.pw_uid, group=forest.pw_gid, extra_groups=[], check=True)
+        require(not retained.exists(), "explicit fixture disposal failed")
+        report["source_recovery"]["fixture_disposed_after_delivery"] = True
         report.update(passed=True, subject="100", rejected_revision=rejected, delivered_revision=repaired,
                       interrupted_run=interrupted_id, recovered_run=resumed["run_id"], final_refs=landed)
     except Exception as error:

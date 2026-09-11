@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 from pathlib import Path
@@ -11,8 +12,9 @@ PRODUCTION_MANIFEST = ROOT / "production-cases.json"
 PRODUCTION_TASKS = ROOT / "tasks-production"
 
 
-def task_toml(case: dict, suite: str) -> str:
+def task_toml(case: dict, suite: str, image: str = "iron-forest-eval:local", offline: bool = False) -> str:
     description = json.dumps(case["summary"])
+    network = 'network_mode = "no-network"' if offline else 'network_mode = "allowlist"\nallowed_hosts = ["openrouter.ai"]'
     return f'''schema_version = "1.4"
 
 artifacts = [{{ source = "/var/lib/forest-eval/bundle", destination = "forest-eval-bundle" }}]
@@ -30,13 +32,12 @@ case = "{case["id"]}"
 
 [verifier]
 timeout_sec = 1800.0
-network_mode = "allowlist"
-allowed_hosts = ["openrouter.ai"]
+{network}
 env = {{ FOREST_EVAL_JUDGE_API_KEY = "${{FOREST_EVAL_JUDGE_API_KEY:-}}", FOREST_EVAL_JUDGE_MODEL = "${{FOREST_EVAL_JUDGE_MODEL:-}}", FOREST_EVAL_FORENSIC_JUDGE_MODEL = "${{FOREST_EVAL_FORENSIC_JUDGE_MODEL:-}}", FOREST_EVAL_REQUIRE_JUDGE = "${{FOREST_EVAL_REQUIRE_JUDGE:-0}}" }}
 environment_mode = "separate"
 
 [verifier.environment]
-docker_image = "iron-forest-eval:local"
+docker_image = "{image}"
 network_mode = "no-network"
 workdir = "/tests"
 
@@ -47,17 +48,16 @@ timeout_sec = 120.0
 
 [agent]
 user = "forest"
-network_mode = "allowlist"
-allowed_hosts = ["openrouter.ai"]
+{network}
 
 [environment]
-docker_image = "iron-forest-eval:local"
+docker_image = "{image}"
 network_mode = "no-network"
 env = {{ OPENROUTER_API_KEY = "${{OPENROUTER_API_KEY:-}}" }}
 '''
 
 
-def generate_tasks(manifest: dict, tasks_dir: Path, suite: str) -> None:
+def generate_tasks(manifest: dict, tasks_dir: Path, suite: str, image: str = "iron-forest-eval:local", offline: bool = False) -> None:
     shutil.rmtree(tasks_dir, ignore_errors=True)
     for case in manifest["cases"]:
         task = tasks_dir / case["id"]
@@ -74,7 +74,7 @@ def generate_tasks(manifest: dict, tasks_dir: Path, suite: str) -> None:
             "Use the production publication CLI for a supplied GitHub Subject, "
             "or return requested read-only findings without tracker writes.\n"
         )
-        (task / "task.toml").write_text(task_toml(case, suite))
+        (task / "task.toml").write_text(task_toml(case, suite, image, offline))
         test = task / "tests" / "test.sh"
         test.write_text(
             "#!/bin/sh\n"
@@ -101,11 +101,29 @@ def load_manifest(path: Path, schema: str) -> dict:
 
 
 def main() -> None:
-    generate_tasks(load_manifest(ROOT / "cases.json", "forest.evals.v1"), TASKS, "regression")
-    if PRODUCTION_MANIFEST.exists():
-        generate_tasks(load_manifest(PRODUCTION_MANIFEST, "forest.production-cases.v1"), PRODUCTION_TASKS, "production-replay")
-    else:
-        shutil.rmtree(PRODUCTION_TASKS, ignore_errors=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--case", action="append", default=[], help="Generate only this regression case (repeatable)")
+    parser.add_argument("--output-dir", type=Path, help="Isolated generated regression task directory")
+    parser.add_argument("--image", default="iron-forest-eval:local")
+    parser.add_argument("--offline", action="store_true", help="Deny agent and verifier network access for deterministic execution")
+    args = parser.parse_args()
+    manifest = load_manifest(ROOT / "cases.json", "forest.evals.v1")
+    if args.output_dir is not None and args.output_dir.exists():
+        parser.error("--output-dir must not exist; refusing to delete existing files")
+    if args.case:
+        selected = set(args.case)
+        unknown = selected - {case["id"] for case in manifest["cases"]}
+        if unknown:
+            parser.error("unknown cases: " + ", ".join(sorted(unknown)))
+        if args.output_dir is None:
+            parser.error("--case requires --output-dir; never truncate the full corpus")
+        manifest = {**manifest, "cases": [case for case in manifest["cases"] if case["id"] in selected]}
+    generate_tasks(manifest, args.output_dir or TASKS, "regression", args.image, args.offline)
+    if args.output_dir is None:
+        if PRODUCTION_MANIFEST.exists():
+            generate_tasks(load_manifest(PRODUCTION_MANIFEST, "forest.production-cases.v1"), PRODUCTION_TASKS, "production-replay")
+        else:
+            shutil.rmtree(PRODUCTION_TASKS, ignore_errors=True)
 
 
 if __name__ == "__main__":

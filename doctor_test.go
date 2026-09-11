@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -76,9 +77,6 @@ func TestCLIDoctorReportsHealthyChecks(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
 	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\n")
 
 	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
@@ -92,9 +90,6 @@ func TestCLIDoctorReportsHealthyChecks(t *testing.T) {
 	}
 	if payload.Repo != "owner/name" {
 		t.Fatalf("repo=%q, want owner/name", payload.Repo)
-	}
-	if len(payload.Checks) != 8 {
-		t.Fatalf("checks=%d, want 8 (checks=%+v)", len(payload.Checks), payload.Checks)
 	}
 	byName := map[string]doctorCheck{}
 	for _, check := range payload.Checks {
@@ -117,9 +112,6 @@ func TestCLIDoctorReportsHealthyChecks(t *testing.T) {
 	if check := byName["openrouter_key"]; !check.OK || check.Result != doctorEvidenced {
 		t.Fatalf("openrouter_key check=%+v, want evidenced ok", check)
 	}
-	if check := byName["powder_reachability"]; !check.OK {
-		t.Fatalf("powder_reachability check=%+v, want ok", check)
-	}
 	if *seenAuth != "Bearer test" {
 		t.Fatalf("openrouter probe Authorization=%q, want Bearer test", *seenAuth)
 	}
@@ -135,9 +127,6 @@ func TestCLIDoctorReportsMissingCredentialFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
 
 	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
 	if code != exitError {
@@ -164,9 +153,6 @@ func TestCLIDoctorNeverPrintsCredentialValue(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
 	const secret = "sk-openrouter-secret-value"
 	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY="+secret+"\n")
 
@@ -198,9 +184,6 @@ func TestCLIDoctorReportsOpenRouterKeyRejected(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
 	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\n")
 
 	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
@@ -231,9 +214,6 @@ func TestCLIDoctorReportsOpenRouterKeyProbeUnknown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	server.Close()
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
 	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\n")
 
 	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
@@ -268,9 +248,6 @@ func TestDoctorOpenRouterKeyRoleScoped(t *testing.T) {
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
 	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
 	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY_BUILDER=builder-key\nOPENROUTER_API_KEY_VERIFIER=verifier-key\n")
 
 	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
@@ -308,10 +285,7 @@ func TestDoctorOpenRouterKeyMissing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("PATH", bin)
 	t.Setenv("HOME", home)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
-	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=\nPOWDER_URL=https://powder.example\n")
+	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=\n")
 
 	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
 	if code != exitError {
@@ -332,182 +306,22 @@ func TestDoctorOpenRouterKeyMissing(t *testing.T) {
 	}
 }
 
-func TestCLIDoctorPowderCheckUsesServiceEnvironment(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	bin := doctorToolStubs(t)
-	marker := filepath.Join(t.TempDir(), "powder-env")
-	writeDoctorStub(t, bin, "powder", `#!/bin/sh
-printf 'POWDER_AGENT=%s POWDER_URL=%s POWDER_API_BASE_URL=%s\n' "$POWDER_AGENT" "$POWDER_URL" "$POWDER_API_BASE_URL" > "$POWDER_ENV_MARKER"
-exit 0
-`)
-	home := t.TempDir()
-	server, seenAuth, _ := doctorOpenRouterServer(t, http.StatusOK)
-	t.Setenv("PATH", bin)
-	t.Setenv("HOME", home)
-	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_ENV_MARKER", marker)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
-	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\nPOWDER_AGENT=powder-agent\nPOWDER_URL=https://powder.example\n")
-
-	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
-	if code != exitOK {
-		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
-	}
-	var payload doctorPayload
-	decodePayload(t, envelope, &payload)
-	if !payload.Healthy {
-		t.Fatalf("healthy=%t, want true (checks=%+v)", payload.Healthy, payload.Checks)
-	}
-	byName := map[string]doctorCheck{}
-	for _, check := range payload.Checks {
-		byName[check.Name] = check
-	}
-	check := byName["powder_reachability"]
-	if !check.OK || check.Result != doctorEvidenced {
-		t.Fatalf("powder_reachability check=%+v, want evidenced ok", check)
-	}
-	if *seenAuth != "Bearer test" {
-		t.Fatalf("openrouter probe Authorization=%q, want Bearer test", *seenAuth)
-	}
-	data, err := os.ReadFile(marker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(data)
-	want := "POWDER_AGENT=powder-agent POWDER_URL=https://powder.example POWDER_API_BASE_URL=\n"
-	if got != want {
-		t.Fatalf("powder probe environment=%q, want %q", got, want)
-	}
-}
-
-func TestCLIDoctorPowderCheckPropagatesAPIKeyWithoutPrinting(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	bin := doctorToolStubs(t)
-	marker := filepath.Join(t.TempDir(), "powder-api-key-env")
-	writeDoctorStub(t, bin, "powder", `#!/bin/sh
-printf '%s\n' "$POWDER_API_KEY" > "$POWDER_API_KEY_MARKER"
-exit 0
-`)
-	home := t.TempDir()
-	server, _, _ := doctorOpenRouterServer(t, http.StatusOK)
-	t.Setenv("PATH", bin)
-	t.Setenv("HOME", home)
-	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_API_KEY_MARKER", marker)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
-	t.Setenv("POWDER_API_KEY", "")
-	const secret = "powder-secret-key"
-	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\nPOWDER_AGENT=powder-agent\nPOWDER_URL=https://powder.example\nPOWDER_API_KEY="+secret+"\n")
-
-	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
-	if code != exitOK {
-		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
-	}
-	if strings.Contains(stderr, secret) {
-		t.Fatalf("doctor leaked POWDER_API_KEY on stderr: %q", stderr)
-	}
-	var payload doctorPayload
-	decodePayload(t, envelope, &payload)
-	if !payload.Healthy {
-		t.Fatalf("healthy=%t, want true (checks=%+v)", payload.Healthy, payload.Checks)
-	}
-	for _, check := range payload.Checks {
-		if strings.Contains(check.Evidence, secret) || strings.Contains(check.Reason, secret) {
-			t.Fatalf("doctor leaked POWDER_API_KEY in check %q: %+v", check.Name, check)
-		}
-	}
-	data, err := os.ReadFile(marker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(data); got != secret+"\n" {
-		t.Fatalf("powder probe POWDER_API_KEY=%q, want %q", got, secret)
-	}
-}
-
-func TestCLIDoctorPowderCheckFailureDoesNotLeakAPIKey(t *testing.T) {
-	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	bin := doctorToolStubs(t)
-	writeDoctorStub(t, bin, "powder", `#!/bin/sh
-printf '%s\n' "$POWDER_API_KEY" >&2
-exit 1
-`)
-	home := t.TempDir()
-	server, _, _ := doctorOpenRouterServer(t, http.StatusOK)
-	t.Setenv("PATH", bin)
-	t.Setenv("HOME", home)
-	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
-	t.Setenv("POWDER_API_KEY", "")
-	const secret = "powder-secret-key"
-	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\nPOWDER_AGENT=powder-agent\nPOWDER_URL=https://powder.example\nPOWDER_API_KEY="+secret+"\n")
-
-	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
-	if code != exitError {
-		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitError, stderr)
-	}
-	if strings.Contains(stderr, secret) {
-		t.Fatalf("doctor leaked POWDER_API_KEY on stderr: %q", stderr)
-	}
-	var payload doctorPayload
-	decodePayload(t, envelope, &payload)
-	byName := map[string]doctorCheck{}
-	for _, check := range payload.Checks {
-		byName[check.Name] = check
-		if strings.Contains(check.Evidence, secret) || strings.Contains(check.Reason, secret) {
-			t.Fatalf("doctor leaked POWDER_API_KEY in check %q: %+v", check.Name, check)
-		}
-	}
-	check := byName["powder_reachability"]
-	if check.OK || check.Result != doctorEvidenced || check.Evidence == "" {
-		t.Fatalf("powder_reachability check=%+v, want evidenced not ok with fixed evidence", check)
-	}
-}
-
-func TestCLIDoctorSubprocessProbeBounded(t *testing.T) {
+func TestDoctorSubprocessProbeBounded(t *testing.T) {
 	oldTimeout := doctorProbeTimeout
 	doctorProbeTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { doctorProbeTimeout = oldTimeout })
 
 	root := t.TempDir()
-	writeCLIConfig(t, root, "exit 1")
-	bin := doctorToolStubs(t)
-	writeDoctorStub(t, bin, "powder", "#!/bin/sh\nsleep 5\n")
-	home := t.TempDir()
-	server, _, _ := doctorOpenRouterServer(t, http.StatusOK)
+	bin := t.TempDir()
+	writeDoctorStub(t, bin, "gh", "#!/bin/sh\n/bin/sleep 5\n")
 	t.Setenv("PATH", bin)
-	t.Setenv("HOME", home)
-	t.Setenv("OPENROUTER_API_BASE", server.URL)
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
-	writeDoctorEnvironment(t, root, "OPENROUTER_API_KEY=test\nPOWDER_AGENT=powder-agent\nPOWDER_URL=https://powder.example\n")
 
 	start := time.Now()
-	code, envelope, stderr := decodeEnvelope(t, "doctor", "--json", "--root", root)
+	_, _, err := doctorProbe(context.Background(), root, "gh", "auth", "status")
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("doctor took %v, want subprocess probe bounded", elapsed)
 	}
-	if code != exitError {
-		t.Fatalf("code=%d, want %d (stderr=%q)", code, exitError, stderr)
-	}
-	var payload doctorPayload
-	decodePayload(t, envelope, &payload)
-	byName := map[string]doctorCheck{}
-	for _, check := range payload.Checks {
-		byName[check.Name] = check
-	}
-	check := byName["powder_reachability"]
-	if check.OK || check.Result != doctorEvidenced || check.Evidence == "" {
-		t.Fatalf("powder_reachability check=%+v, want evidenced not ok with evidence", check)
+	if err == nil {
+		t.Fatal("hung probe returned success")
 	}
 }

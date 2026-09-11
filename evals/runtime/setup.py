@@ -34,7 +34,7 @@ def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, 
         check=False,
     )
     if completed.returncode != 0:
-        raise RuntimeError(f"command failed ({completed.returncode}): {' '.join(args)}\n{completed.stderr}")
+        raise RuntimeError(f"command failed ({completed.returncode}): {' '.join(args)}\n{completed.stdout}{completed.stderr}")
     return completed.stdout.strip()
 
 
@@ -205,6 +205,8 @@ def main() -> None:
 
     shutil.copytree("/opt/iron-forest/.iron-forest/agents", workspace / ".iron-forest/agents")
     shutil.copytree("/opt/iron-forest/.iron-forest/bin", workspace / ".iron-forest/bin")
+    shutil.copyfile("/opt/iron-forest/.iron-forest/defaults.yaml", workspace / ".iron-forest/defaults.yaml")
+    shutil.copytree("/opt/iron-forest/.iron-forest/extensions", workspace / ".iron-forest/extensions")
     request_context = (
         "\n## Current delegated request\n\n"
         "This isolated evaluation Run is an explicit operator delegation. Read "
@@ -226,12 +228,6 @@ def main() -> None:
             tools=args.tools,
             prompt_append=args.prompt_append,
         )
-    declaration_model = next(
-        line.split(":", 1)[1].strip()
-        for line in (workspace / ".iron-forest/agents" / scenario["role"] / "agent.md").read_text().splitlines()
-        if line.startswith("model:")
-    )
-    CANDIDATE_MODEL.write_text(declaration_model + "\n")
     base_files = {
         ".gitignore": ".iron-forest/runtime/\n.iron-forest/bin/\n",
         "value.txt": "old\n",
@@ -253,6 +249,9 @@ def main() -> None:
         f"  - name: scenario\n    run: {check}\n"
     )
     (workspace / ".iron-forest/config.yaml").write_text(config)
+    declaration = json.loads(run(str(workspace / ".iron-forest/bin/forest"), "declaration", "show",
+                                 scenario["role"], "--root", str(workspace), "--json"))
+    CANDIDATE_MODEL.write_text(declaration["data"]["model"] + "\n")
     git(workspace, "add", ".")
     git(workspace, "commit", "-m", "eval: initial repository")
     base_sha = git(workspace, "rev-parse", "HEAD")

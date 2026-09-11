@@ -70,6 +70,7 @@ type RunRecord struct {
 	// Completion is independently observed profile evidence, never inferred
 	// from either execution status. It is absent without a configured observer.
 	Completion *RunCompletion `json:"completion,omitempty"`
+	Recovery   *RunRecovery   `json:"recovery,omitempty"`
 	// NoWork marks an admitted selection whose request command exited 1
 	// before a request or model execution existed. It is not a failed Run.
 	NoWork     bool  `json:"no_work,omitempty"`

@@ -59,6 +59,12 @@ def parse_declaration(role: str) -> dict[str, Any]:
     if not lines or lines[0] != "---":
         raise ValueError(f"agent declaration has no frontmatter: {path}")
     values: dict[str, str] = {}
+    defaults_path = ROOT / ".iron-forest/defaults.yaml"
+    if defaults_path.is_file():
+        for line in defaults_path.read_text().splitlines():
+            name, separator, value = line.partition(":")
+            if separator and name.strip() in {"model", "thinking", "tools"}:
+                values[name.strip()] = value.strip()
     closing = None
     for index, line in enumerate(lines[1:], 1):
         if line == "---":

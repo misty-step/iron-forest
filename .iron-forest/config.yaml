@@ -2,9 +2,9 @@ repo: misty-step/iron-forest        # forge identity (owner/name)
 delivery: git-native
 required_tools: [gh, trufflehog]
 agents:
-  builder:  { poll: "./.iron-forest/bin/forest poll builder",  interval: 300 }
-  verifier: { poll: "./.iron-forest/bin/forest poll verifier", interval: 120 }
-  fixer:    { poll: "./.iron-forest/bin/forest poll fixer",    interval: 300 }
+  builder:  { poll: "exit 1", interval: 300 }
+  verifier: { poll: "exit 1", interval: 120 }
+  fixer:    { poll: "exit 1", interval: 300 }
   critic:   { poll: "./.iron-forest/agents/critic/poll.sh", interval: 86400 }
   tester:   { poll: "./.iron-forest/agents/tester/poll.sh", interval: 86400 }
 checks:

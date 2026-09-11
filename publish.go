@@ -323,10 +323,10 @@ func runConfiguredChecksWithAttestation(ctx context.Context, root, revision stri
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(forestPath(primary, "worktrees"), 0o755); err != nil {
+	if err := os.MkdirAll(forestPath(primary, "checks"), 0o700); err != nil {
 		return err
 	}
-	dir := forestPath(primary, "worktrees", newRunID("checks", time.Now()))
+	dir := forestPath(primary, "checks", newRunID("checks", time.Now()))
 	if addErr := gitRun(ctx, root, "worktree", "add", "--detach", dir, revision); addErr != nil {
 		return errors.Join(addErr, os.RemoveAll(dir))
 	}

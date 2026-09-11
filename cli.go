@@ -996,6 +996,9 @@ func runRecordHuman(record RunRecord, indent string) string {
 	} else {
 		row += " completion=" + oneLine(record.Completion.Status)
 	}
+	if record.Recovery != nil {
+		row += " source=" + oneLine(record.Recovery.Path)
+	}
 	if record.NoWork {
 		row += " no_work=true"
 	}

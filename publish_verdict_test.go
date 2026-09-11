@@ -559,6 +559,14 @@ checks:
 	}
 }
 
+func reviewRequestJSON(subject, revision, tracker string) string {
+	payload := `{"schema":"forest.review-request.v2","subject":"` + subject + `","branch":"forest/` + subject + `/work","revision":"` + revision + `","time":"2026-08-29T00:00:00Z"`
+	if tracker != "" {
+		payload += `,"tracker":"` + tracker + `"`
+	}
+	return payload + `}`
+}
+
 func pushRequestForRevision(t *testing.T, root, subject, revision string) {
 	t.Helper()
 	branch := "forest/" + subject + "/work"
@@ -567,31 +575,33 @@ func pushRequestForRevision(t *testing.T, root, subject, revision string) {
 	runGitDir(t, root, "push", "origin", revision+":refs/heads/"+branch)
 }
 
-// Pending v2 requests remain legitimate read-only inputs after the writer
-// cutover, including their historical Powder completion protocol.
-func pushHistoricalPowderRequest(t *testing.T, root, subject, revision string) {
-	t.Helper()
-	pushEvidence(t, root, "request", revision, reviewRequestJSON(subject, revision, "powder"), "Iron Forest Builder", "builder@forest.invalid")
-	runGitDir(t, root, "push", "origin", revision+":refs/heads/forest/"+subject+"/work")
-}
-
-func TestPublishVerdictPreservesLandedApproveWhilePowderRetries(t *testing.T) {
+func TestPublishVerdictApproveAndRetryIgnoreAmbientPowderCredentials(t *testing.T) {
 	root, origin := testClone(t)
 	writePassingChecks(t, root)
 	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushHistoricalPowderRequest(t, root, "if-next", revision)
+	pushEvidence(t, root, "request", revision, reviewRequestJSON("if-next", revision, "powder"), "Iron Forest Builder", "builder@forest.invalid")
+	runGitDir(t, root, "push", "origin", revision+":refs/heads/forest/if-next/work")
 	checks, verdict := writeEvidencePayloads(t, revision, "approve")
 	seedVerdictRun(t, root, "1-verifier")
-	lifecycle := &fakePowderLifecycle{doneFailure: 1}
-	poller := configuredPowderPoller(t, root, "if-next", lifecycle)
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "tracker-invoked")
+	if err := os.WriteFile(filepath.Join(bin, "powder"), []byte("#!/bin/sh\nprintf invoked > \"$TRACKER_MARKER\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("TRACKER_MARKER", marker)
+	t.Setenv("POWDER_AGENT", "forest-owner-name")
+	t.Setenv("POWDER_URL", "https://powder.invalid")
+	t.Setenv("POWDER_API_BASE_URL", "https://powder.invalid")
+	t.Setenv("POWDER_API_KEY", "unused-test-key")
 
 	result, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "published" || result.PowderStatus != "pending" || result.PowderSubject != "if-next" {
+	if result.Status != "published" || result.Revision != revision || result.Verdict != "approve" {
 		t.Fatalf("result=%#v", result)
 	}
 	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != revision {
@@ -600,85 +610,18 @@ func TestPublishVerdictPreservesLandedApproveWhilePowderRetries(t *testing.T) {
 	before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 
 	result, err = publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
+		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "identical" || result.PowderStatus != "terminal" || lifecycle.proof != revision {
-		t.Fatalf("retry result=%#v proof=%q", result, lifecycle.proof)
+	if result.Status != "identical" || result.Revision != revision || result.Verdict != "approve" {
+		t.Fatalf("retry result=%#v", result)
 	}
 	if got := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); got != before {
-		t.Fatalf("remote refs changed while retrying Powder reconciliation:\n%s\nwant:\n%s", got, before)
+		t.Fatalf("remote refs changed on identical retry:\n%s\nwant:\n%s", got, before)
 	}
-}
-
-func TestPublishVerdictBlocksLaterApproveOnPendingCurrentPowder(t *testing.T) {
-	root, _ := testClone(t)
-	seedApprovedCurrent(t, root, "if-current")
-	writePassingChecks(t, root)
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushHistoricalPowderRequest(t, root, "if-next", revision)
-	checks, verdict := writeEvidencePayloads(t, revision, "approve")
-	seedVerdictRun(t, root, "1-verifier")
-	lifecycle := &fakePowderLifecycle{doneFailure: 1}
-	poller := configuredPowderPoller(t, root, "if-current", lifecycle)
-	before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
-
-	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
-	})
-	if err == nil {
-		t.Fatal("approved while the current Powder Subject was still pending")
-	}
-	if got := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); got != before {
-		t.Fatalf("remote refs changed after pending Powder refusal:\n%s\nwant:\n%s", got, before)
-	}
-}
-
-func TestPublishVerdictBlocksLaterApproveOnNotFoundCurrentPowder(t *testing.T) {
-	root, _ := testClone(t)
-	seedApprovedCurrent(t, root, "if-current")
-	writePassingChecks(t, root)
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushHistoricalPowderRequest(t, root, "if-next", revision)
-	checks, verdict := writeEvidencePayloads(t, revision, "approve")
-	seedVerdictRun(t, root, "1-verifier")
-	lifecycle := &fakePowderLifecycle{notFound: true}
-	poller := configuredPowderPoller(t, root, "if-current", lifecycle)
-	before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
-
-	_, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
-	})
-	if err == nil {
-		t.Fatal("approved while the current Powder Subject could not be found")
-	}
-	if got := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); got != before {
-		t.Fatalf("remote refs changed after missing Powder refusal:\n%s\nwant:\n%s", got, before)
-	}
-}
-
-func TestPublishVerdictPreservesLandedApproveWhenPowderNotFound(t *testing.T) {
-	root, origin := testClone(t)
-	writePassingChecks(t, root)
-	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-	pushHistoricalPowderRequest(t, root, "if-next", revision)
-	checks, verdict := writeEvidencePayloads(t, revision, "approve")
-	seedVerdictRun(t, root, "1-verifier")
-	lifecycle := &fakePowderLifecycle{notFound: true}
-	poller := configuredPowderPoller(t, root, "if-next", lifecycle)
-
-	result, err := publishVerdict(context.Background(), publishVerdictInput{
-		Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier", Powder: poller,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "published" || result.PowderStatus != "pending" || result.PowderSubject != "if-next" {
-		t.Fatalf("result=%#v", result)
-	}
-	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != revision {
-		t.Fatalf("master=%s want %s", got, revision)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("obsolete tracker invoked or marker unreadable: %v", err)
 	}
 }

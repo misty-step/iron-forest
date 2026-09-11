@@ -17,6 +17,8 @@ RUN npm install --global @earendil-works/pi-coding-agent@0.84.4
 COPY --from=forest-build /out/forest /opt/iron-forest/.iron-forest/bin/forest
 COPY --from=secret-scanner /usr/bin/trufflehog /usr/local/bin/trufflehog
 COPY .iron-forest/agents /opt/iron-forest/.iron-forest/agents
+COPY .iron-forest/defaults.yaml /opt/iron-forest/.iron-forest/defaults.yaml
+COPY .iron-forest/extensions /opt/iron-forest/.iron-forest/extensions
 COPY evals/runtime /opt/iron-forest-eval
 RUN useradd --create-home forest \
     && mkdir -p /hidden /workspace /run/forest-eval \

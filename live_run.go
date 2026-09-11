@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,7 @@ type LiveRunView struct {
 	ProcessExit *int           `json:"process_exit,omitempty"`
 	Outcome     string         `json:"outcome,omitempty"`
 	Completion  *RunCompletion `json:"completion,omitempty"`
+	Recovery    *RunRecovery   `json:"recovery,omitempty"`
 }
 
 // liveRunPath names the per-agent live Run record. One file per agent is safe
@@ -153,6 +155,7 @@ func liveRunView(record liveRunRecord, now time.Time) LiveRunView {
 		view.ProcessExit = record.Result.ProcessExit
 		view.Outcome = record.Result.Outcome
 		view.Completion = record.Result.Completion
+		view.Recovery = record.Result.Recovery
 	}
 	if record.RunID != "" {
 		view.Cancel = "forest run cancel " + record.RunID
@@ -218,6 +221,14 @@ func recoverInterruptedRuns(root string) error {
 			}
 			if live.Finalized && live.Result == nil {
 				return fmt.Errorf("interrupted Run %s has no finalized result", live.RunID)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), reservedCleanupTimeout)
+			record.Recovery = NewRunner(root).retainedWorktree(ctx, live.RunID)
+			cancel()
+			recoveredLive := liveRecord(record)
+			recoveredLive.Finalized = live.Finalized
+			if err := writeLiveRun(liveRunPath(root, live.Agent), recoveredLive); err != nil {
+				return err
 			}
 			if err := AppendRun(root, record); err != nil {
 				return err

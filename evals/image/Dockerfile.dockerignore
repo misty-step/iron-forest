@@ -5,6 +5,9 @@
 !.iron-forest/
 !.iron-forest/agents/
 !.iron-forest/agents/**
+!.iron-forest/defaults.yaml
+!.iron-forest/extensions/
+!.iron-forest/extensions/**
 !evals/
 !evals/runtime/
 !evals/runtime/**

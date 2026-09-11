@@ -1,3 +1,19 @@
+## Unreleased
+
+### Changed
+
+* Preserve native Git worktrees for failed, cancelled, timed-out, interrupted,
+  and unknown Runs; report optional local recovery paths without blocking new
+  requests or changing the CLI v2 protocol. Operators own source disposal.
+* Separate disposable fixed-revision Check scratch into `runtime/checks`, keeping
+  normal and killed-Check cleanup without deleting interrupted Run source.
+* Add focused deterministic `run-fast.sh --case ID` and `--journey` paths with
+  native Docker cache builds, immutable image receipts, and real cancellation
+  source-custody evidence.
+* Remove retired Powder selection, reconciliation and reachability operations;
+  keep optional Git-native selectors and historical metadata. Shipped
+  Builder/Verifier/Fixer polls now require explicit requests by default.
+
 ## [0.0.20](https://github.com/misty-step/iron-forest/compare/v0.0.19...v0.0.20) (2026-09-10)
 
 
@@ -43,6 +59,11 @@
 ## Unreleased
 
 ### Features
+
+* Set the core instance default to `openrouter/deepseek/deepseek-v4.1-flash`;
+  all five roles inherit it while retaining their tools and thinking levels.
+  Register its static metadata through an explicit profile extension for Pi
+  0.84.4, preserving existing model metadata, tracing, and provider transport.
 
 * Unify the versioned profile, installed binary and runtime beneath `.iron-forest`.
 * Add explicit Run requests, immutable work attribution, profile-owned scheduled

@@ -33,7 +33,6 @@ func TestBuilderPollMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("POWDER_AGENT", "")
 			p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
 			p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
 				if name == "gh" {
@@ -54,13 +53,15 @@ func TestBuilderPollMatrix(t *testing.T) {
 	}
 }
 
-func TestBuilderPollIgnoresPowderWithoutAgent(t *testing.T) {
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "https://powder.example")
+func TestBuilderPollIgnoresAmbientPowderCredentials(t *testing.T) {
+	t.Setenv("POWDER_AGENT", "forest-owner-name")
+	t.Setenv("POWDER_URL", "https://powder.invalid")
+	t.Setenv("POWDER_API_BASE_URL", "https://powder.invalid")
+	t.Setenv("POWDER_API_KEY", "unused-test-key")
 	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
 	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name == "powder" {
-			t.Fatalf("powder invoked without POWDER_AGENT: %v", args)
+			t.Fatalf("obsolete tracker invoked: %v", args)
 		}
 		if name == "gh" {
 			return []byte(`[]`), nil
@@ -69,114 +70,6 @@ func TestBuilderPollIgnoresPowderWithoutAgent(t *testing.T) {
 	}
 	if got, err := p.builder(context.Background()); got != 1 || err != nil {
 		t.Fatalf("poll exit=%d err=%v want 1", got, err)
-	}
-}
-
-func TestBuilderPollPowderRequiresOrigin(t *testing.T) {
-	t.Setenv("POWDER_AGENT", "forest-owner-name")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
-	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
-	p.Run = func(_ context.Context, name string, _ ...string) ([]byte, error) {
-		if name == "gh" {
-			return []byte(`[]`), nil
-		}
-		t.Fatalf("unexpected tool %s", name)
-		return nil, nil
-	}
-	got, err := p.builder(context.Background())
-	if got != 2 || err == nil {
-		t.Fatalf("poll exit=%d err=%v want 2", got, err)
-	}
-}
-
-func TestBuilderPollPowderMatrix(t *testing.T) {
-	t.Setenv("POWDER_AGENT", "forest-owner-name")
-	t.Setenv("POWDER_URL", "https://powder.example")
-	ctx := context.Background()
-	sha := strings.Repeat("a", 40)
-	cases := []struct {
-		name      string
-		issues    string
-		takeable  string
-		mine      string
-		branch    string
-		powderErr error
-		want      int
-	}{
-		{name: "takeable", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, want: 0},
-		{name: "takeable claimed", issues: `[]`, takeable: `[{"id":"iron-forest-ready"}]`, mine: `[]`, branch: sha + " refs/heads/forest/iron-forest-ready/work\n", want: 1},
-		{name: "published audit match does not hide takeable", issues: `[]`, takeable: `[{"id":"other-ready"}]`, mine: `[]`, branch: sha + " refs/heads/forest/iron-forest-held/work\n", want: 0},
-		{name: "github ready empty powder", issues: `[[{"number":4}]]`, takeable: `[]`, mine: `[]`, want: 0},
-		{name: "malformed powder", issues: `[]`, takeable: `not json`, mine: `[]`, want: 2},
-		{name: "bad powder id", issues: `[]`, takeable: `[{"id":"bad id"}]`, mine: `[]`, want: 2},
-		{name: "powder outage", issues: `[]`, takeable: `[]`, mine: `[]`, powderErr: errors.New("offline"), want: 2},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
-			p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
-				if name == "gh" {
-					return []byte(tc.issues), nil
-				}
-				if name == "powder" {
-					if !slices.Contains(args, "list") || !slices.Contains(args, "--repo") || !slices.Contains(args, "owner/name") {
-						t.Fatalf("powder list repo args missing: %v", args)
-					}
-					if slices.Contains(args, "--takeable") {
-						return []byte(tc.takeable), tc.powderErr
-					}
-					if slices.Contains(args, "--mine") {
-						if !slices.Contains(args, "forest-owner-name") {
-							t.Fatalf("powder mine agent missing: %v", args)
-						}
-						return []byte(tc.mine), tc.powderErr
-					}
-					t.Fatalf("unexpected powder args: %v", args)
-				}
-				return []byte(tc.branch), nil
-			}
-			if got, _ := p.builder(ctx); got != tc.want {
-				t.Fatalf("poll exit=%d want %d", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestListPowderSubjectsRequiresMatchingClaimForAuditMatches(t *testing.T) {
-	t.Setenv("POWDER_AGENT", "shared-audit-label")
-	t.Setenv("POWDER_URL", "https://powder.example")
-	p := &Poller{Root: t.TempDir(), Repo: "owner/name"}
-	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name != "powder" || !slices.Contains(args, "list") {
-			t.Fatalf("unexpected tool call: %s %v", name, args)
-		}
-		if slices.Contains(args, "--mine") {
-			return []byte(`[{"id":"resumable"},{"id":"inaccessible"}]`), nil
-		}
-		if slices.Contains(args, "--takeable") {
-			return []byte(`[{"id":"independent"}]`), nil
-		}
-		t.Fatalf("unexpected Powder list: %v", args)
-		return nil, nil
-	}
-	p.PowderCommand = func(_ context.Context, args ...string) ([]byte, []byte, error) {
-		if strings.Join(args, " ") == "take resumable --agent shared-audit-label" {
-			return []byte(`{"id":"resumable"}`), nil, nil
-		}
-		if strings.Join(args, " ") == "take inaccessible --agent shared-audit-label" {
-			return nil, []byte(`{"code":"held","error":"job is held"}`), errors.New("exit status 1")
-		}
-		t.Fatalf("unexpected Powder command: %v", args)
-		return nil, nil, nil
-	}
-
-	got, err := p.listPowderSubjects(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"independent", "resumable"}; !slices.Equal(got, want) {
-		t.Fatalf("subjects=%v want=%v", got, want)
 	}
 }
 

@@ -57,7 +57,7 @@
   "variants": [
     {
       "id": "deepseek-low",
-      "model": "openrouter/deepseek/deepseek-v4-pro-0813",
+      "model": "openrouter/deepseek/deepseek-v4.1-flash",
       "thinking": "low",
       "change_class": "thinking",
       "estimated_max_usd_per_trial": 0.5,
@@ -84,7 +84,7 @@
     },
     {
       "id": "verifier-readonly-lean",
-      "model": "openrouter/deepseek/deepseek-v4-pro-0813",
+      "model": "openrouter/deepseek/deepseek-v4.1-flash",
       "change_class": "prompt",
       "thinking": "high",
       "tools": "read,grep,glob,bash",

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -16,12 +15,11 @@ import (
 type toolFunc func(context.Context, string, ...string) ([]byte, error)
 
 type Poller struct {
-	Root          string
-	Repo          string
-	Scope         Scope
-	Run           toolFunc
-	PowderCommand powderCommandFunc
-	ResolveTools  bool
+	Root         string
+	Repo         string
+	Scope        Scope
+	Run          toolFunc
+	ResolveTools bool
 }
 
 func NewPoller(root, repo string, scope Scope) *Poller {
@@ -38,10 +36,6 @@ func (p *Poller) git(ctx context.Context, args ...string) ([]byte, error) {
 
 func (p *Poller) gh(ctx context.Context, args ...string) ([]byte, error) {
 	return p.run(ctx, "gh", args...)
-}
-
-func (p *Poller) powder(ctx context.Context, args ...string) ([]byte, error) {
-	return p.run(ctx, "powder", args...)
 }
 
 func (p *Poller) run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -103,27 +97,11 @@ func (p *Poller) readyIssues(ctx context.Context, label string) ([]string, error
 // accompanies exitError so the caller can say why the Poll failed instead of
 // exiting silently.
 func (p *Poller) builder(ctx context.Context) (int, error) {
-	if _, err := p.reconcilePowderPrimary(ctx); err != nil {
-		return exitError, fmt.Errorf("reconcile current Powder Subject: %w", err)
-	}
 	issues, err := p.issueSubjects(ctx)
 	if err != nil {
 		return exitError, err
 	}
 	for _, subject := range issues {
-		claimed, err := p.subjectHasBranch(ctx, subject)
-		if err != nil {
-			return exitError, err
-		}
-		if !claimed {
-			return exitOK, nil
-		}
-	}
-	powder, err := p.powderSubjects(ctx)
-	if err != nil {
-		return exitError, err
-	}
-	for _, subject := range powder {
 		claimed, err := p.subjectHasBranch(ctx, subject)
 		if err != nil {
 			return exitError, err
@@ -145,18 +123,6 @@ func (p *Poller) issueSubjects(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return p.filterScopeSubjects(issues), nil
-}
-
-func (p *Poller) powderSubjects(ctx context.Context) ([]string, error) {
-	// A label scope is a GitHub-only selection rule.
-	if p.Scope.Label != "" {
-		return nil, nil
-	}
-	powder, err := p.listPowderSubjects(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return p.filterScopeSubjects(powder), nil
 }
 
 func (p *Poller) filterScopeSubjects(subjects []string) []string {
@@ -188,85 +154,6 @@ func filterSubjects(subjects []string, keep func(string) bool) []string {
 		}
 	}
 	return result
-}
-
-func powderAgent() string {
-	return strings.TrimSpace(os.Getenv("POWDER_AGENT"))
-}
-
-func powderOriginSet() bool {
-	return strings.TrimSpace(os.Getenv("POWDER_URL")) != "" || strings.TrimSpace(os.Getenv("POWDER_API_BASE_URL")) != ""
-}
-
-type powderListJob struct {
-	ID string `json:"id"`
-}
-
-func (p *Poller) listPowderSubjects(ctx context.Context) ([]string, error) {
-	agent := powderAgent()
-	if agent == "" {
-		return nil, nil
-	}
-	if !powderOriginSet() {
-		return nil, fmt.Errorf("POWDER_AGENT is set but POWDER_URL and POWDER_API_BASE_URL are empty")
-	}
-	if strings.TrimSpace(p.Repo) == "" {
-		return nil, fmt.Errorf("repository is required")
-	}
-	mine, err := p.listPowder(ctx, "--mine", agent, "--repo", p.Repo)
-	if err != nil {
-		return nil, err
-	}
-	subjects := make([]string, 0, len(mine))
-	seen := make(map[string]struct{}, len(mine))
-	for _, id := range mine {
-		if !validSubject(id) {
-			return nil, fmt.Errorf("malformed powder job id %q", id)
-		}
-		args := []string{"take", id, "--agent", agent}
-		if _, stderr, err := p.runPowderCommand(ctx, args...); err != nil {
-			if payload, ok := decodePowderError(stderr); ok && (payload.Code == "held" || payload.Code == "terminal") {
-				continue
-			}
-			return nil, powderCommandFailure("take", id, stderr, err)
-		}
-		subjects = append(subjects, id)
-		seen[id] = struct{}{}
-	}
-	takeable, err := p.listPowder(ctx, "--takeable", "--repo", p.Repo)
-	if err != nil {
-		return nil, err
-	}
-	for _, id := range takeable {
-		if !validSubject(id) {
-			return nil, fmt.Errorf("malformed powder job id %q", id)
-		}
-		if _, exists := seen[id]; !exists {
-			subjects = append(subjects, id)
-		}
-	}
-	sort.Strings(subjects)
-	return subjects, nil
-}
-
-func (p *Poller) listPowder(ctx context.Context, args ...string) ([]string, error) {
-	output, err := p.powder(ctx, append([]string{"list"}, args...)...)
-	if err != nil {
-		return nil, err
-	}
-	var jobs []powderListJob
-	if err := json.Unmarshal(output, &jobs); err != nil {
-		return nil, fmt.Errorf("malformed powder list: %w", err)
-	}
-	ids := make([]string, 0, len(jobs))
-	for _, job := range jobs {
-		id := strings.TrimSpace(job.ID)
-		if id == "" {
-			return nil, fmt.Errorf("malformed powder job id")
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
 }
 
 func (p *Poller) subjectHasBranch(ctx context.Context, subject string) (bool, error) {
