@@ -274,7 +274,7 @@ func TestPollNoteDecodersRejectStrictJSON(t *testing.T) {
 		keys   []string
 		decode func([]byte) error
 	}{
-		{name: "review", data: validReview, keys: []string{"schema", "subject", "branch", "revision", "time"}, decode: decodeReviewNote},
+		{name: "review", data: validReview, keys: []string{"schema", "subject", "branch", "revision", "time", "run_id"}, decode: decodeReviewNote},
 		{name: "checks", data: validChecks, keys: []string{"schema", "revision", "results", "time", "name", "ok", "exit"}, decode: decodeChecksNote},
 		{name: "verdict", data: validVerdict, keys: []string{"schema", "revision", "verdict", "summary", "time"}, decode: decodeVerdictNote},
 	}
@@ -290,7 +290,7 @@ func TestPollNoteDecodersRejectStrictJSON(t *testing.T) {
 		}
 	}
 
-	missingReview := `{"schema":"forest.review-request.v2","subject":"4","branch":"forest/4/work","revision":"` + sha + `"}`
+	missingReview := `{"schema":"forest.review-request.v3","subject":"4","branch":"forest/4/work","revision":"` + sha + `","run_id":"fixture-builder"}`
 	missingChecks := `{"schema":"forest.checks.v1","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
 	missingVerdict := `{"schema":"forest.verdict.v1","revision":"` + sha + `","verdict":"approve","time":"2026-08-10T00:00:00Z"}`
 	nullResults := strings.Replace(validChecks, `"results":[{"name":"test","ok":true,"exit":0}]`, `"results":null`, 1)
@@ -300,12 +300,17 @@ func TestPollNoteDecodersRejectStrictJSON(t *testing.T) {
 		decode func([]byte) error
 	}{
 		{name: "review unknown member", data: strings.Replace(validReview, `,"time":`, `,"extra":true,"time":`, 1), decode: decodeReviewNote},
+		{name: "review legacy tracker", data: strings.Replace(validReview, `,"time":`, `,"tracker":"github","time":`, 1), decode: decodeReviewNote},
+		{name: "review blank request", data: strings.Replace(validReview, `,"time":`, `,"request_id":"","time":`, 1), decode: decodeReviewNote},
+		{name: "review null work", data: strings.Replace(validReview, `,"time":`, `,"work":null,"time":`, 1), decode: decodeReviewNote},
+		{name: "review null work metadata", data: strings.Replace(validReview, `,"time":`, `,"work":{"system":"opaque","id":"work","key":null},"time":`, 1), decode: decodeReviewNote},
+		{name: "review duplicate work identity", data: strings.Replace(validReview, `,"time":`, `,"work":{"system":"opaque","id":"first","id":"second"},"time":`, 1), decode: decodeReviewNote},
 		{name: "checks unknown nested member", data: pollChecksNote(sha, `{"name":"test","ok":true,"exit":0,"extra":true}`), decode: decodeChecksNote},
 		{name: "verdict unknown member", data: strings.Replace(validVerdict, `,"time":`, `,"extra":true,"time":`, 1), decode: decodeVerdictNote},
-		{name: "review duplicate member", data: `{"schema":"forest.review-request.v2","schema":"forest.review-request.v2","subject":"4","branch":"forest/4/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`, decode: decodeReviewNote},
+		{name: "review duplicate member", data: `{"schema":"forest.review-request.v3","schema":"forest.review-request.v3","subject":"4","branch":"forest/4/work","revision":"` + sha + `","time":"2026-08-10T00:00:00Z","run_id":"fixture-builder"}`, decode: decodeReviewNote},
 		{name: "checks duplicate nested member", data: pollChecksNote(sha, `{"name":"test","name":"test","ok":true,"exit":0}`), decode: decodeChecksNote},
 		{name: "verdict duplicate member", data: `{"schema":"forest.verdict.v1","revision":"` + sha + `","verdict":"approve","summary":"done","summary":"done","time":"2026-08-10T00:00:00Z"}`, decode: decodeVerdictNote},
-		{name: "review mixed-case duplicate", data: strings.Replace(validReview, `"schema":"forest.review-request.v2"`, `"schema":"bad","Schema":"forest.review-request.v2"`, 1), decode: decodeReviewNote},
+		{name: "review mixed-case duplicate", data: strings.Replace(validReview, `"schema":"forest.review-request.v3"`, `"schema":"bad","Schema":"forest.review-request.v3"`, 1), decode: decodeReviewNote},
 		{name: "check mixed-case duplicate", data: pollChecksNote(sha, `{"name":"bad","Name":"test","ok":true,"exit":0}`), decode: decodeChecksNote},
 		{name: "trailing JSON", data: validReview + ` {}`, decode: decodeReviewNote},
 		{name: "review malformed time", data: strings.Replace(validReview, "2026-08-10T00:00:00Z", "not-a-time", 1), decode: decodeReviewNote},

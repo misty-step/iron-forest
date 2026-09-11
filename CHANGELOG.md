@@ -14,6 +14,20 @@
   keep optional Git-native selectors and historical metadata. Shipped
   Builder/Verifier/Fixer polls now require explicit requests by default.
 
+## [0.0.20](https://github.com/misty-step/iron-forest/compare/v0.0.19...v0.0.20) (2026-09-10)
+
+
+### Bug Fixes
+
+* **config:** expose effective delivery for admission (MIS-55) ([f823932](https://github.com/misty-step/iron-forest/commit/f823932e415131f1c45246610363ab1dbbe3e208))
+* **evals:** restore live-bound oracle execution (MIS-57) ([900e9ac](https://github.com/misty-step/iron-forest/commit/900e9ac7fe7d8be778e2aec39d702c764f8ec4c3))
+
+
+### Features
+
+* **config:** expose repository-owned intent (MIS-55) ([ae06c55](https://github.com/misty-step/iron-forest/commit/ae06c55cac74b2aaf5f70c2a900fa8124b4398a5))
+* **publication:** bind native evidence to Run work (MIS-57) ([b6d4672](https://github.com/misty-step/iron-forest/commit/b6d46728f5367e51e36126e73ec626f248f0caa7))
+
 ## [0.0.19](https://github.com/misty-step/iron-forest/compare/v0.0.18...v0.0.19) (2026-09-09)
 
 
@@ -63,6 +77,15 @@
 * Record known execution outcomes (`setup_failed`, `execution_failed`,
   `provider_failed`, `cancelled`, `timed_out`, `interrupted`, `internal_error`)
   and the raw `process_exit`. Missing legacy values stay unclassified.
+* Expose optional repository-owned `intent` through strict configuration loading
+  and `forest config show`, without inventing absent intent or treating declared
+  purpose, outcomes, constraints and release policy as enforced authority.
+* Expose the effective native/external delivery mode in `forest config show`
+  so profile admission and product packaging can inspect the actual mode.
+* Bind new native review requests to the owning live Run, request and complete
+  opaque work reference with `forest.review-request.v3`. Keep historical v1/v2
+  evidence readable; preserve independent verifier and fixer continuity, exact
+  revisions, configured checks, credential scanning and atomic publication.
 
 ### Bug Fixes
 
@@ -74,6 +97,8 @@
 * Replace the retired queue-first onboarding walkthrough with the current
   request-first path, and stop presenting the exit-zero Ledger fraction as
   agent or delivery quality.
+* Restore deterministic oracle execution without shadowing its entrypoint with
+  live Run state, and accept native v3 work subjects in evidence grading.
 
 ## [0.0.15](https://github.com/misty-step/iron-forest/compare/v0.0.14...v0.0.15) (2026-09-08)
 

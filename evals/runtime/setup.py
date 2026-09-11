@@ -278,12 +278,12 @@ def main() -> None:
 
         request_actor = "fixer" if scenario["role"] == "fixer" and scenario.get("request_actor") == "fixer" else "builder"
         review_request = {
-            "schema": "forest.review-request.v2",
+            "schema": "forest.review-request.v3",
             "subject": "100",
             "branch": branch,
             "revision": candidate,
             "time": TIME,
-            "tracker": "github",
+            "run_id": "fixture-" + request_actor,
         }
         evidence_push(workspace, "request", candidate, review_request, request_actor)
 
@@ -345,12 +345,12 @@ def main() -> None:
 
     if scenario.get("race") == "unrelated_evidence":
         race_payload = {
-            "schema": "forest.review-request.v2",
+            "schema": "forest.review-request.v3",
             "subject": "999",
             "branch": "forest/999/race",
             "revision": base_sha,
             "time": TIME,
-            "tracker": "github",
+            "run_id": "fixture-builder",
         }
         state["race_request_commit"] = evidence_commit(workspace, "request", base_sha, race_payload, "builder")
         prepare_object(workspace, state["race_request_commit"])

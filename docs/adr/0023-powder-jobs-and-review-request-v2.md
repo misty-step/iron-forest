@@ -9,6 +9,12 @@ Status: accepted, 2026-08-19 (review-request note write retired by 0028, 2026-09
 > uses private per-job claims. `POWDER_AGENT` is optional audit metadata. A
 > matching locally stored claim, not identity equality, resumes or completes a
 > live job.
+>
+> New writers now use [review-request v3](../../README.md#git-coordination),
+> binding actual Run/request identity and an optional opaque WorkReference.
+> The v2 writer/tracker instructions below are historical. Immutable v1/v2
+> evidence remains readable; only pending v2 Powder requests retain legacy
+> reconciliation. A v3 Fixer never rewrites old evidence or emits `tracker`.
 
 Extends [0009](0009-git-coordination-authority.md),
 [0010](0010-agent-owned-effects-and-merge-gate.md), and

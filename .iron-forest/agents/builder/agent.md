@@ -12,12 +12,12 @@ historical queue entries do not authorize new work.
 
 Direct requests use the session or PR workflow in `AGENTS.md`; no ticket is
 required. Use the Forest publication protocol below only when the current
-request supplies a compatible existing GitHub Subject or review request and
-an active Forest runner. Do not create a tracker entry to satisfy that
-protocol. Unsupported legacy tracker metadata requires a fresh handoff.
+request supplies one selected Subject or work request and an active Forest
+Runner. Do not create a tracker entry to satisfy the publication protocol.
+An opaque work reference is not a GitHub or Powder identity.
 
 You are the Builder declaration for this managed repository. Deliver one
-Subject through a branch, review-request evidence, and one human Projection.
+Subject through a branch and review-request evidence, plus any requested Projection.
 
 ## Boundary
 
@@ -35,7 +35,7 @@ invent refs, retry loops, or force flags.
 3. For a direct request, use a focused branch and the ordinary session or PR
    handoff. Report checks, result, and unresolved work without a new ticket.
 4. For an explicitly requested Forest run, read `.iron-forest/config.yaml`. A present
-   `scope.subjects` list remains an allowlist. Require the supplied GitHub
+   `scope.subjects` list remains an allowlist. Require the supplied
    Subject to be in scope and current; do not invent a Subject or widen scope.
 5. Fetch `origin` immediately before branching and create the branch from the
    full current primary-ref SHA. Record that SHA. If the requested work already
@@ -57,9 +57,9 @@ repository, and call only:
 
 The Kernel owns the write-once evidence ref and atomic branch update; use the
 Runner `FOREST_RUN_ID`, and replace this command with neither `git notes` nor
-`git push`. After success, open one GitHub PR Projection with
-`gh pr create --head "$branch"`; link the explicitly supplied GitHub Issue
-when one is part of the current request.
+`git push`. Open a GitHub PR Projection only when the current request requires
+one; link an explicitly supplied GitHub Issue when present. Generic work must
+not invoke GitHub or Powder work mutation; the profile owns completion observation.
 
 If the work exposes a separate problem, report its evidence separately. Keep
 it outside this Subject and do not create a speculative ticket.
@@ -67,11 +67,17 @@ it outside this Subject and do not create a speculative ticket.
 ## Request payload
 
 ```json
-{"schema":"forest.review-request.v2","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","tracker":"github"}
+{"schema":"forest.review-request.v3","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","run_id":"<actual FOREST_RUN_ID>","request_id":"<actual request id>","work":{"system":"<opaque system>","id":"<immutable id>","key":"<display key>","url":"<work URL>"}}
 ```
 
-Set `tracker` to the source actually selected. The Builder writes the initial
-payload; a Fixer writes a fresh payload after a rejected Revision.
+Use the actual live Builder Run identity and the request retained at
+`$FOREST_ROOT/.iron-forest/runtime/runs/$FOREST_RUN_ID.request.json`.
+Copy its exact `id` into `request_id` and its complete `work` snapshot, including
+optional `key` and `url`. Omit `request_id` if the Run has no request, and omit
+`work` if the request has none. Do not add `tracker` or manufacture missing fields.
+The Kernel checks against the owning primary checkout's live Run and retained
+request, including identical retries and a final check after candidate Checks.
+The Builder writes the initial payload; a Fixer uses its own Run/request identity.
 
 ## Result
 

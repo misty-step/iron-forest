@@ -64,7 +64,7 @@ func pollReviewNote(sha string) string {
 }
 
 func pollReviewNoteBranch(sha, branch string) string {
-	return `{"schema":"forest.review-request.v2","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + sha + `","time":"2026-08-10T00:00:00Z"}`
+	return `{"schema":"forest.review-request.v3","subject":"` + reviewSubjectForTest(branch) + `","branch":"` + branch + `","revision":"` + sha + `","time":"2026-08-10T00:00:00Z","run_id":"fixture-builder"}`
 }
 
 func reviewSubjectForTest(branch string) string {

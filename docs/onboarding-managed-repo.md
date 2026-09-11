@@ -16,12 +16,16 @@ Choose `delivery` before granting credentials:
 | Mode | Publication authority | Adoption requirement |
 | --- | --- | --- |
 | `external` | Repository-owned profile plus its external operator workflow | The profile defines candidate review, human merge and tracker reconciliation. Kernel native publication is refused; its native audit is not applicable. |
-| `git-native` | Kernel publication commands and the native Git Gate | The operator explicitly accepts native primary publication after the Gate. This is not the R90 human-merge contract. |
+| `git-native` | Kernel publication commands and the native Git Gate | The operator explicitly accepts native primary publication after the Gate. This does not change Vector's external human-merge contract. |
 
-R90 uses Habitat and its repository-owned external profile. Misty Step uses
-current operator requests; optional tracker references are attribution, not
-permission to start work. Canopy only observes. It does not admit Runs, merge,
-change configuration, or deploy.
+R90 uses Habitat for work tracking; tracker choice does not predetermine delivery.
+Vector retains its existing external human-merge contract. A new repository uses
+only the delivery authority explicitly accepted by its owner, including
+policy-bounded Git-native publication where authorized. A new cohort's policy
+does not silently switch an existing instance. Misty Step uses current operator
+requests; optional tracker references are attribution, not permission to start
+work. Canopy only observes. It does not admit Runs, merge, change configuration,
+or deploy.
 
 ## Prepare the host and profile
 
@@ -42,6 +46,12 @@ Version the complete profile together:
   bin/forest                  # installed executable, ignored by Git
   runtime/                    # generated evidence, ignored by Git
 ```
+
+The profile may declare [repository-owned intent](../README.md#repository-owned-intent):
+purpose, outcomes, constraints, and release policy. Inspect it with
+`forest config show --json`; absent intent stays absent. This is declared policy,
+not a substitute for the owner's actual delivery, capability, and spending
+authority. It does not inject instructions into role prompts or select work.
 
 For manual-only onboarding, each configured declaration must have an explicit
 non-dispatching Poll, for example `poll: "exit 1"` with `interval: 300`.
@@ -124,6 +134,16 @@ Kernel lock. It appends to the standing task; it does not replace role policy.
 A Run may create branches and external effects according to the profile. Pausing
 later does not undo an admitted Run or cancel it.
 
+For native delivery, use the [v3 publication contract](../README.md#git-coordination).
+Builder/Fixer evidence includes its actual live Run ID and optional retained
+request/work association. Verifier and Fixer requests must preserve the complete
+opaque work snapshot; they use their own Run/request identities. Never relabel
+Habitat as GitHub/Powder. Both Verdict kinds require exact candidate evidence,
+and native approval runs the scanner and candidate-configured Checks before
+atomic publication. Greenfield profiles declare real required commands; absent
+product/check implementation blocks publication rather than becoming a no-op.
+External delivery profiles remain under their own completion/merge authority.
+
 ## Read the result, not just the exit code
 
 Use the recorded Run ID with:
@@ -143,9 +163,11 @@ Inspect three independent facts:
    external effect was observed, incomplete, or unavailable. A valid review
    requesting changes is a completed review. Missing completion evidence is not
    success; an unconfigured observer makes no completion claim.
-3. **Delivery:** the chosen authority's exact-revision evidence. For R90 this
-   includes review of the candidate, an operator merge, observed merge facts and
-   tracker reconciliation. A merge is not a deployment.
+3. **Delivery:** the chosen authority's exact-revision evidence. Vector's external
+   contract includes candidate review, an operator merge, observed merge facts
+   and tracker reconciliation. An owner-authorized Git-native profile instead
+   supplies its native Checks, Verdict and published revision evidence. Follow
+   the owning profile's release and reconciliation policy; a merge is not a deployment.
 
 Keep full logs and prompts behind the owning access boundary. Canopy displays
 bounded read-only projections, preserves unknown/partial/stale states, and links
@@ -164,8 +186,8 @@ uncertain remote effect. Inspect the retained request, Run and external evidence
 before authorizing another attempt. Never substitute a fresh paid Run for
 checking whether a PR, receipt or tracker transition already happened.
 
-An R90 merged-but-unreconciled item belongs to its operator completion command,
-not another Verifier. Use the infrastructure owner's current README; do not
+A merged-but-unreconciled item belongs to the owning profile's completion
+workflow, not another Verifier. Use the infrastructure owner's current README; do not
 operate its worker through this checkout's local service.
 
 ## Adopt updates coherently
