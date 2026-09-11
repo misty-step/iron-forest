@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -125,40 +124,18 @@ func TestBuilderPollScopeBySubjects(t *testing.T) {
 		name     string
 		subjects []string
 		issues   string
-		takeable string
-		mine     string
-		agent    string
 		want     int
 	}{
 		{name: "matching issue", subjects: []string{"4"}, issues: `[[{"number":4}]]`, want: 0},
 		{name: "issue outside scope", subjects: []string{"5"}, issues: `[[{"number":4}]]`, want: 1},
-		{name: "matching powder", subjects: []string{"if-241"}, issues: `[]`, takeable: `[{"id":"if-241"}]`, mine: `[]`, agent: "forest-owner-name", want: 0},
-		{name: "powder outside scope", subjects: []string{"if-242"}, issues: `[]`, takeable: `[{"id":"if-241"}]`, mine: `[]`, agent: "forest-owner-name", want: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if test.agent == "" {
-				t.Setenv("POWDER_AGENT", "")
-				t.Setenv("POWDER_URL", "")
-				t.Setenv("POWDER_API_BASE_URL", "")
-			} else {
-				t.Setenv("POWDER_AGENT", test.agent)
-				t.Setenv("POWDER_URL", "https://powder.example")
-			}
 			p := &Poller{Root: t.TempDir(), Repo: "owner/name", Scope: Scope{Subjects: test.subjects}}
 			p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
 				switch name {
 				case "gh":
 					return []byte(test.issues), nil
-				case "powder":
-					if slices.Contains(args, "--takeable") {
-						return []byte(test.takeable), nil
-					}
-					if slices.Contains(args, "--mine") {
-						return []byte(test.mine), nil
-					}
-					t.Fatalf("unexpected powder args: %v", args)
-					return nil, nil
 				case "git":
 					return nil, nil
 				default:
@@ -176,43 +153,21 @@ func TestBuilderPollScopeBySubjects(t *testing.T) {
 func TestBuilderPollScopeByBranchPrefix(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
-		name     string
-		prefix   string
-		issues   string
-		takeable string
-		mine     string
-		agent    string
-		want     int
+		name   string
+		prefix string
+		issues string
+		want   int
 	}{
 		{name: "matching issue", prefix: "forest/4", issues: `[[{"number":4}]]`, want: 0},
 		{name: "issue outside scope", prefix: "forest/5", issues: `[[{"number":4}]]`, want: 1},
-		{name: "matching powder", prefix: "forest/if-", issues: `[]`, takeable: `[{"id":"if-241"}]`, mine: `[]`, agent: "forest-owner-name", want: 0},
-		{name: "powder outside scope", prefix: "forest/ifx-", issues: `[]`, takeable: `[{"id":"if-241"}]`, mine: `[]`, agent: "forest-owner-name", want: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if test.agent == "" {
-				t.Setenv("POWDER_AGENT", "")
-				t.Setenv("POWDER_URL", "")
-				t.Setenv("POWDER_API_BASE_URL", "")
-			} else {
-				t.Setenv("POWDER_AGENT", test.agent)
-				t.Setenv("POWDER_URL", "https://powder.example")
-			}
 			p := &Poller{Root: t.TempDir(), Repo: "owner/name", Scope: Scope{BranchPrefix: test.prefix}}
 			p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
 				switch name {
 				case "gh":
 					return []byte(test.issues), nil
-				case "powder":
-					if slices.Contains(args, "--takeable") {
-						return []byte(test.takeable), nil
-					}
-					if slices.Contains(args, "--mine") {
-						return []byte(test.mine), nil
-					}
-					t.Fatalf("unexpected powder args: %v", args)
-					return nil, nil
 				case "git":
 					return nil, nil
 				default:
@@ -228,9 +183,6 @@ func TestBuilderPollScopeByBranchPrefix(t *testing.T) {
 }
 
 func TestBuilderPollScopeByLabel(t *testing.T) {
-	t.Setenv("POWDER_AGENT", "")
-	t.Setenv("POWDER_URL", "")
-	t.Setenv("POWDER_API_BASE_URL", "")
 	p := &Poller{Root: t.TempDir(), Repo: "owner/name", Scope: Scope{Label: "forest:ready:alpha"}}
 	p.Run = func(_ context.Context, name string, args ...string) ([]byte, error) {
 		switch name {
@@ -239,9 +191,6 @@ func TestBuilderPollScopeByLabel(t *testing.T) {
 				t.Fatalf("label endpoint wrong: %v", args)
 			}
 			return []byte(`[[{"number":4}]]`), nil
-		case "powder":
-			t.Fatalf("label scope must not query powder: %v", args)
-			return nil, nil
 		case "git":
 			return nil, nil
 		default:

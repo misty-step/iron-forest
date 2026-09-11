@@ -23,7 +23,8 @@ The review roster has Builder, Verifier, and Fixer for explicitly requested
 work. A Verifier checks one exact Revision, and a Fixer repairs a rejected
 Revision. Critic and Tester perform requested read-only sweeps and return
 findings with evidence; they do not create tickets or start implementation.
-Their automatic intake polls are disabled.
+Automatic intake polls are disabled for all five shipped declarations; the
+built-in Git-native selectors remain optional profile choices.
 
 ## Quick start
 
@@ -131,8 +132,8 @@ is active. Interrupting drain leaves the instance paused. The JSON read surface
 reports `paused`, `active_runs`, `active_count`, and `drained`; orphaned records
 without live subprocesses are reported separately as `interrupted_runs`.
 Drain does not promise to resume Pi sessions. A new Kernel fences and terminates
-verified orphan Run groups, records interrupted attribution once, and then
-cleans their worktrees.
+verified orphan Run groups, preserves interrupted source and attribution once,
+and only then cleans disposable worktrees.
 
 Choose one delivery authority in `config.yaml`: `delivery: git-native` (the
 default) retains native publication and Gate auditing; `delivery: external`
@@ -203,9 +204,11 @@ repository-relative files under `.iron-forest`, outside `runtime` and `bin`;
 symlinks are refused. Declaration and Run evidence expose paths and SHA-256
 digests. The bytes in the fetched Run worktree must match before Pi starts.
 
-Legacy tracker validation and reconciliation remain in Kernel code and old
-evaluation fixtures. They are not active work-selection instructions. A profile
-change alone does not remove those historical implementation paths.
+Kernel selection and publication no longer call the retired Powder integration:
+there is no tracker list/take/show/done, primary reconciliation, or tracker
+reachability doctor check. Historical tracker metadata remains readable but
+grants no integration authority. Native Builder selection only reads GitHub
+issues and Git refs when a repository explicitly enables that selector.
 
 Agent Runs have no wall-clock deadline by default. To bound a declaration that
 has wedged before, set the optional `max_duration` key (seconds) under that
@@ -246,6 +249,27 @@ then `.iron-forest/defaults.yaml`, then — for `model` only — the built-in
 `openrouter/deepseek/deepseek-v4-pro-0813`. An empty or comment-only defaults
 file is the zero Defaults, not an error. `forest declaration show` publishes
 the resolved model and its source.
+
+This repository sets `openrouter/deepseek/deepseek-v4.1-flash` in
+`.iron-forest/defaults.yaml`; Builder, Critic, Fixer, Tester, and Verifier inherit
+it without role-level model overrides. Their existing tools and `thinking: high`
+remain independent of that default.
+
+Each core declaration explicitly loads `.iron-forest/extensions/models.ts`.
+Pi 0.84.4's bundled catalog predates this model, so the extension registers
+static OpenRouter metadata through Pi's supported provider API. It retains the
+catalog and the Runner's explicit `PI_CODING_AGENT_DIR/models.json` overrides,
+preserves provider transport registrations, and performs no catalog discovery
+or authentication request. When combined with Tach, list this model extension
+before the existing Tach extension. The catalog's cost values are estimates,
+not billing evidence; provider receipts remain authoritative. Offline CLI model
+selection and request-construction checks do not qualify paid model behavior.
+
+Changing these files changes the next dispatch's inputs; it does not update an
+installed Kernel or an immutable worker image. Pause admission before changing
+a live profile, verify every affected `forest declaration show <name> --json`,
+and keep admission paused until the intended runtime revision and profile are
+adopted together. Do not restart or resume a worker merely to test a model name.
 
 Every Run gives Pi a new writable agent directory under `.iron-forest/runtime`
 through `PI_CODING_AGENT_DIR`; no operator Pi state is inherited. For an OpenRouter
@@ -330,12 +354,42 @@ legacy Pi profiles before adoption; they are not valid declaration inputs.
 
 Before `serve` or `once` loads trigger health, the Scheduler performs reserved
 garbage collection under the Kernel lock. One 30-second deadline bounds the
-total operation. It removes reserved `.iron-forest/runtime/worktrees/<run-id>` paths through
-Runner cleanup and prunes their registry entries. One `update-ref` transaction
-removes private Runner, Poll, and Audit refs. It removes only known stale
+total garbage-collection operation. Only Run worktrees with successful execution
+evidence are disposable. Unsuccessful and unknown/orphaned Run worktrees stay in
+place; their presence does not block scheduling. Fixed-revision Check scratch
+worktrees live separately at `.iron-forest/runtime/checks/` and are disposable
+after success, cancellation, or killed-Check startup recovery. Legacy ambiguous
+Check paths under `worktrees/` are retained, never inferred from an agent name.
+One `update-ref` transaction removes
+private Runner, Poll, and Audit refs. It removes only known stale
 `audit.json`, `audit.log`, and `triggers.json` temps. The Ledger owns Ledger
 temps. Run log retention owns Run logs. Any cleanup error blocks startup.
 Reserved garbage collection never resumes a Run.
+
+Failed, cancelled, timed-out, and interrupted Runs retain their original native
+Git worktree at `.iron-forest/runtime/worktrees/<run-id>`. Optional `recovery`
+evidence in `forest.cli.v2` Run rows and live results reports the repo-relative
+`path` and, when available, `base_revision`. Execution outcome remains separate
+from completion and delivery. Missing evidence does not establish source
+availability. Unknown orphan worktrees are also conservatively retained.
+
+This preserves native HEAD/history, index stages, staged deletions, tracked,
+untracked, ignored, and binary files without copying them into a second archive.
+Git worktree registration keeps unpublished HEAD commits reachable during Git
+garbage collection. The worktree parent is mode `0700` for new Runs. Symlinks
+remain symlinks; nothing traverses or restores them as part of custody.
+Pi processes and temporary session state are still cleaned up. A later request
+starts an independent Run; no session or source is automatically resumed.
+
+There is no automatic source expiry or deletion manager. Operators own disk
+capacity and must configure a filesystem/volume quota appropriate to the
+instance. Before disposing of retained work, inspect it with native Git
+(`git -C <path> status`, `diff`, `diff --cached`, and `log`), preserve any needed
+work in operator-controlled storage, then use `git worktree remove <path>`.
+Dirty-worktree disposal requires an explicit operator decision; do not blindly
+force-remove retained paths. Retained source may include credentials or ignored
+files and must be reviewed before sharing. It is local custody, not a portable
+backup independent of the owning repository.
 
 Start the Kernel:
 
@@ -353,7 +407,8 @@ snapshot refs before the supervisor force-stops its command group. Agent Runs
 have no wall-clock deadline. They finish when Pi finishes or an
 operator explicitly cancels a foreground `forest once`; service shutdown stops
 new dispatches and drains active Runs without a systemd deadline. Runner
-cleanup has a separate 10-second bound. A completed dispatch starts an audit
+source identity reads have a separate 30-second bound; cleanup has 10 seconds.
+A completed dispatch starts an audit
 with a separate 60-second bound. These mechanical bounds do not limit agent
 reasoning or model execution.
 
@@ -451,8 +506,8 @@ than 1, timeout, or malformed behavior records an unhealthy trigger. See
 [ADR 0012](docs/adr/0012-poll-trigger-protocol.md) and the
 [onboarding guide](docs/onboarding-managed-repo.md) for selection rules.
 
-The old Builder tracker path remains in the binary for historical compatibility.
-Do not configure or restart it as a source of new work.
+The shipped profile enables none of these selectors automatically. The optional
+Builder selector reads native GitHub/Git state; no tracker adapter remains.
 
 Verifier and Fixer Poll `ls-remote` evidence refs for each `forest/*` tip.
 Historical notes are unread. A missing evidence ref is no work.
@@ -662,16 +717,40 @@ declaration, prompt, skill, or publication contract:
 ```sh
 ./evals/run-fast.sh
 ```
-This command runs the Python checks, builds the pinned evaluation image, runs
-every Harbor oracle case, and exercises an explicit-request delivery journey.
+With no selectors, this remains the full deterministic merge check: regenerate
+the corpus, run Python discovery, sync locked Harbor dependencies, build/reuse
+the exact-input evaluation image, run every oracle case, then run the journey.
 The oracle uses the real Pi process, `forest once`, and publication CLI, with a
 trusted input hook supplying deterministic actions instead of a model. It
 removes candidate/Judge credentials; a pass is **not agent-quality evidence**.
 
+For focused local feedback, select cases (repeatable), the journey, or both:
+
+```sh
+./evals/run-fast.sh --case builder-ready-issue
+./evals/run-fast.sh --journey
+./evals/run-fast.sh --case builder-ready-issue --journey
+```
+
+Focused mode generates only selected tasks into an isolated job input directory;
+it does not run Python discovery, regenerate the full corpus, or sync/install
+dependencies. Case runs require `cd evals && uv sync --locked` once beforehand;
+journey-only needs Python and Docker, not Harbor. Case IDs come from
+`evals/cases.json`; unknown IDs fail. Focused success does not replace full mode.
+
+Every invocation runs native `docker build --iidfile`; Docker's content cache
+owns source invalidation. `image.json` reports the build revision/dirty flag,
+immutable image ID, and actual Kernel SHA-256. Harbor tasks and the journey
+execute that image ID, not a mutable tag; the journey verifies its installed
+binary against the receipt. A dirty flag identifies a local build, not an exact
+Git source revision. Base versions follow Dockerfile pins and native Docker
+cache behavior. No separate source fingerprint or image-reuse protocol exists.
+
 The journey covers implementation, rejection, repair, `forest run cancel`,
-fresh-Run review, delivery, and an identical publication retry. Its standalone
-container uses Docker `--init` so cancellation can reap orphaned descendants.
-Inspect `report.json`, `report.md`, and `journey.json` under the new
+exact tracked/staged/untracked/ignored/unpublished byte custody, fresh-Run review,
+delivery, and identical publication retry. Its standalone container uses Docker `--init` so
+cancellation can reap orphaned descendants. Inspect `image.json` and, for the
+selected paths, `report.json`, `report.md`, and `journey.json` under the new
 `evals/jobs/fast/<job>/` directory. Reports identify oracle/model/unknown/mixed
 execution; model, prompt, and skill promotion cannot use oracle or unknown
 provenance. See [evaluation strategy](docs/evaluation-strategy.md) for the

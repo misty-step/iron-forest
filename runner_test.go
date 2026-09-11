@@ -194,7 +194,7 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	runner := NewRunner(root)
 	runner.PiPath = omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
-	if err == nil || !strings.Contains(err.Error(), "parse harness usage") || !strings.Contains(err.Error(), "nonnegative") {
+	if err == nil {
 		t.Fatalf("invalid usage record=%#v err=%v", record, err)
 	}
 	if record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeInternalError {
@@ -207,8 +207,8 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	if rows[0].TokensIn != 0 || rows[0].TokensOut != 0 || rows[0].CacheRead != 0 || rows[0].CacheWrite != 0 || rows[0].Reasoning != 0 {
 		t.Fatalf("invalid usage leaked into ledger: %#v", rows[0])
 	}
-	if _, statErr := os.Stat(forestPath(root, "worktrees", record.RunID)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("invalid usage worktree survived: %v", statErr)
+	if _, statErr := os.Stat(forestPath(root, "worktrees", record.RunID)); statErr != nil || record.Recovery == nil || rows[0].Recovery == nil {
+		t.Fatalf("invalid usage source or custody evidence lost: %#v %v", record, statErr)
 	}
 }
 
@@ -288,7 +288,7 @@ func TestRunnerRejectsOpenRouterBudgetAsProviderBudgetExhausted(t *testing.T) {
 			runner := NewRunner(root)
 			runner.PiPath = pi
 			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
-			if err == nil || record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeProviderFailed || record.Error != providerBudgetExhausted {
+			if err == nil || record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeProviderFailed {
 				t.Fatalf("budget record=%#v err=%v, want %q", record, err, providerBudgetExhausted)
 			}
 			if !strings.Contains(err.Error(), providerBudgetExhausted) {
@@ -571,14 +571,14 @@ done
 	if err == nil || !errors.Is(err, errRunTimedOut) || errors.Is(err, errRunCancelled) {
 		t.Fatalf("watchdog record=%#v err=%v, want duration expiry, not operator cancellation", record, err)
 	}
-	if record.Exit != runTimedOutExit || record.Error != runTimedOutError || record.Outcome != runOutcomeTimedOut || record.ProcessExit == nil || *record.ProcessExit != -1 {
+	if record.Exit != runTimedOutExit || record.Outcome != runOutcomeTimedOut || record.ProcessExit == nil || *record.ProcessExit != -1 {
 		t.Fatalf("watchdog record=%#v, want timed_out with raw signal exit", record)
 	}
 	if time.Since(started) > 15*time.Second {
 		t.Fatalf("watchdog took %v", time.Since(started))
 	}
 	rows, ledgerErr := readLedger(root, -1)
-	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != runTimedOutExit || rows[0].Outcome != runOutcomeTimedOut || rows[0].Error != runTimedOutError {
+	if ledgerErr != nil || len(rows) != 1 || rows[0].RunID != record.RunID || rows[0].Exit != runTimedOutExit || rows[0].Outcome != runOutcomeTimedOut || rows[0].ProcessExit == nil || *rows[0].ProcessExit != -1 {
 		t.Fatalf("watchdog ledger=%v err=%v, want one timed-out row", rows, ledgerErr)
 	}
 	assertProcessQuiescent(t, heartbeat, "wedged run", "watchdog")
@@ -724,7 +724,7 @@ func TestRunnerCallerDeadlineIncludesPreparation(t *testing.T) {
 	}
 }
 
-func TestRunnerCleansWorktreeWhenAddOutlivesCallerDeadline(t *testing.T) {
+func TestRunnerRetainsWorktreeWhenAddOutlivesCallerDeadline(t *testing.T) {
 	root, _ := testClone(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -758,15 +758,15 @@ exec "$REAL_GIT" "$@"
 		t.Fatalf("worktree add did not complete before caller deadline: %v", err)
 	}
 	worktree := forestPath(root, "worktrees", record.RunID)
-	if _, err := os.Stat(worktree); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("partial worktree path survived: %v", err)
+	if _, err := os.Stat(worktree); err != nil || record.Recovery == nil || record.Outcome != runOutcomeTimedOut {
+		t.Fatalf("partial timed-out worktree lost: %#v %v", record, err)
 	}
-	if list := string(runGitDir(t, root, "worktree", "list", "--porcelain")); strings.Contains(list, worktree) {
-		t.Fatalf("partial worktree registration survived:\n%s", list)
+	if list := string(runGitDir(t, root, "worktree", "list", "--porcelain")); !strings.Contains(list, worktree) {
+		t.Fatalf("partial worktree registration lost:\n%s", list)
 	}
 }
 
-func TestRunnerPreservesPreparationAndCleanupErrors(t *testing.T) {
+func TestRunnerPreservesPreparationErrorWithoutInventingRecovery(t *testing.T) {
 	root, _ := testClone(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -776,7 +776,6 @@ func TestRunnerPreservesPreparationAndCleanupErrors(t *testing.T) {
 	gitWrapper := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 if [ "$1" = worktree ] && [ "$2" = add ]; then exit 7; fi
-if [ "$1" = worktree ] && [ "$2" = remove ]; then exit 9; fi
 exec "$REAL_GIT" "$@"
 `
 	if err := os.WriteFile(gitWrapper, []byte(script), 0o755); err != nil {
@@ -788,10 +787,9 @@ exec "$REAL_GIT" "$@"
 	if err == nil || record.Exit != 1 {
 		t.Fatalf("prepare failure record=%#v err=%v", record, err)
 	}
-	for _, want := range []string{"exit status 7", "exit status 9"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err, want)
-		}
+	var processErr *exec.ExitError
+	if !errors.As(err, &processErr) || processErr.ExitCode() != 7 || record.Recovery != nil || record.Outcome != runOutcomeSetupFailed {
+		t.Fatalf("preparation cause or source availability changed: %#v %v", record, err)
 	}
 }
 

@@ -826,35 +826,44 @@ func mustRead(t *testing.T, path string) []byte {
 }
 
 func reservedCheckDirs(root string) []string {
-	entries, err := os.ReadDir(forestPath(root, "worktrees"))
+	entries, err := os.ReadDir(forestPath(root, "checks"))
 	if err != nil {
 		return nil
 	}
 	var names []string
 	for _, entry := range entries {
-		if entry.IsDir() && isReservedRunID(entry.Name()) && strings.HasSuffix(entry.Name(), "-checks") {
+		if entry.IsDir() && isReservedRunID(entry.Name()) {
 			names = append(names, entry.Name())
 		}
 	}
 	return names
 }
 
-func TestPublishCheckWorktreeIsReservedAndSweptAfterKill(t *testing.T) {
+func TestPublishCheckScratchSweptWithoutDeletingAmbiguousRun(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)
-	dir := forestPath(root, "worktrees", newRunID("checks", time.Unix(1, 0)))
+	dir := forestPath(root, "checks", newRunID("checks", time.Unix(1, 0)))
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	runGitDir(t, root, "worktree", "add", "--detach", dir, "HEAD")
-	if !isReservedRunID(filepath.Base(dir)) {
-		t.Fatal("check worktree name is not reserved")
+	legacy := forestPath(root, "worktrees", filepath.Base(dir))
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitDir(t, root, "worktree", "add", "--detach", legacy, "HEAD")
+	draft := []byte("check-produced source\x00\xff")
+	if err := os.WriteFile(filepath.Join(legacy, "draft.bin"), draft, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("reserved check worktree survived: %v", err)
+		t.Fatalf("known Check scratch survived: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(legacy, "draft.bin")); err != nil || !bytes.Equal(data, draft) {
+		t.Fatalf("ambiguous legacy Run source lost: %q %v", data, err)
 	}
 }
 
@@ -892,7 +901,7 @@ func TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, err := os.Stat(forestPath(linked, "worktrees")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(forestPath(linked, "checks")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("check worktree was nested under the linked Run worktree")
 	}
 	if err := cmd.Process.Kill(); err != nil {
@@ -903,7 +912,7 @@ func TestPublishCheckWorktreeFromLinkedRunIsSweptOnPrimary(t *testing.T) {
 		t.Fatal(err)
 	}
 	if leftover := reservedCheckDirs(primary); len(leftover) != 0 {
-		t.Fatalf("primary check worktrees survived: %v", leftover)
+		t.Fatalf("primary Check scratch survived: %v", leftover)
 	}
 }
 

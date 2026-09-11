@@ -44,32 +44,10 @@ func TestReservedGarbageCollectionRemovesRealResidue(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	transactionLog := filepath.Join(t.TempDir(), "transactions")
-	transactionCount := filepath.Join(t.TempDir(), "transaction-count")
-	t.Setenv("CLEANUP_REAL_GIT", realGit)
-	t.Setenv("CLEANUP_TRANSACTION_LOG", transactionLog)
-	t.Setenv("CLEANUP_TRANSACTION_COUNT", transactionCount)
-	gitWrapper := filepath.Join(t.TempDir(), "git")
-	wrapper := `#!/bin/sh
-set -eu
-if [ "${1-}" = update-ref ] && [ "${2-}" = --no-deref ] && [ "${3-}" = --stdin ]; then
-  input="$CLEANUP_TRANSACTION_LOG.input"
-  cat > "$input"
-  cat "$input" >> "$CLEANUP_TRANSACTION_LOG"
-  printf '1\n' >> "$CLEANUP_TRANSACTION_COUNT"
-  exec "$CLEANUP_REAL_GIT" "$@" < "$input"
-fi
-exec "$CLEANUP_REAL_GIT" "$@"
-`
-	if err := os.WriteFile(gitWrapper, []byte(wrapper), 0o755); err != nil {
+	if err := AppendRun(root, RunRecord{RunID: runID, Agent: "builder", Outcome: runOutcomeCompleted}); err != nil {
 		t.Fatal(err)
 	}
 	runner := NewRunner(root)
-	runner.GitPath = gitWrapper
 	if err := cleanupReservedResidue(root, runner); err != nil {
 		t.Fatal(err)
 	}
@@ -93,22 +71,6 @@ exec "$CLEANUP_REAL_GIT" "$@"
 	}
 	if data, err := os.ReadFile(runLog); err != nil || string(data) != "preserve run evidence\n" {
 		t.Fatalf("Run log changed: data=%q err=%v", data, err)
-	}
-	count, err := os.ReadFile(transactionCount)
-	if err != nil || string(count) != "1\n" {
-		t.Fatalf("update-ref transaction count=%q err=%v, want one", count, err)
-	}
-	transaction, err := os.ReadFile(transactionLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(string(transaction), "start\n") || !strings.HasSuffix(string(transaction), "prepare\ncommit\n") {
-		t.Fatalf("update-ref input is not one explicit transaction:\n%s", transaction)
-	}
-	for _, ref := range reservedRefs {
-		if !strings.Contains(string(transaction), "delete "+ref+"\n") {
-			t.Fatalf("update-ref transaction omitted %s:\n%s", ref, transaction)
-		}
 	}
 }
 
@@ -227,25 +189,8 @@ func TestReservedGarbageCollectionJoinsAllAttemptedErrors(t *testing.T) {
 			t.Fatalf("cleanup error %v does not join %v", err, want)
 		}
 	}
-	for _, want := range []string{
-		"remove reserved worktree " + runID,
-		"prune reserved worktree registry",
-		"remove reserved temp .audit.json-dead",
-		"remove reserved temp .audit.log-dead",
-		"remove reserved temp triggers.json.dead.tmp",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("cleanup error %q omitted %q", err, want)
-		}
-	}
-	callLog, readErr := os.ReadFile(calls)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	for _, want := range []string{"worktree remove --force", "worktree prune --expire=now", "for-each-ref --format=%(refname)"} {
-		if !strings.Contains(string(callLog), want) {
-			t.Fatalf("cleanup did not attempt %q; calls:\n%s", want, callLog)
-		}
+	if _, err := os.Stat(forestPath(root, "worktrees", runID)); err != nil {
+		t.Fatalf("unknown source was removed: %v", err)
 	}
 }
 

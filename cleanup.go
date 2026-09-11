@@ -29,12 +29,16 @@ func cleanupReservedResidue(root string, runner *Runner) error {
 }
 
 func cleanupReservedResidueWith(ctx context.Context, root string, runner *Runner, remove func(string) error) error {
-	refErr := cleanupReservedRefs(ctx, root, runner)
-	var worktreeErr error
-	if refErr == nil {
-		worktreeErr = cleanupReservedWorktrees(ctx, root, runner)
+	worktreeErr := cleanupReservedWorktrees(ctx, root, runner)
+	var refErr error
+	if worktreeErr == nil {
+		refErr = cleanupReservedRefs(ctx, root, runner)
 	}
-	return errors.Join(refErr, worktreeErr, cleanupReservedTemps(ctx, root, remove), cleanupLiveRunRecords(ctx, root, remove), cleanupPiResidue(ctx, root, runner))
+	var liveErr error
+	if worktreeErr == nil {
+		liveErr = cleanupLiveRunRecords(ctx, root, remove)
+	}
+	return errors.Join(refErr, worktreeErr, cleanupReservedTemps(ctx, root, remove), liveErr, cleanupPiResidue(ctx, root, runner))
 }
 
 func cleanupPiResidue(ctx context.Context, root string, runner *Runner) error {
@@ -57,25 +61,39 @@ func cleanupPiResidue(ctx context.Context, root string, runner *Runner) error {
 }
 
 func cleanupReservedWorktrees(ctx context.Context, root string, runner *Runner) error {
-	dir := forestPath(root, "worktrees")
-	entries, readErr := os.ReadDir(dir)
-	if errors.Is(readErr, os.ErrNotExist) {
-		readErr = nil
-	}
 	var cleanupErr error
-	if readErr != nil {
-		cleanupErr = fmt.Errorf("enumerate reserved worktrees: %w", readErr)
-	} else {
+	for _, namespace := range []string{"worktrees", "checks"} {
+		dir := forestPath(root, namespace)
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("enumerate reserved %s: %w", namespace, err))
+			continue
+		}
 		for _, entry := range entries {
 			if !entry.IsDir() || !isReservedRunID(entry.Name()) {
 				continue
 			}
 			if err := ctx.Err(); err != nil {
-				cleanupErr = errors.Join(cleanupErr, err)
-				break
+				return errors.Join(cleanupErr, err)
+			}
+			if namespace == "worktrees" {
+				record, found, findErr := FindRun(root, entry.Name())
+				if findErr != nil {
+					cleanupErr = errors.Join(cleanupErr, findErr)
+					continue
+				}
+				// Unknown and unsuccessful Runs retain native Git source.
+				// Check scratch has separate path ownership and is disposable.
+				if !found || record.Recovery != nil || record.Exit != 0 ||
+					(record.Outcome != runOutcomeCompleted && record.Outcome != runOutcomeNoWork) {
+					continue
+				}
 			}
 			if err := runner.removeWorktree(ctx, filepath.Join(dir, entry.Name()), entry.Name()); err != nil {
-				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove reserved worktree %s: %w", entry.Name(), err))
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove reserved %s %s: %w", namespace, entry.Name(), err))
 			}
 		}
 	}

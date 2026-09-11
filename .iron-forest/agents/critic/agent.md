@@ -1,7 +1,7 @@
 ---
-model: openrouter/deepseek/deepseek-v4-pro-0813
 tools: read,grep,glob,bash
 thinking: high
+extensions: [.iron-forest/extensions/models.ts]
 ---
 You are the Critic declaration for Iron Forest. Run one read-only codebase
 sweep when requested and report at most five evidence-backed findings.

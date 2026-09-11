@@ -530,7 +530,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 				recordContextFailure(&record, runErr)
 			}
 		}
-		if applyRunCancellation(r.Root, &record) {
+		if applyRunCancellation(r.Root, &record) && !errors.Is(runErr, errRunCancelled) {
 			runErr = errors.Join(runErr, errRunCancelled)
 		}
 		// Retain known execution facts before deferred cleanup; recovery must
@@ -541,9 +541,6 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 		var finalizationErr error
 		if piDir != "" {
 			finalizationErr = errors.Join(finalizationErr, r.cleanupFilesystem(piDir))
-		}
-		if worktreeMayExist {
-			finalizationErr = errors.Join(finalizationErr, r.cleanupWorktree(worktree, runID))
 		}
 		if logFile != nil {
 			if !evidenceWritten {
@@ -565,13 +562,24 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 			}
 			finalizationErr = errors.Join(finalizationErr, completeRunLog(logPath))
 		}
+		if worktreeMayExist {
+			// Discover log/usage failures before deciding that source is disposable.
+			if runErr == nil && finalizationErr == nil && (record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork) {
+				finalizationErr = errors.Join(finalizationErr, r.cleanupWorktree(worktree, runID))
+			}
+			if runErr != nil || finalizationErr != nil || (record.Outcome != runOutcomeCompleted && record.Outcome != runOutcomeNoWork) {
+				ctx, cancel := context.WithTimeout(context.Background(), reservedCleanupTimeout)
+				record.Recovery = r.retainedWorktree(ctx, runID)
+				cancel()
+			}
+		}
 		// Preserve the first execution cause. Cleanup or usage failures make an
 		// otherwise successful attempt an internal error, never alter raw Pi exit.
 		runErr = errors.Join(runErr, finalizationErr)
 		if runErr != nil && (record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork) {
 			record.Outcome = runOutcomeInternalError
 		}
-		if applyRunCancellation(r.Root, &record) {
+		if applyRunCancellation(r.Root, &record) && !errors.Is(runErr, errRunCancelled) {
 			runErr = errors.Join(runErr, errRunCancelled)
 		}
 		record.Duration = time.Since(started).Seconds()
@@ -580,9 +588,7 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 			if record.Exit == 0 {
 				record.Exit = 1
 			}
-			if record.Error == "" {
-				record.Error = runErr.Error()
-			}
+			record.Error = runErr.Error()
 		}
 		if record.Exit != 0 && runErr == nil && !record.NoWork {
 			runErr = fmt.Errorf("agent %s exited with %d", declaration.Name, record.Exit)
@@ -737,7 +743,10 @@ func (r *Runner) prepareWorktree(ctx context.Context, path string) (string, bool
 		return "", false, err
 	}
 	branch := strings.TrimPrefix(primary, primaryRefPrefix)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", false, err
+	}
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return "", false, err
 	}
 	if _, err := r.git(ctx, r.Root, "fetch", "origin", branch); err != nil {

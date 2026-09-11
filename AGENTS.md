@@ -4,6 +4,27 @@ Headless software factory. One `forest` Kernel serves this checkout.
 `README.md` is the current operator entrypoint and accepted ADRs state
 technical contracts.
 
+## Engineering principles
+
+- Default to the simplest whole architecture: agent definitions and their
+  triggers/loops. Anything beyond that bears an unusually strong,
+  evidence-based burden of proof. Prefer deleting complexity to wrapping it.
+- Be Bitter Lesson / AGI oriented: trust improving general models, broad tools,
+  and feedback from actual execution. Avoid hardcoded cognitive decomposition,
+  mandatory role taxonomies, scripted planning, heuristic scaffolding, and
+  speculative orchestration.
+- Give each end-to-end outcome one accountable owner. Seek fast, focused,
+  runnable feedback; use native source/runtime evidence rather than parallel
+  handwritten state.
+- Capability is not authority. Preserve explicit permissions, scoped secrets,
+  spend bounds, pause/drain controls, evidence boundaries, and independent
+  verification of the exact revision before accepting or landing code.
+  Keep deterministic checks that protect concrete invariants, not prescribed
+  ways of thinking.
+- Rings and Seedbed are disposable factory/Canopy demonstration fixtures, not
+  product backlogs. Work on them only for the operator's current demonstration
+  or validation goal.
+
 ## Work selection
 
 Work from the operator's current request. Check current code and existing work

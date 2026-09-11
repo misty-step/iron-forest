@@ -64,14 +64,41 @@ evidence, not executable model state. Durable Pi sessions are a separate
 recovery experiment: grade continuity benefits against the additional sensitive
 transcript retention and cleanup surface before adopting them.
 
-`evals/run-fast.sh` regenerates tasks, runs the Python checks, builds the image,
-runs every reference outcome, and rejects any reward below one. It then runs
-`evals/runtime/journey.py`: one explicit request through implementation with a
-planted semantic defect, review rejection, repair, interruption before
-publication via `forest run cancel`, fresh-Run approval, delivery, and an
-identical publication retry. The standalone journey uses Docker `--init`;
-without a PID 1 reaper, orphaned descendants can prevent process-group
-quiescence.
+Without selectors, `evals/run-fast.sh` remains the full deterministic merge
+check: regenerate tasks, Python discovery, locked dependency sync, native Docker
+build, every reference outcome (reward one required), and the journey.
+Use `./evals/run-fast.sh --case builder-ready-issue` (repeat `--case` as needed)
+or `./evals/run-fast.sh --journey` for only the selected feedback path; combine
+them to run both. Focused mode does not sync dependencies, run Python discovery,
+or regenerate the corpus. Install Harbor once with `cd evals && uv sync --locked`
+before case runs. Journey-only needs no Harbor environment. Full mode remains
+the merge gate.
+
+`evals/runtime/journey.py` drives one explicit request through implementation
+with a planted defect, review rejection, repair, cancellation before publication,
+native tracked/staged/binary/untracked/ignored source custody, fresh-Run approval,
+delivery, and an identical publication retry. It asserts actual persisted
+revisions, outcomes and recovery evidence, never a mocked Kernel result. Its
+standalone Docker container uses `--network none` and `--init` to reap orphaned
+descendants. Recovery retains the original Git worktree, including unpublished
+HEAD history after Git garbage collection, not a Pi session or copied archive.
+The journey disposes of its owned fixture only after independent delivery.
+Fixed-revision Check scratch lives separately under `runtime/checks`: the
+journey verifies it is removed between phases while interrupted Run source
+remains available. Killed-Check startup cleanup is covered by the native
+publication regression, including the linked-Run/primary-checkout boundary.
+
+Every invocation runs native `docker build --iidfile`; Docker owns content-cache
+invalidation. `image.json` identifies the build revision/dirty flag, immutable
+image ID and actual Kernel SHA-256. Selected Harbor tasks and the journey consume
+that immutable image; the journey verifies its installed binary against the
+receipt. A dirty flag is not an exact source revision. There is no bespoke
+fingerprint or reuse protocol. Dockerfile COPY/ignore rules control build inputs.
+Fast-generated Harbor tasks use native `no-network` policies for agent and
+verifier phases; model experiment tasks retain their separately authorized
+policies. Harbor may use its egress-control sidecar rather than Docker physical
+network isolation. Case/journey reports and job input directories remain local,
+without external tracker calls, SaaS accounts, candidate keys or Judges.
 
 This is a **deterministic oracle**, not a model experiment. The real Runner
 creates the worktree, identity, Run ID, live Verifier record, logs, and cleanup.
@@ -320,8 +347,10 @@ the old request/Checks/Verdict. Unrelated tracker leases remain unchanged.
 The executable bounded journey is `evals/runtime/journey.py`. Its six real Runs
 cover Builder publication, Verifier rejection, Fixer repair, cancellation of a
 live Verifier before publication, fresh Verifier approval, and identical retry.
-It records the built Forest/Pi/scanner versions, Ledger rows, retained logs,
-ref snapshots, cancellation response, and delivered revision.
+It records the built Forest/Pi/scanner versions, immutable image/Kernel identity,
+build revision and dirty state, Ledger outcomes, retained logs, ref snapshots,
+cancellation response, native source hashes and sizes, post-GC survival,
+explicit fixture disposal, and delivered revision.
 
 This is not an implementation of the entire historical whole-Forest scenario
 outline. Concurrent multi-role scheduling, service loss at every Poll/effect/

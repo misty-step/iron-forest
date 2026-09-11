@@ -43,7 +43,7 @@ var (
 	// from a transport failure, which is unknown rather than a diagnosed key fault.
 	errOpenRouterKeyRejected = errors.New("openrouter rejected the key")
 
-	// doctorProbeTimeout bounds each read-only gh/powder subprocess probe so an
+	// doctorProbeTimeout bounds each read-only gh subprocess probe so an
 	// unreachable or hung tool reports unknown instead of hanging the doctor
 	// command. It is a var so the timeout regression test can shrink it.
 	doctorProbeTimeout = 10 * time.Second
@@ -88,7 +88,7 @@ func runDoctor(_ []string, flags cliFlags) cliOutcome {
 
 func doctorChecks(root, repo string) []doctorCheck {
 	ctx := context.Background()
-	checks := make([]doctorCheck, 0, 8)
+	checks := make([]doctorCheck, 0, 7)
 	for _, tool := range []string{"mise", "go", "pi"} {
 		checks = append(checks, doctorToolCheck(root, tool))
 	}
@@ -97,7 +97,6 @@ func doctorChecks(root, repo string) []doctorCheck {
 		doctorCredentialFileCheck(root),
 		doctorForgeCheck(ctx, root, repo),
 		doctorOpenRouterKeyCheck(ctx, root),
-		doctorPowderCheck(ctx, root, repo),
 	)
 	return checks
 }
@@ -234,63 +233,10 @@ func probeOpenRouterKey(ctx context.Context, key string) error {
 	}
 }
 
-func doctorPowderCheck(ctx context.Context, root, repo string) doctorCheck {
-	path, err := serviceEnvPath(root)
-	if err != nil {
-		return doctorCheck{Name: "powder_reachability", Result: doctorUnknown, OK: false, Reason: err.Error()}
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: false, Evidence: "missing " + path}
-		}
-		return doctorCheck{Name: "powder_reachability", Result: doctorUnknown, OK: false, Reason: fmt.Sprintf("read %s: %v", path, err)}
-	}
-	agent, agentSet := envFileVariableValue(data, "POWDER_AGENT")
-	if !agentSet || strings.TrimSpace(agent) == "" {
-		return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: true, Evidence: "POWDER_AGENT is not set in " + path + "; Powder selection is disabled"}
-	}
-	agent = strings.TrimSpace(agent)
-	apiKey, apiKeySet := envFileVariableValue(data, "POWDER_API_KEY")
-	originURL, urlSet := envFileVariableValue(data, "POWDER_URL")
-	originBase, baseSet := envFileVariableValue(data, "POWDER_API_BASE_URL")
-	if (!urlSet || strings.TrimSpace(originURL) == "") && (!baseSet || strings.TrimSpace(originBase) == "") {
-		return doctorCheck{Name: "powder_reachability", Result: doctorObserved, OK: false, Evidence: "POWDER_AGENT is set in " + path + " but POWDER_URL and POWDER_API_BASE_URL are empty"}
-	}
-	if _, err := trustedExecutable(root, "powder"); err != nil {
-		return doctorCheck{Name: "powder_reachability", Result: doctorUnknown, OK: false, Reason: "powder not found on PATH"}
-	}
-	var probeEnv []string
-	probeEnv = append(probeEnv, "POWDER_AGENT="+agent)
-	if urlSet && strings.TrimSpace(originURL) != "" {
-		probeEnv = append(probeEnv, "POWDER_URL="+strings.TrimSpace(originURL))
-	} else if baseSet && strings.TrimSpace(originBase) != "" {
-		probeEnv = append(probeEnv, "POWDER_API_BASE_URL="+strings.TrimSpace(originBase))
-	}
-	if apiKeySet && strings.TrimSpace(apiKey) != "" {
-		probeEnv = append(probeEnv, "POWDER_API_KEY="+strings.TrimSpace(apiKey))
-	}
-	// The probe inherits POWDER_API_KEY, so its stdout or stderr may echo the
-	// credential. Evidence and reason never contain credential values, so a
-	// failed probe reports a fixed non-secret reason instead of captured output.
-	if _, _, err := doctorProbeEnv(ctx, root, "powder", probeEnv, "list", "--mine", agent, "--repo", repo); err != nil {
-		return doctorCheck{Name: "powder_reachability", Result: doctorEvidenced, OK: false, Evidence: "powder reachability probe failed"}
-	}
-	return doctorCheck{Name: "powder_reachability", Result: doctorEvidenced, OK: true, Evidence: "powder reachable"}
-}
-
 // doctorProbe runs one read-only external probe with both stdout and stderr
 // captured. The caller is responsible for not emitting credential values from
 // the returned text.
 func doctorProbe(ctx context.Context, root, name string, args ...string) (string, string, error) {
-	return doctorProbeEnv(ctx, root, name, nil, args...)
-}
-
-// doctorProbeEnv is doctorProbe with extra environment entries for one probe.
-// The entries are appended to the inherited environment, so a service-file value
-// overrides the same process variable for the probe only. It does not mutate the
-// caller's environment.
-func doctorProbeEnv(ctx context.Context, root, name string, extraEnv []string, args ...string) (string, string, error) {
 	path, err := trustedExecutable(root, name)
 	if err != nil {
 		return "", "", err
@@ -298,9 +244,6 @@ func doctorProbeEnv(ctx context.Context, root, name string, extraEnv []string, a
 	probeCtx, cancel := context.WithTimeout(ctx, doctorProbeTimeout)
 	defer cancel()
 	command := exec.Command(path, args...)
-	if len(extraEnv) > 0 {
-		command.Env = append(os.Environ(), extraEnv...)
-	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	stdout, err := processGroupOutput(probeCtx, command)
@@ -319,32 +262,6 @@ func serviceEnvPath(root string) (string, error) {
 		return "", fmt.Errorf("cannot derive instance name from checkout root %q", root)
 	}
 	return filepath.Join(home, ".config", "iron-forest", name+".env"), nil
-}
-
-// envFileVariableValue parses one variable from dotenv-shaped file data so a
-// check can read the service environment file once and inspect several variables.
-func envFileVariableValue(data []byte, name string) (string, bool) {
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(key) != name {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 {
-			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-				value = value[1 : len(value)-1]
-			}
-		}
-		return value, true
-	}
-	return "", false
 }
 
 // envFileOpenRouterKeys returns the distinct non-empty OpenRouter completion

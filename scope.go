@@ -8,10 +8,9 @@ import (
 )
 
 // Scope is the operator-declared selection rule for an instance. A zero Scope
-// selects the default set: GitHub Issues labeled forest:ready plus takeable or
-// held Powder jobs for the repository. A non-zero Scope selects exactly one
-// alternative: by label (GitHub only), by explicit Subject list, or by branch
-// prefix.
+// selects GitHub Issues labeled forest:ready for Builder polls; Verifier and
+// Fixer polls select native Git evidence. A non-zero Scope selects exactly one
+// alternative: by GitHub label, by explicit Subject list, or by branch prefix.
 type Scope struct {
 	Label        string   `yaml:"label" json:"label,omitempty"`
 	Subjects     []string `yaml:"subjects" json:"subjects,omitempty"`
