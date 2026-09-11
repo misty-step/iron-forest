@@ -212,6 +212,98 @@ func TestRunnerRejectsInvalidUsageBeforeLedgerAppend(t *testing.T) {
 	}
 }
 
+// TestRunnerRecordsProviderReceipt pins the native provider-cost contract: the
+// Run's own provider receipt reaches the Ledger only as the provider's reported
+// amount, and absent, malformed, or unverifiable evidence leaves the charge
+// unknown without failing otherwise successful work.
+func TestRunnerRecordsProviderReceipt(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		receipt string
+		want    *ProviderCost
+	}{
+		{
+			name:    "complete charge",
+			receipt: `{"provider":"openrouter","cost_usd":0.001,"complete":true}`,
+			want:    &ProviderCost{Provider: "openrouter", CostUSD: 0.001, Complete: true},
+		},
+		{
+			name:    "explicit zero charge",
+			receipt: `{"provider":"openrouter","cost_usd":0,"complete":true}`,
+			want:    &ProviderCost{Provider: "openrouter", CostUSD: 0, Complete: true},
+		},
+		{
+			name:    "partial subtotal",
+			receipt: `{"provider":"openrouter","cost_usd":0.00042,"complete":false}`,
+			want:    &ProviderCost{Provider: "openrouter", CostUSD: 0.00042, Complete: false},
+		},
+		{name: "no receipt"},
+		{name: "unknown provider", receipt: `{"provider":"elsewhere","cost_usd":1,"complete":true}`},
+		{name: "truncated json", receipt: `{"provider":"openrouter","cost_usd":`},
+		{name: "negative amount", receipt: `{"provider":"openrouter","cost_usd":-1,"complete":true}`},
+		{name: "unrepresentable amount", receipt: `{"provider":"openrouter","cost_usd":1e999,"complete":true}`},
+		{name: "text amount", receipt: `{"provider":"openrouter","cost_usd":"0.5","complete":true}`},
+		{name: "missing amount", receipt: `{"provider":"openrouter","complete":true}`},
+		{name: "missing completeness", receipt: `{"provider":"openrouter","cost_usd":0.5}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _ := testClone(t)
+			source := filepath.Join(t.TempDir(), "receipt.json")
+			if test.receipt != "" {
+				if err := os.WriteFile(source, []byte(test.receipt), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PROVIDER_COST_SOURCE", source)
+			// The Run's model extension writes this receipt into its own agent
+			// directory; a missing source file stands for an extension that
+			// published nothing.
+			pi := filepath.Join(t.TempDir(), "pi")
+			script := `#!/bin/sh
+if [ -f "$PROVIDER_COST_SOURCE" ]; then
+  cp "$PROVIDER_COST_SOURCE" "$PI_CODING_AGENT_DIR/provider-cost.json"
+fi
+printf '%s\n' '{"type":"turn_end","message":{"usage":{"input":3,"output":5}}}'
+`
+			if err := os.WriteFile(pi, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			runner := NewRunner(root)
+			runner.PiPath = pi
+			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "x"})
+			if err != nil || record.Exit != 0 || record.Outcome != runOutcomeCompleted {
+				t.Fatalf("receipt %q record=%#v err=%v, want a completed Run", test.receipt, record, err)
+			}
+			if record.TokensIn != 3 || record.TokensOut != 5 {
+				t.Fatalf("receipt %q tokens=%#v, want retained usage", test.receipt, record)
+			}
+			rows, ledgerErr := readLedger(root, -1)
+			if ledgerErr != nil || len(rows) != 1 {
+				t.Fatalf("receipt %q ledger=%v err=%v, want one row", test.receipt, rows, ledgerErr)
+			}
+			for _, got := range []*ProviderCost{record.ProviderCost, rows[0].ProviderCost} {
+				if test.want == nil {
+					if got != nil {
+						t.Fatalf("receipt %q published unexpected provider cost %#v", test.receipt, got)
+					}
+					continue
+				}
+				if got == nil || *got != *test.want {
+					t.Fatalf("receipt %q provider cost=%#v, want %#v", test.receipt, got, test.want)
+				}
+			}
+			// Absent evidence stays absent: the row never zero-fills a charge.
+			raw, readErr := os.ReadFile(ledgerPath(root))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if published := bytes.Contains(raw, []byte(`"provider_cost"`)); published != (test.want != nil) {
+				t.Fatalf("receipt %q ledger row provider_cost published=%t, want %t", test.receipt, published, test.want != nil)
+			}
+		})
+	}
+}
+
 func TestRunnerRejectsTerminalPiErrorDespiteZeroProcessExit(t *testing.T) {
 	root, _ := testClone(t)
 	state := t.TempDir()
@@ -377,6 +469,27 @@ func TestParseOMPUsageAggregatesTurnsAfterLargeRecord(t *testing.T) {
 	}
 	if usage != (Usage{TokensIn: 13, TokensOut: 16, CacheRead: 22, CacheWrite: 26, Reasoning: 23}) {
 		t.Fatalf("usage=%#v", usage)
+	}
+}
+
+// A Run's token classes are the accumulated turn_end usage. Pi repeats the same
+// usage object on message_end for every turn, so a Run's cost or token receipt
+// must never add those records a second time.
+func TestParseOMPUsageCountsEachTurnOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "omp.jsonl")
+	data := `{"type":"message_end","message":{"usage":{"input":10,"output":1,"cacheRead":2,"cacheWrite":4,"reasoning":8}}}` + "\n" +
+		`{"type":"turn_end","message":{"usage":{"input":10,"output":1,"cacheRead":2,"cacheWrite":4,"reasoning":8}}}` + "\n" +
+		`{"type":"message_end","message":{"usage":{"input":20,"output":3,"cacheRead":6,"cacheWrite":10,"reasoning":12}}}` + "\n" +
+		`{"type":"turn_end","message":{"usage":{"input":20,"output":3,"cacheRead":6,"cacheWrite":10,"reasoning":12}}}`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := parseAgentUsage(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage != (Usage{TokensIn: 30, TokensOut: 4, CacheRead: 8, CacheWrite: 14, Reasoning: 20}) {
+		t.Fatalf("usage=%#v, want each turn counted once", usage)
 	}
 }
 

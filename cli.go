@@ -740,6 +740,13 @@ func runRunShow(rest []string, flags cliFlags) cliOutcome {
 	if record.RequestID != "" {
 		human += "\n  request_id=" + oneLine(record.RequestID)
 	}
+	// Provider-reported charge: the provider's own amount, with completeness
+	// shown so a partial subtotal never reads as the Run's final charge.
+	if record.ProviderCost != nil {
+		human += fmt.Sprintf("\n  provider_cost provider=%s cost_usd=%s complete=%t",
+			oneLine(record.ProviderCost.Provider), strconv.FormatFloat(record.ProviderCost.CostUSD, 'f', -1, 64),
+			record.ProviderCost.Complete)
+	}
 	if record.Work != nil {
 		work, _ := json.Marshal(record.Work)
 		human += "\n  work=" + string(work)

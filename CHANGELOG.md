@@ -2,6 +2,14 @@
 
 ### Changed
 
+* Record the model provider's own reported charge for a Run. Pi drops
+  OpenRouter's charged amount when it recomputes `usage.cost` from catalog
+  rates, so the declared model extension now observes that provider response
+  and republishes the receipt in the Run's agent directory; the Runner copies
+  it to the Ledger row as `provider_cost` (`{provider, cost_usd, complete}`).
+  Absent evidence stays absent, an explicit zero stays a reported free request,
+  and a Run with any aborted or usage-less request stays partial. No amount is
+  estimated from catalog rates, token counts, or a generation lookup.
 * Preserve native Git worktrees for failed, cancelled, timed-out, interrupted,
   and unknown Runs; report optional local recovery paths without blocking new
   requests or changing the CLI v2 protocol. Operators own source disposal.

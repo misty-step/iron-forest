@@ -296,9 +296,17 @@ Pi 0.84.4's bundled catalog predates this model, so the extension registers
 static OpenRouter metadata through Pi's supported provider API. It retains the
 catalog and the Runner's explicit `PI_CODING_AGENT_DIR/models.json` overrides,
 preserves provider transport registrations, and performs no catalog discovery
-or authentication request. When combined with Tach, list this model extension
-before the existing Tach extension. The catalog's cost values are estimates,
-not billing evidence; provider receipts remain authoritative. Offline CLI model
+or authentication request. The extension also wraps that provider's
+`openai-completions` transport, because Pi recomputes `usage.cost` from catalog
+rates and drops OpenRouter's charged amount. The wrapper observes each
+provider response and republishes the provider's own charge in the Run's
+`PI_CODING_AGENT_DIR/provider-cost.json` as `{provider, cost_usd, complete}`;
+the Runner copies that receipt into the Ledger row as `provider_cost` and never
+derives an amount from catalog rates, token counts, or the optional generation
+endpoint. A Run whose response aborted, failed, or reported no usage stays
+`complete: false` with the observed subtotal; a Run with no receipt records no
+provider cost at all. The catalog's cost values are estimates, not billing
+evidence; provider receipts remain authoritative. Offline CLI model
 selection and request-construction checks do not qualify paid model behavior.
 
 Changing these files changes the next dispatch's inputs; it does not update an
@@ -746,7 +754,9 @@ and `recent_failures`, the newest nonzero rows with `run_id`, `agent`, `exit`,
 and any recorded `error`. The retained `pass_rate` key is the fraction of
 exit-zero Runs, not review quality, observed completion or delivery. Human output
 names this execution exit-zero rate. Token classes are observability, not
-accounting: no cost, price, spend, or currency value is ever computed.
+accounting: the roll-up computes no cost, price, spend, or currency value, and no
+provider charge is summed, denominated, or converted here. Per-Run provider
+receipts stay on their own rows.
 
 `doctor` checks one checkout without mutating it. Each check reports a result
 verb — `observed` for a local presence or mode read, `evidenced` for a
@@ -882,7 +892,13 @@ The Ledger is `.iron-forest/runtime/runs.jsonl`. Each row records Run identity (
 `agent`), timing (`started` and `duration`), `exit`, and exactly five retained
 token classes — `tokens_in`, `tokens_out`, `cache_read`, `cache_write`, and
 `reasoning` — as operational observability, not accounting. The Ledger never
-records a cost, price, spend, or currency field and never computes money.
+computes money. The one monetary field it may record is `provider_cost`, the
+model provider's own reported charge for that Run: `{provider, cost_usd,
+complete}`. `cost_usd` is the provider-reported charged amount only, never a
+catalog estimate, token-derived total, or converted currency; `complete` says
+whether every model request in the Run reported its charge, so a partial
+subtotal stays visibly partial. The field is absent when no provider receipt
+exists, and an explicit zero is a reported free request, not an unknown one.
 
 ## Historical promotion evidence
 

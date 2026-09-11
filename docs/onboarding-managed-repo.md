@@ -68,7 +68,8 @@ Keep credentials outside Git, prompts, defaults and declarations. For a local
 user service the owner supplies `~/.config/iron-forest/<instance>.env`, owned by
 that user and mode `0600`. Use provider completion credentials, not provider
 management, evaluation or personal interactive credentials. Provider controls
-own spending limits; the Ledger does not calculate USD.
+own spending limits; the Ledger does not calculate USD — it only records the
+provider-reported `provider_cost` receipt for a Run.
 
 Worktrees and fresh Pi directories are not a sandbox. A declaration runs with
 the service user's filesystem, network and credential authority. Use separate

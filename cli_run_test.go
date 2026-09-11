@@ -470,10 +470,11 @@ func TestCLIRunRowShowsExitInside80Columns(t *testing.T) {
 	}
 }
 
-// The Ledger token classes are observability, not accounting. Every run read
-// surface must publish the five canonical snake_case fields and nothing that
-// looks like a monetary field.
-func TestCLIRunSurfacesPublishCanonicalTokenFieldsWithoutCost(t *testing.T) {
+// The Ledger token classes are observability, and the only money field is the
+// provider's own reported charge. Every run read surface must publish the five
+// canonical snake_case token fields plus the optional provider_cost object,
+// and nothing that looks like a computed or aggregated monetary field.
+func TestCLIRunSurfacesPublishCanonicalTokenFieldsAndProviderCost(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 	want := RunRecord{
@@ -487,8 +488,17 @@ func TestCLIRunSurfacesPublishCanonicalTokenFieldsWithoutCost(t *testing.T) {
 		CacheRead:  7,
 		CacheWrite: 11,
 		Reasoning:  13,
+		// A partial subtotal is published as partial, never rounded up to a
+		// complete charge.
+		ProviderCost: &ProviderCost{Provider: "openrouter", CostUSD: 0.00042, Complete: false},
 	}
 	if err := AppendRun(root, want); err != nil {
+		t.Fatal(err)
+	}
+	// A Run without a provider receipt keeps the field absent: unknown is not
+	// an explicit zero charge.
+	withoutReceipt := RunRecord{RunID: "run-no-receipt", Agent: "builder", Started: "2026-08-10T00:00:01Z", Exit: 0}
+	if err := AppendRun(root, withoutReceipt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -496,24 +506,63 @@ func TestCLIRunSurfacesPublishCanonicalTokenFieldsWithoutCost(t *testing.T) {
 	var showRecord RunRecord
 	decodePayload(t, show, &showRecord)
 	requireTokenFields(t, showRecord, want, "run show")
+	if showRecord.ProviderCost == nil || *showRecord.ProviderCost != *want.ProviderCost {
+		t.Fatalf("run show provider_cost=%#v, want %#v", showRecord.ProviderCost, want.ProviderCost)
+	}
 	requireNoMonetaryFields(t, payloadKeys(t, show), "run show")
+
+	code, human, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "show", "run-tokens", "--root", root})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("run show human code=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(human, "provider_cost provider=openrouter cost_usd=0.00042 complete=false") {
+		t.Fatalf("run show human=%q, want the provider receipt line", human)
+	}
+	code, emptyHuman, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "show", "run-no-receipt", "--root", root})
+	})
+	if code != 0 || stderr != "" {
+		t.Fatalf("run show without receipt code=%d stderr=%q", code, stderr)
+	}
+	if strings.Contains(emptyHuman, "provider_cost") {
+		t.Fatalf("run show without receipt human=%q, want no invented charge", emptyHuman)
+	}
 
 	_, list, _ := decodeEnvelope(t, "run", "list", "--json", "--root", root)
 	var listPayload runListPayload
 	decodePayload(t, list, &listPayload)
-	if len(listPayload.Runs) != 1 {
-		t.Fatalf("run list runs=%d, want 1", len(listPayload.Runs))
+	listRows := map[string]RunRecord{}
+	for _, row := range listPayload.Runs {
+		listRows[row.RunID] = row
 	}
-	requireTokenFields(t, listPayload.Runs[0], want, "run list")
+	if len(listRows) != 2 {
+		t.Fatalf("run list runs=%v, want both Runs", listPayload.Runs)
+	}
+	requireTokenFields(t, listRows["run-tokens"], want, "run list")
+	if got := listRows["run-tokens"].ProviderCost; got == nil || *got != *want.ProviderCost {
+		t.Fatalf("run list provider_cost=%#v, want %#v", got, want.ProviderCost)
+	}
+	if got := listRows["run-no-receipt"].ProviderCost; got != nil {
+		t.Fatalf("run list invented provider_cost %#v for a Run without a receipt", got)
+	}
 	requireNoMonetaryFields(t, nestedRunKeys(t, list), "run list")
 
 	_, status, _ := decodeEnvelope(t, "status", "--json", "--root", root)
 	var statusPayload statusPayload
 	decodePayload(t, status, &statusPayload)
-	if len(statusPayload.Recent) != 1 {
-		t.Fatalf("status recent=%d, want 1", len(statusPayload.Recent))
+	statusRows := map[string]RunRecord{}
+	for _, row := range statusPayload.Recent {
+		statusRows[row.RunID] = row
 	}
-	requireTokenFields(t, statusPayload.Recent[0], want, "status")
+	if len(statusRows) != 2 {
+		t.Fatalf("status recent=%v, want both Runs", statusPayload.Recent)
+	}
+	requireTokenFields(t, statusRows["run-tokens"], want, "status")
+	if got := statusRows["run-tokens"].ProviderCost; got == nil || *got != *want.ProviderCost {
+		t.Fatalf("status provider_cost=%#v, want %#v", got, want.ProviderCost)
+	}
 	requireNoMonetaryFields(t, nestedRunKeys(t, status), "status")
 }
 
