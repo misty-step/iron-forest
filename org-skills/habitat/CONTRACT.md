@@ -1,4 +1,4 @@
-# Habitat CLI v0.5.4 profile contract
+# Habitat CLI v0.5.6+ profile contract
 
 This document freezes the source-verified Habitat CLI contract that a
 repository-owned work-source profile may consume. It covers the five profile
@@ -15,12 +15,16 @@ deployment are out of scope.
 | Fact | Value | Source |
 | --- | --- | --- |
 | Executable name | `habitat` | `habitat --help` |
-| Version | `habitat-cli-v0.5.4` | `habitat --version` |
+| Compatible version | `habitat-cli-v0.5.6+` | `habitat --version`; binary wire cases |
 | Trusted lookup | `habitat` resolved from a trusted `PATH` | operator runbook |
 
-The contract records the executable name and version only. It does not record an
-organization-specific install path; a deployment supplies its own trusted
-`PATH` entry or explicit executable path.
+The deployment contract requires no organization-specific install path; a
+deployment supplies its own trusted `PATH` entry or explicit executable path.
+The local test runner's convenience lookup is documented under Source evidence.
+
+The original source evidence below was collected with v0.5.4. This contract
+targets v0.5.6 and newer; the owner query mapping and blank-filter rejection
+are guarded against the installed binary, rather than fixture replay alone.
 
 ## Credential and server environment
 
@@ -38,7 +42,7 @@ Observed transport form: `Authorization: Bearer <token>`, JSON content type.
 
 ## Global surface
 
-- `habitat --version` — print `habitat-cli-v0.5.4`, exit 0.
+- `habitat --version` — print the installed version (`habitat-cli-v0.5.6` or newer), exit 0.
 - `habitat --help` — print the command list, revision flags, and environment names.
 - `--json` — machine output on stdout for the commands that support it.
 - `--expected-revision N` — required for `update`, `transition`, and `delete`.
@@ -64,7 +68,7 @@ Observed query parameters and their flag forms:
 | `--type <v>` | `type` |
 | `--priority <v>` | `priority` |
 | `--owner <v>` | `owner` |
-| `--owner-id <uuid>` | `owner_id` |
+| `--owner-id <uuid>` | `owner` |
 | `--team <slug>` | `team` |
 | `--sprint <slug>` | `sprint` |
 | `--sprint-id <uuid>` | `sprint_id` |
@@ -80,6 +84,10 @@ Observed query parameters and their flag forms:
 | `--size <v>` | `size` |
 | `--limit <n>` | `limit` |
 | `--offset <n>` | `offset` |
+
+`--owner-id` selects an owner UUID but emits `owner`, never `owner_id`, on
+the wire. Blank or whitespace-only filter values are validation errors (exit 1)
+and must not issue an HTTP request.
 
 JSON envelope:
 
@@ -240,3 +248,13 @@ five-operation profile contract.
 - v0.5.4 embedded tool description text for `list`, `get`, `history`, and
   `run_links`, which names the list envelope and item fields and the
   `run_links` pagination fields.
+
+- v0.5.6+ binary wire cases in `run-contract-cases.py` verify the owner UUID
+  query mapping and rejection of empty and whitespace-only `--owner-id` values.
+  Run with `python3 org-skills/habitat/run-contract-cases.py` or
+  `bash org-skills/habitat/run-contract-cases.sh`. The runner uses `HABITAT_BIN`,
+  then the canonical local install at
+  `/home/phaedrus/development/r90group/bin/habitat`, then `PATH`. An explicit
+  non-executable `HABITAT_BIN` fails; when no binary is installed, wire cases
+  report a skip and fixture cases still run. The mock binds only to loopback
+  and uses a dummy token with isolated configuration, never the live ledger.
