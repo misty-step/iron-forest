@@ -53,7 +53,12 @@ Ledger rows retain execution identity, request/work attribution, declared
 resource digests, timing, outcome, optional completion evidence and five token
 classes (`tokens_in`, `tokens_out`, `cache_read`, `cache_write`, `reasoning`).
 The Ledger is operational evidence, not monetary accounting; it does not
-calculate cost, price, spend or currency.
+calculate cost, price, spend or currency. The single exception is
+`provider_cost`, the model provider's own reported charge for one Run
+(`{provider, cost_usd, complete}`): the value is copied from the provider
+receipt the Run's model transport published, never estimated from catalog
+rates, token counts, or a generation lookup, and `complete` reports whether
+every model request in the Run reported its charge.
 
 Kernel non-goals are sandbox enforcement, external workflow orchestration,
 automatic retries, a fleet manager, provider budget authority and self-update.

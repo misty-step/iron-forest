@@ -284,7 +284,10 @@ contenders stay in the history.
 Each run item records its experiment and configuration fingerprints, cohort,
 selection reason, model, provider, thinking, tools, prompt/skill/task/evaluator
 digests, outcome class, latency, token counts, and cost. The Harbor adapter
-derives token and cost fields from retained Pi `message_end` usage records.
+derives token and cost fields from retained Pi `message_end` usage records;
+those cost fields are Pi's catalog estimate for experiment comparison, not
+provider billing — the Run's own `provider_cost` receipt is the billing
+evidence.
 `evals/scripts/experiment_history.py` reads the Langfuse dataset-run catalog and
 produces machine-readable JSON plus a quality/cost/latency summary artifact.
 Harbor remains the repetition and result authority; Langfuse owns longitudinal

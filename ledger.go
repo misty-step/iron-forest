@@ -43,6 +43,18 @@ type Usage struct {
 	Reasoning  int64 `json:"reasoning"`
 }
 
+// ProviderCost is the provider's own reported charge for a Run's model
+// requests, as the model transport published it. CostUSD is a charged amount,
+// never a catalog estimate, token-derived total, or converted currency:
+// Complete reports whether every model request in the Run reported its charge,
+// so a partial amount stays visibly partial. The field is absent when no
+// provider receipt exists, and an explicit zero is a reported free request.
+type ProviderCost struct {
+	Provider string  `json:"provider"`
+	CostUSD  float64 `json:"cost_usd"`
+	Complete bool    `json:"complete"`
+}
+
 // Outcomes describe execution, not delivery. Missing legacy values remain
 // unclassified; readers must not reconstruct a cause from Exit or Error.
 const (
@@ -79,6 +91,10 @@ type RunRecord struct {
 	CacheRead  int64 `json:"cache_read"`
 	CacheWrite int64 `json:"cache_write"`
 	Reasoning  int64 `json:"reasoning"`
+	// ProviderCost is this Run's provider-reported charge, when the model
+	// provider reported one directly. It stays absent, never zero-filled, when
+	// no receipt exists.
+	ProviderCost *ProviderCost `json:"provider_cost,omitempty"`
 	// Error records the known execution or finalization failure. Profile
 	// completion reasons are retained separately, including on exit-zero Runs.
 	Error string `json:"error,omitempty"`

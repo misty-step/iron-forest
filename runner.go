@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -540,6 +541,10 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 		}
 		var finalizationErr error
 		if piDir != "" {
+			// Read the Run's provider receipt before its Pi directory is
+			// disposable; a missing or malformed receipt leaves the charge
+			// unknown and never fails an otherwise successful Run.
+			record.ProviderCost = readProviderCost(piDir)
 			finalizationErr = errors.Join(finalizationErr, r.cleanupFilesystem(piDir))
 		}
 		if logFile != nil {
@@ -1375,6 +1380,39 @@ func processExit(err error) int {
 		return exitErr.ProcessState.ExitCode()
 	}
 	return 1
+}
+
+// providerCostFile is the Run-local provider receipt name. The Run's declared
+// model extension writes it at the provider transport seam; Pi itself drops
+// OpenRouter's charged amount when it recomputes usage.cost from catalog rates.
+const providerCostFile = "provider-cost.json"
+
+// readProviderCost reads the optional provider receipt from the Run's agent
+// directory. Only the fixed contract is accepted: the configured provider's
+// own charged amount as a finite, non-negative number with explicit
+// completeness. Missing, unreadable, malformed, or non-finite evidence leaves
+// the Run's charge unknown; optional accounting never fails a Run.
+func readProviderCost(dir string) *ProviderCost {
+	data, err := os.ReadFile(filepath.Join(dir, providerCostFile))
+	if err != nil {
+		return nil
+	}
+	var receipt struct {
+		Provider string   `json:"provider"`
+		CostUSD  *float64 `json:"cost_usd"`
+		Complete *bool    `json:"complete"`
+	}
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return nil
+	}
+	if receipt.Provider != "openrouter" || receipt.CostUSD == nil || receipt.Complete == nil {
+		return nil
+	}
+	amount := *receipt.CostUSD
+	if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
+		return nil
+	}
+	return &ProviderCost{Provider: receipt.Provider, CostUSD: amount, Complete: *receipt.Complete}
 }
 
 func parseAgentUsage(path string) (Usage, error) {
