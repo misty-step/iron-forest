@@ -120,7 +120,7 @@ object; stderr goes to the Run log. The command has the Poll command's 65-second
 bound. A clean exit 1 means selection raced to no work: no Pi process starts,
 `once` exits 1, and the reserved selection receipt is retained with `no_work: true`
 without becoming a successful or failed model Run in aggregate status. Other
-command errors, malformed output, timeouts, and cleanup failures are failed Runs,
+command errors, malformed output, and execution timeouts are failed Runs,
 not hidden selection of another item. The profile, not Kernel, owns any external
 claim/link command and its tracker API.
 
@@ -200,6 +200,9 @@ A Run records independent facts:
   `interrupted`, or `internal_error`. Missing legacy fields mean unknown.
 - `completion`, when configured, records the profile's observation of the
   requested external effect. It is not a delivery or correctness verdict.
+- `cleanup_error`, when present, reports bounded source/Pi-directory disposal
+  failures without changing `exit`, `outcome`, or the execution `error`.
+  Remaining worktree residue is reported separately as `recovery`.
 
 An optional declaration frontmatter `completion: <shell command>` runs once
 after a harness attempt, before worktree cleanup, in the owning repository root.
@@ -433,6 +436,11 @@ remain symlinks; nothing traverses or restores them as part of custody.
 Pi processes and temporary session state are still cleaned up. A later request
 starts an independent Run; no session or source is automatically resumed.
 
+Successful Runs whose cleanup fails also retain any remaining worktree with
+`recovery` evidence, so startup does not retry its deletion or rerun the model.
+Cleanup may already have removed part of a successful Run's disposable tree;
+its recovery path reports residue, not a promise of an intact checkout.
+
 There is no automatic source expiry or deletion manager. Operators own disk
 capacity and must configure a filesystem/volume quota appropriate to the
 instance. Before disposing of retained work, inspect it with native Git
@@ -459,7 +467,11 @@ snapshot refs before the supervisor force-stops its command group. Agent Runs
 have no wall-clock deadline. They finish when Pi finishes or an
 operator explicitly cancels a foreground `forest once`; service shutdown stops
 new dispatches and drains active Runs without a systemd deadline. Runner
-source identity reads have a separate 30-second bound; cleanup has 10 seconds.
+source identity reads have a separate 30-second bound; worktree cleanup has a
+10-second parent bound independent of the Run context. Within it, Git removal
+gets 2 seconds, filesystem fallback 1 second, and registry pruning 1 second,
+leaving process-group shutdown grace. A large generated tree can exceed these
+bounds; the failure is recorded as cleanup evidence, not an execution failure.
 A completed dispatch starts an audit
 with a separate 60-second bound. These mechanical bounds do not limit agent
 reasoning or model execution.

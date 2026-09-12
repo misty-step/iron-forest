@@ -35,18 +35,19 @@ type liveRunRecord struct {
 // same UTC/RFC3339 timestamp the Runner recorded at dispatch; Elapsed is
 // derived from that recorded timestamp, not from filesystem metadata.
 type LiveRunView struct {
-	RunID       string         `json:"run_id"`
-	Agent       string         `json:"agent"`
-	StartedAt   string         `json:"started_at"`
-	Elapsed     string         `json:"elapsed"`
-	Cancel      string         `json:"cancel"`
-	RequestID   string         `json:"request_id,omitempty"`
-	Authority   string         `json:"authority,omitempty"`
-	Work        *WorkReference `json:"work,omitempty"`
-	ProcessExit *int           `json:"process_exit,omitempty"`
-	Outcome     string         `json:"outcome,omitempty"`
-	Completion  *RunCompletion `json:"completion,omitempty"`
-	Recovery    *RunRecovery   `json:"recovery,omitempty"`
+	RunID        string         `json:"run_id"`
+	Agent        string         `json:"agent"`
+	StartedAt    string         `json:"started_at"`
+	Elapsed      string         `json:"elapsed"`
+	Cancel       string         `json:"cancel"`
+	RequestID    string         `json:"request_id,omitempty"`
+	Authority    string         `json:"authority,omitempty"`
+	Work         *WorkReference `json:"work,omitempty"`
+	ProcessExit  *int           `json:"process_exit,omitempty"`
+	Outcome      string         `json:"outcome,omitempty"`
+	Completion   *RunCompletion `json:"completion,omitempty"`
+	Recovery     *RunRecovery   `json:"recovery,omitempty"`
+	CleanupError string         `json:"cleanup_error,omitempty"`
 }
 
 // liveRunPath names the per-agent live Run record. One file per agent is safe
@@ -158,6 +159,7 @@ func liveRunView(record liveRunRecord, now time.Time) LiveRunView {
 		view.Outcome = record.Result.Outcome
 		view.Completion = record.Result.Completion
 		view.Recovery = record.Result.Recovery
+		view.CleanupError = record.Result.CleanupError
 	}
 	if record.RunID != "" {
 		view.Cancel = "forest run cancel " + record.RunID

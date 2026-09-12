@@ -263,8 +263,8 @@ exec "$REAL_GIT" "$@"
 	}
 	select {
 	case record := <-done:
-		if record.Outcome != runOutcomeInternalError || record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 {
-			t.Fatalf("cleanup failure was relabeled by a later caller cancellation: %#v", record)
+		if record.Outcome != runOutcomeCompleted || record.Exit != 0 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Error != "" || !strings.Contains(record.CleanupError, "exit status 9") {
+			t.Fatalf("cleanup or later caller cancellation changed successful execution: %#v", record)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not finish deferred cleanup")

@@ -2,6 +2,10 @@
 
 ### Changed
 
+* Keep successful Run outcomes when bounded worktree/Pi-directory disposal
+  fails. Record `cleanup_error` separately from execution errors and preserve
+  remaining worktree recovery evidence without retrying the model or source
+  disposal at startup.
 * Add optional per-request `land`/`review` authority, retained in live Runs and
   the Ledger and exposed in CLI Run surfaces. Immutable candidate evidence
   preserves review-only authority across Runs; approval publishes Checks and

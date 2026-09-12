@@ -1015,6 +1015,9 @@ func runRecordHuman(record RunRecord, indent string) string {
 	if record.Error != "" {
 		row += " error=" + oneLine(record.Error)
 	}
+	if record.CleanupError != "" {
+		row += " cleanup_error=" + oneLine(record.CleanupError)
+	}
 	return row
 }
 
