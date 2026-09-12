@@ -160,8 +160,7 @@ func TestPublishVerdictApproveFastForwardsPrimaryBranch(t *testing.T) {
 		t.Fatalf("request refs changed:\n%s\nwant:\n%s", got, requestBefore)
 	}
 	for ref, path := range map[string]string{
-		evidenceChecksRefPrefix + revision:  checks,
-		evidenceVerdictRefPrefix + revision: verdict,
+		evidenceChecksRefPrefix + revision: checks,
 	} {
 		want, err := os.ReadFile(path)
 		if err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -92,6 +93,17 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	verdict, err := decodeVerdict(verdictData, revision)
 	if err != nil {
 		return publishVerdictResult{}, err
+	}
+	if verdict.VerifierRunID != nil && *verdict.VerifierRunID != run.RunID {
+		return publishVerdictResult{}, fmt.Errorf("verdict verifier_run_id does not match live Verifier run")
+	}
+	// Bind the validated live owner before comparing or committing evidence.
+	// Historical refs are immutable and remain unbound; only new publications
+	// receive this Kernel-attested identity.
+	verdict.VerifierRunID = &run.RunID
+	verdictData, err = json.Marshal(verdict)
+	if err != nil {
+		return publishVerdictResult{}, fmt.Errorf("encode bound verdict: %w", err)
 	}
 	checks, err := decodeChecks(checksData, revision)
 	if err != nil {
@@ -248,7 +260,7 @@ func payloadRevision(data []byte) (string, error) {
 	var payload struct {
 		Revision string `json:"revision"`
 	}
-	if err := decodeStrictJSON(data, &payload, objectJSONShape("schema", "revision", "verdict", "summary", "time")); err != nil {
+	if err := decodeStrictJSON(data, &payload, objectJSONShape("schema", "revision", "verdict", "summary", "time", "verifier_run_id")); err != nil {
 		return "", err
 	}
 	if !isSHA(payload.Revision) {

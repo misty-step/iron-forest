@@ -9,15 +9,17 @@ import (
 
 func TestCLIReviewPublishedEvidence(t *testing.T) {
 	cases := []struct {
-		name        string
-		decision    string
-		verdict     string
-		request     string
-		withoutWork bool
-		packed      bool
+		name          string
+		decision      string
+		verdict       string
+		request       string
+		withoutWork   bool
+		packed        bool
+		verifierRunID string
 	}{
 		{name: "approve", decision: "approve"},
 		{name: "changes", decision: "changes"},
+		{name: "bound verdict", decision: "approve", verifierRunID: "verifier-run"},
 		{name: "missing verdict"},
 		{name: "malformed verdict", verdict: `{"verdict":"approve"}`},
 		{name: "malformed request", request: `{"branch":"forest/4/guessed"}`},
@@ -46,6 +48,9 @@ func TestCLIReviewPublishedEvidence(t *testing.T) {
 			verdict := tc.verdict
 			if tc.decision != "" {
 				verdict = fmt.Sprintf(`{"schema":"forest.verdict.v1","revision":%q,"verdict":%q,"summary":"Reviewed exact revision","time":"2026-09-12T00:00:00Z"}`, sha, tc.decision)
+				if tc.verifierRunID != "" {
+					verdict = strings.Replace(verdict, `"schema":`, `"verifier_run_id":"`+tc.verifierRunID+`","schema":`, 1)
+				}
 			}
 			if verdict != "" {
 				pushEvidence(t, root, "verdict", sha, verdict, "Iron Forest Verifier", "verifier@forest.invalid")
@@ -111,6 +116,9 @@ func TestCLIReviewPublishedEvidence(t *testing.T) {
 				t.Fatalf("request commit=%+v", row.RequestCommit)
 			}
 			raw := payloadKeys(t, envelope)["reviews"].([]any)[0].(map[string]any)
+			if id, exists := raw["verifier_run_id"]; exists != (tc.verifierRunID != "") || (exists && id != tc.verifierRunID) {
+				t.Fatalf("verifier binding=%+v", raw)
+			}
 			if _, exists := raw["decision"]; exists != (tc.decision != "") {
 				t.Fatalf("decision omission=%+v", raw)
 			}
@@ -133,6 +141,12 @@ func TestCLIReviewPublishedEvidence(t *testing.T) {
 			code, human, _ := captureCLIOutput(t, func() int { return runSurfaceCommand([]string{"review", "show", sha, "--root", root}) })
 			if code != exitOK || !strings.Contains(human, sha) || !strings.Contains(human, "verdict="+wantVerdictState) {
 				t.Fatalf("human output=%q exit=%d", human, code)
+			}
+			if tc.verifierRunID != "" && !strings.Contains(human, "verifier_run_id="+tc.verifierRunID) {
+				t.Fatalf("human binding absent: %s", human)
+			}
+			if wantVerdictState == "readable" && tc.verifierRunID == "" && !strings.Contains(human, "verifier=unbound") {
+				t.Fatalf("legacy verdict not marked unbound: %s", human)
 			}
 		})
 	}

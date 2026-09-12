@@ -2,6 +2,10 @@
 
 ### Changed
 
+* Bind new native Verdict evidence to its live Verifier Run using the
+  Kernel-attested `verifier_run_id`; reject mismatched declarations and expose
+  the binding in review list/show JSON and human output. Historical verdicts
+  remain readable and unbound; time-window correlation is not identity proof.
 * Add read-only `forest review list` and `forest review show <sha>` over
   published immutable request, Checks, and Verdict refs. Report exact revisions,
   published Work references, commit identities and times, independent missing or

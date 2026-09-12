@@ -32,6 +32,7 @@ type reviewRow struct {
 	Decision      string            `json:"decision,omitempty"`
 	Summary       string            `json:"summary,omitempty"`
 	RunID         string            `json:"run_id,omitempty"`
+	VerifierRunID string            `json:"verifier_run_id,omitempty"`
 	RequestID     string            `json:"request_id,omitempty"`
 	Authority     string            `json:"authority,omitempty"`
 	RequestRef    string            `json:"request_ref,omitempty"`
@@ -142,6 +143,9 @@ func readPublishedReviews(ctx context.Context, root, revision string) (rows []re
 					note, pieceErr = decodeVerdict(payload, sha)
 					if pieceErr == nil {
 						row.Decision, row.Summary = note.Verdict, note.Summary
+						if note.VerifierRunID != nil {
+							row.VerifierRunID = *note.VerifierRunID
+						}
 					}
 				}
 			}
@@ -211,6 +215,11 @@ func humanReviews(rows []reviewRow) string {
 			fmt.Fprintf(&text, " %s", row.Branch)
 		}
 		fmt.Fprintf(&text, " request=%s checks=%s verdict=%s", row.RequestState, row.ChecksState, row.VerdictState)
+		if row.VerifierRunID != "" {
+			fmt.Fprintf(&text, " verifier_run_id=%s", row.VerifierRunID)
+		} else if row.VerdictState == "readable" {
+			text.WriteString(" verifier=unbound")
+		}
 		if row.Decision != "" {
 			fmt.Fprintf(&text, " decision=%s\n  %s", row.Decision, row.Summary)
 		}

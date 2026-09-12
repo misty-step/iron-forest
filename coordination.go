@@ -110,11 +110,12 @@ type checksNotePayload struct {
 }
 
 type verdictNote struct {
-	Schema   string `json:"schema"`
-	Revision string `json:"revision"`
-	Verdict  string `json:"verdict"`
-	Summary  string `json:"summary"`
-	Time     string `json:"time"`
+	Schema        string  `json:"schema"`
+	Revision      string  `json:"revision"`
+	Verdict       string  `json:"verdict"`
+	Summary       string  `json:"summary"`
+	Time          string  `json:"time"`
+	VerifierRunID *string `json:"verifier_run_id,omitempty"`
 }
 
 type strictJSONShape struct {
@@ -423,11 +424,16 @@ func decodeChecks(data []byte, sha string) (checksNote, error) {
 
 func decodeVerdict(data []byte, sha string) (verdictNote, error) {
 	var note verdictNote
-	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "revision", "verdict", "summary", "time")); err != nil {
+	shape := objectJSONShape("schema", "revision", "verdict", "summary", "time")
+	shape.fields["verifier_run_id"] = &strictJSONShape{stringOnly: true}
+	if err := decodeStrictJSON(data, &note, shape); err != nil {
 		return note, err
 	}
 	if note.Schema != "forest.verdict.v1" || note.Revision != sha || (note.Verdict != "approve" && note.Verdict != "changes") || strings.TrimSpace(note.Summary) == "" || !validNoteTime(note.Time) {
 		return note, fmt.Errorf("invalid verdict note")
+	}
+	if note.VerifierRunID != nil && !validPublicationRunID(*note.VerifierRunID) {
+		return note, fmt.Errorf("invalid verdict verifier_run_id")
 	}
 	return note, nil
 }

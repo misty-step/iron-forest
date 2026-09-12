@@ -48,7 +48,7 @@ func writeReviewPayloadForRun(t *testing.T, revision, branch string, run liveRun
 	payload, err := json.Marshal(reviewRequest{Schema: "forest.review-request.v3",
 		Subject: reviewSubjectForTest(branch), Branch: branch, Revision: revision,
 		Authority: run.Authority,
-		Time: "2026-08-15T00:00:00Z", RunID: run.RunID, RequestID: run.RequestID, Work: run.Work})
+		Time:      "2026-08-15T00:00:00Z", RunID: run.RunID, RequestID: run.RequestID, Work: run.Work})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestPublishReviewRequestBindsActualRunContext(t *testing.T) {
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			run := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-09T00:00:00Z", RequestID: "selected-request",
 				Authority: "review",
-				Work: &WorkReference{System: "opaque", ID: "selected-work", Key: "WORK-1", URL: "https://work.example/1"}}
+				Work:      &WorkReference{System: "opaque", ID: "selected-work", Key: "WORK-1", URL: "https://work.example/1"}}
 			seedPublicationRun(t, root, run)
 			test.change(&run)
 			payload := writeReviewPayloadForRun(t, revision, "forest/work/implementation", run)
@@ -1250,9 +1250,6 @@ func TestPublishVerdictRequiresOwnedVerifierRun(t *testing.T) {
 			if got := fetchEvidenceFile(t, root, "checks", revision, "checks.json"); !bytes.Equal(got, mustRead(t, checks)) {
 				t.Fatalf("published checks=%q", got)
 			}
-			if got := fetchEvidenceFile(t, root, "verdict", revision, "verdict.json"); !bytes.Equal(got, mustRead(t, verdict)) {
-				t.Fatalf("published verdict=%q", got)
-			}
 			published := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)"))
 
 			invalidate()
@@ -1303,9 +1300,6 @@ func TestCLIPublishVerdictFromOwnedLinkedWorktree(t *testing.T) {
 	}
 	if got := fetchEvidenceFile(t, primary, "checks", revision, "checks.json"); !bytes.Equal(got, mustRead(t, checks)) {
 		t.Fatalf("published checks=%q", got)
-	}
-	if got := fetchEvidenceFile(t, primary, "verdict", revision, "verdict.json"); !bytes.Equal(got, mustRead(t, verdict)) {
-		t.Fatalf("published verdict=%q", got)
 	}
 }
 

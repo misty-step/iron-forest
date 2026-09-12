@@ -534,6 +534,15 @@ Published immutable refs are the authoritative candidate and verdict record.
 PR-comment receipt is a human-facing convenience, never a source of truth or
 a second protocol. Per-ticket pins cannot override published evidence.
 
+Verifier identity is a persisted binding, not time-window correlation. On new
+`forest publish verdict` publications, the Kernel adds `verifier_run_id` to the
+stored `verdict.json` (`forest.verdict.v1`) from the validated live Verifier Run.
+The agent payload may omit it; a declared value must match that Run. The Kernel
+serializes the bound payload before create-only publication and identical-retry
+comparison, without modifying the agent's input file. A different Run cannot
+adopt the existing verdict through an identical retry. Historical refs are never
+rewritten: payloads without this field remain readable but explicitly unbound.
+
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit. Verifier calls `forest publish verdict`.
 The Kernel writes Checks and Verdict evidence refs and, on authorized approve,
@@ -770,6 +779,11 @@ objects `{name, email, time}`. Times are Git commit RFC3339 timestamps. The
 `decision` (`approve` or `changes`) and `summary` exist only when the verdict is
 readable; absence never becomes approval or rejection. Approval alone does not
 prove primary advanced.
+The optional `verifier_run_id` comes only from the readable verdict's persisted
+binding, distinct from the Builder/Fixer `run_id` in the request. It is omitted
+for unbound historical verdicts and unreadable or missing verdict evidence.
+Human output prints `verifier_run_id=<id>` for a bound verdict and
+`verifier=unbound` for a readable historical verdict.
 
 `request_state`, `checks_state`, and `verdict_state` independently report
 `readable`, `missing`, or `unreadable`. Invalid payloads or committer identities
@@ -777,8 +791,10 @@ produce `errors` keyed by evidence kind, not guessed fields. Missing request
 evidence never invents a branch or Work reference. `runs` contains local Ledger
 Run rows matching the exact, non-absent published Work reference, or `[]` when
 none match. These are local execution context, not a second candidate/verdict
-authority; a consumer must establish a unique matching Verifier Run before
-attributing a verdict commit to that Run. The verdict payload has no Run ID.
+authority. Attribute a verdict to a Verifier Run by comparing the persisted
+`verifier_run_id` with the exact Run ID; Work matches and time-window correlation
+are not proof. No matching Run record means missing execution context, not a
+license to infer identity. Historical unbound evidence is never silently promoted.
 
 Each payload publishes what the command resolved. Three keys guard the rest and
 must be read first:

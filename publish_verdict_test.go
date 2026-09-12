@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,71 @@ func requireMissingRemoteRef(t *testing.T, root, ref string) {
 	t.Helper()
 	if output := strings.TrimSpace(string(runGitDir(t, root, "ls-remote", "origin", ref))); output != "" {
 		t.Fatalf("remote ref %s exists: %s", ref, output)
+	}
+}
+
+func TestPublishVerdictVerifierBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		declared string
+		reject   bool
+	}{
+		{name: "absent"},
+		{name: "matching", declared: `"1-verifier"`},
+		{name: "mismatched", declared: `"other-verifier"`, reject: true},
+		{name: "empty", declared: `""`, reject: true},
+		{name: "null", declared: `null`, reject: true},
+		{name: "wrong type", declared: `42`, reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, origin := testClone(t)
+			writePassingChecks(t, root)
+			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+			pushRequestForRevision(t, root, "binding", revision)
+			checks, verdict := writeEvidencePayloads(t, revision, "changes")
+			payload, err := os.ReadFile(verdict)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.declared != "" {
+				payload = []byte(strings.Replace(string(payload), `"schema":`, `"verifier_run_id":`+tc.declared+`,"schema":`, 1))
+				if err := os.WriteFile(verdict, payload, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			seedVerdictRun(t, root, "1-verifier")
+			_, err = publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: "1-verifier"})
+			if tc.reject {
+				if err == nil {
+					t.Fatal("invalid binding published")
+				}
+				requireMissingRemoteRef(t, root, evidenceVerdictRefPrefix+revision)
+				requireMissingRemoteRef(t, root, evidenceChecksRefPrefix+revision)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := runGit(t, "--git-dir="+origin, "show", evidenceVerdictRefPrefix+revision+":verdict.json")
+			var note verdictNote
+			if err := json.Unmarshal(stored, &note); err != nil {
+				t.Fatal(err)
+			}
+			if note.VerifierRunID == nil || *note.VerifierRunID != "1-verifier" || note.Revision != revision || note.Verdict != "changes" || note.Summary != "eval" {
+				t.Fatalf("published verdict=%s", stored)
+			}
+			code, envelope, _ := decodeEnvelope(t, "review", "show", revision, "--json", "--root", root)
+			if code != exitOK {
+				t.Fatalf("review failed: %+v", envelope)
+			}
+			row := payloadKeys(t, envelope)["review"].(map[string]any)
+			if row["verifier_run_id"] != "1-verifier" {
+				t.Fatalf("published binding not exposed: %+v", row)
+			}
+			if unchanged, err := os.ReadFile(verdict); err != nil || string(unchanged) != string(payload) {
+				t.Fatalf("publication rewrote agent payload: %s, %v", unchanged, err)
+			}
+		})
 	}
 }
 
@@ -138,18 +204,12 @@ func TestPublishVerdictChangesCreatesEvidenceRefs(t *testing.T) {
 	if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != before {
 		t.Fatalf("master moved to %s", got)
 	}
-	for ref, path := range map[string]string{
-		evidenceChecksRefPrefix + revision:  checks,
-		evidenceVerdictRefPrefix + revision: verdict,
-	} {
-		want, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := runGit(t, "--git-dir="+origin, "show", ref+":"+filepath.Base(path))
-		if string(got) != string(want) {
-			t.Fatalf("published %s=%s, want %s", ref, got, want)
-		}
+	want, err := os.ReadFile(checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runGit(t, "--git-dir="+origin, "show", evidenceChecksRefPrefix+revision+":checks.json"); string(got) != string(want) {
+		t.Fatalf("published checks=%s, want %s", got, want)
 	}
 }
 
@@ -177,18 +237,12 @@ func TestPublishVerdictApproveFastForwardsMaster(t *testing.T) {
 	if got := string(runGitDir(t, root, "ls-remote", "origin", evidenceRequestRefPrefix+revision, "refs/heads/forest/if-approve/work")); got != requestBefore {
 		t.Fatalf("request refs changed:\n%s\nwant:\n%s", got, requestBefore)
 	}
-	for ref, path := range map[string]string{
-		evidenceChecksRefPrefix + revision:  checks,
-		evidenceVerdictRefPrefix + revision: verdict,
-	} {
-		want, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := runGit(t, "--git-dir="+origin, "show", ref+":"+filepath.Base(path))
-		if string(got) != string(want) {
-			t.Fatalf("published %s=%s, want %s", ref, got, want)
-		}
+	want, err := os.ReadFile(checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runGit(t, "--git-dir="+origin, "show", evidenceChecksRefPrefix+revision+":checks.json"); string(got) != string(want) {
+		t.Fatalf("published checks=%s, want %s", got, want)
 	}
 }
 
@@ -244,7 +298,6 @@ func TestPublishVerdictApprovalAuthorityMatrix(t *testing.T) {
 				for ref, path := range map[string]string{
 					evidenceRequestRefPrefix + revision: payload,
 					evidenceChecksRefPrefix + revision:  checks,
-					evidenceVerdictRefPrefix + revision: verdict,
 				} {
 					name := filepath.Base(path)
 					if path == payload {
@@ -416,8 +469,7 @@ checks:
 				t.Fatalf("master=%s want %s", got, revision)
 			}
 			for ref, path := range map[string]string{
-				evidenceChecksRefPrefix + revision:  checks,
-				evidenceVerdictRefPrefix + revision: verdict,
+				evidenceChecksRefPrefix + revision: checks,
 			} {
 				want, err := os.ReadFile(path)
 				if err != nil {
@@ -591,6 +643,14 @@ func TestPublishVerdictIdenticalIsSuccess(t *testing.T) {
 			}
 			if got := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); got != before {
 				t.Fatalf("remote refs changed on identical retry:\n%s\nwant:\n%s", got, before)
+			}
+			seedVerdictRun(t, root, "2-verifier")
+			input.RunID = "2-verifier"
+			if _, err := publishVerdict(context.Background(), input); !publishConflict(err) {
+				t.Fatalf("another Run adopted existing binding: %v", err)
+			}
+			if got := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); got != before {
+				t.Fatal("another Run changed bound evidence")
 			}
 		})
 	}
