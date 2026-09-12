@@ -17,6 +17,9 @@
 
 ### Changed
 
+* Document opt-in local Linear factory setup, one-delivery intake, credentials,
+  committed-revision installation, evidence reading and human merge/tracker
+  reconciliation in an operator runbook linked from onboarding.
 * Bind new native Verdict evidence to its live Verifier Run using the
   Kernel-attested `verifier_run_id`; reject mismatched declarations and expose
   the binding in review list/show JSON and human output. Historical verdicts

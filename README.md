@@ -353,6 +353,10 @@ managed repository. For a separate sibling managed checkout, use the
 [onboarding guide](docs/onboarding-managed-repo.md); its installer builds the
 Kernel from the factory source into that sibling.
 
+For an explicitly adopted local Linear-labelled delivery, follow the
+[local factory runbook](docs/local-linear-factory.md): profile setup, one-ticket
+intake, evidence reading, human merge, and tracker reconciliation.
+
 ### Second-party deployment checklist
 
 Use the [onboarding guide](docs/onboarding-managed-repo.md). Before handing a
@@ -589,15 +593,17 @@ snapshot. Fixer preserves the rejected Subject, branch and work, requires its
 exact `changes` verdict, and stamps its own actual Run/request IDs onto the
 fresh revision. Old request and verdict refs remain unchanged.
 
-Which identity may create or update which ref is in
-[onboarding](docs/onboarding-managed-repo.md#forge-identities-and-references).
+Choose delivery and credential boundaries through
+[onboarding](docs/onboarding-managed-repo.md#choose-the-boundary). For local
+Linear profiles, use the
+[factory credential guidance](docs/local-linear-factory.md#credentials-and-receipts).
 A read-only forge credential breaks every declaration. Branch protection cannot
 see evidence refs. Restrict `master` with a forge ruleset.
 
 The operator selects current work. Agents own implementation and review
 judgment; the Kernel owns the retained publication protocol. The
-[managed-repository guide](docs/onboarding-managed-repo.md) is a historical
-setup reference, not an instruction to restart retired intake.
+[managed-repository guide](docs/onboarding-managed-repo.md) covers current
+onboarding; it does not authorize restarting retired intake.
 
 ## Current requests
 
@@ -672,6 +678,22 @@ Except for the trusted first
 `master` baseline, the Auditor checks the observable final state after the
 Effect; it remains the observer rather than the Gate owner. See
 [ADR 0010](docs/adr/0010-agent-owned-effects-and-merge-gate.md).
+
+### Read the result
+
+For review-only delivery, run `forest review show <sha>`. Require passing Checks
+and an `approve` Verdict for that exact candidate with a bound `verifier_run_id`;
+inspect that Run with `forest run show <verifier-run-id>`. Open the GitHub PR and
+confirm it is still open with the same head SHA. Review its diff and required
+GitHub checks, then merge on GitHub as the operator. A moved head requires fresh
+verification, not the old approval.
+
+Pause/drain after terminal delivery and reconcile the tracker manually: record
+the candidate, Verifier Run, PR URL and actual merge SHA before marking the work
+done. Agents never merge review-only PRs, enable auto-merge, or mark tracker work
+done. An approve Verdict or successful Run is not a human merge. Follow the
+[one-ticket walkthrough](docs/local-linear-factory.md#deliver-one-ticket-and-read-the-result)
+for intake and receipt handling.
 
 ## Auditor and trust boundary
 
