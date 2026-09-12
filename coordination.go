@@ -80,6 +80,7 @@ type reviewRequest struct {
 	Time      string         `json:"time"`
 	RunID     string         `json:"run_id,omitempty"`
 	RequestID string         `json:"request_id,omitempty"`
+	Authority string         `json:"authority,omitempty"`
 	Work      *WorkReference `json:"work,omitempty"`
 	// Tracker is read-only compatibility for immutable v2 evidence.
 	Tracker string `json:"tracker,omitempty"`
@@ -237,6 +238,7 @@ func decodeReview(data []byte, sha string) (reviewRequest, error) {
 	var probe struct {
 		Schema    string          `json:"schema"`
 		RequestID json.RawMessage `json:"request_id"`
+		Authority json.RawMessage `json:"authority"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return reviewRequest{}, err
@@ -254,6 +256,7 @@ func decodeReview(data []byte, sha string) (reviewRequest, error) {
 		text := &strictJSONShape{stringOnly: true}
 		shape.fields["run_id"] = text
 		shape.fields["request_id"] = text
+		shape.fields["authority"] = text
 		for field := range shape.fields {
 			shape.fields[field] = text
 		}
@@ -267,6 +270,9 @@ func decodeReview(data []byte, sha string) (reviewRequest, error) {
 	var note reviewRequest
 	if err := decodeStrictJSON(data, &note, shape); err != nil {
 		return note, err
+	}
+	if !validRunAuthority(note.Authority) || (probe.Authority != nil && note.Authority == "") {
+		return note, fmt.Errorf("invalid review-request authority")
 	}
 	if !isSHA(sha) || note.Revision != sha || !branchBelongsToSubject(note.Branch, note.Subject) || !validNoteTime(note.Time) {
 		return note, fmt.Errorf("invalid review-request note")

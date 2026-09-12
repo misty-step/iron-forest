@@ -103,6 +103,7 @@ type RunRecord struct {
 	// dispatch, so a later check can see which declaration a Run executed.
 	DefinitionSHA string            `json:"definition_sha,omitempty"`
 	RequestID     string            `json:"request_id,omitempty"`
+	Authority     string            `json:"authority,omitempty"`
 	Work          *WorkReference    `json:"work,omitempty"`
 	ExtensionSHA  map[string]string `json:"extension_sha,omitempty"`
 }

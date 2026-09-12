@@ -1361,6 +1361,9 @@ func runEvidenceLine(record RunRecord, declaration Declaration) string {
 	if record.RequestID != "" {
 		evidence["request_id"] = record.RequestID
 	}
+	if record.Authority != "" {
+		evidence["authority"] = record.Authority
+	}
 	if record.Work != nil {
 		evidence["work"] = record.Work
 	}

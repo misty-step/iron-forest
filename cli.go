@@ -993,6 +993,9 @@ func runRecordHuman(record RunRecord, indent string) string {
 		outcome = "unknown"
 	}
 	row += " outcome=" + oneLine(outcome)
+	if record.Authority != "" {
+		row += " authority=" + oneLine(record.Authority)
+	}
 	if record.ProcessExit == nil {
 		row += " process_exit=unknown"
 	} else {

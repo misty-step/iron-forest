@@ -630,3 +630,66 @@ func nestedRunKeys(t *testing.T, envelope cliEnvelope) map[string]any {
 	}
 	return data
 }
+
+func TestCLIRunSurfacesPreserveAuthority(t *testing.T) {
+	for _, authority := range []string{"", "land", "review"} {
+		t.Run("authority="+authority, func(t *testing.T) {
+			root := t.TempDir()
+			writeCLIConfig(t, root, "exit 1")
+			record := RunRecord{RunID: "run-authority", Agent: "builder", Started: "2026-09-09T00:00:00Z", RequestID: "request", Authority: authority}
+			if err := AppendRun(root, record); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"run", "show", record.RunID}, {"run", "list"}, {"status"}} {
+				t.Run(strings.Join(args, "-"), func(t *testing.T) {
+					code, envelope, stderr := decodeEnvelope(t, append(args, "--json", "--root", root)...)
+					if code != exitOK || stderr != "" {
+						t.Fatalf("code=%d stderr=%q", code, stderr)
+					}
+					fields := nestedRunKeys(t, envelope)
+					if got, present := fields["authority"]; present != (authority != "") || present && got != authority {
+						t.Fatalf("authority=%v present=%t, want %q", got, present, authority)
+					}
+					code, human, stderr := captureCLIOutput(t, func() int {
+						return runSurfaceCommand(append(args, "--root", root))
+					})
+					if code != exitOK || stderr != "" {
+						t.Fatalf("human code=%d stderr=%q", code, stderr)
+					}
+					if authority == "" && strings.Contains(human, "authority=") || authority != "" && !strings.Contains(human, "authority="+authority) {
+						t.Fatalf("human output lost or invented authority: %q", human)
+					}
+				})
+			}
+			// Isolate the live surface so a recent ledger row cannot mask a
+			// missing in-flight association in either representation.
+			liveRoot := t.TempDir()
+			writeCLIConfig(t, liveRoot, "exit 1")
+			if err := writeLiveRun(liveRunPath(liveRoot, record.Agent), liveRecord(record)); err != nil {
+				t.Fatal(err)
+			}
+			code, envelope, stderr := decodeEnvelope(t, "status", "--json", "--root", liveRoot)
+			if code != exitOK || stderr != "" {
+				t.Fatalf("live status code=%d stderr=%q", code, stderr)
+			}
+			fields := payloadKeys(t, envelope)
+			runs, ok := fields["live_runs"].([]any)
+			if !ok || len(runs) != 1 {
+				t.Fatalf("live_runs=%v, want one Run", fields["live_runs"])
+			}
+			live := runs[0].(map[string]any)
+			if got, present := live["authority"]; present != (authority != "") || present && got != authority {
+				t.Fatalf("live authority=%v present=%t, want %q", got, present, authority)
+			}
+			code, human, stderr := captureCLIOutput(t, func() int {
+				return runSurfaceCommand([]string{"status", "--root", liveRoot})
+			})
+			if code != exitOK || stderr != "" {
+				t.Fatalf("live human code=%d stderr=%q", code, stderr)
+			}
+			if authority == "" && strings.Contains(human, "authority=") || authority != "" && !strings.Contains(human, "authority="+authority) {
+				t.Fatalf("live human output lost or invented authority: %q", human)
+			}
+		})
+	}
+}

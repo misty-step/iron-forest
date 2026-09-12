@@ -192,6 +192,102 @@ func TestPublishVerdictApproveFastForwardsMaster(t *testing.T) {
 	}
 }
 
+func TestPublishVerdictApprovalAuthorityMatrix(t *testing.T) {
+	for _, candidateAuthority := range []string{"", "land", "review"} {
+		for _, verifierAuthority := range []string{"", "land", "review"} {
+			t.Run("candidate="+candidateAuthority+"/verifier="+verifierAuthority, func(t *testing.T) {
+				root, origin := testClone(t)
+				branch := "forest/work/implementation"
+				runGitDir(t, root, "checkout", "-b", branch)
+				localPrimary := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "refs/heads/master")))
+				remotePrimary := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master")))
+				writePassingChecks(t, root)
+				revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+				builder := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-12T00:00:00Z", RequestID: "build-request", Authority: candidateAuthority,
+					Work: &WorkReference{System: "opaque", ID: "selected-work"}}
+				seedPublicationRun(t, root, builder)
+				payload := writeReviewPayloadForRun(t, revision, branch, builder)
+				if _, err := publishReviewRequest(context.Background(), publishReviewRequestInput{Root: root, Role: "builder", Branch: branch, PayloadPath: payload, RunID: builder.RunID}); err != nil {
+					t.Fatal(err)
+				}
+				requestBefore := string(runGitDir(t, root, "ls-remote", "origin", evidenceRequestRefPrefix+revision, "refs/heads/"+branch))
+				if err := os.Remove(liveRunPath(root, "builder")); err != nil {
+					t.Fatal(err)
+				}
+				verifier := liveRunRecord{RunID: "11-verifier", Agent: "verifier", StartedAt: "2026-09-12T01:00:00Z", RequestID: "review-request", Authority: verifierAuthority, Work: builder.Work}
+				seedPublicationRun(t, root, verifier)
+				checks, verdict := writeEvidencePayloads(t, revision, "approve")
+				input := publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}
+				reviewOnly := candidateAuthority == "review" || verifierAuthority == "review"
+				for _, status := range []string{"published", "identical"} {
+					if reviewOnly {
+						status = "review-only"
+					}
+					result, err := publishVerdict(context.Background(), input)
+					if err != nil || result.Status != status || result.Revision != revision || result.Verdict != "approve" {
+						t.Fatalf("approval=%#v error=%v want status %s", result, err, status)
+					}
+				}
+				wantPrimary := revision
+				if reviewOnly {
+					wantPrimary = remotePrimary
+				}
+				if got := strings.TrimSpace(string(runGit(t, "--git-dir="+origin, "rev-parse", "refs/heads/master"))); got != wantPrimary {
+					t.Fatalf("remote primary=%s want %s", got, wantPrimary)
+				}
+				if got := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "refs/heads/master"))); got != localPrimary {
+					t.Fatalf("local primary moved to %s from %s", got, localPrimary)
+				}
+				if got := string(runGitDir(t, root, "ls-remote", "origin", evidenceRequestRefPrefix+revision, "refs/heads/"+branch)); got != requestBefore {
+					t.Fatal("approval changed request revision or branch")
+				}
+				for ref, path := range map[string]string{
+					evidenceRequestRefPrefix + revision: payload,
+					evidenceChecksRefPrefix + revision:  checks,
+					evidenceVerdictRefPrefix + revision: verdict,
+				} {
+					name := filepath.Base(path)
+					if path == payload {
+						name = "request.json"
+					}
+					got := runGit(t, "--git-dir="+origin, "show", ref+":"+name)
+					if string(got) != string(mustRead(t, path)) {
+						t.Fatalf("approval changed exact evidence for %s", ref)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPublishLandAuthorityCannotElevateExternalDelivery(t *testing.T) {
+	root, _ := testClone(t)
+	writePassingChecks(t, root)
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	branch := "forest/work/implementation"
+	builder := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-12T00:00:00Z", RequestID: "build-request", Authority: "land"}
+	seedPublicationRun(t, root, builder)
+	payload := writeReviewPayloadForRun(t, revision, branch, builder)
+	build := publishReviewRequestInput{Root: root, Role: "builder", Branch: branch, PayloadPath: payload, RunID: builder.RunID}
+	if _, err := publishReviewRequest(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	verifier := liveRunRecord{RunID: "11-verifier", Agent: "verifier", StartedAt: builder.StartedAt, RequestID: "review-request", Authority: "land"}
+	seedPublicationRun(t, root, verifier)
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	writeTree(t, root, profileName+"/config.yaml", "repo: owner/name\ndelivery: external\nagents:\n  builder: {poll: 'true', interval: 1}\n")
+	before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
+	if _, err := publishReviewRequest(context.Background(), build); err == nil || !publishConflict(err) {
+		t.Fatalf("land builder bypassed external delivery: %v", err)
+	}
+	if _, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}); err == nil || !publishConflict(err) {
+		t.Fatalf("land verifier bypassed external delivery: %v", err)
+	}
+	if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before {
+		t.Fatal("land authority changed external delivery refs")
+	}
+}
+
 func TestPublishVerdictApproveRejectsMissingRequest(t *testing.T) {
 	root, _ := testClone(t)
 	writePassingChecks(t, root)

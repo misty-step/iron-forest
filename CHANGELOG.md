@@ -2,6 +2,11 @@
 
 ### Changed
 
+* Add optional per-request `land`/`review` authority, retained in live Runs and
+  the Ledger and exposed in CLI Run surfaces. Immutable candidate evidence
+  preserves review-only authority across Runs; approval publishes Checks and
+  Verdict with a distinct `review-only` result without advancing primary.
+  Omitted authority keeps existing profile delivery semantics.
 * Record the model provider's own reported charge for a Run. Pi drops
   OpenRouter's charged amount when it recomputes `usage.cost` from catalog
   rates, so the declared model extension now observes that provider response

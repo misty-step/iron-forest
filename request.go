@@ -22,28 +22,45 @@ type WorkReference struct {
 }
 
 type RunRequest struct {
-	Schema string         `json:"schema"`
-	ID     string         `json:"id"`
-	Prompt string         `json:"prompt"`
-	Work   *WorkReference `json:"work,omitempty"`
+	Schema    string         `json:"schema"`
+	ID        string         `json:"id"`
+	Prompt    string         `json:"prompt"`
+	Authority string         `json:"authority,omitempty"`
+	Work      *WorkReference `json:"work,omitempty"`
 }
 
 const maxRequestBytes = 1 << 20
 
 var errRequestNoWork = errors.New("request selection returned no work")
 
+func validRunAuthority(authority string) bool {
+	return authority == "" || authority == "land" || authority == "review"
+}
+
 func decodeRunRequest(data []byte) (*RunRequest, error) {
 	if len(data) > maxRequestBytes {
 		return nil, fmt.Errorf("request exceeds %d bytes", maxRequestBytes)
 	}
 	var request RunRequest
+	// Keep presence separate from the retained string: null and an explicit
+	// empty string must not silently acquire the legacy profile authority.
+	type requestFields RunRequest
+	wire := struct {
+		*requestFields
+		Authority json.RawMessage `json:"authority"`
+	}{requestFields: (*requestFields)(&request)}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	if err := decoder.Decode(&wire); err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, errors.New("request must contain exactly one JSON object")
+	}
+	if len(wire.Authority) != 0 {
+		if err := json.Unmarshal(wire.Authority, &request.Authority); err != nil || request.Authority == "" || !validRunAuthority(request.Authority) {
+			return nil, errors.New("request authority must be land or review when supplied")
+		}
 	}
 	if request.Schema != "forest.request.v1" || strings.TrimSpace(request.ID) == "" || strings.TrimSpace(request.Prompt) == "" {
 		return nil, errors.New("request requires schema forest.request.v1, id and prompt")
@@ -116,6 +133,7 @@ func attachRunRequest(record *RunRecord, request *RunRequest) {
 		return
 	}
 	record.RequestID = request.ID
+	record.Authority = request.Authority
 	if request.Work != nil {
 		work := *request.Work
 		record.Work = &work
@@ -126,7 +144,11 @@ func requestPrompt(standing string, request *RunRequest) string {
 	if request == nil {
 		return standing
 	}
-	return standing + "\n\n## Explicit Run request\n\n" + request.Prompt
+	prompt := standing + "\n\n## Explicit Run request\n\n"
+	if request.Authority != "" {
+		prompt += "Publication authority: " + request.Authority + "\n\n"
+	}
+	return prompt + request.Prompt
 }
 
 // RunCompletion is the profile's observation of its required external effect.

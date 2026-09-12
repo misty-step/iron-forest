@@ -20,6 +20,7 @@ type liveRunRecord struct {
 	Agent         string            `json:"agent"`
 	StartedAt     string            `json:"started_at"`
 	RequestID     string            `json:"request_id,omitempty"`
+	Authority     string            `json:"authority,omitempty"`
 	Work          *WorkReference    `json:"work,omitempty"`
 	DefinitionSHA string            `json:"definition_sha,omitempty"`
 	ExtensionSHA  map[string]string `json:"extension_sha,omitempty"`
@@ -40,6 +41,7 @@ type LiveRunView struct {
 	Elapsed     string         `json:"elapsed"`
 	Cancel      string         `json:"cancel"`
 	RequestID   string         `json:"request_id,omitempty"`
+	Authority   string         `json:"authority,omitempty"`
 	Work        *WorkReference `json:"work,omitempty"`
 	ProcessExit *int           `json:"process_exit,omitempty"`
 	Outcome     string         `json:"outcome,omitempty"`
@@ -105,7 +107,7 @@ func writeLiveRun(path string, record liveRunRecord) error {
 func liveRecord(record RunRecord) liveRunRecord {
 	live := liveRunRecord{
 		RunID: record.RunID, Agent: record.Agent, StartedAt: record.Started,
-		RequestID: record.RequestID, Work: record.Work,
+		RequestID: record.RequestID, Authority: record.Authority, Work: record.Work,
 		DefinitionSHA: record.DefinitionSHA, ExtensionSHA: record.ExtensionSHA,
 	}
 	if record.Outcome != "" {
@@ -150,7 +152,7 @@ func readLiveRuns(root string) ([]liveRunRecord, error) {
 // elapsed time is testable without sleeping.
 func liveRunView(record liveRunRecord, now time.Time) LiveRunView {
 	view := LiveRunView{RunID: record.RunID, Agent: record.Agent, StartedAt: record.StartedAt,
-		RequestID: record.RequestID, Work: record.Work}
+		RequestID: record.RequestID, Authority: record.Authority, Work: record.Work}
 	if record.Result != nil {
 		view.ProcessExit = record.Result.ProcessExit
 		view.Outcome = record.Result.Outcome
@@ -197,7 +199,7 @@ func recoverInterruptedRuns(root string) error {
 			return err
 		} else if !found {
 			record := RunRecord{RunID: live.RunID, Agent: live.Agent, Started: live.StartedAt,
-				RequestID: live.RequestID, Work: live.Work, DefinitionSHA: live.DefinitionSHA,
+				RequestID: live.RequestID, Authority: live.Authority, Work: live.Work, DefinitionSHA: live.DefinitionSHA,
 				ExtensionSHA: live.ExtensionSHA}
 			if live.Result != nil {
 				if live.Result.RunID != live.RunID || live.Result.Agent != live.Agent {

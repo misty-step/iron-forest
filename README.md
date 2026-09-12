@@ -92,6 +92,14 @@ For direct work, save a `forest.request.v1` JSON file:
 association from a title, branch, or current queue. One Run serves at most one
 primary work reference.
 
+Optional `authority` is exactly `"land"` or `"review"`; explicit empty, null,
+or unknown values are invalid. Omission preserves the profile's existing
+delivery behavior. `land` permits native landing only where the profile already
+allows it; `review` permits working and publishing verification evidence, never
+advancing primary. The Kernel binds this restriction into the immutable
+candidate request as well as the Run. A later Verifier cannot elevate a review
+candidate by omitting its own authority or supplying `land`.
+
 ```sh
 ./.iron-forest/bin/forest admission show --json
 ./.iron-forest/bin/forest once builder --request /path/to/request.json
@@ -100,7 +108,7 @@ primary work reference.
 An explicit `once` appends `prompt` to the standing task and bypasses both Poll
 and a scheduled request command. It still requires open admission and the
 exclusive Kernel lock: stop an existing scheduler before a foreground `once`.
-The request ID and work object survive preparation failure, Pi failure,
+The request ID, authority and work object survive preparation failure, Pi failure,
 cancellation, and interrupted-Run recovery in live evidence and the Ledger.
 The full request is retained as `runtime/runs/<run-id>.request.json`.
 
@@ -510,8 +518,8 @@ supplied by the operator. A historical queue item does not authorize a Run.
 
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit. Verifier calls `forest publish verdict`.
-The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
-the configured primary in the same atomic push. New requests use
+The Kernel writes Checks and Verdict evidence refs and, on authorized approve,
+fast-forwards the configured primary in the same atomic push. New requests use
 `forest.review-request.v3`; historical v1/v2 evidence remains readable and is
 never rewritten. Only pending v2 Powder requests retain their legacy
 reconciliation behavior. Generic v3 requests never invoke GitHub/Powder work
@@ -542,10 +550,12 @@ The current review-request payload is:
 
 `subject` is a branch-routing identity, not a tracker enum. `run_id` must name
 the actual live Builder/Fixer owner. `request_id` must match that Run's retained
-request and must be omitted when absent. `work` must exactly equal the complete
-persisted WorkReference snapshot, including optional display fields, or be
-omitted when absent. An explicit request without work is valid. No `tracker`
-member is accepted. Unknown or duplicate fields are rejected.
+request and must be omitted when absent. Optional `authority` must exactly match
+the retained Run request (`land` or `review`), and must be omitted when absent.
+`work` must exactly equal the complete persisted WorkReference snapshot,
+including optional display fields, or be omitted when absent. An explicit
+request without work is valid. No `tracker` member is accepted. Unknown or
+duplicate fields are rejected.
 
 The Verifier has its own Run/request IDs but must review the same complete work
 snapshot. Fixer preserves the rejected Subject, branch and work, requires its
@@ -608,15 +618,26 @@ validates the Builder or Fixer request, confirms the request branch still
 points to the Revision, requires every submitted result to pass, and requires
 the submitted names to equal the `.iron-forest/config.yaml` Check names at that Revision,
 in the same order.
+Landing uses the more restrictive authority of the immutable candidate request
+and the approving Run, with omission on either side meaning the profile default.
+If either side is `review`, successful approval returns exit 0 with
+`data.status: "review-only"`: Checks and the approve Verdict are published for
+the exact candidate, but primary is neither fast-forwarded nor pushed. Identical
+retries retain that result. A Fixer cannot replace a rejected review candidate
+with `land` or omitted authority. Both sides absent preserve existing behavior;
+explicit `land` cannot bypass `delivery: external`.
 The credential scan is a Kernel-owned preflight (`forest scan-secrets` against
 the detached candidate worktree, resolved from the running Kernel binary and
 the external `trufflehog` outside the managed checkout). It runs unconditionally
 before configured Checks and never compiles or executes candidate code, so a
 candidate cannot supply the Gate's credential scanner. The atomic push
-publishes Checks and Verdict, fast-forwards primary, and includes the validated
-request OID and candidate branch as no-op leased refspecs. Both Verdict kinds
-require the exact request and work; moved candidates are refused after Checks.
-The request content is not replaced, and the primary branch is never forced.
+publishes Checks and Verdict, includes primary only when landing is authorized,
+and includes the validated request OID and candidate branch as no-op leased
+refspecs. Both Verdict kinds require the exact request and work; moved candidates
+are refused after Checks. The request content is not replaced, and primary is
+never forced. Review-only profiles may open a PR after successful publication;
+that projection is not a merge and agents still never mark tracker work done.
+See [ADR 0029](docs/adr/0029-per-work-item-authority.md).
 Greenfield checks fail closed: the profile declares required commands, and
 publication remains blocked until the candidate actually implements them.
 Candidate configuration must retain native delivery and nonempty Checks.
@@ -687,7 +708,7 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
 | `forest audit log` | Print audit history. |
 | `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer review-request note and branch. |
-| `forest publish verdict <checks> <verdict>` | Publish Checks and Verdict evidence refs; approve also fast-forwards `master`. |
+| `forest publish verdict <checks> <verdict>` | Publish Checks and Verdict evidence refs; authorized approve also fast-forwards primary, review-only approve never does. |
 
 ### Reading the factory
 
@@ -745,6 +766,9 @@ asked for.
 `run list` returns Runs newest first. `status` reports at most ten recent Runs in
 Ledger order, oldest first, because it is a snapshot of the tail rather than a
 pager; its human output labels the order.
+Explicit per-Run `authority` is exposed by `run show`, `run list`, and `status`
+(recent and live Runs), in both JSON and human output. Its absence means the
+profile default, not an inferred work-item permission.
 
 `status` also publishes `ledger`, a roll-up of the whole Ledger for one-command
 instance health: overall `runs` and `pass_rate`; one entry per agent with

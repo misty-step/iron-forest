@@ -81,9 +81,11 @@ Preserve the rejected request's `subject`, `branch`, and complete `work`.
 Write v3 with the new `revision` and `time`, your actual `FOREST_RUN_ID`, and
 your own retained request's `id` as `request_id` (not the Builder's IDs).
 Read `$FOREST_ROOT/.iron-forest/runtime/runs/$FOREST_RUN_ID.request.json`.
-Omit absent `request_id` and `work`; never add `tracker`. The Kernel requires
-the actual live Fixer, exact retained request/work, and an authenticated
-`changes` verdict; old request/verdict evidence remains immutable.
+Copy its `authority` when present; omit absent `request_id`, `authority`, and
+`work`. A rejected `review` candidate must remain `review`; stop if your request
+would elevate it. Never add `tracker`. The Kernel requires the actual live
+Fixer, exact retained request/work/authority, and an authenticated `changes`
+verdict; old request/verdict evidence remains immutable.
 
 ```json
 {"schema":"forest.review-request.v3","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","run_id":"<actual Fixer FOREST_RUN_ID>","request_id":"<actual Fixer request id>","work":{"system":"<unchanged system>","id":"<unchanged immutable id>","key":"<unchanged display key>","url":"<unchanged work URL>"}}

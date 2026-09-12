@@ -47,6 +47,7 @@ func writeReviewPayloadForRun(t *testing.T, revision, branch string, run liveRun
 	t.Helper()
 	payload, err := json.Marshal(reviewRequest{Schema: "forest.review-request.v3",
 		Subject: reviewSubjectForTest(branch), Branch: branch, Revision: revision,
+		Authority: run.Authority,
 		Time: "2026-08-15T00:00:00Z", RunID: run.RunID, RequestID: run.RequestID, Work: run.Work})
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +72,7 @@ func seedPublicationRun(t *testing.T, root string, run liveRunRecord) {
 		t.Fatal(err)
 	}
 	if run.RequestID != "" {
-		data, err := json.Marshal(RunRequest{Schema: "forest.request.v1", ID: run.RequestID, Prompt: "Selected work", Work: run.Work})
+		data, err := json.Marshal(RunRequest{Schema: "forest.request.v1", ID: run.RequestID, Prompt: "Selected work", Authority: run.Authority, Work: run.Work})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -138,6 +139,8 @@ func TestPublishReviewRequestBindsActualRunContext(t *testing.T) {
 		{"run", func(run *liveRunRecord) { run.RunID = "other-builder" }},
 		{"request", func(run *liveRunRecord) { run.RequestID = "other-request" }},
 		{"missing request", func(run *liveRunRecord) { run.RequestID = "" }},
+		{"authority omitted", func(run *liveRunRecord) { run.Authority = "" }},
+		{"authority elevated", func(run *liveRunRecord) { run.Authority = "land" }},
 		{"work system", func(run *liveRunRecord) { run.Work.System = "other-system" }},
 		{"work identity", func(run *liveRunRecord) { run.Work.ID = "other-work" }},
 		{"work display key", func(run *liveRunRecord) { run.Work.Key = "OTHER-1" }},
@@ -150,6 +153,7 @@ func TestPublishReviewRequestBindsActualRunContext(t *testing.T) {
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			run := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-09T00:00:00Z", RequestID: "selected-request",
+				Authority: "review",
 				Work: &WorkReference{System: "opaque", ID: "selected-work", Key: "WORK-1", URL: "https://work.example/1"}}
 			seedPublicationRun(t, root, run)
 			test.change(&run)
@@ -169,12 +173,13 @@ func TestPublishReviewRequestBindsActualRunContext(t *testing.T) {
 }
 
 func TestPublishReviewRequestRequiresOwnedRunBeforeIdentical(t *testing.T) {
-	for _, state := range []string{"ended", "wrong role", "finalizing", "cancelled", "missing retained request"} {
+	for _, state := range []string{"ended", "wrong role", "finalizing", "cancelled", "missing retained request", "authority drift"} {
 		t.Run(state, func(t *testing.T) {
 			root, _ := testClone(t)
 			writePassingChecks(t, root)
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			run := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-09T00:00:00Z", RequestID: "selected-request"}
+			run.Authority = "review"
 			seedPublicationRun(t, root, run)
 			payload := writeReviewPayloadForRun(t, revision, "forest/work/implementation", run)
 			input := publishReviewRequestInput{Root: root, Role: "builder", Branch: "forest/work/implementation", PayloadPath: payload, RunID: run.RunID}
@@ -202,6 +207,12 @@ func TestPublishReviewRequestRequiresOwnedRunBeforeIdentical(t *testing.T) {
 					}
 				case "missing retained request":
 					if err := os.Remove(forestPath(root, "runs", run.RunID+".request.json")); err != nil {
+						t.Fatal(err)
+					}
+				case "authority drift":
+					changed := run
+					changed.Authority = "land"
+					if err := writeLiveRun(liveRunPath(root, "builder"), changed); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -254,12 +265,15 @@ func TestPublishReviewRequestRechecksOwnerAfterChecks(t *testing.T) {
 }
 
 func TestPublishFixerPreservesWorkAndBranch(t *testing.T) {
-	for _, drift := range []string{"none", "subject", "branch", "work"} {
+	for _, drift := range []string{"none", "subject", "branch", "work", "review preserved", "review omitted", "review elevated"} {
 		t.Run(drift, func(t *testing.T) {
 			root, _ := testClone(t)
 			writePassingChecks(t, root)
 			rejected := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			builder := liveRunRecord{RunID: "10-builder", Agent: "builder", StartedAt: "2026-09-09T00:00:00Z", RequestID: "build-request", Work: &WorkReference{System: "opaque", ID: "work-id", Key: "WORK-1"}}
+			if strings.HasPrefix(drift, "review ") {
+				builder.Authority = "review"
+			}
 			seedPublicationRun(t, root, builder)
 			branch := "forest/work/implementation"
 			payload := writeReviewPayloadForRun(t, rejected, branch, builder)
@@ -276,6 +290,7 @@ func TestPublishFixerPreservesWorkAndBranch(t *testing.T) {
 			revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
 			work := *builder.Work
 			fixer := liveRunRecord{RunID: "12-fixer", Agent: "fixer", StartedAt: builder.StartedAt, RequestID: "repair-request", Work: &work}
+			fixer.Authority = builder.Authority
 			switch drift {
 			case "subject":
 				branch = "forest/other/implementation"
@@ -283,20 +298,28 @@ func TestPublishFixerPreservesWorkAndBranch(t *testing.T) {
 				branch = "forest/work/other"
 			case "work":
 				fixer.Work.Key = "WORK-2"
+			case "review omitted":
+				fixer.Authority = ""
+			case "review elevated":
+				fixer.Authority = "land"
 			}
 			seedPublicationRun(t, root, fixer)
 			payload = writeReviewPayloadForRun(t, revision, branch, fixer)
 			before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 			result, err := publishReviewRequest(context.Background(), publishReviewRequestInput{Root: root, Role: "fixer", Branch: branch, PayloadPath: payload, RunID: fixer.RunID, Rejected: rejected})
-			if drift == "none" {
+			if drift == "none" || drift == "review preserved" {
 				if err != nil || result.Status != "published" {
 					t.Fatalf("repair=%#v error=%v", result, err)
 				}
 				verifier.RunID, verifier.RequestID = "13-verifier", "repaired-review-request"
 				seedPublicationRun(t, root, verifier)
 				checks, verdict = writeEvidencePayloads(t, revision, "approve")
-				if _, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID}); err != nil {
+				result, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: verifier.RunID})
+				if err != nil {
 					t.Fatal(err)
+				}
+				if drift == "review preserved" && result.Status != "review-only" {
+					t.Fatalf("fixer lost review-only restriction: %#v", result)
 				}
 				return
 			}
@@ -1351,5 +1374,48 @@ checks:
 				t.Fatalf("ended or changed Run published remote refs:\nbefore:\n%safter:\n%s", before, got)
 			}
 		})
+	}
+}
+
+func TestPublishVerdictRejectsAuthorityChangeDuringChecks(t *testing.T) {
+	root, _ := testClone(t)
+	run := liveRunRecord{RunID: "1-verifier", Agent: "verifier", StartedAt: "2026-09-12T00:00:00Z", RequestID: "review-request"}
+	seedPublicationRun(t, root, run)
+	run.Authority = "review"
+	replacementRoot := t.TempDir()
+	seedPublicationRun(t, replacementRoot, run)
+	t.Setenv("FOREST_TEST_LIVE_RUN", liveRunPath(root, run.Agent))
+	t.Setenv("FOREST_TEST_NEXT_RUN", liveRunPath(replacementRoot, run.Agent))
+	t.Setenv("FOREST_TEST_REQUEST", forestPath(root, "runs", run.RunID+".request.json"))
+	t.Setenv("FOREST_TEST_NEXT_REQUEST", forestPath(replacementRoot, "runs", run.RunID+".request.json"))
+	completed := filepath.Join(t.TempDir(), "check-completed")
+	t.Setenv("FOREST_TEST_CHECK_COMPLETE", completed)
+	config := `repo: owner/name
+primary: refs/heads/master
+agents:
+  builder: {poll: "true", interval: 1}
+checks:
+  - name: test
+    run: |
+      set -e
+      cp "$FOREST_TEST_NEXT_RUN" "$FOREST_TEST_LIVE_RUN"
+      cp "$FOREST_TEST_NEXT_REQUEST" "$FOREST_TEST_REQUEST"
+      printf complete > "$FOREST_TEST_CHECK_COMPLETE"
+`
+	writeTree(t, root, profileName+"/config.yaml", config)
+	runGitDir(t, root, "commit", "-am", "tighten authority during checks")
+	revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
+	pushRequestForRevision(t, root, "work", revision)
+	checks, verdict := writeEvidencePayloads(t, revision, "approve")
+	before := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
+	_, err := publishVerdict(context.Background(), publishVerdictInput{Root: root, ChecksPath: checks, VerdictPath: verdict, RunID: run.RunID})
+	if err == nil || publishConflict(err) {
+		t.Fatalf("authority changed during checks: error=%v", err)
+	}
+	if string(mustRead(t, completed)) != "complete" {
+		t.Fatal("authority-changing check did not finish")
+	}
+	if after := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); after != before {
+		t.Fatal("stale approval authority changed refs")
 	}
 }

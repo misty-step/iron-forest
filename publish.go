@@ -107,8 +107,8 @@ func publishReviewRequest(ctx context.Context, input publishReviewRequestInput) 
 	if note.Schema != "forest.review-request.v3" {
 		return publishReviewRequestResult{}, fmt.Errorf("new review requests require forest.review-request.v3")
 	}
-	if note.RunID != run.RunID || note.RequestID != run.RequestID || !sameWorkReference(note.Work, run.Work) {
-		return publishReviewRequestResult{}, fmt.Errorf("review-request Run, request or work does not match the active %s Run", input.Role)
+	if note.RunID != run.RunID || note.RequestID != run.RequestID || note.Authority != run.Authority || !sameWorkReference(note.Work, run.Work) {
+		return publishReviewRequestResult{}, fmt.Errorf("review-request Run, request, authority or work does not match the active %s Run", input.Role)
 	}
 	if note.Branch != input.Branch {
 		return publishReviewRequestResult{}, fmt.Errorf("payload branch %q does not match %q", note.Branch, input.Branch)
@@ -238,6 +238,9 @@ func requireFixerRequestContinuity(ctx context.Context, root, rejected string, n
 	if previous.Subject != note.Subject || previous.Branch != note.Branch || !sameWorkReference(previous.Work, note.Work) {
 		return rejectionEvidence{}, fmt.Errorf("fixer subject, branch or work does not match the rejected request")
 	}
+	if previous.Authority == "review" && note.Authority != "review" {
+		return rejectionEvidence{}, fmt.Errorf("fixer cannot elevate the rejected request's review authority")
+	}
 	data, verdictOID, err := poller.evidencePayloadAndOID(ctx, "verdict", rejected, "verifier")
 	if err != nil {
 		return rejectionEvidence{}, fmt.Errorf("read rejected verdict: %w", err)
@@ -264,6 +267,15 @@ func requirePublicationRun(root, role, runID string) (liveRunRecord, error) {
 	if err := json.Unmarshal(data, &run); err != nil {
 		return run, fmt.Errorf("parse live %s Run: %w", role, err)
 	}
+	var envelope struct {
+		Authority json.RawMessage `json:"authority"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return run, fmt.Errorf("parse live %s Run authority: %w", role, err)
+	}
+	if !validRunAuthority(run.Authority) || (envelope.Authority != nil && run.Authority == "") {
+		return run, fmt.Errorf("invalid live publication Run authority")
+	}
 	if run.RunID != runID || run.Agent != role || !validNoteTime(run.StartedAt) || run.Result != nil || run.Finalized {
 		return run, fmt.Errorf("FOREST_RUN_ID does not match an active %s Run", role)
 	}
@@ -276,13 +288,13 @@ func requirePublicationRun(root, role, runID string) (liveRunRecord, error) {
 		return run, fmt.Errorf("publication Run has ended")
 	}
 	request, err := readRunRequest(forestPath(root, "runs", runID+".request.json"))
-	if os.IsNotExist(err) && run.RequestID == "" && run.Work == nil {
+	if os.IsNotExist(err) && run.RequestID == "" && run.Work == nil && run.Authority == "" {
 		return run, nil
 	}
 	if err != nil {
 		return run, fmt.Errorf("read retained publication request: %w", err)
 	}
-	if request.ID != run.RequestID || !sameWorkReference(request.Work, run.Work) {
+	if request.ID != run.RequestID || request.Authority != run.Authority || !sameWorkReference(request.Work, run.Work) {
 		return run, fmt.Errorf("live publication Run does not match its retained request")
 	}
 	return run, nil
@@ -293,7 +305,7 @@ func requireUnchangedPublicationRun(root string, previous liveRunRecord) error {
 	if err != nil {
 		return err
 	}
-	if current.StartedAt != previous.StartedAt || current.RequestID != previous.RequestID || !sameWorkReference(current.Work, previous.Work) {
+	if current.StartedAt != previous.StartedAt || current.RequestID != previous.RequestID || current.Authority != previous.Authority || !sameWorkReference(current.Work, previous.Work) {
 		return fmt.Errorf("publication Run context changed")
 	}
 	return nil
