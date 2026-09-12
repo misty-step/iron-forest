@@ -32,7 +32,7 @@ Done when the repository, Kernel revision, configured roster, active or failed R
 
 Keep the Kernel generic. Configure each role through:
 
-- `.iron-forest/config.yaml`: declaration Polls/intervals, optional `max_duration`, one `delivery` authority, and explicit `required_tools`;
+- `.iron-forest/config.yaml`: declaration Polls/intervals, optional `max_duration`, profile `delivery` ceiling, and explicit `required_tools`;
 - `.iron-forest/agents/<name>/agent.md`: system prompt, model, thinking, tool allowlist, optional scheduled `request` command and explicit `extensions`;
 - `.iron-forest/agents/<name>/task.md`: standing task;
 - `.iron-forest/agents/_shared/skills/`: skills every declaration receives when present;
@@ -58,8 +58,12 @@ Done when `forest selfcheck`, `forest config show`, and every affected `forest d
 ## Operate
 
 Use `forest once <name> --request <file>` for one explicitly authorized supervised
-dispatch from a `forest.request.v1` envelope; `work.system` and `work.id` preserve
-an optional immutable association without giving Kernel a tracker API. Stop an
+dispatch from a `forest.request.v1` envelope; optional `authority: land|review`
+can restrict delivery per work item (omission keeps the profile default).
+`work.system` and `work.id` preserve an optional immutable association without
+giving Kernel a tracker API. Review approval publishes evidence with
+`status: review-only`, never advances primary, and remains restricted across
+Verifier/Fixer Runs through the immutable candidate request. Stop an
 existing scheduler before `once`; both respect persistent admission. Use
 `forest admission pause|drain|resume` to control new dispatch, and `forest run
 cancel` only to cancel a particular Run. Drain does not cancel or resume Pi

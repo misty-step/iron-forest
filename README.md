@@ -92,6 +92,14 @@ For direct work, save a `forest.request.v1` JSON file:
 association from a title, branch, or current queue. One Run serves at most one
 primary work reference.
 
+Optional `authority` is exactly `"land"` or `"review"`; explicit empty, null,
+or unknown values are invalid. Omission preserves the profile's existing
+delivery behavior. `land` permits native landing only where the profile already
+allows it; `review` permits working and publishing verification evidence, never
+advancing primary. The Kernel binds this restriction into the immutable
+candidate request as well as the Run. A later Verifier cannot elevate a review
+candidate by omitting its own authority or supplying `land`.
+
 ```sh
 ./.iron-forest/bin/forest admission show --json
 ./.iron-forest/bin/forest once builder --request /path/to/request.json
@@ -100,7 +108,7 @@ primary work reference.
 An explicit `once` appends `prompt` to the standing task and bypasses both Poll
 and a scheduled request command. It still requires open admission and the
 exclusive Kernel lock: stop an existing scheduler before a foreground `once`.
-The request ID and work object survive preparation failure, Pi failure,
+The request ID, authority and work object survive preparation failure, Pi failure,
 cancellation, and interrupted-Run recovery in live evidence and the Ledger.
 The full request is retained as `runtime/runs/<run-id>.request.json`.
 
@@ -112,7 +120,7 @@ object; stderr goes to the Run log. The command has the Poll command's 65-second
 bound. A clean exit 1 means selection raced to no work: no Pi process starts,
 `once` exits 1, and the reserved selection receipt is retained with `no_work: true`
 without becoming a successful or failed model Run in aggregate status. Other
-command errors, malformed output, timeouts, and cleanup failures are failed Runs,
+command errors, malformed output, and execution timeouts are failed Runs,
 not hidden selection of another item. The profile, not Kernel, owns any external
 claim/link command and its tracker API.
 
@@ -192,6 +200,9 @@ A Run records independent facts:
   `interrupted`, or `internal_error`. Missing legacy fields mean unknown.
 - `completion`, when configured, records the profile's observation of the
   requested external effect. It is not a delivery or correctness verdict.
+- `cleanup_error`, when present, reports bounded source/Pi-directory disposal
+  failures without changing `exit`, `outcome`, or the execution `error`.
+  Remaining worktree residue is reported separately as `recovery`.
 
 An optional declaration frontmatter `completion: <shell command>` runs once
 after a harness attempt, before worktree cleanup, in the owning repository root.
@@ -425,6 +436,11 @@ remain symlinks; nothing traverses or restores them as part of custody.
 Pi processes and temporary session state are still cleaned up. A later request
 starts an independent Run; no session or source is automatically resumed.
 
+Successful Runs whose cleanup fails also retain any remaining worktree with
+`recovery` evidence, so startup does not retry its deletion or rerun the model.
+Cleanup may already have removed part of a successful Run's disposable tree;
+its recovery path reports residue, not a promise of an intact checkout.
+
 There is no automatic source expiry or deletion manager. Operators own disk
 capacity and must configure a filesystem/volume quota appropriate to the
 instance. Before disposing of retained work, inspect it with native Git
@@ -451,7 +467,11 @@ snapshot refs before the supervisor force-stops its command group. Agent Runs
 have no wall-clock deadline. They finish when Pi finishes or an
 operator explicitly cancels a foreground `forest once`; service shutdown stops
 new dispatches and drains active Runs without a systemd deadline. Runner
-source identity reads have a separate 30-second bound; cleanup has 10 seconds.
+source identity reads have a separate 30-second bound; worktree cleanup has a
+10-second parent bound independent of the Run context. Within it, Git removal
+gets 2 seconds, filesystem fallback 1 second, and registry pruning 1 second,
+leaving process-group shutdown grace. A large generated tree can exceed these
+bounds; the failure is recorded as cleanup evidence, not an execution failure.
 A completed dispatch starts an audit
 with a separate 60-second bound. These mechanical bounds do not limit agent
 reasoning or model execution.
@@ -508,10 +528,25 @@ under `refs/forest/v1/{request,checks,verdict}/<sha>`, plus `forest/*` branches
 and `master`. This protocol is retained for compatible requests explicitly
 supplied by the operator. A historical queue item does not authorize a Run.
 
+Published immutable refs are the authoritative candidate and verdict record.
+`forest review list` and `forest review show <sha>` read that record from
+`origin`; consumers join GitHub PRs by the exact candidate revision. A
+PR-comment receipt is a human-facing convenience, never a source of truth or
+a second protocol. Per-ticket pins cannot override published evidence.
+
+Verifier identity is a persisted binding, not time-window correlation. On new
+`forest publish verdict` publications, the Kernel adds `verifier_run_id` to the
+stored `verdict.json` (`forest.verdict.v1`) from the validated live Verifier Run.
+The agent payload may omit it; a declared value must match that Run. The Kernel
+serializes the bound payload before create-only publication and identical-retry
+comparison, without modifying the agent's input file. A different Run cannot
+adopt the existing verdict through an identical retry. Historical refs are never
+rewritten: payloads without this field remain readable but explicitly unbound.
+
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit. Verifier calls `forest publish verdict`.
-The Kernel writes Checks and Verdict evidence refs and, on approve, fast-forwards
-the configured primary in the same atomic push. New requests use
+The Kernel writes Checks and Verdict evidence refs and, on authorized approve,
+fast-forwards the configured primary in the same atomic push. New requests use
 `forest.review-request.v3`; historical v1/v2 evidence remains readable and is
 never rewritten. Only pending v2 Powder requests retain their legacy
 reconciliation behavior. Generic v3 requests never invoke GitHub/Powder work
@@ -542,10 +577,12 @@ The current review-request payload is:
 
 `subject` is a branch-routing identity, not a tracker enum. `run_id` must name
 the actual live Builder/Fixer owner. `request_id` must match that Run's retained
-request and must be omitted when absent. `work` must exactly equal the complete
-persisted WorkReference snapshot, including optional display fields, or be
-omitted when absent. An explicit request without work is valid. No `tracker`
-member is accepted. Unknown or duplicate fields are rejected.
+request and must be omitted when absent. Optional `authority` must exactly match
+the retained Run request (`land` or `review`), and must be omitted when absent.
+`work` must exactly equal the complete persisted WorkReference snapshot,
+including optional display fields, or be omitted when absent. An explicit
+request without work is valid. No `tracker` member is accepted. Unknown or
+duplicate fields are rejected.
 
 The Verifier has its own Run/request IDs but must review the same complete work
 snapshot. Fixer preserves the rejected Subject, branch and work, requires its
@@ -608,15 +645,26 @@ validates the Builder or Fixer request, confirms the request branch still
 points to the Revision, requires every submitted result to pass, and requires
 the submitted names to equal the `.iron-forest/config.yaml` Check names at that Revision,
 in the same order.
+Landing uses the more restrictive authority of the immutable candidate request
+and the approving Run, with omission on either side meaning the profile default.
+If either side is `review`, successful approval returns exit 0 with
+`data.status: "review-only"`: Checks and the approve Verdict are published for
+the exact candidate, but primary is neither fast-forwarded nor pushed. Identical
+retries retain that result. A Fixer cannot replace a rejected review candidate
+with `land` or omitted authority. Both sides absent preserve existing behavior;
+explicit `land` cannot bypass `delivery: external`.
 The credential scan is a Kernel-owned preflight (`forest scan-secrets` against
 the detached candidate worktree, resolved from the running Kernel binary and
 the external `trufflehog` outside the managed checkout). It runs unconditionally
 before configured Checks and never compiles or executes candidate code, so a
 candidate cannot supply the Gate's credential scanner. The atomic push
-publishes Checks and Verdict, fast-forwards primary, and includes the validated
-request OID and candidate branch as no-op leased refspecs. Both Verdict kinds
-require the exact request and work; moved candidates are refused after Checks.
-The request content is not replaced, and the primary branch is never forced.
+publishes Checks and Verdict, includes primary only when landing is authorized,
+and includes the validated request OID and candidate branch as no-op leased
+refspecs. Both Verdict kinds require the exact request and work; moved candidates
+are refused after Checks. The request content is not replaced, and primary is
+never forced. Review-only profiles may open a PR after successful publication;
+that projection is not a merge and agents still never mark tracker work done.
+See [ADR 0029](docs/adr/0029-per-work-item-authority.md).
 Greenfield checks fail closed: the profile declares required commands, and
 publication remains blocked until the candidate actually implements them.
 Candidate configuration must retain native delivery and nonempty Checks.
@@ -684,10 +732,12 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest run show <run-id>` | Print one Ledger row. |
 | `forest run cancel <run-id>` | Stop a live Run's process group and record the cancellation in the Ledger. |
 | `forest run logs [--follow] <run-id>` | Print a Run log, or stream it until the Run completes. |
+| `forest review list` | Read published candidate, Checks, and Verdict evidence from origin, keyed by exact revision. |
+| `forest review show <sha>` | Read one published review by full candidate SHA. |
 | `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
 | `forest audit log` | Print audit history. |
-| `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer review-request note and branch. |
-| `forest publish verdict <checks> <verdict>` | Publish Checks and Verdict evidence refs; approve also fast-forwards `master`. |
+| `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer request evidence commit and branch. |
+| `forest publish verdict <checks> <verdict>` | Publish Checks and Verdict evidence refs; authorized approve also fast-forwards primary, review-only approve never does. |
 
 ### Reading the factory
 
@@ -715,6 +765,36 @@ are snake_case throughout, and an empty collection is `[]`, never `null`.
 Adding a key is compatible; renaming or removing one requires the next schema
 version. Version 2 replaces declaration `profile_files` with `skills` and
 removes declaration `env`.
+
+`review list` returns `data.reviews` sorted by revision; `review show` returns
+`data.review`. Both use the Auditor's confirmed remote-ref snapshot fetch and
+temporary local snapshot refs, not a scan of loose ref files. They never publish
+refs, move branches, run Checks, or alter scheduler state.
+
+Each review carries its exact `revision`, the published `branch` when readable,
+and optional `work`, `run_id`, `request_id`, and `authority` from the request.
+Present refs are named by `request_ref`, `checks_ref`, and `verdict_ref`; each
+corresponding `*_commit` carries `sha`, `author`, and `committer`, with identity
+objects `{name, email, time}`. Times are Git commit RFC3339 timestamps. The
+`decision` (`approve` or `changes`) and `summary` exist only when the verdict is
+readable; absence never becomes approval or rejection. Approval alone does not
+prove primary advanced.
+The optional `verifier_run_id` comes only from the readable verdict's persisted
+binding, distinct from the Builder/Fixer `run_id` in the request. It is omitted
+for unbound historical verdicts and unreadable or missing verdict evidence.
+Human output prints `verifier_run_id=<id>` for a bound verdict and
+`verifier=unbound` for a readable historical verdict.
+
+`request_state`, `checks_state`, and `verdict_state` independently report
+`readable`, `missing`, or `unreadable`. Invalid payloads or committer identities
+produce `errors` keyed by evidence kind, not guessed fields. Missing request
+evidence never invents a branch or Work reference. `runs` contains local Ledger
+Run rows matching the exact, non-absent published Work reference, or `[]` when
+none match. These are local execution context, not a second candidate/verdict
+authority. Attribute a verdict to a Verifier Run by comparing the persisted
+`verifier_run_id` with the exact Run ID; Work matches and time-window correlation
+are not proof. No matching Run record means missing execution context, not a
+license to infer identity. Historical unbound evidence is never silently promoted.
 
 Each payload publishes what the command resolved. Three keys guard the rest and
 must be read first:
@@ -745,6 +825,9 @@ asked for.
 `run list` returns Runs newest first. `status` reports at most ten recent Runs in
 Ledger order, oldest first, because it is a snapshot of the tail rather than a
 pager; its human output labels the order.
+Explicit per-Run `authority` is exposed by `run show`, `run list`, and `status`
+(recent and live Runs), in both JSON and human output. Its absence means the
+profile default, not an inferred work-item permission.
 
 `status` also publishes `ledger`, a roll-up of the whole Ledger for one-command
 instance health: overall `runs` and `pass_rate`; one entry per agent with

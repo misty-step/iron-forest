@@ -2,6 +2,25 @@
 
 ### Changed
 
+* Bind new native Verdict evidence to its live Verifier Run using the
+  Kernel-attested `verifier_run_id`; reject mismatched declarations and expose
+  the binding in review list/show JSON and human output. Historical verdicts
+  remain readable and unbound; time-window correlation is not identity proof.
+* Add read-only `forest review list` and `forest review show <sha>` over
+  published immutable request, Checks, and Verdict refs. Report exact revisions,
+  published Work references, commit identities and times, independent missing or
+  unreadable evidence states, and matching local Ledger Runs. Published refs
+  are the candidate/verdict authority; PR-comment receipts are human-facing
+  conveniences, never a parallel source of truth.
+* Keep successful Run outcomes when bounded worktree/Pi-directory disposal
+  fails. Record `cleanup_error` separately from execution errors and preserve
+  remaining worktree recovery evidence without retrying the model or source
+  disposal at startup.
+* Add optional per-request `land`/`review` authority, retained in live Runs and
+  the Ledger and exposed in CLI Run surfaces. Immutable candidate evidence
+  preserves review-only authority across Runs; approval publishes Checks and
+  Verdict with a distinct `review-only` result without advancing primary.
+  Omitted authority keeps existing profile delivery semantics.
 * Record the model provider's own reported charge for a Run. Pi drops
   OpenRouter's charged amount when it recomputes `usage.cost` from catalog
   rates, so the declared model extension now observes that provider response

@@ -72,9 +72,9 @@ it outside this Subject and do not create a speculative ticket.
 
 Use the actual live Builder Run identity and the request retained at
 `$FOREST_ROOT/.iron-forest/runtime/runs/$FOREST_RUN_ID.request.json`.
-Copy its exact `id` into `request_id` and its complete `work` snapshot, including
-optional `key` and `url`. Omit `request_id` if the Run has no request, and omit
-`work` if the request has none. Do not add `tracker` or manufacture missing fields.
+Copy its exact `id` into `request_id`, its `authority` when present, and its
+complete `work` snapshot, including optional `key` and `url`. Omit each absent
+field. Never invent or elevate authority; do not add `tracker`.
 The Kernel checks against the owning primary checkout's live Run and retained
 request, including identical retries and a final check after candidate Checks.
 The Builder writes the initial payload; a Fixer uses its own Run/request identity.

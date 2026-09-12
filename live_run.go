@@ -20,6 +20,7 @@ type liveRunRecord struct {
 	Agent         string            `json:"agent"`
 	StartedAt     string            `json:"started_at"`
 	RequestID     string            `json:"request_id,omitempty"`
+	Authority     string            `json:"authority,omitempty"`
 	Work          *WorkReference    `json:"work,omitempty"`
 	DefinitionSHA string            `json:"definition_sha,omitempty"`
 	ExtensionSHA  map[string]string `json:"extension_sha,omitempty"`
@@ -34,17 +35,19 @@ type liveRunRecord struct {
 // same UTC/RFC3339 timestamp the Runner recorded at dispatch; Elapsed is
 // derived from that recorded timestamp, not from filesystem metadata.
 type LiveRunView struct {
-	RunID       string         `json:"run_id"`
-	Agent       string         `json:"agent"`
-	StartedAt   string         `json:"started_at"`
-	Elapsed     string         `json:"elapsed"`
-	Cancel      string         `json:"cancel"`
-	RequestID   string         `json:"request_id,omitempty"`
-	Work        *WorkReference `json:"work,omitempty"`
-	ProcessExit *int           `json:"process_exit,omitempty"`
-	Outcome     string         `json:"outcome,omitempty"`
-	Completion  *RunCompletion `json:"completion,omitempty"`
-	Recovery    *RunRecovery   `json:"recovery,omitempty"`
+	RunID        string         `json:"run_id"`
+	Agent        string         `json:"agent"`
+	StartedAt    string         `json:"started_at"`
+	Elapsed      string         `json:"elapsed"`
+	Cancel       string         `json:"cancel"`
+	RequestID    string         `json:"request_id,omitempty"`
+	Authority    string         `json:"authority,omitempty"`
+	Work         *WorkReference `json:"work,omitempty"`
+	ProcessExit  *int           `json:"process_exit,omitempty"`
+	Outcome      string         `json:"outcome,omitempty"`
+	Completion   *RunCompletion `json:"completion,omitempty"`
+	Recovery     *RunRecovery   `json:"recovery,omitempty"`
+	CleanupError string         `json:"cleanup_error,omitempty"`
 }
 
 // liveRunPath names the per-agent live Run record. One file per agent is safe
@@ -105,7 +108,7 @@ func writeLiveRun(path string, record liveRunRecord) error {
 func liveRecord(record RunRecord) liveRunRecord {
 	live := liveRunRecord{
 		RunID: record.RunID, Agent: record.Agent, StartedAt: record.Started,
-		RequestID: record.RequestID, Work: record.Work,
+		RequestID: record.RequestID, Authority: record.Authority, Work: record.Work,
 		DefinitionSHA: record.DefinitionSHA, ExtensionSHA: record.ExtensionSHA,
 	}
 	if record.Outcome != "" {
@@ -150,12 +153,13 @@ func readLiveRuns(root string) ([]liveRunRecord, error) {
 // elapsed time is testable without sleeping.
 func liveRunView(record liveRunRecord, now time.Time) LiveRunView {
 	view := LiveRunView{RunID: record.RunID, Agent: record.Agent, StartedAt: record.StartedAt,
-		RequestID: record.RequestID, Work: record.Work}
+		RequestID: record.RequestID, Authority: record.Authority, Work: record.Work}
 	if record.Result != nil {
 		view.ProcessExit = record.Result.ProcessExit
 		view.Outcome = record.Result.Outcome
 		view.Completion = record.Result.Completion
 		view.Recovery = record.Result.Recovery
+		view.CleanupError = record.Result.CleanupError
 	}
 	if record.RunID != "" {
 		view.Cancel = "forest run cancel " + record.RunID
@@ -197,7 +201,7 @@ func recoverInterruptedRuns(root string) error {
 			return err
 		} else if !found {
 			record := RunRecord{RunID: live.RunID, Agent: live.Agent, Started: live.StartedAt,
-				RequestID: live.RequestID, Work: live.Work, DefinitionSHA: live.DefinitionSHA,
+				RequestID: live.RequestID, Authority: live.Authority, Work: live.Work, DefinitionSHA: live.DefinitionSHA,
 				ExtensionSHA: live.ExtensionSHA}
 			if live.Result != nil {
 				if live.Result.RunID != live.RunID || live.Result.Agent != live.Agent {

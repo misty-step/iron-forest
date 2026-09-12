@@ -80,6 +80,7 @@ type reviewRequest struct {
 	Time      string         `json:"time"`
 	RunID     string         `json:"run_id,omitempty"`
 	RequestID string         `json:"request_id,omitempty"`
+	Authority string         `json:"authority,omitempty"`
 	Work      *WorkReference `json:"work,omitempty"`
 	// Tracker is read-only compatibility for immutable v2 evidence.
 	Tracker string `json:"tracker,omitempty"`
@@ -109,11 +110,12 @@ type checksNotePayload struct {
 }
 
 type verdictNote struct {
-	Schema   string `json:"schema"`
-	Revision string `json:"revision"`
-	Verdict  string `json:"verdict"`
-	Summary  string `json:"summary"`
-	Time     string `json:"time"`
+	Schema        string  `json:"schema"`
+	Revision      string  `json:"revision"`
+	Verdict       string  `json:"verdict"`
+	Summary       string  `json:"summary"`
+	Time          string  `json:"time"`
+	VerifierRunID *string `json:"verifier_run_id,omitempty"`
 }
 
 type strictJSONShape struct {
@@ -237,6 +239,7 @@ func decodeReview(data []byte, sha string) (reviewRequest, error) {
 	var probe struct {
 		Schema    string          `json:"schema"`
 		RequestID json.RawMessage `json:"request_id"`
+		Authority json.RawMessage `json:"authority"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return reviewRequest{}, err
@@ -254,6 +257,7 @@ func decodeReview(data []byte, sha string) (reviewRequest, error) {
 		text := &strictJSONShape{stringOnly: true}
 		shape.fields["run_id"] = text
 		shape.fields["request_id"] = text
+		shape.fields["authority"] = text
 		for field := range shape.fields {
 			shape.fields[field] = text
 		}
@@ -267,6 +271,9 @@ func decodeReview(data []byte, sha string) (reviewRequest, error) {
 	var note reviewRequest
 	if err := decodeStrictJSON(data, &note, shape); err != nil {
 		return note, err
+	}
+	if !validRunAuthority(note.Authority) || (probe.Authority != nil && note.Authority == "") {
+		return note, fmt.Errorf("invalid review-request authority")
 	}
 	if !isSHA(sha) || note.Revision != sha || !branchBelongsToSubject(note.Branch, note.Subject) || !validNoteTime(note.Time) {
 		return note, fmt.Errorf("invalid review-request note")
@@ -417,11 +424,16 @@ func decodeChecks(data []byte, sha string) (checksNote, error) {
 
 func decodeVerdict(data []byte, sha string) (verdictNote, error) {
 	var note verdictNote
-	if err := decodeStrictJSON(data, &note, objectJSONShape("schema", "revision", "verdict", "summary", "time")); err != nil {
+	shape := objectJSONShape("schema", "revision", "verdict", "summary", "time")
+	shape.fields["verifier_run_id"] = &strictJSONShape{stringOnly: true}
+	if err := decodeStrictJSON(data, &note, shape); err != nil {
 		return note, err
 	}
 	if note.Schema != "forest.verdict.v1" || note.Revision != sha || (note.Verdict != "approve" && note.Verdict != "changes") || strings.TrimSpace(note.Summary) == "" || !validNoteTime(note.Time) {
 		return note, fmt.Errorf("invalid verdict note")
+	}
+	if note.VerifierRunID != nil && !validPublicationRunID(*note.VerifierRunID) {
+		return note, fmt.Errorf("invalid verdict verifier_run_id")
 	}
 	return note, nil
 }

@@ -13,6 +13,57 @@ import (
 	"time"
 )
 
+func TestRunRequestAuthorityValidation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		field     string
+		authority string
+		valid     bool
+	}{
+		{name: "absent", valid: true},
+		{name: "land", field: `,"authority":"land"`, authority: "land", valid: true},
+		{name: "review", field: `,"authority":"review"`, authority: "review", valid: true},
+		{name: "empty", field: `,"authority":""`},
+		{name: "null", field: `,"authority":null`},
+		{name: "unknown", field: `,"authority":"publish"`},
+		{name: "case", field: `,"authority":"Land"`},
+		{name: "whitespace", field: `,"authority":" review "`},
+		{name: "number", field: `,"authority":1`},
+		{name: "boolean", field: `,"authority":true`},
+		{name: "object", field: `,"authority":{}`},
+		{name: "array", field: `,"authority":["land"]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := []byte(`{"schema":"forest.request.v1","id":"request","prompt":"Do one thing"` + test.field + `}`)
+			request, err := decodeRunRequest(data)
+			if !test.valid {
+				if err == nil {
+					t.Fatalf("invalid authority admitted: %#v", request)
+				}
+				return
+			}
+			if err != nil || request.Authority != test.authority {
+				t.Fatalf("request=%#v err=%v, want authority %q", request, err, test.authority)
+			}
+			retained, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(retained, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if authority, present := fields["authority"]; present != (test.authority != "") || present && authority != test.authority {
+				t.Fatalf("retained authority=%v present=%t, want %q", authority, present, test.authority)
+			}
+			roundTrip, err := decodeRunRequest(retained)
+			if err != nil || !reflect.DeepEqual(roundTrip, request) {
+				t.Fatalf("retained request changed: %#v err=%v", roundTrip, err)
+			}
+		})
+	}
+}
+
 func TestExplicitRequestBypassesSelectionAndSurvivesFailedRun(t *testing.T) {
 	root, _ := testClone(t)
 	state := t.TempDir()
@@ -34,7 +85,7 @@ func TestExplicitRequestBypassesSelectionAndSurvivesFailedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := &RunRequest{Schema: "forest.request.v1", ID: "request-immutable", Prompt: "Fix only the supplied request.", Work: &WorkReference{System: "https://tracker.example", ID: "immutable-item-id", Key: "EX-9"}}
+	request := &RunRequest{Schema: "forest.request.v1", ID: "request-immutable", Prompt: "Fix only the supplied request.", Authority: "review", Work: &WorkReference{System: "https://tracker.example", ID: "immutable-item-id", Key: "EX-9"}}
 	scheduler := NewScheduler(root, cfg, runner)
 	dispatched, err := scheduler.OnceRequest(context.Background(), "builder", request)
 	if !dispatched || err == nil {
@@ -44,11 +95,11 @@ func TestExplicitRequestBypassesSelectionAndSurvivesFailedRun(t *testing.T) {
 		t.Fatalf("explicit request invoked hidden selection: %v", err)
 	}
 	args, err := os.ReadFile(argsPath)
-	if err != nil || !strings.Contains(string(args), "Standing task") || !strings.Contains(string(args), request.Prompt) {
+	if err != nil || !strings.Contains(string(args), "Standing task") || !strings.Contains(string(args), request.Prompt) || !strings.Contains(string(args), "Publication authority: review") {
 		t.Fatalf("Run did not receive both standing task and explicit request: %q %v", args, err)
 	}
 	rows, err := readLedger(root, -1)
-	if err != nil || len(rows) != 1 || rows[0].Exit != 7 || rows[0].ProcessExit == nil || *rows[0].ProcessExit != 7 || rows[0].Outcome != runOutcomeExecutionFailed || rows[0].RequestID != request.ID || !reflect.DeepEqual(rows[0].Work, request.Work) {
+	if err != nil || len(rows) != 1 || rows[0].Exit != 7 || rows[0].ProcessExit == nil || *rows[0].ProcessExit != 7 || rows[0].Outcome != runOutcomeExecutionFailed || rows[0].RequestID != request.ID || rows[0].Authority != request.Authority || !reflect.DeepEqual(rows[0].Work, request.Work) {
 		t.Fatalf("failed Run lost immutable attribution: %#v %v", rows, err)
 	}
 	retained, err := readRunRequest(forestPath(root, "runs", rows[0].RunID+".request.json"))
@@ -58,15 +109,38 @@ func TestExplicitRequestBypassesSelectionAndSurvivesFailedRun(t *testing.T) {
 }
 
 func TestScheduledRequestReceivesRunIDBeforePreparationFailure(t *testing.T) {
-	root := t.TempDir()
-	runner := NewRunner(root)
-	record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "Standing task", RequestCommand: `printf '{"schema":"forest.request.v1","id":"%s","prompt":"One request","work":{"system":"tracker","id":"immutable"}}\n' "$FOREST_RUN_ID"`})
-	if err == nil || record.Exit == 0 || record.ProcessExit != nil || record.Outcome != runOutcomeSetupFailed || record.RequestID != record.RunID || record.Work == nil || record.Work.ID != "immutable" {
-		t.Fatalf("preparation failure lost selected request: %#v %v", record, err)
-	}
-	retained, found, err := FindRun(root, record.RunID)
-	if err != nil || !found || retained.RequestID != record.RequestID || !reflect.DeepEqual(retained.Work, record.Work) {
-		t.Fatalf("preparation failure missing from Ledger: %#v found=%t err=%v", retained, found, err)
+	for _, authority := range []string{"", "land", "review"} {
+		t.Run("authority="+authority, func(t *testing.T) {
+			root := t.TempDir()
+			runner := NewRunner(root)
+			field := ""
+			if authority != "" {
+				field = `,"authority":"` + authority + `"`
+			}
+			record, err := runner.Run(context.Background(), Declaration{Name: "builder", Model: "local", TaskPrompt: "Standing task", RequestCommand: `printf '{"schema":"forest.request.v1","id":"%s","prompt":"One request","work":{"system":"tracker","id":"immutable"}` + field + `}\n' "$FOREST_RUN_ID"`})
+			if err == nil || record.Exit == 0 || record.ProcessExit != nil || record.Outcome != runOutcomeSetupFailed || record.RequestID != record.RunID || record.Authority != authority || record.Work == nil || record.Work.ID != "immutable" {
+				t.Fatalf("preparation failure lost selected request: %#v %v", record, err)
+			}
+			retained, found, err := FindRun(root, record.RunID)
+			if err != nil || !found || retained.RequestID != record.RequestID || retained.Authority != authority || !reflect.DeepEqual(retained.Work, record.Work) {
+				t.Fatalf("preparation failure missing from Ledger: %#v found=%t err=%v", retained, found, err)
+			}
+			request, err := readRunRequest(forestPath(root, "runs", record.RunID+".request.json"))
+			if err != nil || request.Authority != authority || request.ID != record.RequestID {
+				t.Fatalf("retained request lost authority: %#v err=%v", request, err)
+			}
+			log, err := os.ReadFile(runLogPath(root, record.RunID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var evidence map[string]any
+			if err := json.Unmarshal([]byte(strings.SplitN(string(log), "\n", 2)[0]), &evidence); err != nil {
+				t.Fatalf("invalid Run evidence: %v", err)
+			}
+			if got, present := evidence["authority"]; present != (authority != "") || present && got != authority {
+				t.Fatalf("Run evidence authority=%v present=%t, want %q", got, present, authority)
+			}
+		})
 	}
 }
 
@@ -228,24 +302,39 @@ func TestAdmissionDrainWaitsWithoutCancellingAndBlocksResume(t *testing.T) {
 }
 
 func TestInterruptedRunRecoveryPreservesAttributionWithoutDuplicates(t *testing.T) {
-	root := t.TempDir()
-	live := liveRunRecord{RunID: "1-builder", Agent: "builder", StartedAt: "2026-01-01T00:00:00Z", RequestID: "request", Work: &WorkReference{System: "tracker", ID: "immutable"}, DefinitionSHA: "definition", ExtensionSHA: map[string]string{".iron-forest/usage.ts": "digest"}}
-	if err := writeLiveRun(liveRunPath(root, live.Agent), live); err != nil {
-		t.Fatal(err)
-	}
-	if err := recoverInterruptedRuns(root); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a crash after Ledger publication but before live-record removal.
-	if err := writeLiveRun(liveRunPath(root, live.Agent), live); err != nil {
-		t.Fatal(err)
-	}
-	if err := recoverInterruptedRuns(root); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := readLedger(root, -1)
-	if err != nil || len(rows) != 1 || rows[0].Exit != 137 || rows[0].Outcome != runOutcomeInterrupted || rows[0].ProcessExit != nil || rows[0].RequestID != live.RequestID || !reflect.DeepEqual(rows[0].Work, live.Work) || !reflect.DeepEqual(rows[0].ExtensionSHA, live.ExtensionSHA) {
-		t.Fatalf("interrupted attribution duplicated or lost: %#v %v", rows, err)
+	for _, authority := range []string{"", "land", "review"} {
+		for _, stage := range []string{"running", "finalizing", "finalized"} {
+			t.Run("authority="+authority+"/"+stage, func(t *testing.T) {
+				root := t.TempDir()
+				record := RunRecord{RunID: "1-builder", Agent: "builder", Started: "2026-01-01T00:00:00Z", RequestID: "request", Authority: authority, Work: &WorkReference{System: "tracker", ID: "immutable"}, DefinitionSHA: "definition", ExtensionSHA: map[string]string{".iron-forest/usage.ts": "digest"}}
+				if stage != "running" {
+					record.Outcome = runOutcomeCompleted
+				}
+				live := liveRecord(record)
+				live.Finalized = stage == "finalized"
+				if err := writeLiveRun(liveRunPath(root, live.Agent), live); err != nil {
+					t.Fatal(err)
+				}
+				if err := recoverInterruptedRuns(root); err != nil {
+					t.Fatal(err)
+				}
+				// Simulate a crash after Ledger publication but before live-record removal.
+				if err := writeLiveRun(liveRunPath(root, live.Agent), live); err != nil {
+					t.Fatal(err)
+				}
+				if err := recoverInterruptedRuns(root); err != nil {
+					t.Fatal(err)
+				}
+				wantExit, wantOutcome := 137, runOutcomeInterrupted
+				if live.Finalized {
+					wantExit, wantOutcome = 0, runOutcomeCompleted
+				}
+				rows, err := readLedger(root, -1)
+				if err != nil || len(rows) != 1 || rows[0].Exit != wantExit || rows[0].Outcome != wantOutcome || rows[0].ProcessExit != nil || rows[0].RequestID != live.RequestID || rows[0].Authority != authority || !reflect.DeepEqual(rows[0].Work, live.Work) || !reflect.DeepEqual(rows[0].ExtensionSHA, live.ExtensionSHA) {
+					t.Fatalf("interrupted attribution duplicated or lost: %#v %v", rows, err)
+				}
+			})
+		}
 	}
 }
 

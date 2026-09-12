@@ -906,7 +906,7 @@ exec "$REAL_GIT" "$@"
 	}
 }
 
-func TestRunnerJoinsCleanupErrors(t *testing.T) {
+func TestRunnerReportsCleanupErrorsWithoutFailingExecution(t *testing.T) {
 	root, _ := testClone(t)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -936,12 +936,12 @@ exec "$REAL_GIT" "$@"
 	runner := NewRunner(root)
 	runner.GitPath, runner.PiPath = gitWrapper, omp
 	record, err := runner.Run(context.Background(), Declaration{Name: "builder"})
-	if err == nil || record.Exit != 1 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeInternalError {
+	if err != nil || record.Exit != 0 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeCompleted || record.Error != "" {
 		t.Fatalf("cleanup record=%#v err=%v", record, err)
 	}
 	for _, want := range []string{"git worktree remove", "exit status 9", "git worktree prune", "exit status 11"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("cleanup error %q missing %q", err, want)
+		if !strings.Contains(record.CleanupError, want) {
+			t.Fatalf("cleanup error %q missing %q", record.CleanupError, want)
 		}
 	}
 	worktree := forestPath(root, "worktrees", record.RunID)
@@ -955,8 +955,78 @@ exec "$REAL_GIT" "$@"
 		t.Fatalf("failed Git remove left registry residue:\n%s", list)
 	}
 	rows, readErr := readLedger(root, -1)
-	if readErr != nil || len(rows) != 1 || rows[0].Exit != 1 {
+	if readErr != nil || len(rows) != 1 || rows[0].Exit != 0 || rows[0].CleanupError != record.CleanupError {
 		t.Fatalf("ledger=%v err=%v", rows, readErr)
+	}
+}
+
+func TestRunnerCleanupTimeoutPreservesSuccessfulRun(t *testing.T) {
+	root, _ := testClone(t)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realRM, err := exec.LookPath("rm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	effect := filepath.Join(state, "published")
+	t.Setenv("REAL_GIT", realGit)
+	t.Setenv("REAL_RM", realRM)
+	t.Setenv("EFFECT", effect)
+	gitWrapper := filepath.Join(state, "git")
+	// Block until the Runner kills the group, rather than racing a delay
+	// against a deadline. Other Git operations use the real local repository.
+	gitScript := `#!/bin/sh
+if [ "$1" = worktree ] && [ "$2" = remove ]; then
+	while :; do /bin/sleep 30; done
+fi
+exec "$REAL_GIT" "$@"
+`
+	if err := os.WriteFile(gitWrapper, []byte(gitScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rmScript := `#!/bin/sh
+case "$3" in
+	*/worktrees/*) while :; do /bin/sleep 30; done ;;
+esac
+exec "$REAL_RM" "$@"
+`
+	if err := os.WriteFile(filepath.Join(state, "rm"), []byte(rmScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", state+string(os.PathListSeparator)+os.Getenv("PATH"))
+	pi := filepath.Join(state, "pi")
+	piScript := "#!/bin/sh\nprintf delivered > \"$EFFECT\"\nprintf '%s\\n' '{\"usage\":{\"input\":1}}'\n"
+	if err := os.WriteFile(pi, []byte(piScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewRunner(root)
+	runner.GitPath, runner.PiPath = gitWrapper, pi
+	record, err := runner.Run(context.Background(), Declaration{Name: "verifier"})
+	if err != nil || record.Exit != 0 || record.ProcessExit == nil || *record.ProcessExit != 0 || record.Outcome != runOutcomeCompleted || record.Error != "" {
+		t.Fatalf("cleanup changed successful execution: %#v %v", record, err)
+	}
+	for _, want := range []string{"git worktree remove: context deadline exceeded", "remove worktree path: context deadline exceeded"} {
+		if !strings.Contains(record.CleanupError, want) {
+			t.Fatalf("lost cleanup deadline diagnostic: %#v", record)
+		}
+	}
+	if body, err := os.ReadFile(effect); err != nil || string(body) != "delivered" {
+		t.Fatalf("successful effect lost: %q %v", body, err)
+	}
+	rows, err := readLedger(root, -1)
+	if err != nil || len(rows) != 1 || rows[0].Outcome != runOutcomeCompleted || rows[0].Exit != 0 || rows[0].Error != "" || rows[0].Recovery == nil {
+		t.Fatalf("Ledger lost successful execution or cleanup recovery: %#v %v", rows, err)
+	}
+	// Startup must not retry destruction of a worktree explicitly retained
+	// after a successful Run's bounded cleanup failed.
+	if err := cleanupReservedResidue(root, NewRunner(root)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, rows[0].Recovery.Path, ".git")); err != nil {
+		t.Fatalf("cleanup recovery lost its native Git worktree: %v", err)
 	}
 }
 

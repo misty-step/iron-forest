@@ -91,11 +91,14 @@ Write each payload to a temporary file outside the repository, then call only:
 
 The Kernel validates both Verdict kinds against an authenticated exact-revision
 request and your live owned Run's full work snapshot. On `approve` it reruns
-configured Checks and fast-forwards primary atomically with create-only Checks
-and Verdict refs. The candidate branch and immutable request are checked again
-before publication. Use your own Runner `FOREST_RUN_ID`; do not replace this
-Effect with `git push`, force, retries, or another SHA. Generic v3 publication
-never reconciles GitHub or Powder work; the profile observes completion.
+configured Checks and publishes create-only Checks and Verdict refs. If either
+the candidate request or your Run has `authority: review`, publication returns
+`review-only` and primary does not move; report that the candidate awaits the
+operator. Otherwise the existing native fast-forward behavior applies. The
+candidate branch and immutable request are checked again before publication.
+Use your own Runner `FOREST_RUN_ID`; do not replace this Effect with `git push`,
+force, retries, or another SHA. Generic v3 publication never reconciles GitHub
+or Powder work; the profile observes completion.
 
 ## Result
 

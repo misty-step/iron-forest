@@ -539,13 +539,15 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 		if err := writeLiveRun(livePath, liveRecord(record)); err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("retain Run execution: %w", err))
 		}
-		var finalizationErr error
+		var finalizationErr, cleanupErr error
 		if piDir != "" {
 			// Read the Run's provider receipt before its Pi directory is
 			// disposable; a missing or malformed receipt leaves the charge
 			// unknown and never fails an otherwise successful Run.
 			record.ProviderCost = readProviderCost(piDir)
-			finalizationErr = errors.Join(finalizationErr, r.cleanupFilesystem(piDir))
+			if err := r.cleanupFilesystem(piDir); err != nil {
+				cleanupErr = fmt.Errorf("remove Pi directory %s: %w", piDir, err)
+			}
 		}
 		if logFile != nil {
 			if !evidenceWritten {
@@ -569,17 +571,20 @@ func (r *Runner) Run(ctx context.Context, declaration Declaration) (record RunRe
 		}
 		if worktreeMayExist {
 			// Discover log/usage failures before deciding that source is disposable.
-			if runErr == nil && finalizationErr == nil && (record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork) {
-				finalizationErr = errors.Join(finalizationErr, r.cleanupWorktree(worktree, runID))
+			if runErr == nil && finalizationErr == nil && cleanupErr == nil && (record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork) {
+				cleanupErr = errors.Join(cleanupErr, r.cleanupWorktree(worktree, runID))
 			}
-			if runErr != nil || finalizationErr != nil || (record.Outcome != runOutcomeCompleted && record.Outcome != runOutcomeNoWork) {
+			if runErr != nil || finalizationErr != nil || cleanupErr != nil || (record.Outcome != runOutcomeCompleted && record.Outcome != runOutcomeNoWork) {
 				ctx, cancel := context.WithTimeout(context.Background(), reservedCleanupTimeout)
 				record.Recovery = r.retainedWorktree(ctx, runID)
 				cancel()
 			}
 		}
-		// Preserve the first execution cause. Cleanup or usage failures make an
-		// otherwise successful attempt an internal error, never alter raw Pi exit.
+		if cleanupErr != nil {
+			record.CleanupError = cleanupErr.Error()
+		}
+		// Source disposal is best-effort after execution. Only evidence or
+		// accounting failures invalidate an otherwise successful attempt.
 		runErr = errors.Join(runErr, finalizationErr)
 		if runErr != nil && (record.Outcome == runOutcomeCompleted || record.Outcome == runOutcomeNoWork) {
 			record.Outcome = runOutcomeInternalError
@@ -1360,6 +1365,9 @@ func runEvidenceLine(record RunRecord, declaration Declaration) string {
 	}
 	if record.RequestID != "" {
 		evidence["request_id"] = record.RequestID
+	}
+	if record.Authority != "" {
+		evidence["authority"] = record.Authority
 	}
 	if record.Work != nil {
 		evidence["work"] = record.Work

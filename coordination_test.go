@@ -58,6 +58,38 @@ func TestDecodeReviewRejectsCrossFields(t *testing.T) {
 	}
 }
 
+func TestDecodeReviewAuthority(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	base := `{"schema":"forest.review-request.v3","subject":"work","branch":"forest/work/implementation","revision":"` + sha + `","time":"2026-09-12T00:00:00Z","run_id":"10-builder"`
+	for _, test := range []struct {
+		name      string
+		field     string
+		authority string
+		valid     bool
+	}{
+		{"absent", "", "", true},
+		{"land", `,"authority":"land"`, "land", true},
+		{"review", `,"authority":"review"`, "review", true},
+		{"empty", `,"authority":""`, "", false},
+		{"null", `,"authority":null`, "", false},
+		{"unknown", `,"authority":"merge"`, "", false},
+		{"case", `,"authority":"Review"`, "", false},
+		{"number", `,"authority":1`, "", false},
+		{"boolean", `,"authority":true`, "", false},
+		{"duplicate", `,"authority":"review","authority":"land"`, "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			note, err := decodeReview([]byte(base+test.field+"}"), sha)
+			if (err == nil) != test.valid {
+				t.Fatalf("authority %s: note=%#v error=%v", test.field, note, err)
+			}
+			if test.valid && note.Authority != test.authority {
+				t.Fatalf("authority=%q want %q", note.Authority, test.authority)
+			}
+		})
+	}
+}
+
 func TestBranchGrammars(t *testing.T) {
 	if validForestBranch("forest/4-work") {
 		t.Fatal("hyphen grammar still accepted")

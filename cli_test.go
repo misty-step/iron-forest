@@ -667,9 +667,6 @@ func TestCLIPublishVerdictRequiresRunID(t *testing.T) {
 			if got := string(fetchEvidenceFile(t, root, "checks", revision, "checks.json")); got != string(mustRead(t, checks)) {
 				t.Fatalf("published checks=%q", got)
 			}
-			if got := string(fetchEvidenceFile(t, root, "verdict", revision, "verdict.json")); got != string(mustRead(t, verdict)) {
-				t.Fatalf("published verdict=%q", got)
-			}
 			if got := string(runGit(t, "--git-dir="+origin, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")); got != headsBefore {
 				t.Fatalf("changes verdict moved primary:\nbefore:\n%safter:\n%s", headsBefore, got)
 			}

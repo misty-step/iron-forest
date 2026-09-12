@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -47,6 +48,9 @@ func runPublishVerdict(rest []string, flags cliFlags) cliOutcome {
 	if result.Status == "identical" {
 		human = fmt.Sprintf("accepted identical %s verdict for %s", result.Verdict, result.Revision)
 	}
+	if result.Status == "review-only" {
+		human = fmt.Sprintf("published review-only %s verdict for %s; primary unchanged", result.Verdict, result.Revision)
+	}
 	return cliOutcome{Exit: exitOK, Data: result, Human: human}
 }
 
@@ -90,6 +94,17 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err != nil {
 		return publishVerdictResult{}, err
 	}
+	if verdict.VerifierRunID != nil && *verdict.VerifierRunID != run.RunID {
+		return publishVerdictResult{}, fmt.Errorf("verdict verifier_run_id does not match live Verifier run")
+	}
+	// Bind the validated live owner before comparing or committing evidence.
+	// Historical refs are immutable and remain unbound; only new publications
+	// receive this Kernel-attested identity.
+	verdict.VerifierRunID = &run.RunID
+	verdictData, err = json.Marshal(verdict)
+	if err != nil {
+		return publishVerdictResult{}, fmt.Errorf("encode bound verdict: %w", err)
+	}
 	checks, err := decodeChecks(checksData, revision)
 	if err != nil {
 		return publishVerdictResult{}, err
@@ -108,6 +123,7 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	if err != nil {
 		return publishVerdictResult{}, err
 	}
+	reviewOnly := verdict.Verdict == "approve" && (request.Authority == "review" || run.Authority == "review")
 
 	checksRef := evidenceChecksRefPrefix + revision
 	verdictRef := evidenceVerdictRefPrefix + revision
@@ -130,7 +146,11 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		if err := requireNativeDelivery(runRoot); err != nil {
 			return publishVerdictResult{}, err
 		}
-		return publishVerdictResult{Status: "identical", Revision: revision, Verdict: verdict.Verdict}, nil
+		status := "identical"
+		if reviewOnly {
+			status = "review-only"
+		}
+		return publishVerdictResult{Status: status, Revision: revision, Verdict: verdict.Verdict}, nil
 	}
 	if existingChecks != "" || existingVerdict != "" {
 		return publishVerdictResult{}, conflictError("conflicting evidence ref for %s", revision)
@@ -141,9 +161,11 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 	}
 	var primaryRef string
 	if verdict.Verdict == "approve" {
-		primaryRef, _, err = resolvePrimary(ctx, input.Root, cfg)
-		if err != nil {
-			return publishVerdictResult{}, fmt.Errorf("resolve primary ref: %w", err)
+		if !reviewOnly {
+			primaryRef, _, err = resolvePrimary(ctx, input.Root, cfg)
+			if err != nil {
+				return publishVerdictResult{}, fmt.Errorf("resolve primary ref: %w", err)
+			}
 		}
 		if err := runConfiguredChecksWithAttestation(ctx, input.Root, revision, checks.Results); err != nil {
 			return publishVerdictResult{}, err
@@ -176,7 +198,7 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		requestOID+":"+requestRef,
 		revision+":"+branchRef,
 	)
-	if verdict.Verdict == "approve" {
+	if primaryRef != "" {
 		args = append(args, revision+":"+primaryRef)
 	}
 	if err := poller.confirmEvidence(ctx, branchTip{Name: request.Branch, SHA: revision}, requestOID, ""); err != nil {
@@ -194,6 +216,9 @@ func publishVerdict(ctx context.Context, input publishVerdictInput) (publishVerd
 		return publishVerdictResult{}, classifyVerdictPush(err)
 	}
 	result := publishVerdictResult{Status: "published", Revision: revision, Verdict: verdict.Verdict}
+	if reviewOnly {
+		result.Status = "review-only"
+	}
 	return result, nil
 }
 
@@ -235,7 +260,7 @@ func payloadRevision(data []byte) (string, error) {
 	var payload struct {
 		Revision string `json:"revision"`
 	}
-	if err := decodeStrictJSON(data, &payload, objectJSONShape("schema", "revision", "verdict", "summary", "time")); err != nil {
+	if err := decodeStrictJSON(data, &payload, objectJSONShape("schema", "revision", "verdict", "summary", "time", "verifier_run_id")); err != nil {
 		return "", err
 	}
 	if !isSHA(payload.Revision) {

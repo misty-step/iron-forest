@@ -83,6 +83,9 @@ type RunRecord struct {
 	// from either execution status. It is absent without a configured observer.
 	Completion *RunCompletion `json:"completion,omitempty"`
 	Recovery   *RunRecovery   `json:"recovery,omitempty"`
+	// CleanupError reports bounded disposal failures without changing execution
+	// status. Recovery identifies remaining worktree residue, when available.
+	CleanupError string `json:"cleanup_error,omitempty"`
 	// NoWork marks an admitted selection whose request command exited 1
 	// before a request or model execution existed. It is not a failed Run.
 	NoWork     bool  `json:"no_work,omitempty"`
@@ -103,6 +106,7 @@ type RunRecord struct {
 	// dispatch, so a later check can see which declaration a Run executed.
 	DefinitionSHA string            `json:"definition_sha,omitempty"`
 	RequestID     string            `json:"request_id,omitempty"`
+	Authority     string            `json:"authority,omitempty"`
 	Work          *WorkReference    `json:"work,omitempty"`
 	ExtensionSHA  map[string]string `json:"extension_sha,omitempty"`
 }
