@@ -136,6 +136,8 @@ func cliCommands() []cliCommand {
 		{phrase: "run show", args: 1, operands: "<run-id>", run: runRunShow},
 		{phrase: "run cancel", args: 1, operands: "<run-id>", run: runRunCancel},
 		{phrase: "run logs", args: 1, operands: "<run-id>", optional: []string{flagFollow}, run: runRunLogs},
+		{phrase: "review list", run: runReviewList},
+		{phrase: "review show", args: 1, operands: "<sha>", run: runReviewShow},
 		{phrase: "audit show", optional: []string{flagRescan}, run: runAuditShow},
 		{phrase: "audit log", optional: []string{flagLimit}, run: runAuditLog},
 		{phrase: "scan-secrets", args: 1, operands: "<dir>", run: runScanSecrets},

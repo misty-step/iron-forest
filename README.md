@@ -528,6 +528,12 @@ under `refs/forest/v1/{request,checks,verdict}/<sha>`, plus `forest/*` branches
 and `master`. This protocol is retained for compatible requests explicitly
 supplied by the operator. A historical queue item does not authorize a Run.
 
+Published immutable refs are the authoritative candidate and verdict record.
+`forest review list` and `forest review show <sha>` read that record from
+`origin`; consumers join GitHub PRs by the exact candidate revision. A
+PR-comment receipt is a human-facing convenience, never a source of truth or
+a second protocol. Per-ticket pins cannot override published evidence.
+
 Builder and Fixer call `forest publish review-request`. The Kernel publishes
 the branch and a request evidence commit. Verifier calls `forest publish verdict`.
 The Kernel writes Checks and Verdict evidence refs and, on authorized approve,
@@ -717,9 +723,11 @@ columns when the Run identity is long. `--json` still carries the full
 | `forest run show <run-id>` | Print one Ledger row. |
 | `forest run cancel <run-id>` | Stop a live Run's process group and record the cancellation in the Ledger. |
 | `forest run logs [--follow] <run-id>` | Print a Run log, or stream it until the Run completes. |
+| `forest review list` | Read published candidate, Checks, and Verdict evidence from origin, keyed by exact revision. |
+| `forest review show <sha>` | Read one published review by full candidate SHA. |
 | `forest audit show [--rescan]` | Print audit state, optionally re-running the Auditor first. |
 | `forest audit log` | Print audit history. |
-| `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer review-request note and branch. |
+| `forest publish review-request <role> <branch> <payload> [--rejected <sha>]` | Publish a Builder or Fixer request evidence commit and branch. |
 | `forest publish verdict <checks> <verdict>` | Publish Checks and Verdict evidence refs; authorized approve also fast-forwards primary, review-only approve never does. |
 
 ### Reading the factory
@@ -748,6 +756,29 @@ are snake_case throughout, and an empty collection is `[]`, never `null`.
 Adding a key is compatible; renaming or removing one requires the next schema
 version. Version 2 replaces declaration `profile_files` with `skills` and
 removes declaration `env`.
+
+`review list` returns `data.reviews` sorted by revision; `review show` returns
+`data.review`. Both use the Auditor's confirmed remote-ref snapshot fetch and
+temporary local snapshot refs, not a scan of loose ref files. They never publish
+refs, move branches, run Checks, or alter scheduler state.
+
+Each review carries its exact `revision`, the published `branch` when readable,
+and optional `work`, `run_id`, `request_id`, and `authority` from the request.
+Present refs are named by `request_ref`, `checks_ref`, and `verdict_ref`; each
+corresponding `*_commit` carries `sha`, `author`, and `committer`, with identity
+objects `{name, email, time}`. Times are Git commit RFC3339 timestamps. The
+`decision` (`approve` or `changes`) and `summary` exist only when the verdict is
+readable; absence never becomes approval or rejection. Approval alone does not
+prove primary advanced.
+
+`request_state`, `checks_state`, and `verdict_state` independently report
+`readable`, `missing`, or `unreadable`. Invalid payloads or committer identities
+produce `errors` keyed by evidence kind, not guessed fields. Missing request
+evidence never invents a branch or Work reference. `runs` contains local Ledger
+Run rows matching the exact, non-absent published Work reference, or `[]` when
+none match. These are local execution context, not a second candidate/verdict
+authority; a consumer must establish a unique matching Verifier Run before
+attributing a verdict commit to that Run. The verdict payload has no Run ID.
 
 Each payload publishes what the command resolved. Three keys guard the rest and
 must be read first:

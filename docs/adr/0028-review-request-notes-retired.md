@@ -35,12 +35,20 @@ then pushes the branch and the request ref in one atomic
 
 Existing `refs/notes/forest/*` refs stay unread and unrewritten.
 
+The same single-source-of-truth rule applies to forge integration. Immutable
+`refs/forest/v1/{request,checks,verdict}/<sha>` are the authoritative candidate
+and verdict record. PR-comment receipts are human-facing conveniences, never
+an alternate protocol, and per-ticket pins cannot replace published evidence.
+Consumers read `forest review list` or `forest review show <sha>` and join PRs
+by exact candidate revision, preserving missing and unreadable states.
+
 ## Consequences
 
 - Request and Verdict publication now share one primitive: commit evidence,
   one atomic force-with-lease push, no retries.
 - ADR 0021 and ADR 0023 decision text remains as historical record; only the
   review-request note write they described is retired.
-- Operators inspect request evidence with
-  `git fetch origin refs/forest/v1/request/<sha>` then
-  `git show FETCH_HEAD:request.json`.
+- Operators inspect published evidence with `forest review list --json` or
+  `forest review show <sha> --json`. The read surface reuses confirmed remote
+  snapshot acquisition and reports each commit's identities and times; it does
+  not publish new evidence or mutate the candidate branch.

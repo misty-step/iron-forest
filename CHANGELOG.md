@@ -2,6 +2,12 @@
 
 ### Changed
 
+* Add read-only `forest review list` and `forest review show <sha>` over
+  published immutable request, Checks, and Verdict refs. Report exact revisions,
+  published Work references, commit identities and times, independent missing or
+  unreadable evidence states, and matching local Ledger Runs. Published refs
+  are the candidate/verdict authority; PR-comment receipts are human-facing
+  conveniences, never a parallel source of truth.
 * Keep successful Run outcomes when bounded worktree/Pi-directory disposal
   fails. Record `cleanup_error` separately from execution errors and preserve
   remaining worktree recovery evidence without retrying the model or source
