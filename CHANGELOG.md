@@ -1,3 +1,18 @@
+## [0.0.21](https://github.com/misty-step/iron-forest/compare/v0.0.20...v0.0.21) (2026-09-12)
+
+
+### Bug Fixes
+
+* **evals:** accept kernel-bound verifier verdict evidence ([cac5fc6](https://github.com/misty-step/iron-forest/commit/cac5fc6a2e2cbd6e7649f0da68df63ed30928328))
+* **evals:** expect cross-run verdict retry conflicts ([17fad2a](https://github.com/misty-step/iron-forest/commit/17fad2a214348bc427b4085192b79442954c7608))
+* separate bounded cleanup failures from Run outcomes ([1f7e086](https://github.com/misty-step/iron-forest/commit/1f7e0862c4c61eac459634e42c7c6d798ad4dd25))
+
+
+### Features
+
+* bind per-work-item landing authority across runs ([51a5dc1](https://github.com/misty-step/iron-forest/commit/51a5dc1cde728f0a4e64ae11f95365740cb339ff))
+* **cli:** expose authoritative published review evidence ([a843cd7](https://github.com/misty-step/iron-forest/commit/a843cd7b1e01b2dab409b949d2e6ddd86106c74e))
+
 ## Unreleased
 
 ### Changed
