@@ -4,6 +4,11 @@ Start with one explicit request, one repository owner, and one delivery authorit
 Do not begin by creating readiness labels, importing a backlog, or enabling
 schedules. This guide replaces the retired queue-first onboarding walkthrough.
 
+After the owner explicitly adopts a local Linear-labelled workflow, use the
+[local factory runbook](local-linear-factory.md) for the committed adapter,
+one-ticket intake discipline, credentials, receipts and supervised delivery.
+This is an opt-in profile, not a replacement for explicit operator authority.
+
 ## Choose the boundary
 
 Exactly one live Kernel serves one repository on an operator-owned host. The
@@ -169,6 +174,13 @@ Inspect three independent facts:
    and tracker reconciliation. An owner-authorized Git-native profile instead
    supplies its native Checks, Verdict and published revision evidence. Follow
    the owning profile's release and reconciliation policy; a merge is not a deployment.
+
+For review-only candidates, follow the README's
+[Read the result](../README.md#read-the-result) procedure: inspect exact-revision
+approval and the bound Verifier Run, merge the matching open PR on GitHub as the
+operator, then reconcile the tracker manually. The
+[local walkthrough](local-linear-factory.md#deliver-one-ticket-and-read-the-result)
+shows where to drain admission and retain receipts.
 
 Keep full logs and prompts behind the owning access boundary. Canopy displays
 bounded read-only projections, preserves unknown/partial/stale states, and links
