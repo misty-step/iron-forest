@@ -103,6 +103,8 @@ class GradingBoundaryTest(unittest.TestCase):
             "verdict": "changes",
             "summary": "The candidate violates the requested value contract.",
             "time": "2026-08-14T00:00:00Z",
+            # ADR 0022 (2026-09-12 amendment): new Verdicts carry the live Run ID.
+            "verifier_run_id": "fixture",
         }
 
     def run_git(self, *args: str, input: str | None = None, actor: str | None = None) -> str:
@@ -224,6 +226,33 @@ class GradingBoundaryTest(unittest.TestCase):
         self.publish_verifier_result()
         details = self.grade()
         self.assertFalse(details["passed"], details)
+
+    def test_bound_verdict_is_readable_and_grades_successfully(self) -> None:
+        self.publish_verifier_result()
+        self.assertEqual(
+            grade_module.evidence(self.candidate, "verdict"),
+            (self.verdict_payload, grade_module.ACTORS["verifier"]),
+        )
+        details = self.grade()
+        self.assertTrue(details["passed"], details["failures"])
+
+    def test_historical_verdict_remains_readable_without_invented_binding(self) -> None:
+        # ADR 0022 retains historical unbound evidence without rewriting it.
+        del self.verdict_payload["verifier_run_id"]
+        self.publish_verifier_result()
+        self.assertEqual(
+            grade_module.evidence(self.candidate, "verdict"),
+            (self.verdict_payload, grade_module.ACTORS["verifier"]),
+        )
+
+    def test_malformed_verdict_binding_cannot_pass(self) -> None:
+        self.publish_verifier_result()
+        for run_id in (None, 7, "", ".", "..", "other/run", "other\\run", "two runs"):
+            with self.subTest(run_id=run_id):
+                self.publish_evidence("verdict", {**self.verdict_payload, "verifier_run_id": run_id}, "verifier")
+                self.assertFalse(self.grade()["passed"])
+        self.publish_evidence("verdict", {**self.verdict_payload, "unknown": "field"}, "verifier")
+        self.assertFalse(self.grade()["passed"])
 
     def test_malformed_checks_are_grading_failures_not_exceptions(self) -> None:
         self.publish_verifier_result()

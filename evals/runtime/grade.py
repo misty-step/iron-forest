@@ -100,6 +100,10 @@ def evidence(target: str | None, kind: str) -> tuple[dict, str] | None:
         return None
     schema, keys = schemas[kind]
     optional = {"request_id", "work"} if kind == "request" else set()
+    # ADR 0022 (2026-09-12 amendment) extends v1 Verdicts with Kernel-bound
+    # identity; historical unbound Verdicts remain readable.
+    if kind == "verdict":
+        optional = {"verifier_run_id"}
     if not isinstance(payload, dict) or not keys <= set(payload) or set(payload) - keys - optional:
         return None
     if payload.get("schema") != schema or payload.get("revision") != target:
@@ -147,6 +151,10 @@ def evidence(target: str | None, kind: str) -> tuple[dict, str] | None:
         summary = payload.get("summary")
         if payload.get("verdict") not in ("approve", "changes") or not isinstance(summary, str) or not summary.strip():
             return None
+        if "verifier_run_id" in payload:
+            run_id = payload["verifier_run_id"]
+            if not isinstance(run_id, str) or not run_id or run_id in {".", ".."} or re.search(r"[/\\ \t\r\n]", run_id):
+                return None
     actor = git("log", "-1", "--format=%cn <%ce>", ref, check=False)
     return payload, actor
 
