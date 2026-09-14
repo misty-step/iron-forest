@@ -13,20 +13,27 @@ coordinate multiple repository instances.
 
 ## Orient
 
-Resolve the managed repository and read `README.md`, `.iron-forest/config.yaml`, and the relevant declaration under `.iron-forest/agents/<name>/`. Run the CLI read surfaces before inferring state:
+Resolve the managed repository and use the README's [intent routes](../../README.md#start-here), not new-profile setup for an existing instance. Start with current health and admission:
 
 ```sh
-./.iron-forest/bin/forest version --json
-./.iron-forest/bin/forest config show --json
-./.iron-forest/bin/forest declaration list --json
 ./.iron-forest/bin/forest status --json
 ./.iron-forest/bin/forest admission show --json
-./.iron-forest/bin/forest audit show --json
 ```
 
-Use `forest declaration show <name> --json`, `forest run list --json`, and `forest run show <id> --json` only for the declaration or Run that can change the decision. Treat Git evidence as authority and CLI output as the supported operational projection.
+Choose further reads only for the question: `forest version --json` identifies
+the executing binary; `forest config show --json`, `forest declaration list
+--json`, and `forest declaration show <name> --json` read the current on-disk
+profile. These do not establish which revision or profile a live service adopted.
+For a Run, use `forest run list --json`, `forest run show <id> --json`, and
+`forest run logs <id> --json`; for native delivery, use `forest review show <sha>
+--json` or `forest audit show --json`.
+The README's [read/command boundary](../../README.md#reading-the-factory),
+[Run facts](../../README.md#execution-completion-and-delivery), and
+[Git authority](../../README.md#git-coordination) own their interpretation.
+Read the relevant profile or declaration source when the action needs an edit.
 
-Done when the repository, Kernel revision, configured roster, active or failed Runs, and current Audit state are explicit.
+Done when the repository and evidence needed for the requested decision are
+explicit, with unknown state kept distinct from success.
 
 ## Configure
 
@@ -50,12 +57,18 @@ managed repository may otherwise replace the roster, Polls, prompts, model,
 thinking, tools, and skills without forking the Kernel.
 
 Misty Step work starts from current operator requests. Historical tracker
-adapters remain in code but must not be reconfigured or used as a queue. R90
-profiles continue to use Habitat.
+metadata grants no queue or integration authority; see the
+[composition boundary](../../README.md#repository-owned-composition).
+R90 profiles continue to use Habitat.
 
 Done when `forest selfcheck`, `forest config show`, and every affected `forest declaration show` expose the intended configuration and no ambient resource supplies hidden behavior.
 
 ## Operate
+
+For first approved dispatch, follow [onboarding](../../docs/onboarding-managed-repo.md#execute-the-first-explicit-request).
+For interrupted work, follow [pause, drain and recover](../../docs/onboarding-managed-repo.md#pause-drain-and-recover)
+before authorizing another attempt. For merged revisions, use
+[fenced adoption](../../README.md#adopting-merged-revisions), not a restart alone.
 
 Use `forest once <name> --request <file>` for one explicitly authorized supervised
 dispatch from a `forest.request.v1` envelope; optional `authority: land|review`
