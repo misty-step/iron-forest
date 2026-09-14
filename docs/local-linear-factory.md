@@ -56,6 +56,9 @@ requires `git` and `pi`. Installer dependencies include `mise`, `jq`, `flock`,
 `tar` and a user systemd service. Follow the
 [profile preparation guide](onboarding-managed-repo.md#prepare-the-host-and-profile)
 for credential and isolation boundaries.
+When password-store lookup is chosen, `pass` and a configured password store are
+required; declare `pass` in `required_tools`. Selfcheck validates only `git`, `pi`,
+and configured tools, and the adapters raise `AdapterError` without `pass`.
 
 Keep each Poll at `"exit 1"` during initial manual onboarding. When the owner
 explicitly adopts this local workflow, version this wiring in `config.yaml`:
@@ -132,6 +135,8 @@ no notes or appended newline. Decryption is noninteractive
 (`PASSWORD_STORE_GPG_OPTS='--batch --pinentry-mode error'`) with a ten-second
 timeout per lookup. Do not print, commit or paste credential values into a ticket
 or receipt.
+Password-store lookup additionally requires the companion adapter change to be
+shipped in the product profiles.
 
 Provider completion credentials such as `OPENROUTER_API_KEY` belong in the
 protected service environment, `~/.config/iron-forest/<instance>.env`, owned by
