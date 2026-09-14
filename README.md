@@ -26,9 +26,27 @@ findings with evidence; they do not create tickets or start implementation.
 Automatic intake polls are disabled for all five shipped declarations; the
 built-in Git-native selectors remain optional profile choices.
 
+## Start here
+
+Choose the current operator intent; an existing instance does not need its
+profile recreated or its service reinstalled.
+
+| Intent | Start with |
+| --- | --- |
+| Inspect an existing instance | [Reading the factory](#reading-the-factory): `status --json` and `admission show --json`, then the focused read for the question. |
+| Onboard a repository or dispatch its first approved request | [Onboarding guide](docs/onboarding-managed-repo.md); existing prepared instances can start at [Execute the first explicit request](docs/onboarding-managed-repo.md#execute-the-first-explicit-request). |
+| Control or recover a Run | [Pause, drain and recover](docs/onboarding-managed-repo.md#pause-drain-and-recover), then [read its result](docs/onboarding-managed-repo.md#read-the-result-not-just-the-exit-code) before another attempt. |
+| Adopt a merged revision | [Adopting merged revisions](#adopting-merged-revisions), not a restart-only update. |
+| Change or verify the factory | [Development](#development) and the [operator skill's verification reference](org-skills/iron-forest/verification.md). |
+
+For authority, distinguish [declared intent](#repository-owned-intent),
+[execution and completion](#execution-completion-and-delivery), and
+[published candidate evidence](#git-coordination); none substitutes for the others.
+
 ## Quick start
 
-Create the repository-owned profile at `.iron-forest/config.yaml`:
+For a new profile only, create `.iron-forest/config.yaml`; keep an existing
+repository-owned profile and follow the route above instead:
 
 ```yaml
 repo: misty-step/iron-forest
@@ -552,9 +570,8 @@ the branch and a request evidence commit. Verifier calls `forest publish verdict
 The Kernel writes Checks and Verdict evidence refs and, on authorized approve,
 fast-forwards the configured primary in the same atomic push. New requests use
 `forest.review-request.v3`; historical v1/v2 evidence remains readable and is
-never rewritten. Only pending v2 Powder requests retain their legacy
-reconciliation behavior. Generic v3 requests never invoke GitHub/Powder work
-mutation; their profile completion observer owns work-system effects. See
+never rewritten. Historical tracker metadata grants no integration authority;
+the profile completion observer owns work-system effects. See
 [ADR 0021](docs/adr/0021-kernel-review-request-publication.md),
 [ADR 0022](docs/adr/0022-kernel-verdict-publication.md), and
 [ADR 0023](docs/adr/0023-powder-jobs-and-review-request-v2.md).
@@ -740,10 +757,14 @@ columns when the Run identity is long. `--json` still carries the full
 
 | Command | Purpose |
 | --- | --- |
+| `forest version` | Report the executing binary's embedded build SHA, commit time, and dirty flag; an unversioned build reports an unknown SHA. |
 | `forest serve` | Poll and dispatch enabled declarations. |
 | `forest once <agent>` | Poll once, then dispatch that declaration only when the Poll exits 0. |
-| `forest poll <agent>` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`. |
+| `forest once <agent> --request <file>` | Dispatch one explicit `forest.request.v1`, bypassing Poll and scheduled selection but not admission or the Kernel lock. |
+| `forest poll <agent> [--scope <selector>]` | Evaluate the built-in trigger for `builder`, `verifier`, or `fixer`; does not dispatch a Run. |
 | `forest status` | Show Poll, Run, and Audit errors, live Runs, the last audit result, recent Runs, and Ledger aggregates. |
+| `forest admission show` | Read persistent admission and active/interrupted Run state. |
+| `forest admission pause\|drain\|resume` | Durably block new dispatch, pause and wait for admitted Runs, or reopen admission; resume refuses during drain. |
 | `forest selfcheck` | Validate `.iron-forest/config.yaml` and declarations locally. |
 | `forest config show` | Print the loaded configuration, effective delivery mode, declared intent when present, and resolved primary provenance. |
 | `forest declaration list\|show <name>` | Print declaration names, or one declaration in full. |
@@ -763,16 +784,30 @@ columns when the Run identity is long. `--json` still carries the full
 
 ### Reading the factory
 
-`serve`, `once`, and `poll` are the engine: they hold the Kernel lock and write.
-`publish review-request` and `publish verdict` write without taking that lock, so a
-Run that already holds it can publish. `run cancel` also writes without taking
-the Kernel lock, because the live Run's Runner already holds it. Every other
-row is the read surface. Each read-surface command accepts `--json` and
-`--root <dir>`. `--json` emits one
-`forest.cli.v2` envelope on stdout; human text stays on stderr. `--root`
-answers from another checkout. `trigger reset` and `audit show --rescan` take
-the Kernel lock and refuse while a Kernel runs. `publish review-request` and
-`publish verdict` do not.
+`serve` and `once` dispatch work under the exclusive Kernel lock. Direct `poll`
+does **not** acquire that lock or dispatch; it evaluates the built-in selector
+with Git/GitHub reads and temporary local snapshot refs. These three commands
+use the current checkout and do not accept `--json` or `--root`.
+
+The observational commands are `version`, `status`, `selfcheck`, `doctor`,
+`config show`, `declaration list|show`, `trigger list|show`, `admission show`,
+`run list|show|logs`, `review list|show`, and `audit show|log` without `--rescan`.
+Use those for inspection, not the similarly shaped controls:
+`trigger reset` and native `audit show --rescan` mutate persisted state under
+the Kernel lock and refuse while a Kernel runs. External delivery returns
+not-applicable audit without rescanning. `admission pause|drain|resume` use
+separate admission locks and can control a running Kernel. Publication and
+`run cancel` write without acquiring the Kernel lock.
+
+Every command in the table except `serve`, `once`, and `poll` accepts `--json`
+and `--root <dir>`; `run logs --follow` excludes `--json`. These flags do not
+make a command read-only: `--root` selects the checkout to inspect **or mutate**.
+Other flags are command-specific; `forest help` prints the accepted grammar.
+
+`version` identifies the binary being executed, even with `--root`; `config show`
+and declaration reads load the current on-disk profile. Neither establishes the
+identity adopted by a live service. Use the owning deployment's
+[fenced adoption procedure](#adopting-merged-revisions) for that transition.
 
 
 `--json` emits exactly one envelope on stdout, including on failure:
@@ -869,7 +904,7 @@ read-only external probe, or `unknown` when no answer was obtained — plus
 `ok`, and either `evidence` or a `reason`. It checks `mise`, `go`, and `pi` on
 PATH; `gh auth status`; the instance credential file mode (`0600`); read-only
 forge push capability through `gh api`; the OpenRouter key with a read-only key
-probe. Legacy tracker reachability checks remain in code. The forge and key
+probe. There is no tracker reachability check. The forge and key
 probes never write remotely, and evidence/reason never contain credential
 values. Exit is `0` when every check is healthy and `2` otherwise.
 
@@ -908,8 +943,11 @@ mise exec -- go vet ./...
 mise exec -- go test ./...
 ```
 
-Run the deterministic production-protocol checks before changing an agent
-declaration, prompt, skill, or publication contract:
+Prose-only operator documentation changes use the verification reference's
+meaning, link, and skill-loading checks; they do not by themselves require a
+production journey or model run. Changes to factory declarations, prompts,
+shared/role skills, or the publication contract require the deterministic
+production-protocol checks:
 
 ```sh
 ./evals/run-fast.sh
