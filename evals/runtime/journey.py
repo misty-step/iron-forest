@@ -263,9 +263,15 @@ def main() -> int:
         require(resumed["run_id"] != interrupted_id, "recovery must use a fresh supervised Run, not a fabricated session resume")
         require(refs()["refs/heads/master"] == repaired, "recovered approval did not deliver the repaired Revision")
         require(evidence("verdict", repaired)["verdict"] == "approve", "recovered review did not publish approval")
+        require(evidence("verdict", repaired).get("verifier_run_id") == resumed["run_id"],
+                "approval must bind the actual recovered Verifier Run")
         landed = refs()
-        phase(report, "identical-publication-retry", approval, state)
-        require(refs() == landed, "identical retry changed publication refs")
+        # ADR 0022 (2026-09-12 amendment): a different Run cannot adopt an
+        # existing Verdict, even when its agent-supplied payload is identical.
+        retried = phase(report, "different-run-publication-conflict",
+                        {**approval, "effect": "verifier_approve_conflict"}, state)
+        require(retried["run_id"] != resumed["run_id"], "conflicting retry must use a fresh Verifier Run")
+        require(refs() == landed, "different-Run refusal changed publication refs")
         projection = json.loads((SCENARIO.parent / "pr-created.json").read_text())
         require(projection["count"] == 1 and projection["head"] == branch, "journey must retain one human Projection")
         retained = ROOT / ".iron-forest/runtime/worktrees" / interrupted_id

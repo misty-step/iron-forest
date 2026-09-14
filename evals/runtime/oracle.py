@@ -15,11 +15,11 @@ from pathlib import Path
 FOREST = "/workspace/.iron-forest/bin/forest"
 GIT = "/usr/bin/git"
 NO_EFFECTS = {"no_effect", "builder_scope_held_outside", "builder_scope_branch_no_match"}
-CONFLICTS = {"builder_branch_race", "fixer_conflict", "fixer_branch_race", "verifier_conflict", "verifier_approve_race"}
+CONFLICTS = {"builder_branch_race", "fixer_conflict", "fixer_branch_race", "verifier_conflict", "verifier_approve_race", "verifier_approve_conflict"}
 ROLE_EFFECTS = {
     "builder": {"builder_publish", "builder_scope_publish", "builder_branch_race", *NO_EFFECTS},
     "fixer": {"fixer_publish", "fixer_conflict", "fixer_branch_race", "no_effect"},
-    "verifier": {"verifier_changes", "verifier_approve", "verifier_conflict", "verifier_approve_race", "no_effect"},
+    "verifier": {"verifier_changes", "verifier_approve", "verifier_conflict", "verifier_approve_race", "verifier_approve_conflict", "no_effect"},
     "critic": {"critic_findings", "no_effect"},
     "tester": {"tester_findings", "no_effect"},
 }
@@ -292,7 +292,7 @@ class Oracle:
         ancestry = self.command(GIT, "merge-base", "--is-ancestor", primary_revision, revision, expected=None)
         if ancestry.returncode not in {0, 1}:
             raise RuntimeError("could not establish current primary ancestry")
-        approve = self.effect in {"verifier_approve", "verifier_approve_race"}
+        approve = self.effect in {"verifier_approve", "verifier_approve_race", "verifier_approve_conflict"}
         if approve and (ancestry.returncode != 0 or any(not result["ok"] for result in results)):
             raise RuntimeError("oracle approval expectation contradicted actual Checks or ancestry")
         verdict = "approve" if approve else "changes"
