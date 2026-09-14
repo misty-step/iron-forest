@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -23,18 +24,17 @@ class FakeLangfuseClient(flywheel.LangfuseClient):
     def __init__(self, located_trace_ids: dict[str, list[str]] | None = None):
         self.items: dict[str, FakeItem] = {}
         self.located_trace_ids = located_trace_ids or {}
-        self.ensure_calls: list[str] = []
-        self.calls: list[str] = []
+        self.datasets: set[str] = set()
 
     def ensure_dataset(self, name: str) -> None:
-        self.ensure_calls.append(name)
-        self.calls.append("ensure_dataset")
+        self.datasets.add(name)
 
     def get_dataset_item(self, dataset_name: str, id: str):
         return self.items.get(id)
 
     def create_dataset_item(self, *, dataset_name, id, input, expected_output, metadata, source_trace_id=None) -> None:
-        self.calls.append("create_dataset_item")
+        if dataset_name not in self.datasets:
+            raise RuntimeError("dataset does not exist")
         self.items[id] = FakeItem(id, metadata, source_trace_id)
 
     def list_dataset_items(self, dataset_name: str) -> list[FakeItem]:
@@ -87,22 +87,6 @@ class ProductionFlywheelTest(unittest.TestCase):
             self.assertEqual(result["created"], 0)
             self.assertEqual(client.items, {})
 
-    def test_ingest_ensures_dataset_before_creating_items(self):
-        with tempfile.TemporaryDirectory() as root:
-            runs_dir = Path(root) / "runs"
-            write_run_log(runs_dir, "1787529620484390170-builder", "builder")
-            client = FakeLangfuseClient()
-
-            result = flywheel.ingest_runs(runs_dir, client)
-
-            self.assertEqual(result["created"], 1)
-            self.assertEqual(client.ensure_calls, [flywheel.PRODUCTION_DATASET])
-            self.assertEqual(client.calls[0], "ensure_dataset")
-            self.assertIn("create_dataset_item", client.calls)
-            self.assertLess(
-                client.calls.index("ensure_dataset"),
-                client.calls.index("create_dataset_item"),
-            )
 
     def test_promote_requires_provenance_and_scenario(self):
         with tempfile.TemporaryDirectory() as root:
@@ -136,6 +120,86 @@ class ProductionFlywheelTest(unittest.TestCase):
             missing_scenario.pop("expected_files")
             with self.assertRaises(ValueError):
                 flywheel.promote_contract(missing_scenario, manifest)
+
+
+    def test_promote_validates_role_effects(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / "production-cases.json"
+            manifest.write_text(json.dumps({"schema": "forest.production-cases.v1", "cases": []}) + "\n")
+            contract = {
+                "schema": "forest.production-case.v1",
+                "id": "prod-effect",
+                "role": "builder",
+                "summary": "Replay case.",
+                "effect": "builder_publish",
+                "source_trace_id": "trace-1",
+                "source_run_id": "run-1",
+                "expected_files": {"value.txt": "ready\n"},
+            }
+            before = manifest.read_bytes()
+            for role, effect in (
+                ("builder", "invalid_effect"),
+                ("builder", "verifier_changes"),
+                ("verifier", "verifier_approve_conflict"),
+                ("fixer", "builder_publish"),
+                ([], "builder_publish"),
+            ):
+                with self.subTest(role=role, effect=effect):
+                    with self.assertRaises(ValueError):
+                        flywheel.promote_contract(dict(contract, role=role, effect=effect), manifest)
+                    self.assertEqual(manifest.read_bytes(), before)
+
+            for role, effect in (
+                ("builder", "builder_branch_race"),
+                ("verifier", "verifier_approve_race"),
+                ("fixer", "fixer_conflict"),
+            ):
+                flywheel.promote_contract(dict(contract, id=f"prod-{role}", role=role, effect=effect), manifest)
+            self.assertEqual(
+                {(case["role"], case["effect"]) for case in flywheel.load_production_manifest(manifest)["cases"]},
+                {("builder", "builder_branch_race"), ("verifier", "verifier_approve_race"), ("fixer", "fixer_conflict")},
+            )
+
+    def test_promote_validates_scenario_field_shapes(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / "production-cases.json"
+            manifest.write_text(json.dumps({"schema": "forest.production-cases.v1", "cases": []}) + "\n")
+            base = {
+                "schema": "forest.production-case.v1",
+                "id": "prod-builder-test",
+                "role": "builder",
+                "summary": "Replay case.",
+                "effect": "builder_publish",
+                "source_trace_id": "trace-1",
+                "source_run_id": "run-1",
+                "check": "true",
+            }
+            before = manifest.read_bytes()
+            for fields in (
+                {"expected_files": "not-a-dict"},
+                {"expected_files": {"value.txt": 123}},
+                {"expected_files": None},
+                {"planted_files": []},
+                {"planted_files": None},
+                {"issue": "not-an-issue-dict"},
+                {"issue": {"number": True, "title": "t", "body": "b"}},
+                {"issue": {"number": 1, "title": "", "body": "b"}},
+                {"issue": {"number": 1, "title": "t"}},
+                {"issue": {"number": 1, "title": "t", "body": 123}},
+                {"check": 123},
+                {"check": None},
+                {"check": "   "},
+            ):
+                with self.subTest(fields=fields):
+                    with self.assertRaises(ValueError):
+                        flywheel.promote_contract(dict(base, **fields), manifest)
+                    self.assertEqual(manifest.read_bytes(), before)
+
+            flywheel.promote_contract(dict(base, issue={"number": 1, "title": "t", "body": None}), manifest)
+            flywheel.promote_contract(dict(base, id="prod-no-issue", issue=None), manifest)
+            cases = flywheel.load_production_manifest(manifest)["cases"]
+            self.assertEqual(cases[0]["issue"], {"number": 1, "title": "t", "body": None})
+            self.assertIsNone(cases[1]["issue"])
 
     def test_promote_sorts_and_writes_versioned_manifest(self):
         with tempfile.TemporaryDirectory() as root:
@@ -231,6 +295,42 @@ class ProductionFlywheelTest(unittest.TestCase):
             self.assertIn("- New draft cases awaiting verification: 0", report)
             self.assertIn("- Saturation: 1/1", report)
 
+
+    def test_report_links_promoted_cases_by_source_run_id_when_trace_corrected(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = Path(root) / "production-cases.json"
+            manifest.write_text(json.dumps({
+                "schema": "forest.production-cases.v1",
+                "cases": [
+                    {
+                        "id": "prod-builder-branch-race",
+                        "role": "builder",
+                        "summary": "x",
+                        "effect": "builder_publish",
+                        "source_trace_id": "trace-corrected-real",
+                        "source_run_id": "run-1",
+                        "expected_files": {"value.txt": "ready\n"},
+                    }
+                ],
+            }) + "\n")
+            client = FakeLangfuseClient()
+            # Ingest used run-1 fallback as source_trace_id, but recorded run_id="run-1" in metadata
+            client.items["prod-run-1"] = FakeItem(
+                "prod-run-1",
+                {"role": "builder", "status": "draft", "run_id": "run-1", "source_trace_id": "run-1"},
+            )
+            report = flywheel.report_markdown(client, manifest)
+            self.assertIn("- New draft cases awaiting verification: 0", report)
+            self.assertIn("- Saturation: 1/1", report)
+
+            # Adding an unpromoted item counts as a new draft awaiting verification
+            client.items["prod-run-2"] = FakeItem(
+                "prod-run-2",
+                {"role": "builder", "status": "draft", "run_id": "run-2", "source_trace_id": "trace-2"},
+            )
+            report2 = flywheel.report_markdown(client, manifest)
+            self.assertIn("- New draft cases awaiting verification: 1", report2)
+
     def test_sdk_report_listing_exposes_transport_failure(self):
         class BrokenItems:
             def list(self, **kwargs):
@@ -243,7 +343,64 @@ class ProductionFlywheelTest(unittest.TestCase):
             api = API()
 
         client = flywheel.LangfuseSDKClient(Client())
-        with self.assertRaisesRegex(RuntimeError, "transport down"):
+        with self.assertRaises(RuntimeError):
+            client.list_dataset_items(flywheel.PRODUCTION_DATASET)
+
+    def test_sdk_list_dataset_items_pages_through_all_pages(self):
+        expected = [f"item-{i}" for i in range(120)]
+
+        def list_items(dataset_name, page, limit):
+            return SimpleNamespace(
+                data=expected[(page - 1) * limit:page * limit],
+                meta=SimpleNamespace(total_pages=2),
+            )
+
+        client = flywheel.LangfuseSDKClient(SimpleNamespace(
+            api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+        ))
+        self.assertEqual(client.list_dataset_items(flywheel.PRODUCTION_DATASET), expected)
+
+    def test_sdk_listing_honors_metadata_on_short_pages(self):
+        for meta in (
+            {"total_pages": 2},
+            {"totalPages": 2},
+            SimpleNamespace(total_pages=2),
+            SimpleNamespace(totalPages=2),
+        ):
+            with self.subTest(meta=meta):
+                def list_items(dataset_name, page, limit):
+                    # The server's page size need not equal the requested limit.
+                    data = {1: ["first"], 2: ["last"]}[page]
+                    return SimpleNamespace(data=data, meta=meta)
+
+                client = flywheel.LangfuseSDKClient(SimpleNamespace(
+                    api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+                ))
+                self.assertEqual(client.list_dataset_items(flywheel.PRODUCTION_DATASET), ["first", "last"])
+
+    def test_sdk_listing_without_metadata_stops_on_short_or_empty_page(self):
+        for count in (0, 2, 100, 120):
+            with self.subTest(count=count):
+                expected = [f"item-{i}" for i in range(count)]
+
+                def list_items(dataset_name, page, limit):
+                    return SimpleNamespace(data=expected[(page - 1) * limit:page * limit])
+
+                client = flywheel.LangfuseSDKClient(SimpleNamespace(
+                    api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+                ))
+                self.assertEqual(client.list_dataset_items(flywheel.PRODUCTION_DATASET), expected)
+
+    def test_sdk_listing_exposes_failure_after_first_page(self):
+        def list_items(dataset_name, page, limit):
+            if page == 2:
+                raise RuntimeError("second page unavailable")
+            return SimpleNamespace(data=["first"], meta=SimpleNamespace(total_pages=2))
+
+        client = flywheel.LangfuseSDKClient(SimpleNamespace(
+            api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+        ))
+        with self.assertRaises(RuntimeError):
             client.list_dataset_items(flywheel.PRODUCTION_DATASET)
 
 

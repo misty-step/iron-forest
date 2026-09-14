@@ -37,7 +37,31 @@ MANIFEST_SCHEMA = "forest.production-cases.v1"
 CONTRACT_SCHEMA = "forest.production-case.v1"
 OUTBOX_DIR_NAME = "production-flywheel-outbox"
 SHIPPED_ROLES = {"builder", "verifier", "fixer"}
-SCENARIO_FIELDS = ("issue", "powder_jobs", "check", "expected_files", "planted_files")
+# Effects graded by evals/runtime/grade.py for the shipped replay roles.
+ROLE_EFFECTS: dict[str, set[str]] = {
+    "builder": {
+        "builder_publish",
+        "builder_branch_race",
+        "builder_scope_publish",
+        "builder_scope_held_outside",
+        "builder_scope_branch_no_match",
+        "no_effect",
+    },
+    "verifier": {
+        "verifier_changes",
+        "verifier_approve",
+        "verifier_conflict",
+        "verifier_approve_race",
+        "no_effect",
+    },
+    "fixer": {
+        "fixer_publish",
+        "fixer_conflict",
+        "fixer_branch_race",
+        "no_effect",
+    },
+}
+SCENARIO_FIELDS = ("issue", "check", "expected_files", "planted_files")
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
 
@@ -151,9 +175,30 @@ class LangfuseSDKClient(LangfuseClient):
             metadata=metadata,
             source_trace_id=source_trace_id,
         )
+
     def list_dataset_items(self, dataset_name: str) -> list[Any]:
-        items = self._client.api.dataset_items.list(dataset_name=dataset_name)
-        return list(getattr(items, "data", []) or [])
+        all_items: list[Any] = []
+        page = 1
+        limit = 100
+        while True:
+            response = self._client.api.dataset_items.list(dataset_name=dataset_name, page=page, limit=limit)
+            data = list(getattr(response, "data", []) or [])
+            if not data:
+                break
+            all_items.extend(data)
+            meta = getattr(response, "meta", None)
+            total_pages = None
+            if isinstance(meta, dict):
+                total_pages = meta.get("total_pages") or meta.get("totalPages")
+            elif meta is not None:
+                total_pages = getattr(meta, "total_pages", None) or getattr(meta, "totalPages", None)
+            if isinstance(total_pages, int):
+                if page >= total_pages:
+                    break
+            elif len(data) < limit:
+                break
+            page += 1
+        return all_items
 
     def trace_ids_for_session(self, session_id: str) -> list[str]:
         try:
@@ -252,13 +297,41 @@ def validate_contract(contract: dict[str, Any], existing_ids: set[str]) -> None:
         raise ValueError("contract id must be a nonempty slug")
     if case_id in existing_ids:
         raise ValueError(f"duplicate production case id: {case_id}")
-    if contract.get("role") not in SHIPPED_ROLES:
+    role = contract.get("role")
+    if not isinstance(role, str) or role not in SHIPPED_ROLES:
         raise ValueError("contract role must be builder, verifier, or fixer")
     for field in ("summary", "effect", "source_trace_id", "source_run_id"):
         if not isinstance(contract.get(field), str) or not contract[field]:
             raise ValueError(f"contract {field} must be a nonempty string")
+    allowed_effects = ROLE_EFFECTS[role]
+    if contract["effect"] not in allowed_effects:
+        raise ValueError(
+            f"unsupported effect '{contract['effect']}' for role '{role}'; allowed: {sorted(allowed_effects)}"
+        )
     if not any(contract.get(field) for field in SCENARIO_FIELDS):
         raise ValueError("contract must include at least one scenario field: " + ", ".join(SCENARIO_FIELDS))
+    for field in SCENARIO_FIELDS:
+        if field not in contract:
+            continue
+        val = contract[field]
+        if field in ("expected_files", "planted_files"):
+            if not isinstance(val, dict) or not all(isinstance(k, str) and bool(k) and isinstance(v, str) for k, v in val.items()):
+                raise ValueError(f"contract {field} must be a dictionary of string paths to string contents")
+        elif field == "issue":
+            # The issue fixture treats null as no issue, unlike file maps and Checks.
+            if val is None:
+                continue
+            if not isinstance(val, dict):
+                raise ValueError("contract issue must be an object with number, title, and body")
+            if not isinstance(val.get("number"), int) or isinstance(val.get("number"), bool):
+                raise ValueError("contract issue.number must be an integer")
+            if not isinstance(val.get("title"), str) or not val.get("title"):
+                raise ValueError("contract issue.title must be a nonempty string")
+            if "body" not in val or (val["body"] is not None and not isinstance(val["body"], str)):
+                raise ValueError("contract issue.body must be a string or null")
+        elif field == "check":
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError("contract check must be a nonempty string command")
 
 
 def promote_contract(contract: dict[str, Any], manifest_path: Path = PRODUCTION_MANIFEST) -> dict[str, Any]:
@@ -279,6 +352,7 @@ def report_markdown(client: LangfuseClient, manifest_path: Path = PRODUCTION_MAN
     manifest = load_production_manifest(manifest_path)
     promoted = {case.get("id"): case for case in manifest["cases"]}
     promoted_traces = {case.get("source_trace_id") for case in promoted.values() if case.get("source_trace_id")}
+    promoted_runs = {case.get("source_run_id") for case in promoted.values() if case.get("source_run_id")}
     items = [item for item in client.list_dataset_items(dataset)]
     lines: list[str] = [
         "# Production flywheel maintenance report",
@@ -293,7 +367,18 @@ def report_markdown(client: LangfuseClient, manifest_path: Path = PRODUCTION_MAN
             return metadata["source_trace_id"]
         return getattr(item, "source_trace_id", None)
 
-    drafts = [item for item in items if item_trace(item) not in promoted_traces]
+    def item_run_id(item: Any) -> str | None:
+        metadata = getattr(item, "metadata", None) or {}
+        if isinstance(metadata, dict) and metadata.get("run_id"):
+            return metadata["run_id"]
+        return getattr(item, "run_id", None)
+
+    def is_promoted(item: Any) -> bool:
+        trace = item_trace(item)
+        run_id = item_run_id(item)
+        return (trace is not None and trace in promoted_traces) or (run_id is not None and run_id in promoted_runs)
+
+    drafts = [item for item in items if not is_promoted(item)]
     new_cases = len(drafts)
     total = len(items)
     promoted_count = len(promoted)

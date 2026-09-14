@@ -32,7 +32,11 @@ production trace (session id = Forest Run id)
 The bidirectional provenance key is `source_trace_id`. It is recorded on the
 draft dataset item at intake and copied into the promoted case contract, so the
 original production trace stays linked to the eval case and every later replay
-score.
+score. The stable association key between dataset items and promoted contracts
+for report tracking is `source_run_id` (`metadata.run_id` on the item); the
+maintenance report recognizes a case as promoted if either its `source_run_id`
+or `source_trace_id` matches a promoted contract, preventing false draft counts
+when human promotion records a corrected trace ID.
 
 ## Intake
 
@@ -81,15 +85,31 @@ The contract uses `forest.production-case.v1`:
   "effect": "builder_publish",
   "source_trace_id": "trace-openrouter-1",
   "source_run_id": "1787529620484390170-builder",
-  "expected_files": {"value.txt": "ready\n"}
+  "expected_files": {"value.txt": "ready\n"},
+  "request": {
+    "subject": "1",
+    "instructions": "Change value.txt to ready, followed by a newline."
+  }
 }
 ```
 
-Promotion requires a unique slug id, a shipped role, a summary, an effect, a
-`source_trace_id`, a `source_run_id`, and at least one scenario field
-(`issue`, `powder_jobs`, `check`, `expected_files`, or `planted_files`). It
-appends the case to `evals/production-cases.json`, sorted by id, and records
-`suite: production-replay` plus `promoted_at`.
+Promotion requires a unique slug id, a shipped replay role (`builder`,
+`verifier`, or `fixer`), a summary, an effect supported by that role's runtime
+grader, a `source_trace_id`, a `source_run_id`, and at least one nonempty
+scenario field (`issue`, `check`, `expected_files`, or `planted_files`).
+File maps contain string paths and string contents; a Check is a nonempty
+command string. An issue object requires an integer number, a nonempty title,
+and a body that is either a string or explicit JSON `null`. A null issue
+represents no issue and does not by itself supply a replay scenario. Present
+file maps and Checks cannot be null.
+
+Promotion appends the case to `evals/production-cases.json`, sorted by id, and
+records `suite: production-replay` plus `promoted_at`. Shape validation does not
+replace human verification of the complete replay: current runtime work
+requires an explicit `request`, and role-specific fixtures must reproduce the
+observed failure. Runtime publication uses refs-only evidence under
+[ADR 0028](adr/0028-review-request-notes-retired.md) and per-work-item authority
+under [ADR 0029](adr/0029-per-work-item-authority.md), not legacy note receipts.
 
 `evals/scripts/sync_tasks.py` generates production Harbor tasks from that
 manifest into the separate `evals/tasks-production/` directory, leaving the
@@ -115,14 +135,15 @@ systemctl --user status forest-eval-flywheel@iron-forest.timer
 journalctl --user -u forest-eval-flywheel@iron-forest.service
 ```
 
-The report names new draft cases, coverage by role and outcome,
-production-distribution coverage, saturation, ambiguous or broken drafts, and
-promoted grader-exploit regressions. Judge drift remains in the calibration
-report and Langfuse score panels.
+The report reads all dataset-item pages and names new draft cases, coverage by
+role and outcome, production-distribution coverage, saturation, ambiguous or
+broken drafts, and promoted grader-exploit regressions. Judge drift remains in
+the calibration report and Langfuse score panels.
 
 ## Experiments
 
 Prompt, tool, and model experiments remain separate from the production loop.
 Each experiment records its hypothesis, frozen suite, baseline, result, and
-decision in its own Powder job and Langfuse experiment. Failed experiments stay
-visible and are never folded into a promoted production case silently.
+decision with its current delegated work and Langfuse experiment. Failed
+experiments stay visible and are never folded into a promoted production case
+silently.
