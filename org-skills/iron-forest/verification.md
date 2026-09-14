@@ -123,8 +123,9 @@ printf 'journey exit: %s\n' "$result"
 
 Do not proceed past a failed image build or receipt-generation step. Inspect
 the exit and report before cleanup. A successful report has `passed: true`,
-`execution.kind: deterministic-oracle`, `image_inputs` matching `image.json`
-(including `actual_kernel_sha256`), the expected `forest_version` build SHA and
+`execution.kind: deterministic-oracle`, copied `image_inputs` fields matching
+the `image.json` receipt, and additionally `image_inputs.actual_kernel_sha256`
+equal to `image.json.kernel_sha256`, the expected `forest_version` build SHA and
 dirty flag, distinct rejected/delivered revisions, and distinct interrupted and
 recovered Run IDs. Inspect phases and final refs, not only process exit.
 
