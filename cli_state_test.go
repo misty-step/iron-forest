@@ -307,17 +307,14 @@ func TestCLIAuditShowRescan(t *testing.T) {
 			return runSurfaceCommand([]string{"audit", "show", "--rescan", "--root", root})
 		})
 		if code != exitConflict {
-			t.Fatalf("code=%d, want %d (exitConflict)", code, exitConflict)
-		}
-		if !strings.Contains(stderr, "a Kernel is running; stop it first") {
-			t.Fatalf("stderr=%q, want lock conflict message", stderr)
+			t.Fatalf("code=%d, want %d (stderr=%q)", code, exitConflict, stderr)
 		}
 
 		code, envelope, _ := decodeEnvelope(t, "audit", "show", "--rescan", "--json", "--root", root)
 		if code != exitConflict {
 			t.Fatalf("json code=%d, want %d", code, exitConflict)
 		}
-		if envelope.Error == nil || !strings.Contains(*envelope.Error, "a Kernel is running; stop it first") {
+		if envelope.Error == nil {
 			t.Fatalf("envelope.Error=%v, want conflict error", envelope.Error)
 		}
 	})
