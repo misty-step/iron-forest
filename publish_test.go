@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1422,7 +1421,7 @@ func TestPublishReviewRequestCLI(t *testing.T) {
 		writePassingChecks(t, root)
 		runGitDir(t, root, "checkout", "-b", "forest/1/ready")
 		revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-		payload := writeReviewPayload(t, root, revision, "forest/1/ready")
+		payload := writeReviewPayload(t, root, revision, "forest/1/ready", "1-builder")
 
 		code, stdout, stderr := captureCLIOutput(t, func() int {
 			return runSurfaceCommand([]string{"publish", "review-request", "builder", "forest/1/ready", payload, "--root", root})
@@ -1430,12 +1429,16 @@ func TestPublishReviewRequestCLI(t *testing.T) {
 		if code != exitOK {
 			t.Fatalf("code=%d, want %d (stderr=%q)", code, exitOK, stderr)
 		}
-		if want := fmt.Sprintf("published review-request %s on %s\n", revision, "forest/1/ready"); stdout != want {
-			t.Fatalf("stdout=%q, want %q", stdout, want)
+		if !strings.Contains(stdout, revision) || !strings.Contains(stdout, "forest/1/ready") {
+			t.Fatalf("publication output lacks candidate identity: %q", stdout)
 		}
 		if stderr != "" {
 			t.Fatalf("stderr=%q, want empty", stderr)
 		}
+		if got := fetchEvidenceFile(t, root, "request", revision, "request.json"); !bytes.Equal(got, mustRead(t, payload)) {
+			t.Fatalf("published receipt differs from the v3 payload: %s", got)
+		}
+		publishedRefs := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 
 		code, stdout, stderr = captureCLIOutput(t, func() int {
 			return runSurfaceCommand([]string{"publish", "review-request", "builder", "forest/1/ready", payload, "--root", root})
@@ -1443,11 +1446,14 @@ func TestPublishReviewRequestCLI(t *testing.T) {
 		if code != exitOK {
 			t.Fatalf("republish code=%d, want %d (stderr=%q)", code, exitOK, stderr)
 		}
-		if want := fmt.Sprintf("accepted identical review-request %s on %s\n", revision, "forest/1/ready"); stdout != want {
-			t.Fatalf("republish stdout=%q, want %q", stdout, want)
+		if !strings.Contains(stdout, "identical") || !strings.Contains(stdout, revision) {
+			t.Fatalf("retry output lacks identical candidate result: %q", stdout)
 		}
 		if stderr != "" {
 			t.Fatalf("republish stderr=%q, want empty", stderr)
+		}
+		if got := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); got != publishedRefs {
+			t.Fatalf("identical retry changed remote refs: %s", got)
 		}
 	})
 
@@ -1457,7 +1463,7 @@ func TestPublishReviewRequestCLI(t *testing.T) {
 		writePassingChecks(t, root)
 		runGitDir(t, root, "checkout", "-b", "forest/1/ready")
 		revision := strings.TrimSpace(string(runGitDir(t, root, "rev-parse", "HEAD")))
-		payload := writeReviewPayload(t, root, revision, "forest/1/ready")
+		payload := writeReviewPayload(t, root, revision, "forest/1/ready", "1-builder")
 
 		code, envelope, stderr := decodeEnvelope(t, "publish", "review-request", "builder", "forest/1/ready", payload, "--json", "--root", root)
 		if code != exitOK {
@@ -1470,6 +1476,10 @@ func TestPublishReviewRequestCLI(t *testing.T) {
 		if keys["status"] != "published" || keys["revision"] != revision || keys["branch"] != "forest/1/ready" {
 			t.Fatalf("payload=%v, want status=published revision=%s branch=forest/1/ready", keys, revision)
 		}
+		if got := fetchEvidenceFile(t, root, "request", revision, "request.json"); !bytes.Equal(got, mustRead(t, payload)) {
+			t.Fatalf("published receipt differs from the v3 payload: %s", got)
+		}
+		publishedRefs := string(runGitDir(t, root, "ls-remote", "--refs", "origin"))
 
 		code, envelope, stderr = decodeEnvelope(t, "publish", "review-request", "builder", "forest/1/ready", payload, "--json", "--root", root)
 		if code != exitOK {
@@ -1481,6 +1491,9 @@ func TestPublishReviewRequestCLI(t *testing.T) {
 		keys = payloadKeys(t, envelope)
 		if keys["status"] != "identical" || keys["revision"] != revision || keys["branch"] != "forest/1/ready" {
 			t.Fatalf("republish payload=%v, want status=identical revision=%s branch=forest/1/ready", keys, revision)
+		}
+		if got := string(runGitDir(t, root, "ls-remote", "--refs", "origin")); got != publishedRefs {
+			t.Fatalf("identical retry changed remote refs: %s", got)
 		}
 	})
 }
