@@ -56,6 +56,9 @@ requires `git` and `pi`. Installer dependencies include `mise`, `jq`, `flock`,
 `tar` and a user systemd service. Follow the
 [profile preparation guide](onboarding-managed-repo.md#prepare-the-host-and-profile)
 for credential and isolation boundaries.
+When password-store lookup is chosen, `pass` and a configured password store are
+required; declare `pass` in `required_tools`. Selfcheck validates only `git`, `pi`,
+and configured tools, and the adapters raise `AdapterError` without `pass`.
 
 Keep each Poll at `"exit 1"` during initial manual onboarding. When the owner
 explicitly adopts this local workflow, version this wiring in `config.yaml`:
@@ -123,15 +126,21 @@ ownership before resuming; do not delete immutable evidence to unblock a queue.
 
 ## Credentials and receipts
 
-The adapter looks in the service environment first, then `~/.secrets`, for these
-property names in order: `LINEAR_API_KEY`, `LINEAR_API_TOKEN`, `LINEAR_KEY`,
-`LINEAR_PERSONAL_API_KEY`. It accepts simple `NAME=value` properties with optional
-matching quotes; it does not source shell code. Do not print, commit or paste
-credential values into a ticket or receipt.
+The adapter looks in the service environment first, then `pass` entries named
+`workstation/<NAME>`, for these names in order: `LINEAR_API_KEY`, `LINEAR_API_TOKEN`,
+`LINEAR_KEY`, `LINEAR_PERSONAL_API_KEY`. When adopting the pinned reference above,
+replace its legacy plaintext credential reader with this pass lookup before
+enabling Polls. Each entry contains only the exact UTF-8 credential bytes, with
+no notes or appended newline. Decryption is noninteractive
+(`PASSWORD_STORE_GPG_OPTS='--batch --pinentry-mode error'`) with a ten-second
+timeout per lookup. Do not print, commit or paste credential values into a ticket
+or receipt.
+Password-store lookup additionally requires the companion adapter change to be
+shipped in the product profiles.
 
 Provider completion credentials such as `OPENROUTER_API_KEY` belong in the
 protected service environment, `~/.config/iron-forest/<instance>.env`, owned by
-the operator and mode `0600`. The installer does not source `~/.secrets` for Pi.
+the operator and mode `0600`. The installer does not load the password store for Pi.
 Provide scoped forge authentication for branch/evidence publication and PR
 creation, separately from the human's merge authority. Do not give workers
 provider management credentials. Follow onboarding's
