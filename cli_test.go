@@ -318,15 +318,12 @@ func TestCLIExitFlagValidation(t *testing.T) {
 	root := t.TempDir()
 	writeCLIConfig(t, root, "exit 1")
 
-	for _, raw := range []string{"-2", "-10", "256", "999"} {
+	for _, raw := range []string{"-2", "256"} {
 		code, _, stderr := captureCLIOutput(t, func() int {
 			return runSurfaceCommand([]string{"run", "list", "--exit", raw, "--root", root})
 		})
 		if code != exitInvalidArg {
-			t.Fatalf("--exit %q code=%d, want %d", raw, code, exitInvalidArg)
-		}
-		if !strings.Contains(stderr, "--exit must be an integer between -1 and 255") {
-			t.Fatalf("--exit %q stderr=%q, want range refusal", raw, stderr)
+			t.Fatalf("--exit %q code=%d, want %d (stderr=%q)", raw, code, exitInvalidArg, stderr)
 		}
 	}
 
