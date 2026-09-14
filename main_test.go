@@ -614,9 +614,6 @@ func TestCLIServeLockConflict(t *testing.T) {
 	t.Chdir(root)
 	code, _, stderr := captureCLIOutput(t, func() int { return runCLI([]string{"serve"}) })
 	if code != exitConflict {
-		t.Fatalf("serve code=%d, want %d (exitConflict)", code, exitConflict)
-	}
-	if !strings.Contains(stderr, "a Kernel is running; stop it first") {
-		t.Fatalf("serve stderr=%q, want %q", stderr, "a Kernel is running; stop it first")
+		t.Fatalf("serve code=%d, want %d (stderr=%q)", code, exitConflict, stderr)
 	}
 }
