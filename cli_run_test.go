@@ -113,6 +113,19 @@ func TestCLIRunLogsSeparatesEvictedFromUnknown(t *testing.T) {
 		t.Fatalf("payload=%v, want retained=false", keys)
 	}
 
+	code, stdout, stderr := captureCLIOutput(t, func() int {
+		return runSurfaceCommand([]string{"run", "logs", "run-old", "--root", root})
+	})
+	if code != exitOK {
+		t.Fatalf("human evicted log code=%d, want %d", code, exitOK)
+	}
+	if stdout != "" {
+		t.Fatalf("human evicted log stdout=%q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "run-old") || !strings.Contains(stderr, "no retained log") {
+		t.Fatalf("human evicted log warning lacks the Run identity or eviction reason: %q", stderr)
+	}
+
 	code, _, _ = captureCLIOutput(t, func() int {
 		return runSurfaceCommand([]string{"run", "logs", "ghost", "--root", root})
 	})
