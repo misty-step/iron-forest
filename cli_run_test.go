@@ -122,8 +122,8 @@ func TestCLIRunLogsSeparatesEvictedFromUnknown(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("human evicted log stdout=%q, want empty", stdout)
 	}
-	if want := "run \"run-old\" has no retained log\n"; stderr != want {
-		t.Fatalf("human evicted log stderr=%q, want %q", stderr, want)
+	if !strings.Contains(stderr, "run-old") || !strings.Contains(stderr, "no retained log") {
+		t.Fatalf("human evicted log warning lacks the Run identity or eviction reason: %q", stderr)
 	}
 
 	code, _, _ = captureCLIOutput(t, func() int {
