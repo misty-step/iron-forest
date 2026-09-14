@@ -37,6 +37,7 @@ MANIFEST_SCHEMA = "forest.production-cases.v1"
 CONTRACT_SCHEMA = "forest.production-case.v1"
 OUTBOX_DIR_NAME = "production-flywheel-outbox"
 SHIPPED_ROLES = {"builder", "verifier", "fixer"}
+# Effects graded by evals/runtime/grade.py for the shipped replay roles.
 ROLE_EFFECTS: dict[str, set[str]] = {
     "builder": {
         "builder_publish",
@@ -60,7 +61,7 @@ ROLE_EFFECTS: dict[str, set[str]] = {
         "no_effect",
     },
 }
-SCENARIO_FIELDS = ("issue", "powder_jobs", "check", "expected_files", "planted_files")
+SCENARIO_FIELDS = ("issue", "check", "expected_files", "planted_files")
 SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
 
@@ -174,6 +175,7 @@ class LangfuseSDKClient(LangfuseClient):
             metadata=metadata,
             source_trace_id=source_trace_id,
         )
+
     def list_dataset_items(self, dataset_name: str) -> list[Any]:
         all_items: list[Any] = []
         page = 1
@@ -190,7 +192,10 @@ class LangfuseSDKClient(LangfuseClient):
                 total_pages = meta.get("total_pages") or meta.get("totalPages")
             elif meta is not None:
                 total_pages = getattr(meta, "total_pages", None) or getattr(meta, "totalPages", None)
-            if len(data) < limit or (isinstance(total_pages, int) and page >= total_pages):
+            if isinstance(total_pages, int):
+                if page >= total_pages:
+                    break
+            elif len(data) < limit:
                 break
             page += 1
         return all_items
@@ -293,12 +298,12 @@ def validate_contract(contract: dict[str, Any], existing_ids: set[str]) -> None:
     if case_id in existing_ids:
         raise ValueError(f"duplicate production case id: {case_id}")
     role = contract.get("role")
-    if role not in SHIPPED_ROLES:
+    if not isinstance(role, str) or role not in SHIPPED_ROLES:
         raise ValueError("contract role must be builder, verifier, or fixer")
     for field in ("summary", "effect", "source_trace_id", "source_run_id"):
         if not isinstance(contract.get(field), str) or not contract[field]:
             raise ValueError(f"contract {field} must be a nonempty string")
-    allowed_effects = ROLE_EFFECTS.get(role, set())
+    allowed_effects = ROLE_EFFECTS[role]
     if contract["effect"] not in allowed_effects:
         raise ValueError(
             f"unsupported effect '{contract['effect']}' for role '{role}'; allowed: {sorted(allowed_effects)}"
@@ -306,30 +311,27 @@ def validate_contract(contract: dict[str, Any], existing_ids: set[str]) -> None:
     if not any(contract.get(field) for field in SCENARIO_FIELDS):
         raise ValueError("contract must include at least one scenario field: " + ", ".join(SCENARIO_FIELDS))
     for field in SCENARIO_FIELDS:
-        val = contract.get(field)
-        if val is None:
+        if field not in contract:
             continue
+        val = contract[field]
         if field in ("expected_files", "planted_files"):
             if not isinstance(val, dict) or not all(isinstance(k, str) and bool(k) and isinstance(v, str) for k, v in val.items()):
                 raise ValueError(f"contract {field} must be a dictionary of string paths to string contents")
         elif field == "issue":
+            # The issue fixture treats null as no issue, unlike file maps and Checks.
+            if val is None:
+                continue
             if not isinstance(val, dict):
                 raise ValueError("contract issue must be an object with number, title, and body")
             if not isinstance(val.get("number"), int) or isinstance(val.get("number"), bool):
                 raise ValueError("contract issue.number must be an integer")
             if not isinstance(val.get("title"), str) or not val.get("title"):
                 raise ValueError("contract issue.title must be a nonempty string")
-            if not isinstance(val.get("body"), str):
-                raise ValueError("contract issue.body must be a string")
+            if "body" not in val or (val["body"] is not None and not isinstance(val["body"], str)):
+                raise ValueError("contract issue.body must be a string or null")
         elif field == "check":
             if not isinstance(val, str) or not val.strip():
                 raise ValueError("contract check must be a nonempty string command")
-        elif field == "powder_jobs":
-            if not isinstance(val, list):
-                raise ValueError("contract powder_jobs must be a list of job objects")
-            for job in val:
-                if not isinstance(job, dict) or "id" not in job:
-                    raise ValueError("contract powder_jobs entries must be objects with an id")
 
 
 def promote_contract(contract: dict[str, Any], manifest_path: Path = PRODUCTION_MANIFEST) -> dict[str, Any]:

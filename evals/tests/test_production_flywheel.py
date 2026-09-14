@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -23,18 +24,17 @@ class FakeLangfuseClient(flywheel.LangfuseClient):
     def __init__(self, located_trace_ids: dict[str, list[str]] | None = None):
         self.items: dict[str, FakeItem] = {}
         self.located_trace_ids = located_trace_ids or {}
-        self.ensure_calls: list[str] = []
-        self.calls: list[str] = []
+        self.datasets: set[str] = set()
 
     def ensure_dataset(self, name: str) -> None:
-        self.ensure_calls.append(name)
-        self.calls.append("ensure_dataset")
+        self.datasets.add(name)
 
     def get_dataset_item(self, dataset_name: str, id: str):
         return self.items.get(id)
 
     def create_dataset_item(self, *, dataset_name, id, input, expected_output, metadata, source_trace_id=None) -> None:
-        self.calls.append("create_dataset_item")
+        if dataset_name not in self.datasets:
+            raise RuntimeError("dataset does not exist")
         self.items[id] = FakeItem(id, metadata, source_trace_id)
 
     def list_dataset_items(self, dataset_name: str) -> list[FakeItem]:
@@ -87,22 +87,6 @@ class ProductionFlywheelTest(unittest.TestCase):
             self.assertEqual(result["created"], 0)
             self.assertEqual(client.items, {})
 
-    def test_ingest_ensures_dataset_before_creating_items(self):
-        with tempfile.TemporaryDirectory() as root:
-            runs_dir = Path(root) / "runs"
-            write_run_log(runs_dir, "1787529620484390170-builder", "builder")
-            client = FakeLangfuseClient()
-
-            result = flywheel.ingest_runs(runs_dir, client)
-
-            self.assertEqual(result["created"], 1)
-            self.assertEqual(client.ensure_calls, [flywheel.PRODUCTION_DATASET])
-            self.assertEqual(client.calls[0], "ensure_dataset")
-            self.assertIn("create_dataset_item", client.calls)
-            self.assertLess(
-                client.calls.index("ensure_dataset"),
-                client.calls.index("create_dataset_item"),
-            )
 
     def test_promote_requires_provenance_and_scenario(self):
         with tempfile.TemporaryDirectory() as root:
@@ -144,21 +128,37 @@ class ProductionFlywheelTest(unittest.TestCase):
             manifest.write_text(json.dumps({"schema": "forest.production-cases.v1", "cases": []}) + "\n")
             contract = {
                 "schema": "forest.production-case.v1",
-                "id": "prod-builder-test",
+                "id": "prod-effect",
                 "role": "builder",
                 "summary": "Replay case.",
-                "effect": "invalid_effect",
+                "effect": "builder_publish",
                 "source_trace_id": "trace-1",
                 "source_run_id": "run-1",
                 "expected_files": {"value.txt": "ready\n"},
             }
-            with self.assertRaisesRegex(ValueError, "unsupported effect 'invalid_effect' for role 'builder'"):
-                flywheel.promote_contract(contract, manifest)
+            before = manifest.read_bytes()
+            for role, effect in (
+                ("builder", "invalid_effect"),
+                ("builder", "verifier_changes"),
+                ("verifier", "verifier_approve_conflict"),
+                ("fixer", "builder_publish"),
+                ([], "builder_publish"),
+            ):
+                with self.subTest(role=role, effect=effect):
+                    with self.assertRaises(ValueError):
+                        flywheel.promote_contract(dict(contract, role=role, effect=effect), manifest)
+                    self.assertEqual(manifest.read_bytes(), before)
 
-            # Verifier effect on builder contract is also rejected
-            contract["effect"] = "verifier_changes"
-            with self.assertRaisesRegex(ValueError, "unsupported effect 'verifier_changes' for role 'builder'"):
-                flywheel.promote_contract(contract, manifest)
+            for role, effect in (
+                ("builder", "builder_branch_race"),
+                ("verifier", "verifier_approve_race"),
+                ("fixer", "fixer_conflict"),
+            ):
+                flywheel.promote_contract(dict(contract, id=f"prod-{role}", role=role, effect=effect), manifest)
+            self.assertEqual(
+                {(case["role"], case["effect"]) for case in flywheel.load_production_manifest(manifest)["cases"]},
+                {("builder", "builder_branch_race"), ("verifier", "verifier_approve_race"), ("fixer", "fixer_conflict")},
+            )
 
     def test_promote_validates_scenario_field_shapes(self):
         with tempfile.TemporaryDirectory() as root:
@@ -172,52 +172,35 @@ class ProductionFlywheelTest(unittest.TestCase):
                 "effect": "builder_publish",
                 "source_trace_id": "trace-1",
                 "source_run_id": "run-1",
+                "check": "true",
             }
+            before = manifest.read_bytes()
+            for fields in (
+                {"expected_files": "not-a-dict"},
+                {"expected_files": {"value.txt": 123}},
+                {"expected_files": None},
+                {"planted_files": []},
+                {"planted_files": None},
+                {"issue": "not-an-issue-dict"},
+                {"issue": {"number": True, "title": "t", "body": "b"}},
+                {"issue": {"number": 1, "title": "", "body": "b"}},
+                {"issue": {"number": 1, "title": "t"}},
+                {"issue": {"number": 1, "title": "t", "body": 123}},
+                {"check": 123},
+                {"check": None},
+                {"check": "   "},
+            ):
+                with self.subTest(fields=fields):
+                    with self.assertRaises(ValueError):
+                        flywheel.promote_contract(dict(base, **fields), manifest)
+                    self.assertEqual(manifest.read_bytes(), before)
 
-            # expected_files as string
-            bad_expected = dict(base, expected_files="not-a-dict")
-            with self.assertRaisesRegex(ValueError, "expected_files must be a dictionary"):
-                flywheel.promote_contract(bad_expected, manifest)
+            flywheel.promote_contract(dict(base, issue={"number": 1, "title": "t", "body": None}), manifest)
+            flywheel.promote_contract(dict(base, id="prod-no-issue", issue=None), manifest)
+            cases = flywheel.load_production_manifest(manifest)["cases"]
+            self.assertEqual(cases[0]["issue"], {"number": 1, "title": "t", "body": None})
+            self.assertIsNone(cases[1]["issue"])
 
-            # expected_files with non-string value
-            bad_expected_val = dict(base, expected_files={"value.txt": 123})
-            with self.assertRaisesRegex(ValueError, "expected_files must be a dictionary"):
-                flywheel.promote_contract(bad_expected_val, manifest)
-
-            # planted_files as string
-            bad_planted = dict(base, planted_files="not-a-dict")
-            with self.assertRaisesRegex(ValueError, "planted_files must be a dictionary"):
-                flywheel.promote_contract(bad_planted, manifest)
-
-            # issue not a dict
-            bad_issue = dict(base, issue="not-an-issue-dict")
-            with self.assertRaisesRegex(ValueError, "issue must be an object"):
-                flywheel.promote_contract(bad_issue, manifest)
-
-            # issue without integer number
-            bad_issue_num = dict(base, issue={"number": "one", "title": "t", "body": "b"})
-            with self.assertRaisesRegex(ValueError, "issue.number must be an integer"):
-                flywheel.promote_contract(bad_issue_num, manifest)
-
-            # issue without title
-            bad_issue_title = dict(base, issue={"number": 1, "title": "", "body": "b"})
-            with self.assertRaisesRegex(ValueError, "issue.title must be a nonempty string"):
-                flywheel.promote_contract(bad_issue_title, manifest)
-
-            # check not a string
-            bad_check = dict(base, check=123)
-            with self.assertRaisesRegex(ValueError, "check must be a nonempty string command"):
-                flywheel.promote_contract(bad_check, manifest)
-
-            # powder_jobs not a list
-            bad_powder = dict(base, powder_jobs="not-a-list")
-            with self.assertRaisesRegex(ValueError, "powder_jobs must be a list"):
-                flywheel.promote_contract(bad_powder, manifest)
-
-            # powder_jobs entry without id
-            bad_powder_entry = dict(base, powder_jobs=[{"state": "open"}])
-            with self.assertRaisesRegex(ValueError, "powder_jobs entries must be objects with an id"):
-                flywheel.promote_contract(bad_powder_entry, manifest)
     def test_promote_sorts_and_writes_versioned_manifest(self):
         with tempfile.TemporaryDirectory() as root:
             manifest = Path(root) / "production-cases.json"
@@ -347,6 +330,7 @@ class ProductionFlywheelTest(unittest.TestCase):
             )
             report2 = flywheel.report_markdown(client, manifest)
             self.assertIn("- New draft cases awaiting verification: 1", report2)
+
     def test_sdk_report_listing_exposes_transport_failure(self):
         class BrokenItems:
             def list(self, **kwargs):
@@ -359,96 +343,65 @@ class ProductionFlywheelTest(unittest.TestCase):
             api = API()
 
         client = flywheel.LangfuseSDKClient(Client())
-        with self.assertRaisesRegex(RuntimeError, "transport down"):
+        with self.assertRaises(RuntimeError):
             client.list_dataset_items(flywheel.PRODUCTION_DATASET)
 
     def test_sdk_list_dataset_items_pages_through_all_pages(self):
-        class PagedResponse:
-            def __init__(self, data, page, total_pages):
-                self.data = data
-                # Test camelCase totalPages attribute variant from SDK
-                self.meta = {"page": page, "totalPages": total_pages}
+        expected = [f"item-{i}" for i in range(120)]
 
-        class PagedDatasetItems:
-            def __init__(self):
-                self.requested_pages = []
+        def list_items(dataset_name, page, limit):
+            return SimpleNamespace(
+                data=expected[(page - 1) * limit:page * limit],
+                meta=SimpleNamespace(total_pages=2),
+            )
 
-            def list(self, dataset_name, page=1, limit=100):
-                self.requested_pages.append((page, limit))
-                if page == 1:
-                    return PagedResponse([f"item-{i}" for i in range(100)], page=1, total_pages=2)
-                elif page == 2:
-                    return PagedResponse([f"item-{i}" for i in range(100, 120)], page=2, total_pages=2)
-                return PagedResponse([], page=page, total_pages=2)
+        client = flywheel.LangfuseSDKClient(SimpleNamespace(
+            api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+        ))
+        self.assertEqual(client.list_dataset_items(flywheel.PRODUCTION_DATASET), expected)
 
-        class API:
-            def __init__(self):
-                self.dataset_items = PagedDatasetItems()
+    def test_sdk_listing_honors_metadata_on_short_pages(self):
+        for meta in (
+            {"total_pages": 2},
+            {"totalPages": 2},
+            SimpleNamespace(total_pages=2),
+            SimpleNamespace(totalPages=2),
+        ):
+            with self.subTest(meta=meta):
+                def list_items(dataset_name, page, limit):
+                    # The server's page size need not equal the requested limit.
+                    data = {1: ["first"], 2: ["last"]}[page]
+                    return SimpleNamespace(data=data, meta=meta)
 
-        class Client:
-            def __init__(self):
-                self.api = API()
+                client = flywheel.LangfuseSDKClient(SimpleNamespace(
+                    api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+                ))
+                self.assertEqual(client.list_dataset_items(flywheel.PRODUCTION_DATASET), ["first", "last"])
 
-        client_obj = Client()
-        sdk_client = flywheel.LangfuseSDKClient(client_obj)
-        items = sdk_client.list_dataset_items(flywheel.PRODUCTION_DATASET)
-        self.assertEqual(len(items), 120)
-        self.assertEqual(items[0], "item-0")
-        self.assertEqual(items[119], "item-119")
-        self.assertEqual(client_obj.api.dataset_items.requested_pages, [(1, 100), (2, 100)])
-    def test_sdk_list_dataset_items_single_page_without_meta(self):
-        class UnpagedResponse:
-            def __init__(self, data):
-                self.data = data
-                self.meta = None
+    def test_sdk_listing_without_metadata_stops_on_short_or_empty_page(self):
+        for count in (0, 2, 100, 120):
+            with self.subTest(count=count):
+                expected = [f"item-{i}" for i in range(count)]
 
-        class UnpagedDatasetItems:
-            def __init__(self):
-                self.requested_pages = []
+                def list_items(dataset_name, page, limit):
+                    return SimpleNamespace(data=expected[(page - 1) * limit:page * limit])
 
-            def list(self, dataset_name, page=1, **kwargs):
-                self.requested_pages.append(page)
-                return UnpagedResponse(["single-1", "single-2"])
+                client = flywheel.LangfuseSDKClient(SimpleNamespace(
+                    api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+                ))
+                self.assertEqual(client.list_dataset_items(flywheel.PRODUCTION_DATASET), expected)
 
-        class API:
-            def __init__(self):
-                self.dataset_items = UnpagedDatasetItems()
+    def test_sdk_listing_exposes_failure_after_first_page(self):
+        def list_items(dataset_name, page, limit):
+            if page == 2:
+                raise RuntimeError("second page unavailable")
+            return SimpleNamespace(data=["first"], meta=SimpleNamespace(total_pages=2))
 
-        class Client:
-            def __init__(self):
-                self.api = API()
-
-        client_obj = Client()
-        sdk_client = flywheel.LangfuseSDKClient(client_obj)
-        items = sdk_client.list_dataset_items(flywheel.PRODUCTION_DATASET)
-        self.assertEqual(items, ["single-1", "single-2"])
-        self.assertEqual(client_obj.api.dataset_items.requested_pages, [1])
-
-    def test_sdk_list_dataset_items_empty_dataset(self):
-        class EmptyResponse:
-            data = []
-            meta = {"page": 1, "total_pages": 0}
-
-        class EmptyDatasetItems:
-            def __init__(self):
-                self.requested_pages = []
-
-            def list(self, dataset_name, page=1, **kwargs):
-                self.requested_pages.append(page)
-                return EmptyResponse()
-        class API:
-            def __init__(self):
-                self.dataset_items = EmptyDatasetItems()
-
-        class Client:
-            def __init__(self):
-                self.api = API()
-
-        client_obj = Client()
-        sdk_client = flywheel.LangfuseSDKClient(client_obj)
-        items = sdk_client.list_dataset_items(flywheel.PRODUCTION_DATASET)
-        self.assertEqual(items, [])
-        self.assertEqual(client_obj.api.dataset_items.requested_pages, [1])
+        client = flywheel.LangfuseSDKClient(SimpleNamespace(
+            api=SimpleNamespace(dataset_items=SimpleNamespace(list=list_items)),
+        ))
+        with self.assertRaises(RuntimeError):
+            client.list_dataset_items(flywheel.PRODUCTION_DATASET)
 
 
 if __name__ == "__main__":
