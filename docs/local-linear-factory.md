@@ -123,15 +123,19 @@ ownership before resuming; do not delete immutable evidence to unblock a queue.
 
 ## Credentials and receipts
 
-The adapter looks in the service environment first, then `~/.secrets`, for these
-property names in order: `LINEAR_API_KEY`, `LINEAR_API_TOKEN`, `LINEAR_KEY`,
-`LINEAR_PERSONAL_API_KEY`. It accepts simple `NAME=value` properties with optional
-matching quotes; it does not source shell code. Do not print, commit or paste
-credential values into a ticket or receipt.
+The adapter looks in the service environment first, then `pass` entries named
+`workstation/<NAME>`, for these names in order: `LINEAR_API_KEY`, `LINEAR_API_TOKEN`,
+`LINEAR_KEY`, `LINEAR_PERSONAL_API_KEY`. When adopting the pinned reference above,
+replace its legacy plaintext credential reader with this pass lookup before
+enabling Polls. Each entry contains only the exact UTF-8 credential bytes, with
+no notes or appended newline. Decryption is noninteractive
+(`PASSWORD_STORE_GPG_OPTS='--batch --pinentry-mode error'`) with a ten-second
+timeout per lookup. Do not print, commit or paste credential values into a ticket
+or receipt.
 
 Provider completion credentials such as `OPENROUTER_API_KEY` belong in the
 protected service environment, `~/.config/iron-forest/<instance>.env`, owned by
-the operator and mode `0600`. The installer does not source `~/.secrets` for Pi.
+the operator and mode `0600`. The installer does not load the password store for Pi.
 Provide scoped forge authentication for branch/evidence publication and PR
 creation, separately from the human's merge authority. Do not give workers
 provider management credentials. Follow onboarding's
