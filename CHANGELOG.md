@@ -1,3 +1,20 @@
+## [0.0.22](https://github.com/misty-step/iron-forest/compare/v0.0.21...v0.0.22) (2026-09-14)
+
+
+### Bug Fixes
+
+* **cli:** reject trailing operands after help tokens ([bd4a52f](https://github.com/misty-step/iron-forest/commit/bd4a52fea792f5b734ec4cc1ae747e74bffb060f))
+* **cli:** reject trailing operands after help tokens ([f663801](https://github.com/misty-step/iron-forest/commit/f663801927e2f71420041f88b55be69b1d8b03b8))
+* **flywheel:** adapt promotion and pagination to current consumers ([8c42086](https://github.com/misty-step/iron-forest/commit/8c420863aa60ed250dcea3f232cb207fac128f8e))
+* **flywheel:** align Langfuse pagination loop with experiment_history.py ([2d9683d](https://github.com/misty-step/iron-forest/commit/2d9683ddc175686aabaacf893b9fee228be7536e))
+* **flywheel:** align Langfuse pagination loop with experiment_history.py ([512cb36](https://github.com/misty-step/iron-forest/commit/512cb3619aa77014421c230e0e1287b2449ee398))
+* **flywheel:** join promoted cases by run id or trace id in maintenance report ([8ef7383](https://github.com/misty-step/iron-forest/commit/8ef7383d00e35cc30673809b56265309f30d952c))
+* **flywheel:** join promoted cases by run id or trace id in maintenance report ([929eff3](https://github.com/misty-step/iron-forest/commit/929eff38e6fd371846a353fa93b6ebf6a2deca10))
+* **flywheel:** page through all dataset items in LangfuseSDKClient ([fec1a28](https://github.com/misty-step/iron-forest/commit/fec1a28ee55727fe46a794228194eee2924ce38e))
+* **flywheel:** page through all dataset items in LangfuseSDKClient ([7a5cd72](https://github.com/misty-step/iron-forest/commit/7a5cd7228ced772c797ee8f05ed2699e5c0d5a37))
+* **flywheel:** validate role effect allowlist and scenario field shapes in promotion ([214db0f](https://github.com/misty-step/iron-forest/commit/214db0f49e63ac635aa8ec8edbd834f5faecacb1))
+* **flywheel:** validate role effect allowlist and scenario field shapes in promotion ([4d91be6](https://github.com/misty-step/iron-forest/commit/4d91be641b46a4ee810e7729cca6c5cfbe2fce70))
+
 ## [0.0.21](https://github.com/misty-step/iron-forest/compare/v0.0.20...v0.0.21) (2026-09-12)
 
 
